@@ -1,0 +1,63 @@
+{
+  "title": "k6 Overview (env/app)",
+  "timezone": "browser",
+  "schemaVersion": 37,
+  "version": 1,
+  "refresh": "10s",
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(env)",
+        "includeAll": false,
+        "multi": false
+      },
+      {
+        "name": "app",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(app)",
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "HTTP RPS",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (app) (rate(http_reqs_total{env=\"$env\", app=~\"$app\"}[1m]))" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "p95 http_req_duration (ms)",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le, app) (rate(http_req_duration_seconds_bucket{env=\"$env\", app=~\"$app\"}[1m])) ) * 1000" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Error rate",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (app) (rate(http_req_failed_total{env=\"$env\", app=~\"$app\"}[1m]))" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Active VUs",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum(vus{env=\"$env\", app=~\"$app\"})" }
+      ]
+    }
+  ]
+}
+
+

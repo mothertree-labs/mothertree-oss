@@ -1,0 +1,91 @@
+serverName: '{{ env "MATRIX_HOST" }}'
+ingress:
+  host: '{{ env "MATRIX_HOST" }}'
+  tls:
+    - secretName: synapse-tls
+      hosts:
+        - '{{ env "MATRIX_HOST" }}'
+
+# Stable secrets — prevents the chart from regenerating random values on every upgrade
+config:
+  registrationSharedSecret: {{ env "SYNAPSE_REGISTRATION_SHARED_SECRET" | quote }}
+  macaroonSecretKey: {{ env "SYNAPSE_MACAROON_SECRET_KEY" | quote }}
+
+# Override database and redis passwords from tenant secrets
+database:
+  password: {{ env "SYNAPSE_DB_PASSWORD" | quote }}
+
+redis:
+  password: {{ env "SYNAPSE_REDIS_PASSWORD" | quote }}
+  auth:
+    password: {{ env "SYNAPSE_REDIS_PASSWORD" | quote }}
+
+# Dev-only: reduce Synapse requests to prevent request-based memory exhaustion on a single node.
+# Keep limits as-is to allow burst; requests are what block scheduling.
+resources:
+  requests:
+    cpu: 10m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+
+# Override extraConfig to update OIDC issuer for dev environment
+# Note: This replaces the entire extraConfig section, so we must include all settings
+# TURN server IP is extracted from phase1 outputs in create_env script
+extraConfig:
+  turn_uris:
+    - 'turn:{{ env "TURN_SERVER_IP" }}:3478?transport=udp'
+    - 'turn:{{ env "TURN_SERVER_IP" }}:3478?transport=tcp'
+    - 'turn:{{ env "TURN_SERVER_IP" }}:3479?transport=udp'
+    - 'turn:{{ env "TURN_SERVER_IP" }}:3479?transport=tcp'
+  turn_shared_secret: {{ env "TURN_SHARED_SECRET" | quote }}
+  # Explicitly disable email delegation (deprecated feature)
+  account_threepid_delegates: {}
+  # Email configuration - Postfix SMTP (dev)
+  # Per Synapse homeserver.yaml documentation
+  email:
+    smtp_host: "postfix-internal.infra-mail.svc.cluster.local"
+    smtp_port: 587
+    notif_from: 'Matrix Notifications <noreply@{{ env "TENANT_DOMAIN" }}>'
+    enable_notifs: true
+    require_transport_security: false
+  # Disable password login - all auth goes through Keycloak OIDC
+  password_config:
+    enabled: false
+  # OIDC provider configuration for Keycloak (dev environment)
+  oidc_providers:
+    - idp_id: keycloak
+      idp_name: "Sign in with MotherTree"
+      discover: true
+      issuer: 'https://{{ env "AUTH_HOST" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}'
+      client_id: "matrix-synapse"
+      client_secret: {{ env "SYNAPSE_OIDC_CLIENT_SECRET" | quote }}
+      scopes: ["openid", "profile", "email"]
+      user_mapping_provider:
+        config:
+          # Use email directly for stable user identification across deployments
+          # Note: These are Synapse Jinja2 templates, not Go templates
+          localpart_template: "{{ "{{" }} user.email {{ "}}" }}"
+          display_name_template: "{{ "{{" }} user.name {{ "}}" }}"
+          email_template: "{{ "{{" }} user.email {{ "}}" }}"
+  rc_message:
+    per_second: 1000
+    burst_count: 10000
+  rc_login:
+    address:
+      per_second: 100
+      burst_count: 100
+    account:
+      per_second: 0.5
+      burst_count: 5
+    failed_attempts:
+      per_second: 1
+      burst_count: 10
+  rc_joins:
+    local:
+      per_second: 0.5
+      burst_count: 20
+    remote:
+      per_second: 0.1
+      burst_count: 10

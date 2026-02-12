@@ -1,0 +1,100 @@
+# Postfix configuration for SMTP relay
+# This server accepts mail from internal K8s/VPC networks and relays to the internet
+# DKIM signing is done by the K8s Postfix before forwarding here
+# This relay MUST NOT modify any headers to preserve DKIM signatures
+
+# Basic settings
+smtpd_banner = $myhostname ESMTP
+biff = no
+append_dot_mydomain = no
+
+# Hostname and domain - MX mail host FQDN passed from deploy_infra (mail.* = MX target)
+myhostname = {{ mx_mail_host_fqdn }}
+mydomain = {{ mail_domain | default('example.com') }}
+myorigin = $mydomain
+
+# CRITICAL: Transparent relay settings to preserve DKIM signatures
+# Do not append @mydomain to addresses without domain
+append_at_myorigin = no
+# Do not rewrite any headers (empty = disabled)
+local_header_rewrite_clients = 
+# Do not add missing headers (Date, Message-ID, etc.)
+always_add_missing_headers = no
+
+# Network settings - accept from internal networks only
+# These ranges cover:
+# - 10.0.0.0/8: K8s pod networks, VPN clients
+# - 172.16.0.0/12: Docker networks, some K8s networks
+# - 192.168.0.0/16: VPC private networks
+inet_interfaces = all
+inet_protocols = ipv4
+mynetworks = 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+
+# Relay configuration:
+# 1. permit_mynetworks: Allow relay from trusted internal networks (outbound mail)
+# 2. permit_auth_destination: Allow delivery to domains in relay_domains (inbound mail)
+# 3. reject: Block everything else (prevents open relay)
+smtpd_relay_restrictions = permit_mynetworks, permit_auth_destination, reject
+
+# Recipient verification - probe K8s Postfix (which probes Stalwart) to verify recipient exists
+# This prevents backscatter attacks: if recipient doesn't exist, reject during SMTP session
+# instead of accepting and bouncing later (which would spam the forged sender address)
+smtpd_recipient_restrictions = permit_mynetworks, reject_unverified_recipient, permit_auth_destination, reject
+
+# Address verification settings
+address_verify_poll_count = 3
+address_verify_poll_delay = 3s
+address_verify_map = btree:/var/lib/postfix/verify
+# Use permanent rejection (550) not temporary (450) for invalid addresses
+unverified_recipient_reject_code = 550
+unverified_recipient_reject_reason = Recipient address rejected: undeliverable address
+
+# Delivery settings - pure relay, no local delivery
+mydestination = 
+relayhost = 
+
+# Inbound mail routing - accept mail for tenant domains and route to K8s Postfix
+# These files are generated from tenant configs by deploy_infra
+{% if tenant_domains is defined and tenant_domains | length > 0 %}
+relay_domains = hash:/etc/postfix/relay_domains
+transport_maps = hash:/etc/postfix/transport
+{% else %}
+# No tenant domains configured - inbound mail routing disabled
+relay_domains = 
+{% endif %} 
+
+# Queue settings
+maximal_queue_lifetime = 1d
+bounce_queue_lifetime = 1d
+
+# Size limits
+message_size_limit = 52428800
+mailbox_size_limit = 0
+
+# TLS settings for outbound connections
+smtp_tls_security_level = may
+smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
+smtp_tls_loglevel = 1
+
+# TLS for inbound (Let's Encrypt cert via Certbot; renewal hooks managed by Ansible)
+{% if tls_email is defined and tls_email | length > 0 %}
+smtpd_tls_security_level = may
+smtpd_tls_cert_file = /etc/letsencrypt/live/{{ mx_mail_host_fqdn }}/fullchain.pem
+smtpd_tls_key_file = /etc/letsencrypt/live/{{ mx_mail_host_fqdn }}/privkey.pem
+smtpd_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
+smtpd_tls_loglevel = 1
+smtpd_tls_received_header = yes
+smtpd_tls_session_cache_database = btree:$data_directory/smtpd_scache
+smtpd_tls_mandatory_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
+smtpd_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
+smtpd_tls_mandatory_ciphers = high
+{% endif %}
+
+# Disable local delivery - we are a relay only
+local_recipient_maps = 
+local_transport = error:no local mail delivery
+
+# NO milters configured - DKIM signing happens upstream in K8s Postfix
+
+# Logging
+maillog_file = /var/log/mail.log

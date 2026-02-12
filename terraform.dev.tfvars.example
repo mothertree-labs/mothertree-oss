@@ -1,0 +1,25 @@
+# Environment-specific overrides for dev infrastructure
+#
+# Copy to: terraform.dev.tfvars
+# Then run: ./scripts/manage_infra dev
+#
+# This file is loaded AFTER terraform.tfvars (if present), so values here override it.
+#
+# Common use case: dev clusters can be smaller / cheaper and optionally enable autoscaling
+# without changing prod.
+
+# Example: a small dev node pool with autoscaling enabled
+# - count is the initial/current node count
+# - autoscaler min/max bounds the pool size
+linode_node_pools = [
+  {
+    type  = "g6-standard-2"
+    count = 2
+    tags  = ["matrix", "dev"]
+    autoscaler = {
+      min = 1
+      max = 3
+    }
+  }
+]
+

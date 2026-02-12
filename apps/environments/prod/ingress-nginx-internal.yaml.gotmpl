@@ -1,0 +1,6 @@
+controller:
+  config:
+    # Dynamic whitelist CIDRs passed from deploy_infra via environment variables
+    # These override the defaults in values/ingress-nginx-internal.yaml
+    set-real-ip-from: '{{ env "INGRESS_INTERNAL_REAL_IP_FROM" | default "10.8.0.0/24" }}'
+    whitelist-source-range: '{{ env "INGRESS_INTERNAL_WHITELIST" | default "10.8.0.0/24" }}'

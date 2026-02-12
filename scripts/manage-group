@@ -1,0 +1,411 @@
+#!/bin/bash
+
+# Manage Stalwart Mailing List Groups
+# Creates, updates, lists, and deletes mailing list groups via the Stalwart API
+#
+# Usage:
+#   Create group / add members:
+#     ./scripts/manage-group --tenant=<name> --env=<env> <list-name> [member1] [member2] ...
+#   Show group details (no members given):
+#     ./scripts/manage-group --tenant=<name> --env=<env> <list-name>
+#   List all groups:
+#     ./scripts/manage-group --tenant=<name> --env=<env> --list
+#   Remove members from group:
+#     ./scripts/manage-group --tenant=<name> --env=<env> --remove <list-name> <member1> [member2] ...
+#   Delete group:
+#     ./scripts/manage-group --tenant=<name> --env=<env> --delete <list-name>
+#
+# Examples:
+#   ./scripts/manage-group --tenant=<name> --env=dev team-all user@dev.example.com
+#   ./scripts/manage-group --tenant=<name> --env=dev --list
+#   ./scripts/manage-group --tenant=<name> --env=dev --remove team-all user@dev.example.com
+#   ./scripts/manage-group --tenant=<name> --env=dev --delete team-all
+#
+# Members can be Stalwart account names or email addresses of existing accounts.
+
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_status()  { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
+
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+TENANT=""
+MT_ENV=""
+ACTION=""  # "", "list", "remove", "delete"
+LIST_NAME=""
+MEMBERS=()
+
+usage() {
+    echo "Usage:"
+    echo "  $0 --tenant=<name> --env=<env> <list-name> [member1] [member2] ..."
+    echo "  $0 --tenant=<name> --env=<env> --list"
+    echo "  $0 --tenant=<name> --env=<env> --remove <list-name> <member1> [member2] ..."
+    echo "  $0 --tenant=<name> --env=<env> --delete <list-name>"
+    echo ""
+    echo "Options:"
+    echo "  --tenant=<name>   Tenant name (directory in tenants/)"
+    echo "  --env=<env>       Environment (dev, prod)"
+    echo "  --list            List all groups for this tenant"
+    echo "  --remove          Remove the specified members from the group"
+    echo "  --delete          Delete the group entirely"
+    echo "  -h, --help        Show this help"
+    echo ""
+    echo "When called with a list name and no members, shows group details."
+    echo "When called with a list name and members, creates the group or adds members."
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --tenant=*)
+            TENANT="${1#*=}"
+            shift
+            ;;
+        --env=*)
+            MT_ENV="${1#*=}"
+            shift
+            ;;
+        --list)
+            ACTION="list"
+            shift
+            ;;
+        --remove)
+            ACTION="remove"
+            shift
+            ;;
+        --delete)
+            ACTION="delete"
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --*)
+            print_error "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+        *)
+            if [ -z "$LIST_NAME" ]; then
+                LIST_NAME="$1"
+            else
+                MEMBERS+=("$1")
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Validate required parameters
+if [ -z "$TENANT" ]; then
+    print_error "--tenant=<name> is required"
+    usage
+    exit 1
+fi
+
+if [ -z "$MT_ENV" ]; then
+    print_error "--env=<env> is required"
+    usage
+    exit 1
+fi
+
+if [ "$ACTION" != "list" ] && [ -z "$LIST_NAME" ]; then
+    print_error "List name is required (or use --list to see all groups)"
+    usage
+    exit 1
+fi
+
+if [ "$ACTION" = "remove" ] && [ ${#MEMBERS[@]} -eq 0 ]; then
+    print_error "--remove requires at least one member email"
+    usage
+    exit 1
+fi
+
+# Load tenant config
+TENANT_DIR="$REPO/tenants/$TENANT"
+TENANT_CONFIG="$TENANT_DIR/$MT_ENV.config.yaml"
+TENANT_SECRETS="$TENANT_DIR/$MT_ENV.secrets.yaml"
+
+if [ ! -f "$TENANT_CONFIG" ]; then
+    print_error "Tenant config not found: $TENANT_CONFIG"
+    exit 1
+fi
+
+if [ ! -f "$TENANT_SECRETS" ]; then
+    print_error "Tenant secrets not found: $TENANT_SECRETS"
+    exit 1
+fi
+
+export KUBECONFIG="$REPO/kubeconfig.$MT_ENV.yaml"
+
+TENANT_DOMAIN=$(yq '.dns.domain' "$TENANT_CONFIG")
+ENV_DNS_LABEL=$(yq '.dns.env_dns_label // ""' "$TENANT_CONFIG")
+STALWART_ADMIN_PASSWORD=$(yq '.stalwart.admin_password' "$TENANT_SECRETS")
+
+if [ -z "$STALWART_ADMIN_PASSWORD" ] || [ "$STALWART_ADMIN_PASSWORD" = "null" ]; then
+    print_error "Stalwart admin password not found in $TENANT_SECRETS"
+    exit 1
+fi
+
+# Build email domain
+if [ -n "$ENV_DNS_LABEL" ] && [ "$ENV_DNS_LABEL" != "null" ]; then
+    EMAIL_DOMAIN="${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+else
+    EMAIL_DOMAIN="${TENANT_DOMAIN}"
+fi
+
+NS_MAIL="tn-${TENANT}-mail"
+
+# Set up port-forward
+LOCAL_PORT=$((RANDOM % 10000 + 20000))
+
+print_status "Connecting to Stalwart in $NS_MAIL..."
+kubectl port-forward -n "$NS_MAIL" deployment/stalwart ${LOCAL_PORT}:8080 &>/dev/null &
+PF_PID=$!
+sleep 3
+
+if ! kill -0 $PF_PID 2>/dev/null; then
+    print_error "Port-forward to Stalwart failed"
+    print_error "Check pod status: kubectl get pods -n $NS_MAIL"
+    exit 1
+fi
+
+cleanup() {
+    kill $PF_PID 2>/dev/null && wait $PF_PID 2>/dev/null || true
+}
+trap cleanup EXIT
+
+API_BASE="http://localhost:${LOCAL_PORT}/api"
+AUTH="admin:${STALWART_ADMIN_PASSWORD}"
+
+# Helper: make an API call, return body and set HTTP_CODE
+api_call() {
+    local method="$1"
+    local endpoint="$2"
+    local data="${3:-}"
+
+    local args=(-s -w "\n%{http_code}" --max-time 10 -X "$method" -u "$AUTH")
+    if [ -n "$data" ]; then
+        args+=(-H "Content-Type: application/json" -d "$data")
+    fi
+
+    local result
+    result=$(curl "${args[@]}" "${API_BASE}${endpoint}" 2>/dev/null)
+    HTTP_CODE=$(echo "$result" | tail -n1)
+    RESPONSE_BODY=$(echo "$result" | sed '$d')
+}
+
+# ---- Action: list all groups ----
+do_list() {
+    print_status "Listing groups for $TENANT ($MT_ENV)..."
+    api_call GET "/principal?type=list&limit=100"
+
+    if [ "$HTTP_CODE" != "200" ]; then
+        print_error "Failed to list groups (HTTP $HTTP_CODE)"
+        echo "$RESPONSE_BODY"
+        exit 1
+    fi
+
+    local total
+    total=$(echo "$RESPONSE_BODY" | jq -r '.data.total // 0')
+
+    if [ "$total" = "0" ]; then
+        print_status "No groups found"
+        return
+    fi
+
+    echo ""
+    echo "$RESPONSE_BODY" | jq -r '.data.items[] | "  \(.name)\t\(.emails // [] | join(", "))\t(\(.members // [] | length) members)"'
+    echo ""
+    print_status "$total group(s) found"
+}
+
+# ---- Action: show group details ----
+do_show() {
+    print_status "Fetching group '$LIST_NAME'..."
+    api_call GET "/principal/$LIST_NAME"
+
+    if [ "$HTTP_CODE" != "200" ]; then
+        if echo "$RESPONSE_BODY" | grep -q "notFound"; then
+            print_error "Group '$LIST_NAME' does not exist"
+        else
+            print_error "Failed to fetch group (HTTP $HTTP_CODE)"
+            echo "$RESPONSE_BODY"
+        fi
+        exit 1
+    fi
+
+    echo ""
+    echo "  Name:    $(echo "$RESPONSE_BODY" | jq -r '.data.name // "N/A"')"
+    echo "  Emails:  $(echo "$RESPONSE_BODY" | jq -r '.data.emails // [] | join(", ")')"
+    echo ""
+
+    local member_count
+    member_count=$(echo "$RESPONSE_BODY" | jq -r '.data.members // [] | length')
+
+    if [ "$member_count" = "0" ]; then
+        echo "  No members"
+    else
+        echo "  Members ($member_count):"
+        echo "$RESPONSE_BODY" | jq -r '.data.members // [] | .[]' | while read -r m; do
+            echo "    - $m"
+        done
+    fi
+    echo ""
+}
+
+# ---- Action: create group or add members ----
+do_create_or_add() {
+    # Check if group already exists
+    api_call GET "/principal/$LIST_NAME"
+
+    if [ "$HTTP_CODE" = "200" ] && ! echo "$RESPONSE_BODY" | grep -q "notFound"; then
+        # Group exists — add members
+        if [ ${#MEMBERS[@]} -eq 0 ]; then
+            # No members specified, just show the group
+            do_show
+            return
+        fi
+
+        print_status "Group '$LIST_NAME' exists, adding ${#MEMBERS[@]} member(s)..."
+
+        local patches="["
+        local first=true
+        for member in "${MEMBERS[@]}"; do
+            if [ "$first" = true ]; then
+                first=false
+            else
+                patches+=","
+            fi
+            patches+="{\"action\":\"addItem\",\"field\":\"members\",\"value\":\"$member\"}"
+        done
+        patches+="]"
+
+        api_call PATCH "/principal/$LIST_NAME" "$patches"
+
+        if [ "$HTTP_CODE" = "200" ]; then
+            print_success "Members added to '$LIST_NAME'"
+            for member in "${MEMBERS[@]}"; do
+                echo "  + $member"
+            done
+        else
+            print_error "Failed to add members (HTTP $HTTP_CODE)"
+            echo "$RESPONSE_BODY"
+            exit 1
+        fi
+    else
+        # Group does not exist — create it
+        LIST_EMAIL="${LIST_NAME}@${EMAIL_DOMAIN}"
+        print_status "Creating group '$LIST_NAME' <$LIST_EMAIL>..."
+
+        local members_json="[]"
+        if [ ${#MEMBERS[@]} -gt 0 ]; then
+            members_json=$(printf '%s\n' "${MEMBERS[@]}" | jq -R . | jq -s .)
+        fi
+
+        local payload
+        payload=$(jq -n \
+            --arg name "$LIST_NAME" \
+            --arg email "$LIST_EMAIL" \
+            --arg desc "Mailing list $LIST_NAME for $TENANT" \
+            --argjson members "$members_json" \
+            '{type: "list", name: $name, emails: [$email], description: $desc, members: $members}')
+
+        api_call POST "/principal" "$payload"
+
+        if [ "$HTTP_CODE" = "200" ]; then
+            if echo "$RESPONSE_BODY" | grep -q "fieldAlreadyExists"; then
+                print_warning "Group '$LIST_NAME' already exists (race condition). Try again to add members."
+            else
+                print_success "Group '$LIST_NAME' created <$LIST_EMAIL>"
+                if [ ${#MEMBERS[@]} -gt 0 ]; then
+                    echo "  Members:"
+                    for member in "${MEMBERS[@]}"; do
+                        echo "    - $member"
+                    done
+                fi
+            fi
+        else
+            print_error "Failed to create group (HTTP $HTTP_CODE)"
+            echo "$RESPONSE_BODY"
+            exit 1
+        fi
+    fi
+}
+
+# ---- Action: remove members ----
+do_remove() {
+    print_status "Removing ${#MEMBERS[@]} member(s) from '$LIST_NAME'..."
+
+    local patches="["
+    local first=true
+    for member in "${MEMBERS[@]}"; do
+        if [ "$first" = true ]; then
+            first=false
+        else
+            patches+=","
+        fi
+        patches+="{\"action\":\"removeItem\",\"field\":\"members\",\"value\":\"$member\"}"
+    done
+    patches+="]"
+
+    api_call PATCH "/principal/$LIST_NAME" "$patches"
+
+    if [ "$HTTP_CODE" = "200" ]; then
+        print_success "Members removed from '$LIST_NAME'"
+        for member in "${MEMBERS[@]}"; do
+            echo "  - $member"
+        done
+    elif echo "$RESPONSE_BODY" | grep -q "notFound"; then
+        print_error "Group '$LIST_NAME' does not exist"
+        exit 1
+    else
+        print_error "Failed to remove members (HTTP $HTTP_CODE)"
+        echo "$RESPONSE_BODY"
+        exit 1
+    fi
+}
+
+# ---- Action: delete group ----
+do_delete() {
+    print_status "Deleting group '$LIST_NAME'..."
+
+    api_call DELETE "/principal/$LIST_NAME"
+
+    if [ "$HTTP_CODE" = "200" ]; then
+        print_success "Group '$LIST_NAME' deleted"
+    elif echo "$RESPONSE_BODY" | grep -q "notFound"; then
+        print_error "Group '$LIST_NAME' does not exist"
+        exit 1
+    else
+        print_error "Failed to delete group (HTTP $HTTP_CODE)"
+        echo "$RESPONSE_BODY"
+        exit 1
+    fi
+}
+
+# Dispatch
+case "$ACTION" in
+    list)
+        do_list
+        ;;
+    remove)
+        do_remove
+        ;;
+    delete)
+        do_delete
+        ;;
+    *)
+        do_create_or_add
+        ;;
+esac

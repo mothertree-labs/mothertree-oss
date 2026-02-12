@@ -1,0 +1,12 @@
+all:
+  children:
+    vpn_servers:
+      # VPN servers also serve as SMTP relay (mail.* = MX host)
+      # Hosts are added dynamically by deploy_infra based on environment
+      hosts: {}
+    turn_servers:
+      hosts:
+        turn.example.com:
+          ansible_host: 192.0.2.1
+          ansible_user: root
+          ansible_ssh_private_key_file: ~/.ssh/id_ed25519

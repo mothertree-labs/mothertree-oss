@@ -1,0 +1,38 @@
+# Cloud Firewall Controller
+# Creates a Linode Cloud Firewall labeled lke-<cluster-id> and attaches all
+# cluster nodes. Reconciles on node events and periodically.
+
+namespace: kube-system
+replicaCount: 1
+
+# Setting apiToken to non-empty activates --linode-creds args in the deployment.
+# The actual token is in the pre-created "linode-cfw" K8s Secret (created by deploy_infra).
+apiToken: "externally-managed"
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# defaultRules: true (chart default) provides all required LKE ports:
+#   - Kubelet health (10250, 10256 TCP from 192.168.128.0/17)
+#   - WireGuard kubectl proxy (51820 UDP from 192.168.128.0/17)
+#   - Calico BGP (179 TCP from 192.168.128.0/17)
+#   - Calico Typha (5473 TCP from 192.168.128.0/17)
+#   - IPENCAP (from 192.168.128.0/17)
+#   - NodeBalancer NodePorts (30000-32767 TCP/UDP from 192.168.255.0/24)
+#
+# Custom rules below are APPENDED to the defaults.
+firewall:
+  inbound:
+    # SSH restricted to VPN network only (no public SSH)
+    - label: "ssh-vpn-only"
+      action: "ACCEPT"
+      protocol: "TCP"
+      ports: "22"
+      addresses:
+        ipv4:
+          - "10.8.0.0/24"

@@ -1,0 +1,322 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [ $# -lt 3 ]; then
+  echo "Usage: $0 <env> <suite> <scenario> [OPTIONS]" >&2
+  echo "  env: dev or prod" >&2
+  echo "  suite: matrix or docs" >&2
+  echo "  scenario: load or smoke" >&2
+  echo "" >&2
+  echo "Options:" >&2
+  echo "  --users <csv_path>     Path to CSV file (default: perf/users/users.csv)" >&2
+  echo "  --skip-build           Skip building/pushing Docker image" >&2
+  echo "  --vus <number>         Number of virtual users (overrides K6_VUS from env file)" >&2
+  echo "  --duration <duration>  Test duration, e.g. '5m', '10m' (overrides K6_DURATION)" >&2
+  exit 1
+fi
+
+MT_ENV="$1"
+SUITE="$2"
+SCENARIO="$3"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+USERS_CSV="${REPO}/perf/users/users.csv"
+SKIP_BUILD=false
+K6_VUS_OVERRIDE=""
+K6_DURATION_OVERRIDE=""
+
+# Parse optional arguments
+shift 3
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --users)
+      USERS_CSV="$2"
+      shift 2
+      ;;
+    --skip-build)
+      SKIP_BUILD=true
+      shift
+      ;;
+    --vus)
+      K6_VUS_OVERRIDE="$2"
+      shift 2
+      ;;
+    --duration)
+      K6_DURATION_OVERRIDE="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Validate environment
+if [[ "$MT_ENV" != "dev" && "$MT_ENV" != "prod" ]]; then
+  echo "[ERROR] Environment must be 'dev' or 'prod'" >&2
+  exit 1
+fi
+
+# Validate suite and scenario
+if [[ "$SUITE" != "matrix" && "$SUITE" != "docs" ]]; then
+  echo "[ERROR] Suite must be 'matrix' or 'docs'" >&2
+  exit 1
+fi
+
+if [[ "$SCENARIO" != "load" && "$SCENARIO" != "smoke" ]]; then
+  echo "[ERROR] Scenario must be 'load' or 'smoke'" >&2
+  exit 1
+fi
+
+# Validate CSV file exists
+if [[ ! -f "$USERS_CSV" ]]; then
+  echo "[ERROR] Users CSV file not found: $USERS_CSV" >&2
+  exit 1
+fi
+
+echo "[INFO] Running performance test: env=$MT_ENV suite=$SUITE scenario=$SCENARIO"
+echo "[INFO] Using users CSV: $USERS_CSV"
+
+# Load secrets (Cloudflare, Linode, DB, etc.) - prefer env-specific
+if [ -f "$REPO/secrets.${MT_ENV}.tfvars.env" ]; then
+  # shellcheck disable=SC1091
+  source "$REPO/secrets.${MT_ENV}.tfvars.env"
+  echo "[INFO] Loaded secrets from secrets.${MT_ENV}.tfvars.env"
+else
+  echo "[ERROR] No secrets file found. Create $REPO/secrets.${MT_ENV}.tfvars.env" >&2
+  exit 1
+fi
+
+export KUBECONFIG="$REPO/kubeconfig.$MT_ENV.yaml"
+
+# Verify kubeconfig exists
+if [[ ! -f "$KUBECONFIG" ]]; then
+  echo "[ERROR] Kubeconfig not found: $KUBECONFIG" >&2
+  exit 1
+fi
+
+# Build and push Docker image (unless skipped)
+if [[ "$SKIP_BUILD" == "false" ]]; then
+  echo "[INFO] Building and pushing k6 performance test image..."
+  BUILD_SCRIPT="$REPO/apps/scripts/perf/build-k6-image.sh"
+  if [[ ! -f "$BUILD_SCRIPT" ]]; then
+    echo "[ERROR] Build script not found: $BUILD_SCRIPT" >&2
+    exit 1
+  fi
+  pushd "$REPO" >/dev/null
+    PUSH=true "$BUILD_SCRIPT"
+  popd >/dev/null
+  echo "[INFO] Image built and pushed successfully"
+else
+  echo "[INFO] Skipping image build (--skip-build flag set)"
+fi
+
+# Create perf namespace if it doesn't exist
+echo "[INFO] Ensuring perf namespace exists..."
+if ! kubectl get namespace perf >/dev/null 2>&1; then
+  kubectl create namespace perf
+  echo "[INFO] Created perf namespace"
+else
+  echo "[INFO] perf namespace already exists"
+fi
+
+# Ensure monitoring namespace exists (for pushgateway)
+echo "[INFO] Ensuring monitoring namespace exists..."
+if ! kubectl get namespace monitoring >/dev/null 2>&1; then
+  kubectl create namespace monitoring
+  echo "[INFO] Created monitoring namespace"
+else
+  echo "[INFO] monitoring namespace already exists"
+fi
+
+# Deploy perf test infrastructure (pushgateway)
+echo "[INFO] Ensuring perf test infrastructure is deployed..."
+PERF_INFRA_DIR="$REPO/apps/manifests/perf"
+
+# Deploy pushgateway for k6 metrics
+if [[ -f "$PERF_INFRA_DIR/pushgateway.yaml" ]]; then
+  echo "[INFO] Deploying pushgateway..."
+  kubectl apply -f "$PERF_INFRA_DIR/pushgateway.yaml"
+  echo "[INFO] Waiting for pushgateway to be ready..."
+  kubectl -n monitoring wait --for=condition=ready pod -l app=prometheus-pushgateway --timeout=60s 2>/dev/null || \
+    echo "[WARNING] pushgateway not ready yet, continuing anyway..."
+else
+  echo "[WARNING] pushgateway manifest not found: $PERF_INFRA_DIR/pushgateway.yaml"
+fi
+
+# Create or update image pull secret if GitHub PAT is available
+if [[ -n "${GITHUB_PAT:-}" ]]; then
+  echo "[INFO] Creating/updating GHCR image pull secret..."
+  kubectl -n perf create secret docker-registry ghcr-creds \
+    --docker-server=ghcr.io \
+    --docker-username="${GITHUB_USERNAME:-YOUR_USERNAME}" \
+    --docker-password="$GITHUB_PAT" \
+    --docker-email="${GITHUB_EMAIL:-you@example.com}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  
+  # Attach to default service account
+  kubectl -n perf patch serviceaccount default \
+    -p '{"imagePullSecrets":[{"name":"ghcr-creds"}]}' 2>/dev/null || \
+  kubectl -n perf patch serviceaccount default \
+    --type='json' \
+    -p='[{"op":"add","path":"/imagePullSecrets","value":[{"name":"ghcr-creds"}]}]'
+  echo "[INFO] Image pull secret configured"
+else
+  echo "[WARNING] GITHUB_PAT not found in secrets - image pull may fail if image is private"
+  echo "[INFO] To fix: add 'export GITHUB_PAT=\"your_token\"' to secrets.${MT_ENV}.tfvars.env"
+fi
+
+# Create or update users secret
+echo "[INFO] Creating/updating users secret from CSV..."
+kubectl -n perf create secret generic perf-users \
+  --from-file=users.csv="$USERS_CSV" \
+  --dry-run=client -o yaml | kubectl apply -f -
+echo "[INFO] Users secret updated"
+
+# Create or update k6 JSON converter ConfigMap
+echo "[INFO] Creating/updating k6 JSON converter ConfigMap..."
+CONVERTER_CONFIGMAP="$REPO/apps/manifests/perf/k6-json-converter-configmap.yaml"
+if [[ -f "$CONVERTER_CONFIGMAP" ]]; then
+  kubectl apply -f "$CONVERTER_CONFIGMAP"
+  echo "[INFO] k6 JSON converter ConfigMap updated"
+else
+  echo "[WARNING] k6 JSON converter ConfigMap not found: $CONVERTER_CONFIGMAP"
+fi
+
+# Load perf environment file for test configuration
+ENV_FILE="$REPO/perf/env/${MT_ENV}.env"
+if [[ -f "$ENV_FILE" ]]; then
+  echo "[INFO] Loading test environment variables from $ENV_FILE"
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+else
+  echo "[WARNING] Perf env file not found: $ENV_FILE"
+  echo "[WARNING] Some environment variables may be missing"
+fi
+
+# Apply command-line overrides for k6 settings
+if [[ -n "$K6_VUS_OVERRIDE" ]]; then
+  export K6_VUS="$K6_VUS_OVERRIDE"
+  echo "[INFO] Overriding K6_VUS with command-line value: $K6_VUS"
+fi
+if [[ -n "$K6_DURATION_OVERRIDE" ]]; then
+  export K6_DURATION="$K6_DURATION_OVERRIDE"
+  echo "[INFO] Overriding K6_DURATION with command-line value: $K6_DURATION"
+fi
+
+# Determine manifest path
+MANIFEST_PATH="$REPO/apps/manifests/perf/${MT_ENV}/k6-${SUITE}-${SCENARIO}.yaml"
+
+if [[ ! -f "$MANIFEST_PATH" ]]; then
+  echo "[ERROR] Manifest not found: $MANIFEST_PATH" >&2
+  exit 1
+fi
+
+# Delete existing job if it exists (to allow re-running)
+JOB_NAME="k6-${SUITE}-${SCENARIO}"
+echo "[INFO] Cleaning up existing job if present..."
+kubectl -n perf delete job "$JOB_NAME" --ignore-not-found=true
+
+# Check for yq (required for env var injection)
+if ! command -v yq >/dev/null 2>&1; then
+  echo "[ERROR] yq is required but not found" >&2
+  echo "[INFO] Install yq: brew install yq (or apt-get install yq)" >&2
+  exit 1
+fi
+
+# Create a temporary manifest with environment variables injected
+TMP_MANIFEST=$(mktemp)
+trap "rm -f $TMP_MANIFEST" EXIT
+
+# Copy manifest
+cp "$MANIFEST_PATH" "$TMP_MANIFEST"
+
+# Read env file and inject vars (skip comments and empty lines)
+while IFS='=' read -r key value || [[ -n "$key" ]]; do
+  # Skip comments, empty lines, and internal vars
+  [[ "$key" =~ ^[[:space:]]*# ]] && continue
+  [[ -z "${key// }" ]] && continue
+  [[ "$key" =~ ^[[:space:]]*(_|BASH|HOME|PATH|PWD|SHELL|USER|KUBECONFIG)[[:space:]]*$ ]] && continue
+  
+  # Remove leading/trailing whitespace from key
+  key="${key#"${key%%[![:space:]]*}"}"
+  key="${key%"${key##*[![:space:]]}"}"
+  
+  # Get value from environment (already sourced)
+  if [[ -n "${!key:-}" ]]; then
+    value="${!key}"
+    # Escape special characters for YAML
+    value_escaped=$(echo "$value" | sed "s/'/''/g")
+    # Use yq to add env var (yq v4 syntax)
+    yq eval ".spec.template.spec.containers[0].env += [{\"name\": \"$key\", \"value\": \"$value_escaped\"}]" -i "$TMP_MANIFEST" 2>/dev/null || \
+    yq eval ".spec.template.spec.containers[0].env = .spec.template.spec.containers[0].env + [{\"name\": \"$key\", \"value\": \"$value_escaped\"}]" -i "$TMP_MANIFEST"
+  fi
+done < "$ENV_FILE" 2>/dev/null || true
+
+# Apply the job manifest
+echo "[INFO] Applying job manifest: $MANIFEST_PATH (with env vars injected)"
+kubectl -n perf apply -f "$TMP_MANIFEST"
+
+# Wait for job to start
+echo "[INFO] Waiting for job pod to start..."
+max_attempts=30
+attempt=0
+POD_NAME=""
+while [ $attempt -lt $max_attempts ]; do
+  POD_NAME=$(kubectl -n perf get pods -l app="$SUITE" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+  if [[ -n "$POD_NAME" ]]; then
+    POD_STATUS=$(kubectl -n perf get pod "$POD_NAME" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+    if [[ "$POD_STATUS" == "Running" || "$POD_STATUS" == "Pending" ]]; then
+      echo "[INFO] Job pod started: $POD_NAME (status: $POD_STATUS)"
+      break
+    fi
+  fi
+  attempt=$((attempt + 1))
+  if [ $attempt -lt $max_attempts ]; then
+    sleep 2
+  fi
+done
+
+if [[ -z "$POD_NAME" ]]; then
+  echo "[WARNING] Could not find job pod after $((max_attempts * 2)) seconds"
+  echo "[INFO] Checking job status..."
+  kubectl -n perf get job "$JOB_NAME" || true
+else
+  echo "[INFO] Job pod: $POD_NAME"
+fi
+
+# Provide observation links
+echo ""
+echo "=========================================="
+echo "[SUCCESS] Performance test job submitted!"
+echo "=========================================="
+echo ""
+echo "Job: $JOB_NAME"
+echo "Namespace: perf"
+echo "Environment: $MT_ENV"
+echo ""
+echo "View job logs:"
+echo "  kubectl -n perf logs job/$JOB_NAME -f"
+if [[ -n "$POD_NAME" ]]; then
+  echo "  kubectl -n perf logs $POD_NAME -f"
+fi
+echo ""
+echo "View job status:"
+echo "  kubectl -n perf get job $JOB_NAME"
+echo "  kubectl -n perf describe job $JOB_NAME"
+echo ""
+echo "View metrics in Grafana:"
+if [[ -n "${TENANT_DOMAIN:-}" ]]; then
+  echo "  https://grafana.${TENANT_ENV_DNS_LABEL:+$TENANT_ENV_DNS_LABEL.}${TENANT_DOMAIN}:30443"
+else
+  echo "  (Set TENANT_DOMAIN to see Grafana URL)"
+fi
+echo ""
+echo "Prometheus remote write endpoint:"
+echo "  http://prometheus-server.monitoring:9090/api/v1/write"
+echo ""
+echo "To watch logs in real-time, run:"
+echo "  kubectl -n perf logs job/$JOB_NAME -f"
+echo ""
+

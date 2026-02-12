@@ -1,0 +1,20 @@
+# Jitsi Meet Base Configuration
+# Note: Jitsi is primarily deployed via apps/manifests/jitsi/*.yaml.tpl templates
+# This values file is for the Helm chart fallback (currently not used)
+global:
+  # publicURL is set in environment-specific files
+  tz: "UTC"
+
+# Web configuration
+web:
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    # hosts and tls are set in environment-specific files
+
+# Disable JVB initially to avoid service issues
+jvb:
+  enabled: false
+  useNodeIP: true  # Required by chart validation even when disabled

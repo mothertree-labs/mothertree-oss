@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: y-provider
+  namespace: docs
+  labels:
+    app.kubernetes.io/name: docs
+    app.kubernetes.io/instance: docs
+    app.kubernetes.io/component: yProvider
+    app.kubernetes.io/part-of: mother-tree
+spec:
+  selector:
+    app.kubernetes.io/name: docs
+    app.kubernetes.io/instance: docs
+    app.kubernetes.io/component: yProvider
+  ports:
+    - name: http
+      port: 4444
+      targetPort: 4444
+      protocol: TCP
+  type: ClusterIP

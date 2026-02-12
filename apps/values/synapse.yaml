@@ -1,0 +1,95 @@
+# NOTE: serverName, ingress.host, and extraConfig are set in environment-specific files
+# (apps/environments/<env>/synapse.yaml.gotmpl) using tenant config variables
+reportStats: false
+enableRegistration: false
+adminUsers: []
+
+config:
+  serve_server_wellknown: true
+  # registrationSharedSecret is overridden by environment-specific gotmpl files.
+  # MUST be set explicitly — the chart default uses randAlphaNum which generates
+  # a new random value on every helm upgrade, changing the config Secret and
+  # causing unnecessary Synapse restarts.
+  registrationSharedSecret: "INJECTED_VIA_SECRET"
+
+synapse:
+  serve_server_wellknown: true
+  # Must use Recreate with ReadWriteOnce PVC and 1 replica — RollingUpdate deadlocks
+  # because the new pod can't mount the volume until the old pod is terminated.
+  strategy:
+    type: Recreate
+
+# Enable signing key job to generate the secret
+signingkey:
+  job:
+    enabled: true
+
+database:
+  type: postgresql
+  # Use short service name - resolves within the same namespace as Synapse
+  host: matrix-synapse-postgresql
+  port: 5432
+  database: synapse
+  username: synapse
+  # Password is injected via environment-specific gotmpl files
+  # Source: tenants/<name>/<env>.secrets.yaml -> matrix.synapse_password
+  password: "INJECTED_VIA_SECRET"
+
+# PostgreSQL subchart configuration
+postgresql:
+  primary:
+    resources:
+      requests:
+        cpu: 20m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+        # No CPU limit - databases should be able to burst
+
+redis:
+  enabled: true
+  # Use short service name - resolves within the same namespace as Synapse
+  host: matrix-synapse-redis-master
+  port: 6379
+  # Password is injected via environment-specific gotmpl files
+  # Source: tenants/<name>/<env>.secrets.yaml -> database.redis_password
+  password: "INJECTED_VIA_SECRET"
+  # auth.password must match redis.password — the Redis subchart uses auth.password
+  # for the server's requirepass and probe authentication (REDISCLI_AUTH env var).
+  # Without this, probes fail with NOAUTH causing unnecessary restarts.
+  auth:
+    enabled: true
+    password: "INJECTED_VIA_SECRET"
+  architecture: standalone
+  master:
+    persistence:
+      enabled: false
+    resources:
+      requests:
+        cpu: 40m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: linode-block-storage-retain
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 1Gi
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/priority: "100"  # Higher priority for API paths
+  # host and tls are set in environment-specific files
+  # NOTE: No cert-manager annotation — an explicit Certificate resource (synapse-tls)
+  # is created in create_env before helmfile sync, shared by both Synapse and Element.

@@ -1,0 +1,41 @@
+controller:
+  kind: DaemonSet  # Use DaemonSet instead of Deployment to ensure pod on every node
+                   # This way, NodePort with externalTrafficPolicy: Local works on all nodes
+                   # Even if a node fails, other nodes can still handle traffic
+  service:
+    type: NodePort
+    externalTrafficPolicy: Local  # Preserve source IP for NodePort
+    nodePorts:
+      http: 30080
+      https: 30443
+  resources:
+    requests:
+      cpu: 10m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  config:
+    # Basic nginx configuration for internal services
+    use-proxy-protocol: "false"
+    compute-full-forwarded-for: "true"
+    use-forwarded-headers: "true"
+    enable-real-ip: "true"
+    real-ip-header: "X-Forwarded-For"
+    set-real-ip-from: "10.8.0.0/24"  # VPN network CIDR (will be updated by phase2/infra with VPN server VPC subnet)
+    # Restrict access to VPN network (will be updated by phase2/infra with VPN server VPC subnet for NAT'd traffic)
+    whitelist-source-range: "10.8.0.0/24"
+  ingressClassResource:
+    name: nginx-internal
+    enabled: true
+    default: false
+    controllerValue: "k8s.io/ingress-nginx-internal"
+  ingressClass: nginx-internal
+
+# Disable admission webhook for internal ingress
+admissionWebhooks:
+  enabled: false
+
+# Disable default backend
+defaultBackend:
+  enabled: false

@@ -1,0 +1,92 @@
+prometheus:
+  # Dev-only resource reductions to avoid request-based scheduling pressure on a single node.
+  # (Limits can stay reasonably high; requests are what block scheduling.)
+  prometheusSpec:
+    # Dev-only: avoid consuming a Linode block volume attachment.
+    # Single-node dev clusters can hit Linode's max attached volume limit when multiple tenants are deployed.
+    storageSpec:
+      emptyDir: {}
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+  ingress:
+    hosts:
+      - 'prometheus.internal.{{ env "INFRA_ENV_DNS_LABEL" }}.{{ env "INFRA_DOMAIN" }}'
+    tls:
+      - secretName: prometheus-tls
+        hosts:
+          - 'prometheus.internal.{{ env "INFRA_ENV_DNS_LABEL" }}.{{ env "INFRA_DOMAIN" }}'
+
+grafana:
+  # Dev-only resource reductions.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  ingress:
+    hosts:
+      - 'grafana.internal.{{ env "INFRA_ENV_DNS_LABEL" }}.{{ env "INFRA_DOMAIN" }}'
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - 'grafana.internal.{{ env "INFRA_ENV_DNS_LABEL" }}.{{ env "INFRA_DOMAIN" }}'
+
+# Disable alerts that are acceptable in dev
+defaultRules:
+  disabled:
+    KubeMemoryOvercommit: true
+
+alertmanager:
+  ingress:
+    hosts:
+      - 'alertmanager.internal.{{ env "INFRA_ENV_DNS_LABEL" }}.{{ env "INFRA_DOMAIN" }}'
+    tls:
+      - secretName: alertmanager-tls
+        hosts:
+          - 'alertmanager.internal.{{ env "INFRA_ENV_DNS_LABEL" }}.{{ env "INFRA_DOMAIN" }}'
+  # AlertManager configuration for dev alerting
+  config:
+    global:
+      smtp_smarthost: 'postfix-internal.infra-mail.svc.cluster.local:587'
+      smtp_from: 'alertmanager@{{ env "INFRA_ENV_DNS_LABEL" }}.{{ env "INFRA_DOMAIN" }}'
+      smtp_require_tls: false
+    route:
+      receiver: 'default'
+      group_by: ['alertname', 'severity', 'namespace']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        # Critical alerts: notify immediately and more frequently
+        - match:
+            severity: critical
+          receiver: 'critical-alerts'
+          repeat_interval: 1h
+    receivers:
+      - name: 'default'
+        email_configs:
+          - to: 'oncall@example.com'
+            send_resolved: true
+            headers:
+              # Note: These are AlertManager Go templates, escaped with raw string blocks
+              Subject: '{{ "{{" }} printf "[%s DEV] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+      - name: 'critical-alerts'
+        email_configs:
+          - to: 'oncall@example.com'
+            send_resolved: true
+            headers:
+              Subject: '{{ "{{" }} printf "[%s DEV CRITICAL] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+    inhibit_rules:
+      # Don't send warning alerts if critical alert is already firing
+      - source_match:
+          severity: 'critical'
+        target_match:
+          severity: 'warning'
+        equal: ['alertname', 'namespace']

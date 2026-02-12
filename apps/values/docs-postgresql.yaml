@@ -1,0 +1,121 @@
+# PostgreSQL Configuration for LaSuite Docs
+# Conservative resource allocation for 2-node cluster
+
+# Database configuration
+postgresqlDatabase: docs
+postgresqlUsername: docs
+# Password is managed by docs-secrets.DATABASE_PASSWORD and synced via db-init-job
+
+# Authentication
+# NOTE: Do NOT set passwords here. They are managed externally:
+#   1. docs-secrets.DATABASE_PASSWORD is the authoritative source for the 'docs' user password
+#   2. db-init-job syncs the password to PostgreSQL
+#   3. deploy-docs.sh syncs the password to this secret after db-init-job runs
+# If you set passwords here, they will be overwritten by the sync process.
+auth:
+  # Let Helm auto-generate the postgres superuser password on first install
+  # It will be stored in the docs-postgresql secret
+  username: docs
+  database: docs
+  # existingSecret would be cleaner but requires pre-creating the secret
+  # For now, we rely on the db-init-job and post-sync to keep things consistent
+
+# Resource configuration - tuned based on actual usage (~48Mi observed)
+resources:
+  requests:
+    cpu: 30m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+    # No CPU limit - databases should be able to burst
+
+# Persistence
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClass: linode-block-storage-retain
+
+# Primary configuration
+primary:
+  # Disable FIPS mode - required for Nextcloud's MD5-based path hashing
+  # VMware Photon OS enables FIPS by default which blocks MD5() function
+  fips:
+    openssl: "off"
+
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: linode-block-storage-retain
+  
+  # Memory tuned based on actual usage (~48Mi observed)
+  resources:
+    requests:
+      cpu: 30m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+      # No CPU limit - databases should be able to burst
+  
+  # Create dedicated Keycloak database and user so Keycloak can authenticate
+  # NOTE: The keycloak role password here is only used on initial DB creation.
+  # After first install, change it with:
+  #   ALTER ROLE keycloak PASSWORD '<value from KEYCLOAK_DB_PASSWORD in tenant secrets>';
+  # The actual password used by Keycloak at runtime comes from KEYCLOAK_DB_PASSWORD
+  # env var set in apps/environments/<env>/keycloak.yaml.gotmpl
+  initdb:
+    scripts:
+      create-keycloak.sql: |
+        DO
+        $$
+        BEGIN
+          IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'keycloak') THEN
+            CREATE ROLE keycloak LOGIN PASSWORD 'CHANGE-ME-AFTER-INIT';
+          END IF;
+        END
+        $$;
+        
+        DO
+        $$
+        BEGIN
+          IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloak') THEN
+            CREATE DATABASE keycloak OWNER keycloak;
+          END IF;
+        END
+        $$;
+
+        -- Revoke default PUBLIC connect privilege for cross-tenant isolation
+        REVOKE CONNECT ON DATABASE keycloak FROM PUBLIC;
+        GRANT CONNECT ON DATABASE keycloak TO keycloak;
+
+# Disable metrics and monitoring to save resources
+metrics:
+  enabled: false
+
+# Security context
+securityContext:
+  enabled: true
+  fsGroup: 1001
+
+# Service configuration
+service:
+  type: ClusterIP
+  ports:
+    postgresql: 5432
+
+# Read replicas configuration
+# replicaCount is set via --set in deploy-docs.sh based on tenant config
+readReplicas:
+  # Disable FIPS mode - required for Nextcloud's MD5-based path hashing
+  fips:
+    openssl: "off"
+
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: linode-block-storage-retain
+  resources:
+    requests:
+      cpu: 30m
+      memory: 128Mi
+    limits:
+      memory: 256Mi

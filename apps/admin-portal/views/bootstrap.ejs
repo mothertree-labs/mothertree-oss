@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= title %></title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500&family=Tomorrow:wght@400&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    body {
+      font-family: 'Instrument Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+    
+    .bootstrap-container {
+      max-width: 420px;
+      width: 100%;
+      background: rgba(255, 255, 255, 0.95);
+      border-radius: 16px;
+      padding: 2.5rem;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    }
+    
+    .bootstrap-header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    
+    .bootstrap-title {
+      font-family: 'Tomorrow', sans-serif;
+      font-size: 2.25rem;
+      color: #00d4aa;
+      margin-bottom: 0.5rem;
+      letter-spacing: 1px;
+    }
+    
+    .bootstrap-subtitle {
+      color: #666;
+      font-size: 1rem;
+    }
+    
+    .info-box {
+      background: #e8f5f1;
+      border: 1px solid #00d4aa;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+      color: #1a1a2e;
+      line-height: 1.5;
+    }
+    
+    .error-message {
+      background: #fee;
+      border: 1px solid #fcc;
+      color: #c00;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      margin-bottom: 1.25rem;
+      font-size: 0.9rem;
+    }
+    
+    .form-group {
+      margin-bottom: 1.25rem;
+    }
+    
+    .form-group label {
+      display: block;
+      margin-bottom: 0.5rem;
+      color: #333;
+      font-weight: 500;
+      font-size: 0.95rem;
+    }
+    
+    .form-group input {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border: 2px solid #e0e0e0;
+      border-radius: 8px;
+      font-size: 1rem;
+      transition: border-color 0.2s;
+    }
+    
+    .form-group input:focus {
+      outline: none;
+      border-color: #00d4aa;
+    }
+    
+    .submit-btn {
+      width: 100%;
+      padding: 1rem;
+      background: linear-gradient(135deg, #00d4aa 0%, #00b894 100%);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+      margin-top: 0.5rem;
+    }
+    
+    .submit-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(0, 212, 170, 0.4);
+    }
+    
+    .back-link {
+      text-align: center;
+      margin-top: 1.5rem;
+    }
+    
+    .back-link a {
+      color: #666;
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+    
+    .back-link a:hover {
+      color: #00d4aa;
+    }
+  </style>
+</head>
+<body>
+  <div class="bootstrap-container">
+    <div class="bootstrap-header">
+      <h1 class="bootstrap-title">MotherTree</h1>
+      <p class="bootstrap-subtitle">First-Time Admin Login</p>
+    </div>
+    
+    <div class="info-box">
+      Use this page for your initial login with the temporary password.
+      After logging in, you'll be able to access the admin dashboard.
+    </div>
+    
+    <% if (error) { %>
+      <div class="error-message"><%= error %></div>
+    <% } %>
+    
+    <form method="POST" action="/bootstrap">
+      <div class="form-group">
+        <label for="username">Email</label>
+        <input type="email" id="username" name="username" required autofocus 
+               placeholder="admin@example.org">
+      </div>
+      
+      <div class="form-group">
+        <label for="password">Temporary Password</label>
+        <input type="password" id="password" name="password" required
+               placeholder="Enter your temporary password">
+      </div>
+      
+      <button type="submit" class="submit-btn">Sign In</button>
+    </form>
+    
+    <div class="back-link">
+      <a href="/">Back to Home</a>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,83 @@
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+*.tfvars
+*.tfvars.json
+*.tfvars.env
+secrets.tfvars.env
+
+# Kubernetes
+kubeconfig.*.yaml
+*.kubeconfig
+
+# Environment files
+.env
+*.env
+# But track docs/envs/*.env (non-secret domain/host configuration)
+!docs/envs/*.env
+
+# Logs
+*.log
+logs/
+crash.log
+crash.*.log
+
+# Node.js
+node_modules/
+
+# Build artifacts
+.source-hash.*
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+.cursorrules
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
+kubetmp/
+
+# Terraform override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraform.tfstate.lock.info
+.terraformrc
+terraform.rc
+
+# Performance test artifacts
+tf
+perf/users/**
+
+# Secrets (sensitive credentials)
+matrix-registration-shared-secret.txt
+docs/keycloak-google-oauth-secret.yaml
+apps/manifests/jitsi/secrets.yaml
+
+# Tenant secrets (sensitive credentials per tenant/environment)
+tenants/*/*.secrets.yaml
+*.secrets.yaml
+
+# Notify credentials
+notify.env
+
+# OSS sync config (contains repo URL, per-developer)
+oss.conf

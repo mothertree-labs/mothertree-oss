@@ -1,0 +1,172 @@
+# Static HTML files for Jitsi Keycloak Adapter
+# These files provide the OIDC login flow UI
+# See: https://github.com/nordeck/jitsi-keycloak-adapter
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jitsi-adapter-static-files
+  namespace: matrix
+  labels:
+    app: jitsi-web
+    component: auth
+data:
+  # body.html - Injects script to intercept login requests and redirect to OIDC
+  body.html: |
+    <script>
+    function oidcRedirect() {
+      const qs = new URLSearchParams(window.location.search.substring(1));
+      qs.delete("oidc");
+
+      const path = encodeURIComponent(
+        window.location.pathname.replace(/\/+/g, "/"),
+      );
+      const search = encodeURIComponent(qs.toString());
+
+      let hash = "config.prejoinConfig.enabled=false";
+      if (window.location.hash) {
+        hash = `${hash}&${window.location.hash.substring(1)}`;
+      }
+      hash = encodeURIComponent(hash);
+
+      window.location = `/oidc/auth?path=${path}&search=${search}&hash=${hash}`;
+
+      try {
+        // remove react from DOM to prevent UI distortion
+        document.all.react.remove();
+      } catch {
+        // do nothing
+      }
+    }
+
+    function interceptLoginRequest() {
+      try {
+        // check if login or IamHost button is created in DOM
+        const _button = document.getElementById("modal-dialog-ok-button");
+
+        if (!_button) return;
+
+        let labelKey;
+        try {
+          labelKey = Object.values(_button)[0].return.memoizedProps.labelKey;
+        } catch {
+          // do nothing
+        }
+
+        if (labelKey === "dialog.login") {
+          // if this is a login screen, redirect to OIDC login page
+          oidcRedirect();
+        } else if (labelKey === "dialog.IamHost") {
+          // if this is an IamHost screen, redirect to OIDC login page when clicked
+          _button.onclick = oidcRedirect;
+        }
+      } finally {
+        setTimeout(function () {
+          interceptLoginRequest();
+        }, 1000);
+      }
+    }
+
+    interceptLoginRequest();
+    </script>
+
+  # oidc-adapter.html - Handles OIDC callback and token exchange
+  oidc-adapter.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <script>
+          async function getToken(code, path, search, hash) {
+            try {
+              const _path = encodeURIComponent(path);
+              const _search = encodeURIComponent(search);
+              const _hash = encodeURIComponent(hash);
+
+              const req = `/oidc/tokenize` +
+                `?code=${code}` +
+                `&path=${_path}` +
+                `&search=${_search}` +
+                `&hash=${_hash}`;
+
+              const res = await fetch(req, {
+                headers: {
+                  "Accept": "application/json",
+                },
+              });
+
+              return await res.json();
+            } catch {
+              return undefined;
+            }
+          }
+
+          async function adapter() {
+            const qs = new URLSearchParams(window.location.search);
+
+            const err = qs.get("error");
+            const sessionState = qs.get("session_state");
+            const code = qs.get("code");
+            const path = qs.get("path");
+            const search = qs.get("search") || "";
+            const hash = qs.get("hash") || "";
+
+            if (!path.match("^/")) throw new Error("invalid path");
+
+            let target = `${path}?` +
+              `${search}${search ? "&" : ""}` +
+              `oidc=unauthorized` +
+              `${hash ? "#" : ""}${hash}`;
+
+            if (!err) {
+              const token = await getToken(code, path, search, hash);
+
+              if (token) {
+                target = `${path}?` +
+                  `${search}${search ? "&" : ""}` +
+                  `oidc=authorized` +
+                  `&jwt=${token}` +
+                  `${hash ? "#" : ""}${hash}`;
+              } else {
+                target = `${path}?` +
+                  `${search}${search ? "&" : ""}` +
+                  `oidc=failed` +
+                  `${hash ? "#" : ""}${hash}`;
+              }
+            }
+
+            window.location = target;
+          }
+        </script>
+      </head>
+      <body onload="adapter()">
+        adapting...
+      </body>
+    </html>
+
+  # oidc-redirect.html - Initial redirect to OIDC flow
+  oidc-redirect.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <script>
+          function redirect() {
+            const path = encodeURIComponent(
+              window.location.pathname.replace(/\/+/g, "/"),
+            );
+            const search = encodeURIComponent(
+              window.location.search.substring(1),
+            );
+            const hash = encodeURIComponent(
+              window.location.hash.substring(1),
+            );
+
+            window.location = `/oidc/redirect` +
+              `?path=${path}&search=${search}&hash=${hash}`;
+          }
+        </script>
+      </head>
+      <body onload="redirect()">
+        redirecting...
+      </body>
+    </html>

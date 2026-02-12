@@ -1,0 +1,167 @@
+environments:
+  dev: {}
+  prod: {}
+
+# Helm defaults to avoid deprecated flag issues with helm-diff plugin
+helmDefaults:
+  # Use template mode for diff to avoid --validate flag conflicts with Helm v4
+  diff:
+    # Disable validation in diff to avoid conflict with --dry-run in Helm v4
+    args:
+      - --no-validate
+
+---
+
+repositories:
+  - name: ingress-nginx
+    url: https://kubernetes.github.io/ingress-nginx
+  - name: jetstack
+    url: https://charts.jetstack.io
+  - name: ananace
+    url: https://ananace.gitlab.io/charts/
+  - name: halkeye
+    url: https://halkeye.github.io/helm-charts
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+  - name: vector
+    url: https://helm.vector.dev
+  - name: bitnami
+    url: https://charts.bitnami.com/bitnami
+  - name: impress
+    url: https://suitenumerique.github.io/docs/
+  - name: jitsi
+    url: https://jitsi-contrib.github.io/jitsi-helm
+
+releases:
+  # Ingress Controller
+  - name: ingress-nginx
+    namespace: ingress-nginx
+    chart: ingress-nginx/ingress-nginx
+    version: 4.7.1
+    wait: true
+    timeout: 600
+    labels:
+      tier: system
+    values:
+      - values/ingress-nginx.yaml
+    createNamespace: true
+
+  # Cert Manager
+  - name: cert-manager
+    namespace: cert-manager
+    chart: jetstack/cert-manager
+    version: v1.13.3
+    wait: true
+    timeout: 600
+    labels:
+      tier: system
+    values:
+      - values/cert-manager.yaml
+    createNamespace: true
+
+  # Synapse (Matrix homeserver)
+  - name: matrix-synapse
+    namespace: matrix
+    chart: ananace/matrix-synapse
+    version: 3.12.12
+    needs:
+      - ingress-internal/ingress-nginx-internal
+    labels:
+      tier: apps
+    values:
+      - values/synapse.yaml
+      - environments/{{ .Environment.Name }}/synapse.yaml
+    createNamespace: true
+
+  # Element Web
+  - name: element-web
+    namespace: matrix
+    chart: halkeye/element-web
+    version: 1.29.0
+    needs:
+      - ingress-nginx/ingress-nginx
+    labels:
+      tier: apps
+    values:
+      - values/element.yaml
+      - environments/{{ .Environment.Name }}/element.yaml
+    createNamespace: true
+
+  # Prometheus Stack
+  - name: kube-prometheus-stack
+    namespace: monitoring
+    chart: prometheus-community/kube-prometheus-stack
+    version: 58.0.0
+    disableValidation: true
+    needs:
+      - ingress-nginx/ingress-nginx
+      - cert-manager/cert-manager
+    wait: true
+    timeout: 600
+    labels:
+      tier: system
+    values:
+      - values/prometheus.yaml
+      - environments/{{ .Environment.Name }}/prometheus.yaml
+    createNamespace: true
+
+  # Vector (Log Collection)
+  - name: vector
+    namespace: monitoring
+    chart: vector/vector
+    version: 0.46.0
+    needs:
+      - monitoring/kube-prometheus-stack
+    labels:
+      tier: system
+    values:
+      - values/vector.yaml
+    createNamespace: true
+
+
+  # Internal Ingress Controller
+  - name: ingress-nginx-internal
+    namespace: ingress-internal
+    chart: ingress-nginx/ingress-nginx
+    version: 4.7.1
+    wait: true
+    timeout: 600
+    labels:
+      tier: system
+    values:
+      - values/ingress-nginx-internal.yaml
+    createNamespace: true
+
+  # PostgreSQL for Docs - DEPLOYED VIA deploy-docs.sh (not here to avoid duplication)
+  
+  # Redis for Docs
+  - name: docs-redis
+    namespace: docs
+    chart: bitnami/redis
+    version: 20.1.0
+    disableValidation: true
+    needs:
+      - monitoring/kube-prometheus-stack
+    labels:
+      tier: apps
+    values:
+      - values/docs-redis.yaml
+    createNamespace: true
+  
+
+  # Keycloak for authentication
+  # Note: Depends on docs-postgresql which is deployed by deploy-docs.sh
+  # Keycloak will retry connection until PostgreSQL is ready
+  - name: keycloak
+    namespace: docs
+    chart: codecentric/keycloakx
+    version: 7.1.4
+    labels:
+      tier: apps
+    values:
+      - values/keycloak-codecentric.yaml
+      - environments/{{ .Environment.Name }}/keycloak.yaml
+    createNamespace: false  # Uses existing docs namespace
+
+
+

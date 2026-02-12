@@ -1,0 +1,257 @@
+---
+- name: Configure SMTP Relay on VPN Server
+  hosts: vpn_servers
+  become: yes
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Postfix
+      apt:
+        name: postfix
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    # Certbot + Postfix inbound TLS (Let's Encrypt HTTP-01; port 80 only during certbot)
+    - name: Install Certbot (apt)
+      apt:
+        name: certbot
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when: tls_email is defined and tls_email | length > 0
+
+    - name: Create Certbot renewal-hooks directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /etc/letsencrypt/renewal-hooks/pre
+        - /etc/letsencrypt/renewal-hooks/post
+        - /etc/letsencrypt/renewal-hooks/deploy
+      when: tls_email is defined and tls_email | length > 0
+
+    - name: Deploy Certbot pre-hook (allow port 80 for HTTP-01)
+      copy:
+        content: |
+          #!/bin/bash
+          ufw allow 80/tcp comment 'Certbot HTTP-01 temporary'
+        dest: /etc/letsencrypt/renewal-hooks/pre/allow-port-80.sh
+        mode: '0755'
+      when: tls_email is defined and tls_email | length > 0
+
+    - name: Deploy Certbot post-hook (deny port 80 after renewal)
+      copy:
+        content: |
+          #!/bin/bash
+          yes | ufw delete allow 80/tcp 2>/dev/null || true
+        dest: /etc/letsencrypt/renewal-hooks/post/deny-port-80.sh
+        mode: '0755'
+      when: tls_email is defined and tls_email | length > 0
+
+    - name: Deploy Certbot deploy-hook (reload Postfix after renewal)
+      copy:
+        content: |
+          #!/bin/bash
+          systemctl reload postfix
+        dest: /etc/letsencrypt/renewal-hooks/deploy/postfix-reload.sh
+        mode: '0755'
+      when: tls_email is defined and tls_email | length > 0
+
+    - name: Check if Let's Encrypt cert already exists
+      stat:
+        path: "/etc/letsencrypt/live/{{ mx_mail_host_fqdn }}/fullchain.pem"
+      register: cert_file
+      when: tls_email is defined and tls_email | length > 0
+
+    - name: Obtain Let's Encrypt certificate for MX mail host (HTTP-01)
+      block:
+        - name: Allow port 80 temporarily for Certbot
+          ufw:
+            rule: allow
+            port: '80'
+            proto: tcp
+            comment: 'Certbot HTTP-01 temporary'
+
+        - name: Run certbot certonly (standalone)
+          command: >
+            certbot certonly --standalone --non-interactive --agree-tos
+            --email {{ tls_email }}
+            -d {{ mx_mail_host_fqdn }}
+            --preferred-challenges http
+          register: certbot_result
+          changed_when: certbot_result.rc == 0 and 'Successfully received certificate' in certbot_result.stdout
+          failed_when: certbot_result.rc != 0
+
+        - name: Remove temporary UFW allow 80
+          ufw:
+            rule: allow
+            port: '80'
+            proto: tcp
+            delete: yes
+      when: tls_email is defined and tls_email | length > 0 and not (cert_file is defined and cert_file.stat.exists)
+
+    - name: Configure Postfix as internal relay
+      template:
+        src: postfix-relay-main.cf.j2
+        dest: /etc/postfix/main.cf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart postfix
+
+    - name: Deploy transport map for inbound mail routing
+      template:
+        src: postfix-transport.j2
+        dest: /etc/postfix/transport
+        owner: root
+        group: root
+        mode: '0644'
+      notify: rebuild postfix maps
+      when: tenant_domains is defined and tenant_domains | length > 0
+
+    - name: Deploy relay_domains for inbound mail
+      template:
+        src: postfix-relay-domains.j2
+        dest: /etc/postfix/relay_domains
+        owner: root
+        group: root
+        mode: '0644'
+      notify: rebuild postfix maps
+      when: tenant_domains is defined and tenant_domains | length > 0
+
+    - name: Ensure Postfix is enabled and started
+      systemd:
+        name: postfix
+        enabled: yes
+        state: started
+
+    - name: Allow SMTP from internal networks (10.0.0.0/8)
+      ufw:
+        rule: allow
+        port: '25'
+        proto: tcp
+        from_ip: 10.0.0.0/8
+        comment: 'SMTP from K8s pod network'
+
+    - name: Allow SMTP from internal networks (172.16.0.0/12)
+      ufw:
+        rule: allow
+        port: '25'
+        proto: tcp
+        from_ip: 172.16.0.0/12
+        comment: 'SMTP from Docker/K8s networks'
+
+    - name: Allow SMTP from internal networks (192.168.0.0/16)
+      ufw:
+        rule: allow
+        port: '25'
+        proto: tcp
+        from_ip: 192.168.0.0/16
+        comment: 'SMTP from VPC private networks'
+
+    - name: Allow SMTP from internet (inbound mail)
+      ufw:
+        rule: allow
+        port: '25'
+        proto: tcp
+        comment: 'SMTP inbound mail from internet'
+      when: tenant_domains is defined and tenant_domains | length > 0
+
+  handlers:
+    - name: rebuild postfix maps
+      shell: |
+        postmap /etc/postfix/transport 2>/dev/null || true
+        postmap /etc/postfix/relay_domains 2>/dev/null || true
+      notify: restart postfix
+
+    - name: restart postfix
+      systemd:
+        name: postfix
+        state: restarted
+
+- name: Configure TURN Server
+  hosts: turn_servers
+  become: yes
+  vars:
+    turn_realm: "matrix"
+    # turn_shared_secret: REQUIRED - must be passed via --extra-vars
+    # Source: tenants/<name>/<env>.secrets.yaml -> turn.shared_secret
+    # Example: ansible-playbook playbook.yml -e "turn_shared_secret=<value>"
+    turn_listening_port: 3478
+    turn_alt_port: 3479
+    turn_tls_port: 5349
+    turn_alt_tls_port: 5350
+    turn_min_port: 49152
+    turn_max_port: 65535
+
+  tasks:
+    - name: Validate turn_shared_secret is provided
+      fail:
+        msg: "turn_shared_secret must be passed via --extra-vars (source: tenants/<name>/<env>.secrets.yaml -> turn.shared_secret)"
+      when: turn_shared_secret is not defined or turn_shared_secret | length == 0
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Coturn
+      apt:
+        name: coturn
+        state: present
+
+    - name: Enable Coturn service
+      systemd:
+        name: coturn
+        enabled: yes
+        state: started
+
+    - name: Create turnserver configuration directory
+      file:
+        path: /etc/turnserver
+        state: directory
+        owner: turnserver
+        group: turnserver
+        mode: '0755'
+
+    - name: Generate turnserver configuration
+      template:
+        src: turnserver.conf.j2
+        dest: /etc/turnserver/turnserver.conf
+        owner: turnserver
+        group: turnserver
+        mode: '0644'
+      notify: restart coturn
+
+    - name: Create log directory
+      file:
+        path: /var/log/turnserver
+        state: directory
+        owner: turnserver
+        group: turnserver
+        mode: '0755'
+
+    - name: Generate systemd service override
+      template:
+        src: coturn.service.j2
+        dest: /etc/systemd/system/coturn.service
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart coturn
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart coturn
+      systemd:
+        name: coturn
+        state: restarted

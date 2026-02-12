@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= title %> - MotherTree Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            sage: { DEFAULT: '#7C9A6C', dark: '#5A7A4C' },
+            cream: '#FAF8F5',
+            'warm-gray': '#6B6B6B',
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-cream min-h-screen p-8">
+  <div class="max-w-6xl mx-auto">
+    <!-- Header -->
+    <header class="flex items-center justify-between mb-8">
+      <div>
+        <h1 class="text-3xl text-sage">MotherTree Admin</h1>
+        <p class="text-warm-gray mt-1">Welcome, <%= user.name || user.email %></p>
+      </div>
+      <a href="/auth/logout" class="text-warm-gray hover:text-sage-dark transition-colors">
+        Sign Out
+      </a>
+    </header>
+
+    <!-- Invite User Form -->
+    <div class="bg-white rounded-xl shadow-lg p-8 mb-8">
+      <h2 class="text-2xl text-sage mb-6">Invite New User</h2>
+      
+      <form id="inviteForm" class="space-y-4">
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-warm-gray mb-2">First Name</label>
+            <input type="text" name="firstName" required
+              class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sage">
+          </div>
+          <div>
+            <label class="block text-warm-gray mb-2">Last Name</label>
+            <input type="text" name="lastName" required
+              class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sage">
+          </div>
+        </div>
+        
+        <div>
+          <label class="block text-warm-gray mb-2">Tenant Email (login email)</label>
+          <div class="flex items-center">
+            <input type="text" id="emailUsername" required placeholder="username"
+              class="flex-1 px-4 py-2 border border-gray-300 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-sage"
+              pattern="[a-zA-Z0-9._-]+" title="Letters, numbers, dots, underscores, and hyphens only">
+            <span class="px-4 py-2 bg-gray-100 border border-l-0 border-gray-300 rounded-r-lg text-warm-gray" id="emailDomain">@<%= process.env.EMAIL_DOMAIN || process.env.TENANT_DOMAIN || '' %></span>
+            <input type="hidden" name="email" id="fullEmail">
+          </div>
+        </div>
+        
+        <div>
+          <label class="block text-warm-gray mb-2">Recovery Email (for invitation)</label>
+          <input type="email" name="recoveryEmail" required placeholder="personal@gmail.com"
+            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sage">
+        </div>
+        
+        <div id="formMessage" class="hidden p-4 rounded-lg"></div>
+        
+        <button type="submit" 
+          class="w-full bg-sage text-white px-6 py-3 rounded-lg hover:bg-sage-dark transition-colors">
+          Send Invitation
+        </button>
+      </form>
+    </div>
+
+    <!-- Members List -->
+    <div class="bg-white rounded-xl shadow-lg p-8 mb-8">
+      <h2 class="text-2xl text-sage mb-6">Members</h2>
+
+      <div id="membersList" class="space-y-4">
+        <p class="text-warm-gray">Loading members...</p>
+      </div>
+    </div>
+
+    <!-- Guests List -->
+    <div class="bg-white rounded-xl shadow-lg p-8">
+      <h2 class="text-2xl text-sage mb-6">Guests</h2>
+      <p class="text-warm-gray text-sm mb-4">External collaborators with access to shared documents only. Guests can self-register at <a href="#" id="guestRegisterLink" class="text-sage hover:text-sage-dark underline">account portal</a>.</p>
+
+      <div id="guestsList" class="space-y-4">
+        <p class="text-warm-gray">Loading guests...</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Escape HTML to prevent XSS when inserting user-supplied data into the DOM
+    function escapeHtml(str) {
+      if (!str) return '';
+      const div = document.createElement('div');
+      div.appendChild(document.createTextNode(str));
+      return div.innerHTML;
+    }
+
+    // Load users on page load
+    async function loadUsers() {
+      try {
+        const response = await fetch('/api/users');
+        const users = await response.json();
+
+        const members = users.filter(u => u.userType !== 'guest');
+        const guests = users.filter(u => u.userType === 'guest');
+
+        renderUserList('membersList', members, 'member');
+        renderUserList('guestsList', guests, 'guest');
+      } catch (error) {
+        console.error('Failed to load users:', error);
+        document.getElementById('membersList').innerHTML = '<p class="text-red-500">Failed to load users.</p>';
+        document.getElementById('guestsList').innerHTML = '<p class="text-red-500">Failed to load users.</p>';
+      }
+    }
+
+    function renderUserList(containerId, users, type) {
+      const container = document.getElementById(containerId);
+
+      if (users.length === 0) {
+        container.innerHTML = `<p class="text-warm-gray">No ${type === 'guest' ? 'guests' : 'members'} yet.</p>`;
+        return;
+      }
+
+      container.innerHTML = users.map(user => `
+        <div class="flex items-center justify-between p-4 bg-cream rounded-lg">
+          <div>
+            <p class="font-medium">${escapeHtml(user.firstName)} ${escapeHtml(user.lastName)}</p>
+            <p class="text-sm text-warm-gray">${escapeHtml(user.email)}</p>
+            ${type === 'member' && user.recoveryEmail ? `<p class="text-xs text-warm-gray">Recovery: ${escapeHtml(user.recoveryEmail)}</p>` : ''}
+          </div>
+          <div class="flex items-center gap-4">
+            <span class="px-3 py-1 rounded-full text-sm ${user.hasPasskey ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}">
+              ${user.hasPasskey ? 'Active' : 'Pending Passkey'}
+            </span>
+            <button onclick="deleteUser('${escapeHtml(user.id)}')" class="text-red-500 hover:text-red-700" title="Removes user from authentication only. Does not delete data from Matrix, Docs, or other apps.">
+              Remove Access
+            </button>
+          </div>
+        </div>
+      `).join('');
+    }
+    
+    // Handle invite form
+    document.getElementById('inviteForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const form = e.target;
+      
+      // Combine username with domain for full email
+      const username = document.getElementById('emailUsername').value;
+      const domain = document.getElementById('emailDomain').textContent;
+      document.getElementById('fullEmail').value = username + domain;
+      
+      const formData = new FormData(form);
+      const data = Object.fromEntries(formData);
+      const messageEl = document.getElementById('formMessage');
+      
+      try {
+        const response = await fetch('/api/invite', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+          messageEl.className = 'p-4 rounded-lg bg-green-100 text-green-800';
+          messageEl.textContent = 'Invitation sent successfully!';
+          messageEl.classList.remove('hidden');
+          form.reset();
+          loadUsers();
+        } else {
+          throw new Error(result.error || 'Failed to send invitation');
+        }
+      } catch (error) {
+        messageEl.className = 'p-4 rounded-lg bg-red-100 text-red-800';
+        messageEl.textContent = error.message;
+        messageEl.classList.remove('hidden');
+      }
+      
+      setTimeout(() => messageEl.classList.add('hidden'), 5000);
+    });
+    
+    // Delete user
+    async function deleteUser(userId) {
+      if (!confirm('Are you sure you want to delete this user?')) return;
+      
+      try {
+        const response = await fetch(`/api/users/${userId}`, { method: 'DELETE' });
+        if (response.ok) {
+          loadUsers();
+        } else {
+          const result = await response.json();
+          alert(result.error || 'Failed to delete user');
+        }
+      } catch (error) {
+        alert('Failed to delete user');
+      }
+    }
+    
+    // Set guest registration link to account portal
+    (function() {
+      var currentHost = window.location.hostname;
+      var accountHost = currentHost.replace(/^admin\./, 'account.');
+      var link = document.getElementById('guestRegisterLink');
+      if (link) {
+        link.href = 'https://' + accountHost + '/register';
+      }
+    })();
+
+    // Initial load
+    loadUsers();
+  </script>
+</body>
+</html>

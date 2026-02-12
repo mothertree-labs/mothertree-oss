@@ -1,0 +1,71 @@
+#!/bin/bash
+# Validate that local Cloudflare IP reference files match the live Cloudflare ranges.
+# Exit 0 if they match, exit 1 if changed (prints diff).
+# Usage:
+#   ./scripts/check-cloudflare-ips            # validate only
+#   ./scripts/check-cloudflare-ips --update   # overwrite reference files with current IPs
+
+set -euo pipefail
+
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+V4_FILE="$REPO/scripts/cloudflare-ips-v4.txt"
+V6_FILE="$REPO/scripts/cloudflare-ips-v6.txt"
+
+UPDATE=false
+if [ "${1:-}" = "--update" ]; then
+  UPDATE=true
+fi
+
+# Fetch live IPs from Cloudflare
+V4_LIVE=$(curl -sf https://www.cloudflare.com/ips-v4/ | grep -E '^[0-9]' | sort)
+V6_LIVE=$(curl -sf https://www.cloudflare.com/ips-v6/ | grep -E '^[0-9a-f]' | sort)
+
+if [ -z "$V4_LIVE" ] || [ -z "$V6_LIVE" ]; then
+  echo "[ERROR] Failed to fetch Cloudflare IP ranges" >&2
+  exit 1
+fi
+
+if [ "$UPDATE" = "true" ]; then
+  cat > "$V4_FILE" <<EOF
+# Cloudflare IPv4 ranges — https://www.cloudflare.com/ips-v4/
+# Last verified: $(date +%Y-%m-%d)
+$V4_LIVE
+EOF
+  cat > "$V6_FILE" <<EOF
+# Cloudflare IPv6 ranges — https://www.cloudflare.com/ips-v6/
+# Last verified: $(date +%Y-%m-%d)
+$V6_LIVE
+EOF
+  echo "[INFO] Cloudflare IP reference files updated"
+  exit 0
+fi
+
+# Extract CIDRs from reference files (skip comments and blank lines)
+V4_LOCAL=$(grep -v '^#' "$V4_FILE" | grep -v '^$' | sort)
+V6_LOCAL=$(grep -v '^#' "$V6_FILE" | grep -v '^$' | sort)
+
+CHANGED=false
+
+V4_DIFF=$(diff <(echo "$V4_LOCAL") <(echo "$V4_LIVE") || true)
+if [ -n "$V4_DIFF" ]; then
+  echo "[WARNING] Cloudflare IPv4 ranges have changed:"
+  echo "$V4_DIFF"
+  CHANGED=true
+fi
+
+V6_DIFF=$(diff <(echo "$V6_LOCAL") <(echo "$V6_LIVE") || true)
+if [ -n "$V6_DIFF" ]; then
+  echo "[WARNING] Cloudflare IPv6 ranges have changed:"
+  echo "$V6_DIFF"
+  CHANGED=true
+fi
+
+if [ "$CHANGED" = "true" ]; then
+  echo ""
+  echo "[ERROR] Cloudflare IP ranges have changed since last verification."
+  echo "Review the diff above, then run: ./scripts/check-cloudflare-ips --update"
+  exit 1
+fi
+
+echo "[INFO] Cloudflare IP ranges are up to date"
+exit 0

@@ -1,0 +1,223 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jitsi-metrics-exporter
+  namespace: matrix
+  labels:
+    app: jitsi-metrics-exporter
+    component: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jitsi-metrics-exporter
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: jitsi-metrics-exporter
+        component: monitoring
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: exporter
+        image: python:3.11-slim
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        ports:
+        - containerPort: 9090
+          name: metrics
+        command:
+        - /bin/sh
+        - -c
+        - |
+          export HOME=/tmp
+          pip install --no-cache-dir prometheus-client requests && \
+          python /app/exporter.py
+        volumeMounts:
+        - name: exporter-script
+          mountPath: /app
+        env:
+        - name: JVB_URL
+          value: "http://jitsi-jvb:8080"
+        - name: JICOFO_URL
+          value: "http://jitsi-jicofo:8888"
+        - name: EXPORTER_PORT
+          value: "9090"
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+      volumes:
+      - name: exporter-script
+        configMap:
+          name: jitsi-metrics-exporter-script
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jitsi-metrics-exporter-script
+  namespace: matrix
+data:
+  exporter.py: |
+    #!/usr/bin/env python3
+    """
+    Jitsi Metrics Exporter
+    Converts Jitsi REST API JSON responses to Prometheus metrics
+    """
+    import os
+    import time
+    import json
+    import requests
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    
+    # Prometheus metrics
+    jvb_conferences = Gauge('jitsi_jvb_conferences', 'Number of active conferences on JVB')
+    jvb_participants = Gauge('jitsi_jvb_participants', 'Total number of participants on JVB')
+    jvb_total_conferences = Counter('jitsi_jvb_total_conferences_created', 'Total conferences created on JVB')
+    jvb_total_participants = Counter('jitsi_jvb_total_participants', 'Total participants on JVB')
+    # Global bitrate metrics directly from Colibri stats (bps)
+    jvb_bit_rate_download = Gauge('jitsi_jvb_bit_rate_download_bps', 'Total download bitrate on JVB (bps)')
+    jvb_bit_rate_upload = Gauge('jitsi_jvb_bit_rate_upload_bps', 'Total upload bitrate on JVB (bps)')
+    # Per-conference bitrate metrics (if conference_sizes is available)
+    jvb_conference_bitrate_download = Gauge('jitsi_jvb_conference_bitrate_download_bps', 'Download bitrate per conference', ['conference_id'])
+    jvb_conference_bitrate_upload = Gauge('jitsi_jvb_conference_bitrate_upload_bps', 'Upload bitrate per conference', ['conference_id'])
+    jvb_conference_participants = Gauge('jitsi_jvb_conference_participants', 'Number of participants per conference', ['conference_id'])
+    jvb_conference_packets_received = Counter('jitsi_jvb_conference_packets_received_total', 'Packets received per conference', ['conference_id'])
+    jvb_conference_packets_sent = Counter('jitsi_jvb_conference_packets_sent_total', 'Packets sent per conference', ['conference_id'])
+    
+    jicofo_conferences = Gauge('jitsi_jicofo_conferences', 'Number of active conferences on Jicofo')
+    jicofo_participants = Gauge('jitsi_jicofo_participants', 'Total number of participants on Jicofo')
+    jicofo_total_conferences = Counter('jitsi_jicofo_total_conferences_created', 'Total conferences created on Jicofo')
+    
+    exporter_errors = Counter('jitsi_exporter_errors_total', 'Total errors encountered by exporter', ['component'])
+    exporter_scrape_duration = Histogram('jitsi_exporter_scrape_duration_seconds', 'Time spent scraping Jitsi APIs', ['component'])
+    
+    JVB_URL = os.getenv('JVB_URL', 'http://jitsi-jvb:8080')
+    JICOFO_URL = os.getenv('JICOFO_URL', 'http://jitsi-jicofo:8888')
+    
+    def scrape_jvb():
+        """Scrape JVB stats and update metrics"""
+        try:
+            start_time = time.time()
+            response = requests.get(f'{JVB_URL}/colibri/stats', timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Update global stats
+            jvb_conferences.set(data.get('conferences', 0))
+            jvb_participants.set(data.get('participants', 0))
+            
+            # Export global bitrate directly from Colibri stats (already bps)
+            jvb_bit_rate_download.set(data.get('bit_rate_download', 0))
+            jvb_bit_rate_upload.set(data.get('bit_rate_upload', 0))
+            
+            # Update counters (only increment if value increased)
+            total_conf = data.get('total_conferences_created', 0)
+            total_part = data.get('total_participants', 0)
+            # Note: Counters should be incremented, but we'll set them as gauges for now
+            # In production, you'd track previous values and increment
+            
+            # Scrape per-conference stats (if conference_sizes is available)
+            conference_sizes = data.get('conference_sizes')
+            conference_ids = conference_sizes.keys() if conference_sizes else []
+            for conf_id in conference_ids:
+                try:
+                    conf_response = requests.get(f'{JVB_URL}/colibri/stats/{conf_id}', timeout=2)
+                    if conf_response.status_code == 200:
+                        conf_data = conf_response.json()
+                        jvb_conference_participants.labels(conference_id=conf_id).set(
+                            len(conf_data.get('participants', []))
+                        )
+                        # Aggregate bitrates from participants
+                        total_download = sum(p.get('bit_rate_download', 0) for p in conf_data.get('participants', []))
+                        total_upload = sum(p.get('bit_rate_upload', 0) for p in conf_data.get('participants', []))
+                        jvb_conference_bitrate_download.labels(conference_id=conf_id).set(total_download)
+                        jvb_conference_bitrate_upload.labels(conference_id=conf_id).set(total_upload)
+                except Exception as e:
+                    exporter_errors.labels(component='jvb_conference').inc()
+            
+            duration = time.time() - start_time
+            exporter_scrape_duration.labels(component='jvb').observe(duration)
+        except Exception as e:
+            exporter_errors.labels(component='jvb').inc()
+            print(f"Error scraping JVB: {e}")
+    
+    def scrape_jicofo():
+        """Scrape Jicofo stats and update metrics"""
+        try:
+            start_time = time.time()
+            response = requests.get(f'{JICOFO_URL}/stats', timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            
+            jicofo_conferences.set(data.get('conferences', 0))
+            jicofo_participants.set(data.get('participants', 0))
+            
+            duration = time.time() - start_time
+            exporter_scrape_duration.labels(component='jicofo').observe(duration)
+        except Exception as e:
+            exporter_errors.labels(component='jicofo').inc()
+            print(f"Error scraping Jicofo: {e}")
+    
+    class MetricsHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/metrics':
+                # Scrape metrics before serving
+                scrape_jvb()
+                scrape_jicofo()
+                
+                self.send_response(200)
+                self.send_header('Content-Type', CONTENT_TYPE_LATEST)
+                self.end_headers()
+                self.wfile.write(generate_latest())
+            elif self.path == '/health':
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'OK')
+            else:
+                self.send_response(404)
+                self.end_headers()
+        
+        def log_message(self, format, *args):
+            # Suppress default logging
+            pass
+    
+    if __name__ == '__main__':
+        port = int(os.getenv('EXPORTER_PORT', '9090'))
+        server = HTTPServer(('0.0.0.0', port), MetricsHandler)
+        print(f'Starting Jitsi metrics exporter on port {port}')
+        server.serve_forever()
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jitsi-metrics-exporter
+  namespace: matrix
+  labels:
+    app: jitsi-metrics-exporter
+    component: monitoring
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9090
+    name: metrics
+    targetPort: 9090
+  selector:
+    app: jitsi-metrics-exporter
+

@@ -1,0 +1,101 @@
+# Loki Configuration for Log Storage
+# SingleBinary mode with test schema for immediate working setup
+
+# Use pure SingleBinary mode for simplicity
+deploymentMode: SingleBinary
+
+# Explicitly set single replica for SingleBinary mode
+singleBinary:
+  replicas: 1
+
+# Configure Loki with minimal working setup (no test schema)
+loki:
+  # Disable test schema to use custom configuration
+  useTestSchema: false
+  # Disable multi-tenancy to avoid "no org id" error
+  auth_enabled: false
+  
+  # Replication configuration for SingleBinary
+  common:
+    replication_factor: 1
+  
+  # Disable structured metadata to avoid schema conflicts
+  limits_config:
+    allow_structured_metadata: false
+  
+  # Minimal schema configuration for filesystem storage
+  schemaConfig:
+    configs:
+      - from: "2020-10-24"
+        store: boltdb-shipper
+        object_store: filesystem
+        schema: v11
+        index:
+          prefix: index_
+          period: 24h
+  
+  # Storage configuration for filesystem
+  storage_config:
+    filesystem:
+      directory: /var/loki/chunks
+
+# SingleBinary mode - explicitly disable all distributed components
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+gateway:
+  replicas: 0
+distributor:
+  replicas: 0
+ingester:
+  replicas: 0
+querier:
+  replicas: 0
+queryFrontend:
+  replicas: 0
+queryScheduler:
+  replicas: 0
+compactor:
+  replicas: 0
+indexGateway:
+  replicas: 0
+bloomCompactor:
+  replicas: 0
+bloomGateway:
+  replicas: 0
+
+# No S3 configuration - using test schema with filesystem storage
+
+# Storage configuration
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClassName: linode-block-storage-retain
+
+# Resource limits
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Cache configuration with reduced memory requirements
+chunksCache:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 3100

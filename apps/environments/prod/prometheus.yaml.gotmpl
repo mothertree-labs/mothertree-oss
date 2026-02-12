@@ -1,0 +1,81 @@
+prometheus:
+  ingress:
+    hosts:
+      - 'prometheus.internal.{{ env "INFRA_DOMAIN" }}'
+    tls:
+      - secretName: prometheus-tls
+        hosts:
+          - 'prometheus.internal.{{ env "INFRA_DOMAIN" }}'
+
+grafana:
+  ingress:
+    hosts:
+      - 'grafana.internal.{{ env "INFRA_DOMAIN" }}'
+      - 'grafana.prod.{{ env "INFRA_DOMAIN" }}'
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - 'grafana.internal.{{ env "INFRA_DOMAIN" }}'
+          - 'grafana.prod.{{ env "INFRA_DOMAIN" }}'
+
+alertmanager:
+  ingress:
+    hosts:
+      - 'alertmanager.internal.{{ env "INFRA_DOMAIN" }}'
+    tls:
+      - secretName: alertmanager-tls
+        hosts:
+          - 'alertmanager.internal.{{ env "INFRA_DOMAIN" }}'
+  # AlertManager configuration for production alerting
+  config:
+    global:
+      smtp_smarthost: 'postfix-internal.infra-mail.svc.cluster.local:587'
+      smtp_from: 'alertmanager@{{ env "INFRA_DOMAIN" }}'
+      smtp_require_tls: false
+    route:
+      receiver: 'default'
+      group_by: ['alertname', 'severity', 'namespace']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        # Critical alerts: notify immediately and more frequently
+        - match:
+            severity: critical
+          receiver: 'critical-alerts'
+          repeat_interval: 1h
+          continue: true
+        # All alerts also go to Matrix for visibility
+        - receiver: 'matrix-alerts'
+          continue: false
+    receivers:
+      - name: 'default'
+        email_configs:
+          - to: 'oncall@example.com'
+            send_resolved: true
+            headers:
+              # Note: These are AlertManager Go templates, escaped with raw string blocks
+              Subject: '{{ "{{" }} printf "[%s] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+      - name: 'critical-alerts'
+        email_configs:
+          - to: 'oncall@example.com'
+            send_resolved: true
+            headers:
+              Subject: '{{ "{{" }} printf "[%s CRITICAL] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+        webhook_configs:
+          # TODO: Matrix room ID should come from tenant config
+          # Room ID: #alerts on Matrix server
+          - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ env "ALERTMANAGER_MATRIX_ROOM_ID" | default "!room:matrix.example.org" }}'
+            send_resolved: true
+      - name: 'matrix-alerts'
+        webhook_configs:
+          # TODO: Matrix room ID should come from tenant config
+          - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ env "ALERTMANAGER_MATRIX_ROOM_ID" | default "!room:matrix.example.org" }}'
+            send_resolved: true
+    inhibit_rules:
+      # Don't send warning alerts if critical alert is already firing
+      - source_match:
+          severity: 'critical'
+        target_match:
+          severity: 'warning'
+        equal: ['alertname', 'namespace']

@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pgbench
+  namespace: perf
+  labels:
+    env: dev
+    app: db
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        env: dev
+        app: db
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: pgbench
+          image: postgres:16
+          env:
+            - name: PGBENCH_CONN
+              value: "${POSTGRES_DSN}"
+          command: ["sh", "-lc"]
+          args:
+            - |
+              echo "Running pgbench against $PGBENCH_CONN" && \
+              pgbench -i "$PGBENCH_CONN" && \
+              pgbench -c 10 -j 2 -T 60 "$PGBENCH_CONN"
+
+

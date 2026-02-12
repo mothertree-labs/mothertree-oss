@@ -1,0 +1,186 @@
+# Example Tenant - Development Configuration
+# Non-secret configuration for the example tenant in development
+# Copy this directory to tenants/<your-tenant>/ and customize
+
+tenant:
+  name: example
+  display_name: "Example Organization"
+  env: dev
+
+# DNS Configuration
+dns:
+  domain: example.com
+  # Subdomains with dev prefix (relative to domain)
+  matrix_subdomain: matrix      # matrix.dev.example.com
+  element_subdomain: element    # element.dev.example.com
+  synapse_subdomain: synapse    # synapse.dev.example.com
+  docs_subdomain: docs          # docs.dev.example.com
+  files_subdomain: files        # files.dev.example.com
+  auth_subdomain: auth          # auth.dev.example.com
+  jitsi_subdomain: jitsi        # jitsi.dev.example.com
+  home_subdomain: home          # home.dev.example.com
+  mail_subdomain: mail          # mail.dev.example.com
+  webmail_subdomain: webmail    # webmail.dev.example.com
+  admin_subdomain: admin        # admin.dev.example.com (tenant admin portal)
+  account_subdomain: account    # account.dev.example.com (user self-service portal)
+  calendar_subdomain: calendar  # calendar.dev.example.com
+  # For dev, include env label in DNS (matrix.dev.example.com)
+  env_dns_label: dev
+  # Cookie domain for shared authentication
+  cookie_domain: .dev.example.com
+
+# Keycloak configuration (shared Keycloak instance, separate realm)
+keycloak:
+  realm: example
+
+# SMTP/Email configuration
+smtp:
+  domain: dev.example.com
+
+# Database names (tenant-specific to avoid conflicts in shared PostgreSQL)
+database:
+  docs_db: docs_example
+  nextcloud_db: nextcloud_example
+  stalwart_db: stalwart_example
+  roundcube_db: roundcube_example
+
+# S3 bucket naming
+s3:
+  bucket_prefix: dev-example-com
+  docs_bucket: docs-media-dev-example-com
+  matrix_bucket: matrix-media-dev-example-com
+  files_bucket: files-media-dev-example-com
+  mail_bucket: mail-media-dev-example-com
+  cluster: us-lax-1
+
+# Resource allocation and scaling (reduced for dev)
+# HPA auto-scales between min_replicas and max_replicas based on CPU (80% threshold)
+# Dev uses min=1 to control costs in steady state
+resources:
+  # Docs - stateless, scales with HPA
+  docs:
+    backend:
+      min_replicas: 1
+      max_replicas: 5
+      memory_request: 256Mi
+      memory_limit: 512Mi
+    frontend:
+      min_replicas: 1
+      max_replicas: 5
+      memory_request: 64Mi
+      memory_limit: 128Mi
+    y_provider:
+      min_replicas: 1
+      max_replicas: 5
+      memory_request: 64Mi
+      memory_limit: 128Mi
+
+  # Element - stateless, scales with HPA
+  element:
+    min_replicas: 1
+    max_replicas: 5
+    memory_request: 64Mi
+    memory_limit: 128Mi
+
+  # Jitsi - web scales with HPA, JVB scales with HPA + cluster autoscaler
+  jitsi:
+    web:
+      min_replicas: 1
+      max_replicas: 5
+      memory_request: 32Mi
+      memory_limit: 64Mi
+    jvb:
+      min_replicas: 1
+      max_replicas: 5  # hostPort - HPA triggers cluster autoscaler for new nodes
+      memory_request: 256Mi
+      memory_limit: 1Gi
+    jvb_port: 31000  # Unique per tenant, used as hostPort for UDP media
+
+  # Roundcube - stateless, scales with HPA
+  roundcube:
+    min_replicas: 1
+    max_replicas: 5
+    memory_request: 128Mi
+    memory_limit: 256Mi
+    cpu_request: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
+    cpu_limit: 200m
+
+  # Admin Portal - stateless, scales with HPA
+  admin_portal:
+    min_replicas: 1
+    max_replicas: 5
+    memory_request: 64Mi
+    memory_limit: 128Mi
+    cpu_request: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
+    cpu_limit: 200m
+
+  # Account Portal - stateless, scales with HPA
+  account_portal:
+    min_replicas: 1
+    max_replicas: 5
+    memory_request: 64Mi
+    memory_limit: 128Mi
+    cpu_request: 100m
+    cpu_limit: 200m
+
+  # Synapse Admin - stateless, scales with HPA
+  synapse_admin:
+    min_replicas: 1
+    max_replicas: 5
+    memory_request: 32Mi
+    memory_limit: 64Mi
+
+  # Stalwart - hostPort, HPA triggers cluster autoscaler for new nodes
+  stalwart:
+    min_replicas: 1
+    max_replicas: 5
+    memory_request: 128Mi
+    memory_limit: 512Mi
+    cpu_request: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
+    cpu_limit: 250m
+    storage_size: 1Gi  # Local storage for config/cache
+    # Unique ports per tenant for multi-tenant mail (like jvb_port pattern)
+    smtps_port: 46500       # SMTP submission with implicit TLS (like 465)
+    submission_port: 58700  # SMTP submission with STARTTLS (like 587)
+    imaps_port: 9930        # IMAP with implicit TLS (like 993)
+    imaps_app_port: 9940    # IMAP for app passwords (PLAIN/LOGIN via internal directory)
+    submission_app_port: 5880  # SMTP submission for app passwords (PLAIN/LOGIN)
+
+  # Keycloak - fixed replicas with session clustering (no HPA)
+  keycloak:
+    replicas: 2  # Fixed HA, no HPA
+
+  # Synapse - cannot scale yet (PVC constraint)
+  synapse:
+    replicas: 1  # No HPA - PVC with ReadWriteOnce
+    memory_request: 512Mi
+    memory_limit: 1Gi
+    cpu_request: 250m
+    cpu_limit: 500m
+
+  # Nextcloud - cannot scale yet (PVC constraint)
+  nextcloud:
+    replicas: 1  # No HPA - PVC with ReadWriteOnce
+    memory_request: 256Mi
+    memory_limit: 512Mi
+    storage_size: 5Gi
+
+  # PostgreSQL is shared infrastructure - configured via deploy_infra, not per-tenant
+
+  # Redis - Sentinel for HA (no HPA, Helm StatefulSet)
+  redis:
+    replicas: 1  # 0 = standalone, 1+ = sentinel mode
+
+# Feature flags
+features:
+  jitsi_enabled: true
+  matrix_enabled: true
+  docs_enabled: true
+  files_enabled: true
+  smtp_enabled: true
+  turn_enabled: true
+  mail_enabled: true
+  webmail_enabled: true
+  admin_portal_enabled: true
+  account_portal_enabled: true
+  calendar_enabled: true

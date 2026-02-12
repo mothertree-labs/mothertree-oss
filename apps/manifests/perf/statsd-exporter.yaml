@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-statsd-exporter
+  namespace: infra-monitoring
+  labels:
+    app: prometheus-statsd-exporter
+spec:
+  ports:
+    - port: 9125
+      targetPort: 9125
+      name: statsd
+      protocol: UDP
+    - port: 9102
+      targetPort: 9102
+      name: http-metrics
+  selector:
+    app: prometheus-statsd-exporter
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-statsd-exporter
+  namespace: infra-monitoring
+  labels:
+    app: prometheus-statsd-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus-statsd-exporter
+  template:
+    metadata:
+      labels:
+        app: prometheus-statsd-exporter
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: statsd-exporter
+          image: prom/statsd-exporter:v0.26.1
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          ports:
+            - containerPort: 9125
+              name: statsd
+              protocol: UDP
+            - containerPort: 9102
+              name: http-metrics
+          args:
+            - --statsd.mapping-config=/etc/statsd/statsd_mapping.yml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/statsd
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: statsd-exporter-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: statsd-exporter-config
+  namespace: infra-monitoring
+data:
+  statsd_mapping.yml: |
+    mappings:
+      # Map k6 metrics (e.g., k6.http_reqs -> k6_http_reqs)
+      - match: "k6\\.(.*)"
+        name: "k6_${1}"
+        match_type: regex
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: prometheus-statsd-exporter
+  namespace: infra-monitoring
+  labels:
+    app: prometheus-statsd-exporter
+spec:
+  selector:
+    matchLabels:
+      app: prometheus-statsd-exporter
+  endpoints:
+    - port: http-metrics
+      path: /metrics
+      interval: 30s
+

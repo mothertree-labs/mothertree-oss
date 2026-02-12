@@ -1,0 +1,18 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: jitsi-metrics-exporter
+  namespace: matrix
+  labels:
+    app: jitsi-metrics-exporter
+    component: monitoring
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: jitsi-metrics-exporter
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 15s
+

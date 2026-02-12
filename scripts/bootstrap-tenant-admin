@@ -1,0 +1,360 @@
+#!/bin/bash
+
+# Bootstrap Tenant Admin Script
+# Creates the initial tenant admin user with a temporary password
+# The admin must then log in and register a passkey
+#
+# Usage:
+#   ./scripts/bootstrap-tenant-admin --tenant=<name> <env> --email=<admin-email> --name="First Last"
+#
+# Example:
+#   ./scripts/bootstrap-tenant-admin --tenant=<name> dev --email=admin@example.com --name="Admin User"
+
+set -euo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+print_status() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+TENANT=""
+MT_ENV=""
+ADMIN_EMAIL=""
+ADMIN_NAME=""
+
+usage() {
+  echo "Usage: $0 --tenant=<name> <env> --email=<admin-email> --name=\"First Last\""
+  echo ""
+  echo "Required:"
+  echo "  --tenant=<name>     Tenant name (directory in tenants/)"
+  echo "  env                 Environment name (prod, dev)"
+  echo "  --email=<email>     Admin's tenant email address"
+  echo "  --name=\"First Last\" Admin's full name"
+  echo ""
+  echo "Example:"
+  echo "  $0 --tenant=<name> dev --email=admin@example.com --name=\"Admin User\""
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --tenant=*)
+      TENANT="${1#*=}"
+      shift
+      ;;
+    --email=*)
+      ADMIN_EMAIL="${1#*=}"
+      shift
+      ;;
+    --name=*)
+      ADMIN_NAME="${1#*=}"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --*)
+      echo "[ERROR] Unknown option: $1" >&2
+      usage
+      exit 1
+      ;;
+    *)
+      if [ -z "$MT_ENV" ]; then
+        MT_ENV="$1"
+      else
+        echo "[ERROR] Unexpected argument: $1" >&2
+        usage
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+# Validate required parameters
+if [ -z "$TENANT" ]; then
+  print_error "--tenant=<name> is required"
+  usage
+  exit 1
+fi
+
+if [ -z "$MT_ENV" ]; then
+  print_error "Environment name (prod, dev) is required"
+  usage
+  exit 1
+fi
+
+if [ -z "$ADMIN_EMAIL" ]; then
+  print_error "--email=<admin-email> is required"
+  usage
+  exit 1
+fi
+
+if [ -z "$ADMIN_NAME" ]; then
+  print_error "--name=\"First Last\" is required"
+  usage
+  exit 1
+fi
+
+# Parse first and last name
+FIRST_NAME=$(echo "$ADMIN_NAME" | awk '{print $1}')
+LAST_NAME=$(echo "$ADMIN_NAME" | awk '{$1=""; print $0}' | xargs)
+if [ -z "$LAST_NAME" ]; then
+  LAST_NAME="Admin"
+fi
+
+# Set up environment
+TENANT_DIR="$REPO/tenants/$TENANT"
+TENANT_CONFIG="$TENANT_DIR/${MT_ENV}.config.yaml"
+TENANT_SECRETS="$TENANT_DIR/${MT_ENV}.secrets.yaml"
+
+if [ ! -f "$TENANT_CONFIG" ]; then
+  print_error "Tenant config not found: $TENANT_CONFIG"
+  exit 1
+fi
+
+if [ ! -f "$TENANT_SECRETS" ]; then
+  print_error "Tenant secrets not found: $TENANT_SECRETS"
+  exit 1
+fi
+
+export KUBECONFIG="$REPO/kubeconfig.$MT_ENV.yaml"
+
+# Load tenant configuration
+TENANT_DOMAIN=$(yq '.dns.domain' "$TENANT_CONFIG")
+TENANT_KEYCLOAK_REALM=$(yq '.keycloak.realm' "$TENANT_CONFIG")
+TENANT_ENV_DNS_LABEL=$(yq '.dns.env_dns_label // ""' "$TENANT_CONFIG")
+
+if [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
+  AUTH_HOST="auth.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+else
+  AUTH_HOST="auth.${TENANT_DOMAIN}"
+fi
+
+NS_AUTH="infra-auth"
+
+print_status "Bootstrapping tenant admin for $TENANT ($MT_ENV)"
+print_status "Admin email: $ADMIN_EMAIL"
+print_status "Admin name: $FIRST_NAME $LAST_NAME"
+print_status "Keycloak realm: $TENANT_KEYCLOAK_REALM"
+print_status "Auth host: $AUTH_HOST"
+
+# Generate temporary password
+TEMP_PASSWORD=$(openssl rand -base64 12)
+
+# Wait for Keycloak to be ready
+print_status "Waiting for Keycloak pod to be ready..."
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=keycloakx -n "$NS_AUTH" --timeout=300s || {
+    print_error "Keycloak pod is not ready after 5 minutes"
+    exit 1
+}
+
+# Set up port-forward
+print_status "Setting up port-forward to Keycloak service..."
+kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http 8080:80 > /tmp/keycloak-pf.log 2>&1 &
+PF_PID=$!
+sleep 3
+
+cleanup() {
+    kill $PF_PID 2>/dev/null || true
+}
+trap cleanup EXIT
+
+KEYCLOAK_URL="http://localhost:8080"
+
+# Get admin token
+print_status "Getting Keycloak admin access token..."
+ADMIN_USER="admin"
+if [ -z "${KEYCLOAK_ADMIN_PASSWORD:-}" ]; then
+    # Try to load from tenant secrets
+    KEYCLOAK_ADMIN_PASSWORD=$(yq '.keycloak.admin_password // ""' "$TENANT_SECRETS" 2>/dev/null)
+    if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ] || [ "$KEYCLOAK_ADMIN_PASSWORD" = "null" ]; then
+        print_error "KEYCLOAK_ADMIN_PASSWORD is required but not set"
+        print_error "Set it in tenants/<tenant>/<env>.secrets.yaml under keycloak.admin_password"
+        exit 1
+    fi
+fi
+ADMIN_PASSWORD="$KEYCLOAK_ADMIN_PASSWORD"
+
+ACCESS_TOKEN=$(curl -s -X POST \
+  "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
+  --data-urlencode "username=$ADMIN_USER" \
+  --data-urlencode "password=$ADMIN_PASSWORD" \
+  --data-urlencode "grant_type=password" \
+  --data-urlencode "client_id=admin-cli" | jq -r '.access_token')
+
+if [ "$ACCESS_TOKEN" = "null" ] || [ -z "$ACCESS_TOKEN" ]; then
+    print_error "Failed to get Keycloak admin access token"
+    exit 1
+fi
+print_success "Access token obtained"
+
+# Check if user already exists
+print_status "Checking if user $ADMIN_EMAIL already exists..."
+EXISTING_USER=$(curl -s "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/users?username=$ADMIN_EMAIL" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.[0].id // empty')
+
+if [ -n "$EXISTING_USER" ]; then
+    print_warning "User $ADMIN_EMAIL already exists (ID: $EXISTING_USER)"
+    echo ""
+    read -p "Do you want to reset their password and update their roles? (y/N) " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        print_status "Aborted. No changes made."
+        exit 0
+    fi
+    USER_ID="$EXISTING_USER"
+else
+    # Create the admin user
+    print_status "Creating admin user..."
+    CREATE_RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/create_user.json -X POST \
+      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/users" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"username\": \"$ADMIN_EMAIL\",
+        \"email\": \"$ADMIN_EMAIL\",
+        \"firstName\": \"$FIRST_NAME\",
+        \"lastName\": \"$LAST_NAME\",
+        \"enabled\": true,
+        \"emailVerified\": true,
+        \"credentials\": [{
+          \"type\": \"password\",
+          \"value\": \"$TEMP_PASSWORD\",
+          \"temporary\": true
+        }],
+        \"requiredActions\": [\"webauthn-register-passwordless\"]
+      }")
+
+    if [ "$CREATE_RESPONSE" != "201" ]; then
+        print_error "Failed to create user (HTTP $CREATE_RESPONSE)"
+        cat /tmp/create_user.json
+        exit 1
+    fi
+    print_success "User created"
+
+    # Get the user ID
+    USER_ID=$(curl -s "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/users?username=$ADMIN_EMAIL" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.[0].id')
+fi
+
+if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
+    print_error "Could not get user ID"
+    exit 1
+fi
+
+print_status "User ID: $USER_ID"
+
+# Set/reset temporary password
+if [ -n "$EXISTING_USER" ]; then
+    print_status "Resetting password..."
+    curl -s -X PUT \
+      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/users/$USER_ID/reset-password" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"type\": \"password\",
+        \"value\": \"$TEMP_PASSWORD\",
+        \"temporary\": true
+      }"
+    print_success "Password reset"
+fi
+
+# Set required actions
+print_status "Setting required actions..."
+curl -s -X PUT \
+  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/users/$USER_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"requiredActions\": [\"webauthn-register-passwordless\"]
+  }"
+
+# Get tenant-admin role
+print_status "Assigning tenant-admin role..."
+TENANT_ADMIN_ROLE=$(curl -s "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/roles/tenant-admin" \
+  -H "Authorization: Bearer $ACCESS_TOKEN")
+
+ROLE_ID=$(echo "$TENANT_ADMIN_ROLE" | jq -r '.id // empty')
+
+if [ -z "$ROLE_ID" ] || [ "$ROLE_ID" = "null" ]; then
+    print_warning "tenant-admin role not found, creating it..."
+    curl -s -X POST \
+      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/roles" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "tenant-admin",
+        "description": "Tenant administrator - can invite and manage users"
+      }'
+    
+    TENANT_ADMIN_ROLE=$(curl -s "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/roles/tenant-admin" \
+      -H "Authorization: Bearer $ACCESS_TOKEN")
+fi
+
+# Assign role to user
+ASSIGN_RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/assign_role.json -X POST \
+  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/users/$USER_ID/role-mappings/realm" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "[$TENANT_ADMIN_ROLE]")
+
+if [ "$ASSIGN_RESPONSE" = "204" ]; then
+    print_success "tenant-admin role assigned"
+else
+    print_warning "Role assignment returned HTTP $ASSIGN_RESPONSE (may already be assigned)"
+fi
+
+echo ""
+echo "========================================"
+print_success "Tenant admin bootstrapped successfully!"
+echo "========================================"
+echo ""
+echo "Admin Details:"
+echo "  Email: $ADMIN_EMAIL"
+echo "  Name: $FIRST_NAME $LAST_NAME"
+echo "  Temporary Password: $TEMP_PASSWORD"
+echo ""
+if [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
+  ADMIN_PORTAL_URL="https://admin.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+else
+  ADMIN_PORTAL_URL="https://admin.${TENANT_DOMAIN}"
+fi
+
+BOOTSTRAP_URL="${ADMIN_PORTAL_URL}/bootstrap"
+
+echo "FIRST-TIME SETUP URL:"
+echo "  $BOOTSTRAP_URL"
+echo ""
+echo "Admin Portal URL (use after passkey is set up):"
+echo "  $ADMIN_PORTAL_URL"
+echo ""
+echo "Next Steps:"
+echo "  1. Share the temporary password with the admin securely"
+echo "  2. Admin opens: $BOOTSTRAP_URL"
+echo "  3. Enter email ($ADMIN_EMAIL) and temporary password"
+echo "  4. Admin will be redirected to dashboard"
+echo "  5. Admin should then set up a passkey for future logins"
+echo ""
+echo "IMPORTANT: The temporary password will only work once."
+echo "           After first login, use passkey authentication."

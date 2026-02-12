@@ -1,0 +1,35 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: turnutils
+  namespace: perf
+  labels:
+    env: prod
+    app: turn
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        env: prod
+        app: turn
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: turnutils
+          image: instrumentisto/coturn:4.6.7
+          env:
+            - name: TURN_HOST
+              value: "${TURN_HOST}"
+            - name: TURN_USER
+              value: "${TURN_USER}"
+            - name: TURN_PASS
+              value: "${TURN_PASS}"
+          command: ["sh", "-lc"]
+          args:
+            - |
+              if [ -z "$TURN_HOST" ]; then echo "TURN_HOST required"; exit 1; fi; \
+              echo "Testing TURN at $TURN_HOST"; \
+              turnutils_uclient -u "$TURN_USER" -w "$TURN_PASS" "$TURN_HOST" 3478 -n 200 -m 20
+
+

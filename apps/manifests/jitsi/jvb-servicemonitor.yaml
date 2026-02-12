@@ -1,0 +1,21 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: jitsi-jvb
+  namespace: matrix
+  labels:
+    app: jitsi-jvb
+    component: jvb
+spec:
+  selector:
+    matchLabels:
+      app: jitsi-jvb
+  endpoints:
+  - port: http
+    path: /colibri/stats
+    interval: 30s
+    # Note: JVB returns JSON, not Prometheus format
+    # This ServiceMonitor is for reference; actual scraping done via metrics exporter
+
+
+

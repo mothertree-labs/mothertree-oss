@@ -1,0 +1,720 @@
+#!/bin/bash
+# Setup Admin Portal OIDC client in Keycloak
+# This script creates/updates the admin-portal client with proper configuration
+# and configures the authentication flow for passkey + password login.
+#
+# Usage: ./scripts/setup-admin-portal-client <env>
+# Example: ./scripts/setup-admin-portal-client dev
+#
+# This script is idempotent - safe to run multiple times.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(dirname "$SCRIPT_DIR")"
+
+ENV="${1:-}"
+if [ -z "$ENV" ]; then
+    echo "Usage: $0 <env>"
+    echo "Example: $0 dev"
+    exit 1
+fi
+
+# Load tenant config
+TENANT_NAME="${TENANT_NAME:-example}"
+TENANT_CONFIG="$REPO/tenants/$TENANT_NAME/$ENV.config.yaml"
+TENANT_SECRETS="$REPO/tenants/$TENANT_NAME/$ENV.secrets.yaml"
+
+if [ ! -f "$TENANT_CONFIG" ]; then
+    echo "[ERROR] Tenant config not found: $TENANT_CONFIG"
+    exit 1
+fi
+
+if [ ! -f "$TENANT_SECRETS" ]; then
+    echo "[ERROR] Tenant secrets not found: $TENANT_SECRETS"
+    exit 1
+fi
+
+# Extract configuration
+TENANT_DOMAIN=$(yq '.dns.domain' "$TENANT_CONFIG")
+ENV_LABEL=$(yq '.dns.env_dns_label // ""' "$TENANT_CONFIG")
+AUTH_SUBDOMAIN=$(yq '.dns.auth_subdomain // "auth"' "$TENANT_CONFIG")
+ADMIN_SUBDOMAIN=$(yq '.dns.admin_subdomain // "admin"' "$TENANT_CONFIG")
+KEYCLOAK_REALM=$(yq '.keycloak.realm // "docs"' "$TENANT_CONFIG")
+ADMIN_PORTAL_SECRET=$(yq '.oidc.admin_portal_client_secret' "$TENANT_SECRETS")
+ACCOUNT_SUBDOMAIN=$(yq '.dns.account_subdomain // "account"' "$TENANT_CONFIG")
+ACCOUNT_PORTAL_SECRET=$(yq '.oidc.account_portal_client_secret // ""' "$TENANT_SECRETS")
+if [ -z "${KEYCLOAK_ADMIN_PASSWORD:-}" ]; then
+    echo "[ERROR] KEYCLOAK_ADMIN_PASSWORD is required but not set"
+    echo "[ERROR] Set it in tenants/<tenant>/<env>.secrets.yaml under keycloak.admin_password"
+    exit 1
+fi
+
+# Build hostnames
+if [ -n "$ENV_LABEL" ] && [ "$ENV_LABEL" != "null" ]; then
+    AUTH_HOST="$AUTH_SUBDOMAIN.$ENV_LABEL.$TENANT_DOMAIN"
+    ADMIN_HOST="$ADMIN_SUBDOMAIN.$ENV_LABEL.$TENANT_DOMAIN"
+    ACCOUNT_HOST="$ACCOUNT_SUBDOMAIN.$ENV_LABEL.$TENANT_DOMAIN"
+else
+    AUTH_HOST="$AUTH_SUBDOMAIN.$TENANT_DOMAIN"
+    ADMIN_HOST="$ADMIN_SUBDOMAIN.$TENANT_DOMAIN"
+    ACCOUNT_HOST="$ACCOUNT_SUBDOMAIN.$TENANT_DOMAIN"
+fi
+
+echo "[INFO] Setting up admin-portal client for $TENANT_NAME ($ENV)"
+echo "[INFO] Auth host: $AUTH_HOST"
+echo "[INFO] Admin host: $ADMIN_HOST"
+echo "[INFO] Keycloak realm: $KEYCLOAK_REALM"
+
+# Get admin token
+echo "[INFO] Getting Keycloak admin token..."
+TOKEN=$(curl -s -X POST "https://$AUTH_HOST/realms/master/protocol/openid-connect/token" \
+    --data-urlencode "username=admin" \
+    --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
+    --data-urlencode "grant_type=password" \
+    --data-urlencode "client_id=admin-cli" | jq -r '.access_token')
+
+if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
+    echo "[ERROR] Failed to get Keycloak admin token"
+    exit 1
+fi
+
+#############################################
+# 0a. Configure Realm frontendUrl
+#############################################
+echo "[INFO] Configuring realm frontendUrl..."
+
+REALM_CONFIG=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM" \
+    -H "Authorization: Bearer $TOKEN")
+
+CURRENT_FRONTEND_URL=$(echo "$REALM_CONFIG" | jq -r '.attributes.frontendUrl // ""')
+EXPECTED_FRONTEND_URL="https://$AUTH_HOST"
+
+if [ "$CURRENT_FRONTEND_URL" != "$EXPECTED_FRONTEND_URL" ]; then
+    echo "[INFO] Updating frontendUrl from '$CURRENT_FRONTEND_URL' to '$EXPECTED_FRONTEND_URL'"
+    UPDATED_REALM=$(echo "$REALM_CONFIG" | jq --arg url "$EXPECTED_FRONTEND_URL" '.attributes.frontendUrl = $url')
+    curl -s -X PUT "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$UPDATED_REALM" > /dev/null
+    echo "[INFO] Realm frontendUrl configured"
+else
+    echo "[INFO] Realm frontendUrl already correct"
+fi
+
+#############################################
+# 0b. Configure User Profile to allow recoveryEmail attribute
+#############################################
+echo "[INFO] Configuring User Profile..."
+
+PROFILE=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/users/profile" \
+    -H "Authorization: Bearer $TOKEN")
+
+# Check if recoveryEmail already exists
+if echo "$PROFILE" | jq -e '.attributes[] | select(.name == "recoveryEmail")' > /dev/null 2>&1; then
+    echo "[INFO] recoveryEmail attribute already in User Profile"
+else
+    echo "[INFO] Adding recoveryEmail to User Profile..."
+    PROFILE=$(echo "$PROFILE" | jq '.attributes += [{
+        "name": "recoveryEmail",
+        "displayName": "Recovery Email",
+        "validations": {
+            "email": {},
+            "length": {"max": 255}
+        },
+        "permissions": {
+            "view": ["admin"],
+            "edit": ["admin"]
+        },
+        "multivalued": false
+    }]')
+fi
+
+# Check if tenantEmail already exists
+if echo "$PROFILE" | jq -e '.attributes[] | select(.name == "tenantEmail")' > /dev/null 2>&1; then
+    echo "[INFO] tenantEmail attribute already in User Profile"
+else
+    echo "[INFO] Adding tenantEmail to User Profile..."
+    PROFILE=$(echo "$PROFILE" | jq '.attributes += [{
+        "name": "tenantEmail",
+        "displayName": "Tenant Email",
+        "validations": {
+            "email": {},
+            "length": {"max": 255}
+        },
+        "permissions": {
+            "view": ["admin"],
+            "edit": ["admin"]
+        },
+        "multivalued": false
+    }]')
+fi
+
+# Check if userType already exists
+if echo "$PROFILE" | jq -e '.attributes[] | select(.name == "userType")' > /dev/null 2>&1; then
+    echo "[INFO] userType attribute already in User Profile"
+else
+    echo "[INFO] Adding userType to User Profile..."
+    PROFILE=$(echo "$PROFILE" | jq '.attributes += [{
+        "name": "userType",
+        "displayName": "User Type",
+        "validations": {
+            "length": {"max": 50}
+        },
+        "permissions": {
+            "view": ["admin"],
+            "edit": ["admin"]
+        },
+        "multivalued": false
+    }]')
+fi
+
+# Update the profile
+curl -s -X PUT "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/users/profile" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$PROFILE" > /dev/null
+echo "[INFO] User Profile updated"
+
+#############################################
+# 1. Configure Realm SMTP Settings
+#############################################
+echo "[INFO] Configuring realm SMTP settings..."
+
+# Get current realm config
+REALM_CONFIG=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM" \
+    -H "Authorization: Bearer $TOKEN")
+
+# Update SMTP settings
+UPDATED_REALM=$(echo "$REALM_CONFIG" | jq --arg fromEmail "noreply@$TENANT_DOMAIN" '.smtpServer = {
+    "host": "postfix.infra-mail.svc.cluster.local",
+    "port": "25",
+    "from": $fromEmail,
+    "fromDisplayName": "MotherTree",
+    "replyTo": ("support@" + .realm),
+    "ssl": "false",
+    "starttls": "false",
+    "auth": "false"
+}')
+
+curl -s -X PUT "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$UPDATED_REALM" > /dev/null
+
+echo "[INFO] SMTP configured"
+
+#############################################
+# 2. Configure Session Timeouts
+#############################################
+echo "[INFO] Configuring session timeouts..."
+
+TIMEOUT_CONFIG=$(echo "$REALM_CONFIG" | jq '. + {
+    "accessCodeLifespan": 300,
+    "accessCodeLifespanLogin": 1800,
+    "accessCodeLifespanUserAction": 600,
+    "actionTokenGeneratedByUserLifespan": 600
+}')
+
+curl -s -X PUT "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$TIMEOUT_CONFIG" > /dev/null
+
+echo "[INFO] Session timeouts configured"
+
+#############################################
+# 3. Fix Authentication Flow
+#############################################
+echo "[INFO] Fixing passkey browser authentication flow..."
+
+# Helper function to update flow execution with error checking
+update_flow_execution() {
+    local EXEC_ID="$1"
+    local EXEC_NAME="$2"
+    local REQUIREMENT="$3"
+    
+    local RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+        "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"id\": \"$EXEC_ID\", \"requirement\": \"$REQUIREMENT\"}")
+    
+    local HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+    
+    if [ "$HTTP_CODE" = "202" ] || [ "$HTTP_CODE" = "204" ]; then
+        echo "[INFO] Set $EXEC_NAME to $REQUIREMENT"
+        return 0
+    else
+        echo "[ERROR] Failed to set $EXEC_NAME to $REQUIREMENT (HTTP $HTTP_CODE)"
+        echo "[ERROR] Response: $(echo "$RESPONSE" | head -n -1)"
+        return 1
+    fi
+}
+
+# Get the passkey browser flow executions with retry
+MAX_RETRIES=3
+RETRY_DELAY=2
+EXECUTIONS=""
+
+for i in $(seq 1 $MAX_RETRIES); do
+    EXECUTIONS=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+        -H "Authorization: Bearer $TOKEN")
+    
+    # Check if we got a valid response (should be a JSON array)
+    if echo "$EXECUTIONS" | jq -e 'type == "array"' > /dev/null 2>&1; then
+        EXEC_COUNT=$(echo "$EXECUTIONS" | jq 'length')
+        if [ "$EXEC_COUNT" -gt 0 ]; then
+            echo "[INFO] Found $EXEC_COUNT executions in passkey browser flow"
+            break
+        fi
+    fi
+    
+    if [ $i -lt $MAX_RETRIES ]; then
+        echo "[WARN] passkey browser flow not ready, retrying in ${RETRY_DELAY}s... (attempt $i/$MAX_RETRIES)"
+        sleep $RETRY_DELAY
+    fi
+done
+
+# Verify we have valid executions
+if ! echo "$EXECUTIONS" | jq -e 'type == "array" and length > 0' > /dev/null 2>&1; then
+    echo "[ERROR] Failed to get passkey browser flow executions after $MAX_RETRIES attempts"
+    echo "[ERROR] Response: $EXECUTIONS"
+    exit 1
+fi
+
+# Track if all changes succeeded
+FLOW_CHANGES_OK=true
+
+# Disable Conditional 2FA subflow
+COND_2FA_ID=$(echo "$EXECUTIONS" | jq -r '.[] | select(.displayName == "passkey browser Browser - Conditional 2FA") | .id')
+if [ -n "$COND_2FA_ID" ] && [ "$COND_2FA_ID" != "null" ]; then
+    update_flow_execution "$COND_2FA_ID" "Conditional 2FA subflow" "DISABLED" || FLOW_CHANGES_OK=false
+else
+    echo "[WARN] Conditional 2FA subflow not found in flow"
+fi
+
+# Disable Organization subflow
+ORG_ID=$(echo "$EXECUTIONS" | jq -r '.[] | select(.displayName == "passkey browser Organization") | .id')
+if [ -n "$ORG_ID" ] && [ "$ORG_ID" != "null" ]; then
+    update_flow_execution "$ORG_ID" "Organization subflow" "DISABLED" || FLOW_CHANGES_OK=false
+else
+    echo "[WARN] Organization subflow not found in flow"
+fi
+
+# Disable Username Password Form in passkey browser flow
+PWD_FORM_ID=$(echo "$EXECUTIONS" | jq -r '.[] | select(.displayName == "Username Password Form") | .id')
+if [ -n "$PWD_FORM_ID" ] && [ "$PWD_FORM_ID" != "null" ]; then
+    update_flow_execution "$PWD_FORM_ID" "Username Password Form" "DISABLED" || FLOW_CHANGES_OK=false
+else
+    echo "[WARN] Username Password Form not found in flow"
+fi
+
+# Verify changes were applied
+echo "[INFO] Verifying authentication flow changes..."
+VERIFY_EXECUTIONS=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+    -H "Authorization: Bearer $TOKEN")
+
+VERIFY_FAILED=false
+
+# Check Conditional 2FA
+COND_2FA_STATUS=$(echo "$VERIFY_EXECUTIONS" | jq -r '.[] | select(.displayName == "passkey browser Browser - Conditional 2FA") | .requirement')
+if [ "$COND_2FA_STATUS" != "DISABLED" ]; then
+    echo "[ERROR] Conditional 2FA subflow is '$COND_2FA_STATUS', expected 'DISABLED'"
+    VERIFY_FAILED=true
+fi
+
+# Check Organization
+ORG_STATUS=$(echo "$VERIFY_EXECUTIONS" | jq -r '.[] | select(.displayName == "passkey browser Organization") | .requirement')
+if [ "$ORG_STATUS" != "DISABLED" ]; then
+    echo "[ERROR] Organization subflow is '$ORG_STATUS', expected 'DISABLED'"
+    VERIFY_FAILED=true
+fi
+
+# Check Username Password Form
+PWD_STATUS=$(echo "$VERIFY_EXECUTIONS" | jq -r '.[] | select(.displayName == "Username Password Form") | .requirement')
+if [ "$PWD_STATUS" != "DISABLED" ]; then
+    echo "[ERROR] Username Password Form is '$PWD_STATUS', expected 'DISABLED'"
+    VERIFY_FAILED=true
+fi
+
+if [ "$VERIFY_FAILED" = "true" ]; then
+    echo "[ERROR] Authentication flow verification failed - login may not work correctly"
+    exit 1
+fi
+
+echo "[INFO] Authentication flow changes verified successfully"
+
+#############################################
+# 4. Create/Update admin-portal Client
+#############################################
+echo "[INFO] Setting up admin-portal client..."
+
+# Check if client exists
+EXISTING_CLIENT=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients?clientId=admin-portal" \
+    -H "Authorization: Bearer $TOKEN")
+CLIENT_COUNT=$(echo "$EXISTING_CLIENT" | jq 'length')
+
+# Get passkey browser flow ID for client override
+PASSKEY_FLOW_ID=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/authentication/flows" \
+    -H "Authorization: Bearer $TOKEN" | jq -r '.[] | select(.alias=="passkey browser") | .id')
+
+CLIENT_CONFIG='{
+    "clientId": "admin-portal",
+    "name": "Admin Portal",
+    "enabled": true,
+    "protocol": "openid-connect",
+    "publicClient": false,
+    "secret": "'"$ADMIN_PORTAL_SECRET"'",
+    "standardFlowEnabled": true,
+    "directAccessGrantsEnabled": false,
+    "serviceAccountsEnabled": true,
+    "redirectUris": [
+        "https://'"$ADMIN_HOST"'/*"
+    ],
+    "webOrigins": [
+        "https://'"$ADMIN_HOST"'"
+    ],
+    "attributes": {
+        "pkce.code.challenge.method": "S256"
+    },
+    "authenticationFlowBindingOverrides": {
+        "browser": "'"$PASSKEY_FLOW_ID"'"
+    }
+}'
+
+if [ "$CLIENT_COUNT" -gt 0 ]; then
+    echo "[INFO] Updating existing admin-portal client..."
+    CLIENT_UUID=$(echo "$EXISTING_CLIENT" | jq -r '.[0].id')
+    
+    curl -s -X PUT "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$CLIENT_UUID" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$CLIENT_CONFIG" > /dev/null
+else
+    echo "[INFO] Creating new admin-portal client..."
+    curl -s -X POST "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$CLIENT_CONFIG" > /dev/null
+fi
+
+# Get client UUID (may have been created)
+CLIENT_UUID=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients?clientId=admin-portal" \
+    -H "Authorization: Bearer $TOKEN" | jq -r '.[0].id')
+
+#############################################
+# 4b. Create/Update admin-portal-bootstrap Client
+#############################################
+echo "[INFO] Setting up admin-portal-bootstrap client (standard browser flow for first login)..."
+
+EXISTING_BOOTSTRAP_CLIENT=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients?clientId=admin-portal-bootstrap" \
+    -H "Authorization: Bearer $TOKEN")
+BOOTSTRAP_CLIENT_COUNT=$(echo "$EXISTING_BOOTSTRAP_CLIENT" | jq 'length')
+
+# Get standard browser flow ID (not passkey browser)
+STANDARD_BROWSER_FLOW_ID=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/authentication/flows" \
+    -H "Authorization: Bearer $TOKEN" | jq -r '.[] | select(.alias=="browser") | .id')
+
+# Bootstrap client uses standard browser flow explicitly (password + required actions)
+BOOTSTRAP_CLIENT_CONFIG='{
+    "clientId": "admin-portal-bootstrap",
+    "name": "Admin Portal Bootstrap",
+    "description": "Used for first-time admin login with password",
+    "enabled": true,
+    "protocol": "openid-connect",
+    "publicClient": false,
+    "secret": "'"$ADMIN_PORTAL_SECRET"'",
+    "standardFlowEnabled": true,
+    "directAccessGrantsEnabled": false,
+    "serviceAccountsEnabled": false,
+    "redirectUris": [
+        "https://'"$ADMIN_HOST"'/bootstrap/callback"
+    ],
+    "webOrigins": [
+        "https://'"$ADMIN_HOST"'"
+    ],
+    "attributes": {
+        "pkce.code.challenge.method": "S256"
+    },
+    "authenticationFlowBindingOverrides": {
+        "browser": "'"$STANDARD_BROWSER_FLOW_ID"'"
+    }
+}'
+
+if [ "$BOOTSTRAP_CLIENT_COUNT" -gt 0 ]; then
+    echo "[INFO] Updating existing admin-portal-bootstrap client..."
+    BOOTSTRAP_CLIENT_UUID=$(echo "$EXISTING_BOOTSTRAP_CLIENT" | jq -r '.[0].id')
+    
+    curl -s -X PUT "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$BOOTSTRAP_CLIENT_UUID" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$BOOTSTRAP_CLIENT_CONFIG" > /dev/null
+else
+    echo "[INFO] Creating new admin-portal-bootstrap client..."
+    curl -s -X POST "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$BOOTSTRAP_CLIENT_CONFIG" > /dev/null
+fi
+
+#############################################
+# 4c. Create/Update account-portal Client
+#############################################
+if [ -z "$ACCOUNT_PORTAL_SECRET" ] || [ "$ACCOUNT_PORTAL_SECRET" = "null" ] || [ "$ACCOUNT_PORTAL_SECRET" = "" ]; then
+    echo "[ERROR] account_portal_client_secret not found in $TENANT_SECRETS"
+    echo "[ERROR] Add 'account_portal_client_secret' under the 'oidc' section"
+    exit 1
+fi
+
+echo "[INFO] Setting up account-portal client (user self-service portal)..."
+
+EXISTING_ACCOUNT_CLIENT=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients?clientId=account-portal" \
+    -H "Authorization: Bearer $TOKEN")
+ACCOUNT_CLIENT_COUNT=$(echo "$EXISTING_ACCOUNT_CLIENT" | jq 'length')
+
+ACCOUNT_CLIENT_CONFIG='{
+    "clientId": "account-portal",
+    "name": "Account Portal",
+    "description": "User self-service portal (app passwords, recovery, guest registration)",
+    "enabled": true,
+    "protocol": "openid-connect",
+    "publicClient": false,
+    "secret": "'"$ACCOUNT_PORTAL_SECRET"'",
+    "standardFlowEnabled": true,
+    "directAccessGrantsEnabled": false,
+    "serviceAccountsEnabled": true,
+    "redirectUris": [
+        "https://'"$ACCOUNT_HOST"'/*"
+    ],
+    "webOrigins": [
+        "https://'"$ACCOUNT_HOST"'"
+    ],
+    "attributes": {
+        "pkce.code.challenge.method": "S256"
+    },
+    "authenticationFlowBindingOverrides": {
+        "browser": "'"$PASSKEY_FLOW_ID"'"
+    }
+}'
+
+if [ "$ACCOUNT_CLIENT_COUNT" -gt 0 ]; then
+    echo "[INFO] Updating existing account-portal client..."
+    ACCOUNT_CLIENT_UUID=$(echo "$EXISTING_ACCOUNT_CLIENT" | jq -r '.[0].id')
+
+    curl -s -X PUT "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$ACCOUNT_CLIENT_UUID" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$ACCOUNT_CLIENT_CONFIG" > /dev/null
+else
+    echo "[INFO] Creating new account-portal client..."
+    curl -s -X POST "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$ACCOUNT_CLIENT_CONFIG" > /dev/null
+fi
+
+# Get account-portal client UUID
+ACCOUNT_CLIENT_UUID=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients?clientId=account-portal" \
+    -H "Authorization: Bearer $TOKEN" | jq -r '.[0].id')
+
+echo "[INFO] Account portal client configured: https://$ACCOUNT_HOST"
+
+#############################################
+# 5. Add Protocol Mapper for Realm Roles (both clients)
+#############################################
+echo "[INFO] Adding realm roles protocol mapper..."
+
+ROLE_MAPPER_CONFIG='{
+    "name": "realm roles",
+    "protocol": "openid-connect",
+    "protocolMapper": "oidc-usermodel-realm-role-mapper",
+    "consentRequired": false,
+    "config": {
+        "multivalued": "true",
+        "userinfo.token.claim": "true",
+        "id.token.claim": "true",
+        "access.token.claim": "true",
+        "claim.name": "realm_access.roles",
+        "jsonType.label": "String"
+    }
+}'
+
+# Get bootstrap client UUID
+BOOTSTRAP_CLIENT_UUID=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients?clientId=admin-portal-bootstrap" \
+    -H "Authorization: Bearer $TOKEN" | jq -r '.[0].id')
+
+# Add mapper to main admin-portal client
+EXISTING_MAPPERS=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$CLIENT_UUID/protocol-mappers/models" \
+    -H "Authorization: Bearer $TOKEN")
+MAPPER_EXISTS=$(echo "$EXISTING_MAPPERS" | jq '[.[] | select(.name == "realm roles")] | length')
+
+if [ "$MAPPER_EXISTS" -eq 0 ]; then
+    curl -s -X POST "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$CLIENT_UUID/protocol-mappers/models" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$ROLE_MAPPER_CONFIG" > /dev/null
+    echo "[INFO] Realm roles mapper added to admin-portal"
+else
+    echo "[INFO] Realm roles mapper already exists on admin-portal"
+fi
+
+# Add mapper to bootstrap client
+if [ -n "$BOOTSTRAP_CLIENT_UUID" ] && [ "$BOOTSTRAP_CLIENT_UUID" != "null" ]; then
+    BOOTSTRAP_MAPPERS=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$BOOTSTRAP_CLIENT_UUID/protocol-mappers/models" \
+        -H "Authorization: Bearer $TOKEN")
+    BOOTSTRAP_MAPPER_EXISTS=$(echo "$BOOTSTRAP_MAPPERS" | jq '[.[] | select(.name == "realm roles")] | length')
+    
+    if [ "$BOOTSTRAP_MAPPER_EXISTS" -eq 0 ]; then
+        curl -s -X POST "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$BOOTSTRAP_CLIENT_UUID/protocol-mappers/models" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$ROLE_MAPPER_CONFIG" > /dev/null
+        echo "[INFO] Realm roles mapper added to admin-portal-bootstrap"
+    else
+        echo "[INFO] Realm roles mapper already exists on admin-portal-bootstrap"
+    fi
+fi
+
+# Add mapper to account-portal client
+ACCOUNT_MAPPERS=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$ACCOUNT_CLIENT_UUID/protocol-mappers/models" \
+    -H "Authorization: Bearer $TOKEN")
+ACCOUNT_MAPPER_EXISTS=$(echo "$ACCOUNT_MAPPERS" | jq '[.[] | select(.name == "realm roles")] | length')
+
+if [ "$ACCOUNT_MAPPER_EXISTS" -eq 0 ]; then
+    curl -s -X POST "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$ACCOUNT_CLIENT_UUID/protocol-mappers/models" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$ROLE_MAPPER_CONFIG" > /dev/null
+    echo "[INFO] Realm roles mapper added to account-portal"
+else
+    echo "[INFO] Realm roles mapper already exists on account-portal"
+fi
+
+#############################################
+# 6. Configure Service Account Roles
+#############################################
+echo "[INFO] Configuring service account roles for admin API access..."
+
+SERVICE_ACCOUNT=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$CLIENT_UUID/service-account-user" \
+    -H "Authorization: Bearer $TOKEN")
+SERVICE_ACCOUNT_ID=$(echo "$SERVICE_ACCOUNT" | jq -r '.id')
+
+if [ -n "$SERVICE_ACCOUNT_ID" ] && [ "$SERVICE_ACCOUNT_ID" != "null" ]; then
+    # Get realm-management client UUID
+    REALM_MGMT_CLIENT=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients?clientId=realm-management" \
+        -H "Authorization: Bearer $TOKEN" | jq -r '.[0].id')
+    
+    if [ -n "$REALM_MGMT_CLIENT" ] && [ "$REALM_MGMT_CLIENT" != "null" ]; then
+        # Get the manage-users role
+        MANAGE_USERS_ROLE=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$REALM_MGMT_CLIENT/roles/manage-users" \
+            -H "Authorization: Bearer $TOKEN")
+        
+        if [ -n "$MANAGE_USERS_ROLE" ] && [ "$(echo "$MANAGE_USERS_ROLE" | jq -r '.name')" = "manage-users" ]; then
+            # Assign manage-users role to service account
+            curl -s -X POST "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/users/$SERVICE_ACCOUNT_ID/role-mappings/clients/$REALM_MGMT_CLIENT" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "[$MANAGE_USERS_ROLE]" 2>/dev/null || true
+            echo "[INFO] Service account configured with manage-users role"
+        fi
+
+        # Get the view-realm role (needed for guest user role assignment)
+        VIEW_REALM_ROLE=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$REALM_MGMT_CLIENT/roles/view-realm" \
+            -H "Authorization: Bearer $TOKEN")
+
+        if [ -n "$VIEW_REALM_ROLE" ] && [ "$(echo "$VIEW_REALM_ROLE" | jq -r '.name')" = "view-realm" ]; then
+            # Assign view-realm role to service account
+            curl -s -X POST "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/users/$SERVICE_ACCOUNT_ID/role-mappings/clients/$REALM_MGMT_CLIENT" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "[$VIEW_REALM_ROLE]" 2>/dev/null || true
+            echo "[INFO] Service account configured with view-realm role"
+        fi
+    fi
+fi
+
+#############################################
+# 7. Configure Service Account Roles for Account Portal
+#############################################
+echo "[INFO] Configuring service account roles for account-portal..."
+
+ACCOUNT_SERVICE_ACCOUNT=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$ACCOUNT_CLIENT_UUID/service-account-user" \
+    -H "Authorization: Bearer $TOKEN")
+ACCOUNT_SA_ID=$(echo "$ACCOUNT_SERVICE_ACCOUNT" | jq -r '.id')
+
+if [ -n "$ACCOUNT_SA_ID" ] && [ "$ACCOUNT_SA_ID" != "null" ]; then
+    # Get realm-management client UUID (already fetched above, but re-fetch for safety)
+    REALM_MGMT_CLIENT=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients?clientId=realm-management" \
+        -H "Authorization: Bearer $TOKEN" | jq -r '.[0].id')
+
+    if [ -n "$REALM_MGMT_CLIENT" ] && [ "$REALM_MGMT_CLIENT" != "null" ]; then
+        # Assign manage-users role (needed for recovery, guest creation, email swap)
+        MANAGE_USERS_ROLE=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$REALM_MGMT_CLIENT/roles/manage-users" \
+            -H "Authorization: Bearer $TOKEN")
+
+        if [ -n "$MANAGE_USERS_ROLE" ] && [ "$(echo "$MANAGE_USERS_ROLE" | jq -r '.name')" = "manage-users" ]; then
+            curl -s -X POST "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/users/$ACCOUNT_SA_ID/role-mappings/clients/$REALM_MGMT_CLIENT" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "[$MANAGE_USERS_ROLE]" 2>/dev/null || true
+            echo "[INFO] Account portal service account: manage-users role assigned"
+        fi
+
+        # Assign view-realm role (needed for role assignment in guest creation)
+        VIEW_REALM_ROLE=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$REALM_MGMT_CLIENT/roles/view-realm" \
+            -H "Authorization: Bearer $TOKEN")
+
+        if [ -n "$VIEW_REALM_ROLE" ] && [ "$(echo "$VIEW_REALM_ROLE" | jq -r '.name')" = "view-realm" ]; then
+            curl -s -X POST "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/users/$ACCOUNT_SA_ID/role-mappings/clients/$REALM_MGMT_CLIENT" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "[$VIEW_REALM_ROLE]" 2>/dev/null || true
+            echo "[INFO] Account portal service account: view-realm role assigned"
+        fi
+
+        # Assign view-users role (needed for user lookup)
+        VIEW_USERS_ROLE=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/clients/$REALM_MGMT_CLIENT/roles/view-users" \
+            -H "Authorization: Bearer $TOKEN")
+
+        if [ -n "$VIEW_USERS_ROLE" ] && [ "$(echo "$VIEW_USERS_ROLE" | jq -r '.name')" = "view-users" ]; then
+            curl -s -X POST "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/users/$ACCOUNT_SA_ID/role-mappings/clients/$REALM_MGMT_CLIENT" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "[$VIEW_USERS_ROLE]" 2>/dev/null || true
+            echo "[INFO] Account portal service account: view-users role assigned"
+        fi
+    fi
+fi
+
+#############################################
+# 8. Configure Realm Login/Email Theme
+#############################################
+echo "[INFO] Configuring realm login and email themes..."
+
+THEME_UPDATE=$(curl -s -w "%{http_code}" -o /dev/null -X PUT "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"loginTheme": "platform", "emailTheme": "platform"}')
+
+if [ "$THEME_UPDATE" = "204" ]; then
+    echo "[INFO] Realm themes set to platform"
+else
+    echo "[WARN] Failed to set realm themes (HTTP $THEME_UPDATE)"
+fi
+
+#############################################
+# Summary
+#############################################
+echo ""
+echo "[SUCCESS] Admin portal client setup complete!"
+echo ""
+echo "Configuration:"
+echo "  Admin Portal:   client_id=admin-portal   redirect=https://$ADMIN_HOST/*"
+echo "  Account Portal: client_id=account-portal redirect=https://$ACCOUNT_HOST/*"
+echo "  Auth flow: passkey browser (supports passkey + password)"
+echo "  SMTP: postfix.infra-mail.svc.cluster.local:25"
+echo ""
+echo "Next steps:"
+echo "  1. Deploy admin portal: ./scripts/create_env --tenant=$TENANT_NAME $ENV"
+echo "  2. Bootstrap admin user: ./scripts/bootstrap-tenant-admin $ENV"

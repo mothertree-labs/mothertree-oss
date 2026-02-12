@@ -1,0 +1,303 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k6-json-converter
+  namespace: perf
+data:
+  converter.py: |
+    #!/usr/bin/env python3
+    """Convert k6 JSON output to Prometheus format and push to Pushgateway."""
+    import json
+    import os
+    import sys
+    import time
+    import requests
+    from pathlib import Path
+
+    PUSHGATEWAY_URL = os.getenv('PUSHGATEWAY_URL', 'http://prometheus-pushgateway.monitoring.svc.cluster.local:9091')
+    JSON_FILE = os.getenv('K6_JSON_FILE', '/shared/k6-results.json')
+    JOB_NAME = os.getenv('JOB_NAME', 'k6-test')
+    ENV = os.getenv('ENV', 'dev')
+    APP = os.getenv('APP', 'unknown')
+    POLL_INTERVAL = float(os.getenv('POLL_INTERVAL', '5.0'))
+
+    def parse_k6_jsonl(json_file):
+        """Parse k6 JSONL output and convert to Prometheus format."""
+        metrics = {}
+        metric_definitions = {}
+        
+        # k6 JSON output is JSONL (one JSON object per line)
+        # First pass: collect metric definitions and aggregate point values
+        with open(json_file, 'r') as f:
+            for line in f:
+                try:
+                    obj = json.loads(line.strip())
+                    if not obj:
+                        continue
+                    
+                    # Handle metric definitions
+                    if obj.get('type') == 'Metric':
+                        metric_name = obj.get('data', {}).get('name', '')
+                        metric_type = obj.get('data', {}).get('type', 'gauge')
+                        metric_definitions[metric_name] = metric_type
+                        if metric_name not in metrics:
+                            metrics[metric_name] = {'values': [], 'type': metric_type}
+                    
+                    # Handle metric points
+                    elif obj.get('type') == 'Point':
+                        metric_name = obj.get('metric', '')
+                        value = obj.get('data', {}).get('value')
+                        if metric_name and value is not None:
+                            if metric_name not in metrics:
+                                metrics[metric_name] = {'values': [], 'type': metric_definitions.get(metric_name, 'gauge')}
+                            metrics[metric_name]['values'].append(float(value))
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    continue
+        
+        # Second pass: convert aggregated values to Prometheus format
+        prom_metrics = []
+        
+        # Get http_reqs total for calculating failed requests
+        http_reqs_total = metrics.get('http_reqs', {}).get('values', [])
+        http_reqs_count = http_reqs_total[-1] if http_reqs_total else 0
+        
+        for metric_name, metric_data in metrics.items():
+            if not metric_data['values']:
+                continue
+            
+            values = metric_data['values']
+            metric_type = metric_data['type']
+            
+            # Convert metric name (k6 uses dots, Prometheus uses underscores)
+            # Remove k6_ prefix to match dashboard expectations
+            prom_name = metric_name.replace('.', '_').replace('-', '_')
+            
+            # Handle specific metrics that dashboard expects (without k6_ prefix)
+            if metric_name == 'http_reqs' and metric_type == 'counter':
+                # Prometheus convention: counters should end in _total
+                # k6 outputs individual increments (each Point = 1), so sum all values
+                prom_metrics.append(f'{prom_name}_total{{env="{ENV}",app="{APP}"}} {int(sum(values)) if values else 0}')
+            elif metric_name == 'http_req_duration' and metric_type in ('gauge', 'trend'):
+                # Dashboard expects: http_req_duration_seconds_bucket (histogram)
+                # Values are in milliseconds, convert to seconds
+                sorted_vals = sorted([v/1000.0 for v in values])  # Convert ms to seconds
+                if sorted_vals:
+                    # Define buckets in seconds
+                    buckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+                    for bucket in buckets:
+                        count = sum(1 for v in sorted_vals if v <= bucket)
+                        prom_metrics.append(f'{prom_name}_seconds_bucket{{env="{ENV}",app="{APP}",le="{bucket}"}} {count}')
+                    prom_metrics.append(f'{prom_name}_seconds_bucket{{env="{ENV}",app="{APP}",le="+Inf"}} {len(sorted_vals)}')
+                    prom_metrics.append(f'{prom_name}_seconds_sum{{env="{ENV}",app="{APP}"}} {sum(sorted_vals)}')
+                    prom_metrics.append(f'{prom_name}_seconds_count{{env="{ENV}",app="{APP}"}} {len(sorted_vals)}')
+            elif metric_name == 'http_req_failed' and metric_type == 'rate':
+                # Convert rate (0-1) to counter: failed_requests = total_requests * rate
+                # Use average rate and multiply by total requests to get counter
+                failed_rate = sum(values) / len(values) if values else 0
+                failed_count = int(http_reqs_count * failed_rate) if http_reqs_count > 0 else 0
+                prom_metrics.append(f'{prom_name}_total{{env="{ENV}",app="{APP}"}} {failed_count}')
+            elif metric_name == 'vus' and metric_type == 'gauge':
+                # Dashboard expects: vus (gauge) - use current/last value
+                prom_metrics.append(f'{prom_name}{{env="{ENV}",app="{APP}"}} {values[-1] if values else 0}')
+            else:
+                # For other metrics, keep k6_ prefix and provide detailed stats
+                if not prom_name.startswith('k6_'):
+                    prom_name = f'k6_{prom_name}'
+                if metric_type in ('gauge', 'trend'):
+                    prom_metrics.append(f'{prom_name}_avg{{env="{ENV}",app="{APP}"}} {sum(values)/len(values)}')
+                    prom_metrics.append(f'{prom_name}_min{{env="{ENV}",app="{APP}"}} {min(values)}')
+                    prom_metrics.append(f'{prom_name}_max{{env="{ENV}",app="{APP}"}} {max(values)}')
+                    sorted_vals = sorted(values)
+                    if len(sorted_vals) > 0:
+                        p90_idx = int(len(sorted_vals) * 0.9)
+                        p95_idx = int(len(sorted_vals) * 0.95)
+                        prom_metrics.append(f'{prom_name}_p90{{env="{ENV}",app="{APP}"}} {sorted_vals[min(p90_idx, len(sorted_vals)-1)]}')
+                        prom_metrics.append(f'{prom_name}_p95{{env="{ENV}",app="{APP}"}} {sorted_vals[min(p95_idx, len(sorted_vals)-1)]}')
+                elif metric_type == 'counter':
+                    prom_metrics.append(f'{prom_name}_total{{env="{ENV}",app="{APP}"}} {sum(values)}')
+                elif metric_type == 'rate':
+                    prom_metrics.append(f'{prom_name}{{env="{ENV}",app="{APP}"}} {sum(values)/len(values) if values else 0}')
+        
+        return prom_metrics
+
+    def push_to_pushgateway(metrics, job_name):
+        """Push metrics to Pushgateway."""
+        if not metrics:
+            return
+        
+        metrics_text = '\n'.join(metrics) + '\n'
+        url = f'{PUSHGATEWAY_URL}/metrics/job/{job_name}/env/{ENV}/app/{APP}'
+        try:
+            response = requests.put(url, data=metrics_text, headers={'Content-Type': 'text/plain'}, timeout=5)
+            response.raise_for_status()
+            print(f"Pushed {len(metrics)} metrics", file=sys.stderr)
+        except Exception as e:
+            print(f"Error pushing: {e}", file=sys.stderr)
+
+    def get_metric_values(json_file):
+        """Extract raw metric values from JSONL file."""
+        metrics = {}
+        metric_definitions = {}
+        
+        with open(json_file, 'r') as f:
+            for line in f:
+                try:
+                    obj = json.loads(line.strip())
+                    if not obj:
+                        continue
+                    
+                    if obj.get('type') == 'Metric':
+                        metric_name = obj.get('data', {}).get('name', '')
+                        metric_type = obj.get('data', {}).get('type', 'gauge')
+                        metric_definitions[metric_name] = metric_type
+                        if metric_name not in metrics:
+                            metrics[metric_name] = {'values': [], 'type': metric_type}
+                    
+                    elif obj.get('type') == 'Point':
+                        metric_name = obj.get('metric', '')
+                        value = obj.get('data', {}).get('value')
+                        if metric_name and value is not None:
+                            if metric_name not in metrics:
+                                metrics[metric_name] = {'values': [], 'type': metric_definitions.get(metric_name, 'gauge')}
+                            metrics[metric_name]['values'].append(float(value))
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    continue
+        
+        return metrics
+
+    def main():
+        """Main loop: poll for JSON file and push metrics."""
+        json_path = Path(JSON_FILE)
+        last_size = 0
+        last_counter_values = {}  # Track last pushed counter values
+        last_file_mtime = 0
+        last_vu_value = None
+        vu_zero_pushed = False  # Track if we've already pushed VUs=0
+        
+        print(f"k6 JSON converter: {JSON_FILE} -> {PUSHGATEWAY_URL}", file=sys.stderr)
+        
+        while True:
+            try:
+                if json_path.exists():
+                    current_size = json_path.stat().st_size
+                    current_mtime = json_path.stat().st_mtime
+                    file_stable_time = time.time() - current_mtime
+                    
+                    # Check if file has changed
+                    file_changed = current_size > last_size or current_mtime > last_file_mtime
+                    
+                    # Always process if file exists (even if unchanged, to handle test end)
+                    if file_changed or file_stable_time > 5:  # Process every 5s even if file unchanged
+                        try:
+                            # Get raw metric values
+                            raw_metrics = get_metric_values(json_path)
+                            
+                            # Check if counters have changed
+                            counters_changed = False
+                            for metric_name, metric_data in raw_metrics.items():
+                                if metric_data['type'] == 'counter':
+                                    current_total = int(sum(metric_data['values'])) if metric_data['values'] else 0
+                                    last_total = last_counter_values.get(metric_name, 0)
+                                    if current_total != last_total:
+                                        counters_changed = True
+                                        last_counter_values[metric_name] = current_total
+                            
+                            # Check if test has ended (file stable for 15+ seconds)
+                            test_ended = file_stable_time > 15
+                            
+                            # Always push if counters changed, or every 10 seconds for gauges, or if test ended
+                            should_push = counters_changed
+                            if not should_push:
+                                # Push periodically for gauges (VUs, etc.)
+                                time_since_last_push = time.time() - getattr(main, 'last_push_time', 0)
+                                if time_since_last_push >= 10:
+                                    should_push = True
+                            
+                            # Always push if test has ended (to ensure VUs=0 is sent)
+                            if test_ended:
+                                should_push = True
+                            
+                            if should_push:
+                                # Convert to Prometheus format
+                                prom_metrics = []
+                                
+                                # Get http_reqs total for calculating failed requests
+                                http_reqs_values = raw_metrics.get('http_reqs', {}).get('values', [])
+                                http_reqs_count = int(sum(http_reqs_values)) if http_reqs_values else 0
+                                
+                                for metric_name, metric_data in raw_metrics.items():
+                                    if not metric_data['values']:
+                                        continue
+                                    
+                                    values = metric_data['values']
+                                    metric_type = metric_data['type']
+                                    prom_name = metric_name.replace('.', '_').replace('-', '_')
+                                    
+                                    if metric_name == 'http_reqs' and metric_type == 'counter':
+                                        prom_metrics.append(f'{prom_name}_total{{env="{ENV}",app="{APP}"}} {int(sum(values))}')
+                                    elif metric_name == 'http_req_duration' and metric_type in ('gauge', 'trend'):
+                                        sorted_vals = sorted([v/1000.0 for v in values])
+                                        if sorted_vals:
+                                            buckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+                                            for bucket in buckets:
+                                                count = sum(1 for v in sorted_vals if v <= bucket)
+                                                prom_metrics.append(f'{prom_name}_seconds_bucket{{env="{ENV}",app="{APP}",le="{bucket}"}} {count}')
+                                            prom_metrics.append(f'{prom_name}_seconds_bucket{{env="{ENV}",app="{APP}",le="+Inf"}} {len(sorted_vals)}')
+                                            prom_metrics.append(f'{prom_name}_seconds_sum{{env="{ENV}",app="{APP}"}} {sum(sorted_vals)}')
+                                            prom_metrics.append(f'{prom_name}_seconds_count{{env="{ENV}",app="{APP}"}} {len(sorted_vals)}')
+                                    elif metric_name == 'http_req_failed' and metric_type == 'rate':
+                                        failed_rate = sum(values) / len(values) if values else 0
+                                        failed_count = int(http_reqs_count * failed_rate) if http_reqs_count > 0 else 0
+                                        prom_metrics.append(f'{prom_name}_total{{env="{ENV}",app="{APP}"}} {failed_count}')
+                                    elif metric_name == 'vus' and metric_type == 'gauge':
+                                        # Use last value, but check if test has ended
+                                        vu_value = values[-1] if values else 0
+                                        last_vu_value = vu_value
+                                        
+                                        # If file hasn't been updated in 15 seconds, assume test ended
+                                        if file_stable_time > 15:
+                                            vu_value = 0
+                                            if not vu_zero_pushed:
+                                                print(f"Test appears to have ended (file unchanged for {file_stable_time:.0f}s), setting VUs=0", file=sys.stderr)
+                                                vu_zero_pushed = True
+                                        
+                                        prom_metrics.append(f'{prom_name}{{env="{ENV}",app="{APP}"}} {vu_value}')
+                                    else:
+                                        if not prom_name.startswith('k6_'):
+                                            prom_name = f'k6_{prom_name}'
+                                        if metric_type in ('gauge', 'trend'):
+                                            prom_metrics.append(f'{prom_name}_avg{{env="{ENV}",app="{APP}"}} {sum(values)/len(values)}')
+                                            prom_metrics.append(f'{prom_name}_min{{env="{ENV}",app="{APP}"}} {min(values)}')
+                                            prom_metrics.append(f'{prom_name}_max{{env="{ENV}",app="{APP}"}} {max(values)}')
+                                        elif metric_type == 'counter':
+                                            prom_metrics.append(f'{prom_name}_total{{env="{ENV}",app="{APP}"}} {int(sum(values))}')
+                                        elif metric_type == 'rate':
+                                            prom_metrics.append(f'{prom_name}{{env="{ENV}",app="{APP}"}} {sum(values)/len(values) if values else 0}')
+                                
+                                if prom_metrics:
+                                    push_to_pushgateway(prom_metrics, JOB_NAME)
+                                    main.last_push_time = time.time()
+                            
+                            last_size = current_size
+                            last_file_mtime = current_mtime
+                            
+                            # Reset vu_zero_pushed flag if file starts updating again (new test)
+                            if file_changed:
+                                vu_zero_pushed = False
+                        except (json.JSONDecodeError, ValueError) as e:
+                            print(f"JSON parse error (file may be incomplete): {e}", file=sys.stderr)
+                        except Exception as e:
+                            print(f"Error: {e}", file=sys.stderr)
+                            import traceback
+                            traceback.print_exc(file=sys.stderr)
+                
+                time.sleep(POLL_INTERVAL)
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                print(f"Error: {e}", file=sys.stderr)
+                time.sleep(POLL_INTERVAL)
+
+    if __name__ == '__main__':
+        main()
+

@@ -1,0 +1,20 @@
+{
+  "name": "admin-portal",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "4.21.2",
+    "express-session": "1.18.1",
+    "connect-redis": "7.1.1",
+    "redis": "4.6.13",
+    "passport": "0.7.0",
+    "openid-client": "5.7.1",
+    "ejs": "3.1.10",
+    "helmet": "8.0.0",
+    "nodemailer": "6.9.16"
+  }
+}

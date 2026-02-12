@@ -1,0 +1,77 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [ $# -ne 1 ]; then
+  echo "Usage: $0 <env>" >&2
+  exit 1
+fi
+
+MT_ENV="$1"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+echo "[INFO] Destroying environment: $MT_ENV"
+
+# Load secrets for terraform providers - prefer env-specific for completeness
+if [ -f "$REPO/secrets.${MT_ENV}.tfvars.env" ]; then
+  # shellcheck disable=SC1091
+  source "$REPO/secrets.${MT_ENV}.tfvars.env"
+  echo "[INFO] Loaded secrets from secrets.${MT_ENV}.tfvars.env"
+else
+  echo "[WARN] No env-specific secrets file found at $REPO/secrets.${MT_ENV}.tfvars.env; continuing (destroy may still work if providers are configured)"
+fi
+
+# Docs cleanup (render + delete)
+export KUBECONFIG="$REPO/kubeconfig.$MT_ENV.yaml"
+# Note: Environment variables (DOCS_HOST, AUTH_HOST, etc.) should be set
+# by the calling script (create_env) from tenant config, or export them manually
+if [ -f "$REPO/docs/docs-config.yaml.tpl" ]; then
+  echo "[INFO] Deleting Docs manifests"
+  envsubst < "$REPO/docs/ingress.yaml.tpl" | kubectl delete -f - --ignore-not-found=true || true
+  envsubst < "$REPO/docs/docs-config.yaml.tpl" | kubectl delete -f - --ignore-not-found=true || true
+fi
+kubectl delete -f "$REPO/docs/backend-deployment.yaml" --ignore-not-found=true || true
+kubectl delete -f "$REPO/docs/backend-service.yaml" --ignore-not-found=true || true
+kubectl delete -f "$REPO/docs/y-provider-deployment.yaml" --ignore-not-found=true || true
+kubectl delete -f "$REPO/docs/y-provider-service.yaml" --ignore-not-found=true || true
+kubectl delete -f "$REPO/docs/db-init-job.yaml" --ignore-not-found=true || true
+
+# Apps teardown
+pushd "$REPO/apps" >/dev/null
+  helmfile -e "$MT_ENV" destroy || true
+popd >/dev/null
+
+# Infra teardown
+pushd "$REPO/infra" >/dev/null
+  terraform init -input=false
+  if terraform workspace select "$MT_ENV" 2>/dev/null; then
+    echo "[INFO] Destroying infra resources in workspace: $MT_ENV"
+    # For prod, use empty env_dns_label to match create_env behavior
+    if [ "$MT_ENV" = "prod" ]; then
+      terraform destroy -input=false -auto-approve -var env="$MT_ENV" -var env_dns_label=""
+    else
+      terraform destroy -input=false -auto-approve -var env="$MT_ENV" -var env_dns_label="$MT_ENV"
+    fi
+  else
+    echo "[WARN] Workspace '$MT_ENV' does not exist in infra, skipping infra teardown"
+  fi
+popd >/dev/null
+
+# Phase1 teardown
+pushd "$REPO/phase1" >/dev/null
+  terraform init -input=false
+  if terraform workspace select "$MT_ENV" 2>/dev/null; then
+    echo "[INFO] Destroying phase1 resources in workspace: $MT_ENV"
+    # For prod, use empty env_dns_label to match create_env behavior
+    if [ "$MT_ENV" = "prod" ]; then
+      terraform destroy -input=false -auto-approve -var env="$MT_ENV" -var env_dns_label=""
+    else
+      terraform destroy -input=false -auto-approve -var env="$MT_ENV" -var env_dns_label="$MT_ENV"
+    fi
+  else
+    echo "[WARN] Workspace '$MT_ENV' does not exist in phase1, skipping phase1 teardown"
+  fi
+popd >/dev/null
+
+echo "[SUCCESS] Environment '$MT_ENV' destroyed."
+

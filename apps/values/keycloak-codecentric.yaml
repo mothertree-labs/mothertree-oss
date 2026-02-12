@@ -1,0 +1,133 @@
+# replicas is set in environment-specific files (apps/environments/<env>/keycloak.yaml.gotmpl)
+# based on resources.keycloak.replicas in tenant config
+# Default fallback value if env-specific file doesn't set it
+replicas: 2
+
+# PodDisruptionBudget ensures at least 1 pod remains available during voluntary disruptions
+podDisruptionBudget:
+  minAvailable: 1
+
+image:
+  repository: quay.io/keycloak/keycloak
+  tag: "26.5.1"
+  pullPolicy: IfNotPresent
+ 
+# HTTP settings – use root context so health/checks and realms are under /
+http:
+  relativePath: "/"
+
+# command is set in environment-specific files (apps/environments/<env>/keycloak.yaml.gotmpl)
+# to include the correct --hostname for each tenant
+
+# Note: KC_HTTP_RELATIVE_PATH, KC_PROXY_HEADERS, KC_HTTP_ENABLED are set by
+# the http and proxy sections above - don't duplicate them here
+# extraEnv is overridden by environment-specific files (apps/environments/<env>/keycloak.yaml.gotmpl)
+# which source KEYCLOAK_ADMIN_PASSWORD and KEYCLOAK_DB_PASSWORD from tenant secrets
+extraEnv: |
+  - name: KEYCLOAK_ADMIN
+    value: admin
+  - name: KEYCLOAK_ADMIN_PASSWORD
+    value: OVERRIDE-IN-ENV-SPECIFIC-VALUES
+  - name: KC_DB
+    value: postgres
+  - name: KC_DB_USERNAME
+    value: keycloak
+  - name: KC_DB_PASSWORD
+    value: OVERRIDE-IN-ENV-SPECIFIC-VALUES
+  - name: KC_LOG_LEVEL
+    value: INFO
+
+# Proxy configuration
+proxy:
+  enabled: true
+  mode: xforwarded  # Use xforwarded for nginx-ingress X-Forwarded-* headers
+  http:
+    enabled: true  # Enables HTTP
+
+# Resources - optimized for 2-replica HA setup
+# Lower request for scheduling flexibility, higher limit for headroom
+resources:
+  requests:
+    cpu: 10m
+    memory: 512Mi
+  limits:
+    cpu: 500m
+    memory: 2048Mi
+
+# Ingress - DISABLED: We manage ingresses per-tenant to support multi-tenant auth domains
+# Each tenant creates their own ingress via apps/manifests/keycloak/tenant-auth-ingress.yaml.tpl
+ingress:
+  enabled: false
+
+# Disable PostgreSQL (we use existing)
+postgresql:
+  enabled: false
+
+# Custom platform theme mounted from ConfigMap
+# The theme is synced to ConfigMap via apps/scripts/sync-keycloak-theme.sh
+# Theme is stored as a tar.gz file and extracted via init container
+extraVolumes: |
+  - name: platform-theme
+    configMap:
+      name: keycloak-platform-theme
+      defaultMode: 0644
+  - name: platform-theme-extracted
+    emptyDir: {}
+
+extraInitContainers: |
+  - name: extract-theme
+    image: busybox:1.36
+    command:
+      - sh
+      - -c
+      - |
+        echo "Extracting platform theme..."
+        mkdir -p /themes-extracted
+        if [ -f /theme-src/theme.tar.gz ]; then
+          tar -xzf /theme-src/theme.tar.gz -C /themes-extracted
+          echo "Theme extracted successfully"
+          ls -la /themes-extracted/
+        else
+          echo "ERROR: theme.tar.gz not found in ConfigMap"
+          exit 1
+        fi
+    volumeMounts:
+      - name: platform-theme
+        mountPath: /theme-src
+        readOnly: true
+      - name: platform-theme-extracted
+        mountPath: /themes-extracted
+
+extraVolumeMounts: |
+  - name: platform-theme-extracted
+    mountPath: /opt/keycloak/themes
+    readOnly: true
+
+# Health checks for Keycloak 26.x (management port 9000)
+# Health checks for Keycloak 26.x (management port 9000)
+livenessProbe: |
+  httpGet:
+    path: /health/live
+    port: http-internal
+  initialDelaySeconds: 120
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe: |
+  httpGet:
+    path: /health/ready
+    port: http-internal
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+startupProbe: |
+  httpGet:
+    path: /health
+    port: http-internal
+  initialDelaySeconds: 15
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 60

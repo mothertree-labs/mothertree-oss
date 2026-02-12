@@ -1,0 +1,21 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: jitsi-jicofo
+  namespace: matrix
+  labels:
+    app: jitsi-jicofo
+    component: jicofo
+spec:
+  selector:
+    matchLabels:
+      app: jitsi-jicofo
+  endpoints:
+  - port: http
+    path: /stats
+    interval: 30s
+    # Note: Jicofo returns JSON, not Prometheus format
+    # This ServiceMonitor is for reference; actual scraping done via metrics exporter
+
+
+

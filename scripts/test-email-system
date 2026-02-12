@@ -1,0 +1,454 @@
+#!/bin/bash
+#
+# Email System Test Suite
+# Tests email functionality for a tenant environment
+#
+# Usage: ./scripts/test-email-system <tenant> <env>
+# Example: ./scripts/test-email-system example dev
+#
+# Tests performed:
+# 1. No open relay - unauthenticated external relay should be rejected
+# 2. Backscatter prevention - mail to non-existent local user should be rejected
+# 3. Local delivery - mail between local users should work
+# 4. Outbound relay - authenticated user sending to external should work
+# 5. Domain validation - only correct domains registered in Stalwart
+#
+# Prerequisites:
+# - kubectl configured with access to the cluster
+# - swaks installed (brew install swaks)
+# - jq and yq installed
+
+set -uo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+TENANT="${1:-}"
+MT_ENV="${2:-}"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+if [ -z "$TENANT" ] || [ -z "$MT_ENV" ]; then
+    echo "Usage: $0 <tenant> <env>"
+    echo "Example: $0 example dev"
+    exit 1
+fi
+
+# Load configuration
+TENANT_CONFIG="$REPO/tenants/$TENANT/$MT_ENV.config.yaml"
+TENANT_SECRETS="$REPO/tenants/$TENANT/$MT_ENV.secrets.yaml"
+KUBECONFIG="$REPO/kubeconfig.$MT_ENV.yaml"
+
+if [ ! -f "$TENANT_CONFIG" ]; then
+    echo -e "${RED}[ERROR]${NC} Tenant config not found: $TENANT_CONFIG"
+    exit 1
+fi
+
+if [ ! -f "$TENANT_SECRETS" ]; then
+    echo -e "${RED}[ERROR]${NC} Tenant secrets not found: $TENANT_SECRETS"
+    exit 1
+fi
+
+export KUBECONFIG
+
+# Extract configuration
+TENANT_DOMAIN=$(yq '.dns.domain' "$TENANT_CONFIG")
+ENV_DNS_LABEL=$(yq '.dns.env_dns_label // ""' "$TENANT_CONFIG")
+MAIL_SUBDOMAIN=$(yq '.dns.mail_subdomain' "$TENANT_CONFIG")
+STALWART_SUBMISSION_PORT=$(yq '.resources.stalwart.submission_port' "$TENANT_CONFIG")
+STALWART_ADMIN_PASSWORD=$(yq '.stalwart.admin_password' "$TENANT_SECRETS")
+
+# Build hostnames
+if [ -n "$ENV_DNS_LABEL" ] && [ "$ENV_DNS_LABEL" != "null" ]; then
+    MAIL_HOST="${MAIL_SUBDOMAIN}.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+    EMAIL_DOMAIN="${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+else
+    MAIL_HOST="${MAIL_SUBDOMAIN}.${TENANT_DOMAIN}"
+    EMAIL_DOMAIN="${TENANT_DOMAIN}"
+fi
+
+NS_MAIL="tn-${TENANT}-mail"
+
+echo "=============================================="
+echo " Email System Test Suite"
+echo "=============================================="
+echo "Tenant:       $TENANT"
+echo "Environment:  $MT_ENV"
+echo "Mail Host:    $MAIL_HOST"
+echo "Email Domain: $EMAIL_DOMAIN"
+echo "Submission:   $STALWART_SUBMISSION_PORT"
+echo "Namespace:    $NS_MAIL"
+echo "=============================================="
+echo ""
+
+PASS_COUNT=0
+FAIL_COUNT=0
+SKIP_COUNT=0
+
+pass() {
+    echo -e "${GREEN}[PASS]${NC} $1"
+    PASS_COUNT=$((PASS_COUNT + 1))
+}
+
+fail() {
+    echo -e "${RED}[FAIL]${NC} $1"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+
+skip() {
+    echo -e "${YELLOW}[SKIP]${NC} $1"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+}
+
+info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+# Kill a background process quietly (suppresses "Terminated" message)
+kill_quiet() {
+    local pid=$1
+    kill "$pid" 2>/dev/null && wait "$pid" 2>/dev/null || true
+}
+
+# Cleanup all background processes on exit (port-forwards, etc.)
+cleanup() {
+    kill $(jobs -p) 2>/dev/null || true
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# Check prerequisites
+check_prerequisites() {
+    echo "=== Checking Prerequisites ==="
+    
+    if ! command -v swaks &>/dev/null; then
+        echo -e "${RED}[ERROR]${NC} swaks not installed. Install with: brew install swaks"
+        exit 1
+    fi
+    pass "swaks installed"
+    
+    if ! command -v kubectl &>/dev/null; then
+        echo -e "${RED}[ERROR]${NC} kubectl not installed"
+        exit 1
+    fi
+    pass "kubectl installed"
+    
+    if ! kubectl get ns "$NS_MAIL" &>/dev/null; then
+        echo -e "${RED}[ERROR]${NC} Namespace $NS_MAIL not found"
+        exit 1
+    fi
+    pass "Namespace $NS_MAIL exists"
+    
+    echo ""
+}
+
+# Test 1: Domain Validation
+test_domain_validation() {
+    echo "=== Test 1: Domain Validation ==="
+    info "Checking registered domains in Stalwart..."
+    
+    # Port forward to Stalwart
+    kubectl port-forward -n "$NS_MAIL" deployment/stalwart 18090:8080 &>/dev/null &
+    PF_PID=$!
+    sleep 3
+    
+    if ! kill -0 $PF_PID 2>/dev/null; then
+        fail "Could not port-forward to Stalwart"
+        return
+    fi
+    
+    DOMAINS=$(curl -s -u "admin:${STALWART_ADMIN_PASSWORD}" "http://localhost:18090/api/principal?type=domain" 2>/dev/null)
+    kill_quiet $PF_PID
+    
+    if [ -z "$DOMAINS" ]; then
+        fail "Could not query Stalwart API"
+        return
+    fi
+    
+    DOMAIN_COUNT=$(echo "$DOMAINS" | jq -r '.data.total // 0')
+    DOMAIN_NAMES=$(echo "$DOMAINS" | jq -r '.data.items[].name // empty' | tr '\n' ', ' | sed 's/,$//')
+    
+    info "Found $DOMAIN_COUNT domain(s): $DOMAIN_NAMES"
+    
+    # Check that EMAIL_DOMAIN is registered
+    if echo "$DOMAINS" | jq -r '.data.items[].name' | grep -q "^${EMAIL_DOMAIN}$"; then
+        pass "Local domain $EMAIL_DOMAIN is registered"
+    else
+        fail "Local domain $EMAIL_DOMAIN is NOT registered"
+    fi
+    
+    # Check for unexpected domains (like gmail.com)
+    UNEXPECTED=$(echo "$DOMAINS" | jq -r '.data.items[].name' | grep -v "^${EMAIL_DOMAIN}$" | grep -v "^${TENANT_DOMAIN}$" || true)
+    if [ -n "$UNEXPECTED" ]; then
+        fail "Unexpected domains registered: $UNEXPECTED"
+    else
+        pass "No unexpected domains registered"
+    fi
+    
+    echo ""
+}
+
+# Test 2: No Open Relay (unauthenticated external relay)
+test_no_open_relay() {
+    echo "=== Test 2: No Open Relay ==="
+    info "Testing that unauthenticated relay to external domains is rejected..."
+
+    POSTFIX_POD=$(kubectl get pods -n infra-mail -l app=postfix -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+    if [ -z "$POSTFIX_POD" ]; then
+        skip "Postfix pod not found in infra-mail"
+        echo ""
+        return
+    fi
+
+    kubectl port-forward -n infra-mail "$POSTFIX_POD" 18025:25 &>/dev/null &
+    PF_PID=$!
+    sleep 3
+
+    if ! kill -0 $PF_PID 2>/dev/null; then
+        fail "Could not port-forward to Postfix"
+        echo ""
+        return
+    fi
+
+    info "Sending relay attempt to external address via K8s Postfix (should be rejected)..."
+    RESULT=$(swaks \
+        --to "victim@gmail.com" \
+        --from "attacker@external-spammer.com" \
+        --server localhost \
+        --port 18025 \
+        --timeout 10 \
+        --quit-after RCPT \
+        2>&1)
+    SWAKS_EXIT=$?
+
+    kill_quiet $PF_PID
+
+    if [ $SWAKS_EXIT -eq 0 ]; then
+        fail "CRITICAL: Open relay detected! Unauthenticated relay to external address was accepted"
+    elif echo "$RESULT" | grep -q "Connected to"; then
+        pass "Unauthenticated relay correctly rejected"
+        info "$(echo "$RESULT" | grep '<\*\*' | head -1 | sed 's/^[ ]*//')"
+    else
+        info "$(echo "$RESULT" | tail -3)"
+        skip "Could not connect to Postfix"
+    fi
+
+    echo ""
+}
+
+# Test 3: Backscatter Prevention
+test_backscatter_prevention() {
+    echo "=== Test 3: Backscatter Prevention ==="
+    info "Testing that mail to non-existent local user is rejected during SMTP session..."
+
+    FAKE_USER="nonexistent_$(date +%s)@${EMAIL_DOMAIN}"
+    info "Testing with fake user: $FAKE_USER"
+
+    POSTFIX_POD=$(kubectl get pods -n infra-mail -l app=postfix -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+    if [ -z "$POSTFIX_POD" ]; then
+        skip "Postfix pod not found in infra-mail"
+        echo ""
+        return
+    fi
+
+    kubectl port-forward -n infra-mail "$POSTFIX_POD" 18028:25 &>/dev/null &
+    PF_PID=$!
+    sleep 3
+
+    if ! kill -0 $PF_PID 2>/dev/null; then
+        fail "Could not port-forward to Postfix"
+        echo ""
+        return
+    fi
+
+    info "Sending mail to non-existent user via K8s Postfix (should be rejected at RCPT TO)..."
+    RESULT=$(swaks \
+        --to "$FAKE_USER" \
+        --from "sender@example.com" \
+        --server localhost \
+        --port 18028 \
+        --timeout 10 \
+        --quit-after RCPT \
+        2>&1)
+    SWAKS_EXIT=$?
+
+    kill_quiet $PF_PID
+
+    if [ $SWAKS_EXIT -eq 0 ]; then
+        fail "Non-existent recipient was ACCEPTED (backscatter risk!)"
+    elif echo "$RESULT" | grep -q "Connected to"; then
+        pass "Non-existent recipient correctly rejected (backscatter prevented)"
+        info "$(echo "$RESULT" | grep '<\*\*' | head -1 | sed 's/^[ ]*//')"
+    else
+        info "$(echo "$RESULT" | tail -3)"
+        skip "Could not connect to Postfix"
+    fi
+
+    echo ""
+}
+
+# Test 4: Valid Local Recipient Accepted
+test_local_recipient() {
+    echo "=== Test 4: Valid Local Recipient Accepted ==="
+    info "Testing that mail to existing local user is accepted..."
+    
+    # Get an existing user from Stalwart
+    kubectl port-forward -n "$NS_MAIL" deployment/stalwart 18091:8080 &>/dev/null &
+    PF_PID=$!
+    sleep 3
+    
+    USERS=$(curl -s -u "admin:${STALWART_ADMIN_PASSWORD}" "http://localhost:18091/api/principal?type=individual" 2>/dev/null)
+    kill_quiet $PF_PID
+    
+    LOCAL_USER=$(echo "$USERS" | jq -r '.data.items[0].emails[0] // empty')
+    
+    if [ -z "$LOCAL_USER" ]; then
+        skip "No local users found to test"
+        echo ""
+        return
+    fi
+    
+    info "Testing with user: $LOCAL_USER"
+    
+    # Test via Stalwart SMTP port
+    kubectl port-forward -n "$NS_MAIL" deployment/stalwart 18026:25 &>/dev/null &
+    PF_PID=$!
+    sleep 3
+    
+    RESULT=$(swaks \
+        --to "$LOCAL_USER" \
+        --from "sender@example.com" \
+        --server "localhost" \
+        --port 18026 \
+        --timeout 10 \
+        --quit-after RCPT \
+        2>&1 || true)
+    
+    kill_quiet $PF_PID
+    
+    if echo "$RESULT" | grep -qE "250|Ok|Accepted"; then
+        pass "Valid local recipient accepted"
+    elif echo "$RESULT" | grep -qiE "550|reject|denied"; then
+        fail "Valid local recipient was rejected"
+        info "Response: $(echo "$RESULT" | grep -E "^[<>~*]" | tail -5)"
+    else
+        info "Response: $(echo "$RESULT" | grep -E "^[<>~*]" | tail -5)"
+        skip "Could not determine result"
+    fi
+    
+    echo ""
+}
+
+# Test 5: Authenticated Outbound Relay
+test_authenticated_outbound() {
+    echo "=== Test 5: Authenticated Outbound Relay ==="
+    info "Testing that authenticated users can send to external addresses..."
+    info "(This test requires OAUTH - checking config only)"
+    
+    # We can't easily test OAUTH authentication from CLI
+    # Instead, verify the config allows relay for authenticated users
+    
+    # Check the actual running config
+    CONFIG=$(kubectl exec -n "$NS_MAIL" deployment/stalwart -- cat /opt/stalwart/etc/config.toml 2>/dev/null || echo "")
+    
+    if echo "$CONFIG" | grep -q "relay.*=.*authenticated_as"; then
+        pass "Relay config allows authenticated users"
+    else
+        fail "Relay config may not allow authenticated users"
+    fi
+    
+    if echo "$CONFIG" | grep -q "is_local_domain.*rcpt_domain.*internal"; then
+        pass "Directory config uses conditional local domain check"
+    else
+        info "Directory config: $(echo "$CONFIG" | grep 'directory.*=' | head -1)"
+        skip "Could not verify directory config"
+    fi
+    
+    echo ""
+}
+
+# Test 6: Stalwart Health Check
+test_stalwart_health() {
+    echo "=== Test 6: Stalwart Health Check ==="
+    
+    PODS=$(kubectl get pods -n "$NS_MAIL" -l app=stalwart -o jsonpath='{.items[*].status.phase}')
+    RUNNING_COUNT=$(echo "$PODS" | tr ' ' '\n' | grep -c "Running" || echo "0")
+    TOTAL_COUNT=$(echo "$PODS" | tr ' ' '\n' | grep -c "." || echo "0")
+    
+    if [ "$RUNNING_COUNT" -eq "$TOTAL_COUNT" ] && [ "$TOTAL_COUNT" -gt 0 ]; then
+        pass "All Stalwart pods running ($RUNNING_COUNT/$TOTAL_COUNT)"
+    else
+        fail "Stalwart pods not healthy ($RUNNING_COUNT/$TOTAL_COUNT running)"
+    fi
+    
+    # Check recent errors
+    ERRORS=$(kubectl logs -n "$NS_MAIL" -l app=stalwart --tail=100 --since=5m 2>/dev/null | grep -c "ERROR" || echo "0")
+    ERRORS=$(echo "$ERRORS" | tr -d '\n' | tr -d ' ')
+    if [ "$ERRORS" -eq 0 ] 2>/dev/null; then
+        pass "No errors in recent logs"
+    else
+        info "Found $ERRORS error(s) in recent logs (last 5 min)"
+    fi
+    
+    echo ""
+}
+
+# Test 7: Postfix Integration
+test_postfix_integration() {
+    echo "=== Test 7: Postfix Integration ==="
+    
+    # Check that K8s Postfix can reach Stalwart
+    POSTFIX_POD=$(kubectl get pods -n infra-mail -l app=postfix -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+    
+    if [ -z "$POSTFIX_POD" ]; then
+        skip "Postfix pod not found in infra-mail"
+        echo ""
+        return
+    fi
+    
+    info "Testing Postfix -> Stalwart connectivity..."
+    
+    STALWART_SVC="stalwart.${NS_MAIL}.svc.cluster.local"
+    RESULT=$(kubectl exec -n infra-mail "$POSTFIX_POD" -c postfix -- nc -zv "$STALWART_SVC" 25 2>&1 || echo "failed")
+    
+    if echo "$RESULT" | grep -qiE "succeeded|open|connected"; then
+        pass "Postfix can reach Stalwart on port 25"
+    else
+        fail "Postfix cannot reach Stalwart: $RESULT"
+    fi
+    
+    echo ""
+}
+
+# Run all tests
+main() {
+    check_prerequisites
+    test_domain_validation
+    test_no_open_relay
+    test_backscatter_prevention
+    test_local_recipient
+    test_authenticated_outbound
+    test_stalwart_health
+    test_postfix_integration
+    
+    echo "=============================================="
+    echo " Test Summary"
+    echo "=============================================="
+    echo -e "${GREEN}Passed:${NC}  $PASS_COUNT"
+    echo -e "${RED}Failed:${NC}  $FAIL_COUNT"
+    echo -e "${YELLOW}Skipped:${NC} $SKIP_COUNT"
+    echo "=============================================="
+    
+    if [ "$FAIL_COUNT" -gt 0 ]; then
+        echo -e "${RED}Some tests failed!${NC}"
+        exit 1
+    else
+        echo -e "${GREEN}All tests passed!${NC}"
+        exit 0
+    fi
+}
+
+main

@@ -1,0 +1,1639 @@
+#!/bin/bash
+
+# Tenant Environment Deployment Script
+# Purpose: Deploy tenant applications (CI-ready)
+# 
+# Prerequisites:
+#   - Cluster must exist (run manage_infra first)
+#   - Shared infrastructure must be deployed (run deploy_infra first)
+#   - Kubeconfig must be available
+#   - Tenant config and secrets must exist
+#
+# Usage:
+#   ./scripts/create_env --tenant=<name> <env> [options]
+#
+# Examples:
+#   ./scripts/create_env --tenant=example prod
+#   ./scripts/create_env --tenant=example dev --create-alert-user
+
+set -euo pipefail
+
+# Default values
+CREATE_ALERT_USER="false"
+TENANT=""
+MT_ENV=""
+
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export REPO_ROOT="$REPO"
+
+# Source project config if available (provides CONTAINER_REGISTRY, GITHUB_ORG)
+[[ -f "$REPO/project.conf" ]] && source "$REPO/project.conf"
+
+# Pre-scan for nesting level (must be set before sourcing notify.sh)
+NESTING_LEVEL=0
+for arg in "$@"; do
+  case "$arg" in
+    --nesting-level=*) NESTING_LEVEL="${arg#*=}" ;;
+  esac
+done
+_MT_NOTIFY_NESTING_LEVEL=$NESTING_LEVEL
+
+usage() {
+  echo "Usage: $0 --tenant=<name> <env> [options]"
+  echo ""
+  echo "Required:"
+  echo "  --tenant=<name>     Tenant name (directory in tenants/)"
+  echo "  env                 Environment name (prod, dev)"
+  echo ""
+  echo "Options:"
+  echo "  --create-alert-user Create the alertbot Matrix user for alerting"
+  echo ""
+  echo "Examples:"
+  echo "  $0 --tenant=example prod"
+  echo "  $0 --tenant=example dev --create-alert-user"
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --tenant=*)
+      TENANT="${1#*=}"
+      shift
+      ;;
+    --create-alert-user)
+      CREATE_ALERT_USER="true"
+      shift
+      ;;
+    --nesting-level=*)
+      # Already parsed above
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --*)
+      echo "[ERROR] Unknown option: $1" >&2
+      usage
+      exit 1
+      ;;
+    *)
+      if [ -z "$MT_ENV" ]; then
+        MT_ENV="$1"
+      else
+        echo "[ERROR] Unexpected argument: $1" >&2
+        usage
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+# Validate required parameters
+if [ -z "$TENANT" ]; then
+  echo "[ERROR] --tenant=<name> is required" >&2
+  echo ""
+  echo "Available tenants:"
+  ls -1 "$REPO/tenants/" 2>/dev/null | grep -v README || echo "  (none found)"
+  echo ""
+  usage
+  exit 1
+fi
+
+if [ -z "$MT_ENV" ]; then
+  echo "[ERROR] Environment name (prod, dev) is required" >&2
+  usage
+  exit 1
+fi
+
+# Validate tenant directory exists
+TENANT_DIR="$REPO/tenants/$TENANT"
+if [ ! -d "$TENANT_DIR" ]; then
+  echo "[ERROR] Tenant directory not found: $TENANT_DIR" >&2
+  echo ""
+  echo "Available tenants:"
+  ls -1 "$REPO/tenants/" 2>/dev/null | grep -v README || echo "  (none found)"
+  exit 1
+fi
+
+# Validate tenant config files exist
+export TENANT_CONFIG="$TENANT_DIR/$MT_ENV.config.yaml"
+export TENANT_SECRETS="$TENANT_DIR/$MT_ENV.secrets.yaml"
+
+if [ ! -f "$TENANT_CONFIG" ]; then
+  echo "[ERROR] Tenant config not found: $TENANT_CONFIG" >&2
+  echo "Create this file based on $TENANT_DIR/$MT_ENV.config.yaml.example" >&2
+  exit 1
+fi
+
+if [ ! -f "$TENANT_SECRETS" ]; then
+  echo "[ERROR] Tenant secrets not found: $TENANT_SECRETS" >&2
+  echo "Create this file based on $TENANT_DIR/$MT_ENV.secrets.yaml.example" >&2
+  exit 1
+fi
+
+# Verify kubeconfig exists (cluster must be created by manage_infra first)
+export KUBECONFIG="$REPO/kubeconfig.$MT_ENV.yaml"
+if [ ! -f "$KUBECONFIG" ]; then
+  echo "[ERROR] Kubeconfig not found: $KUBECONFIG" >&2
+  echo ""
+  echo "The Kubernetes cluster must exist before deploying tenant environments."
+  echo "Run './scripts/manage_infra $MT_ENV' first to create the infrastructure."
+  exit 1
+fi
+
+# Check if yq is available for YAML parsing
+if ! command -v yq &> /dev/null; then
+  echo "[ERROR] yq is required but not installed." >&2
+  echo "Install with: brew install yq" >&2
+  exit 1
+fi
+
+echo "[INFO] Deploying tenant: $TENANT"
+echo "[INFO] Environment: $MT_ENV"
+echo "[INFO] Config: $TENANT_CONFIG"
+if [ "$CREATE_ALERT_USER" = "true" ]; then
+  echo "[INFO] Alertbot Matrix user will be created"
+fi
+
+# Load tenant configuration
+echo "[INFO] Loading tenant configuration..."
+export TENANT="$TENANT"
+export TENANT_NAME="$TENANT"
+export TENANT_DB_USER="docs_${TENANT}"  # Per-tenant database user for isolation
+export TENANT_DISPLAY_NAME=$(yq '.tenant.display_name' "$TENANT_CONFIG")
+export TENANT_DOMAIN=$(yq '.dns.domain' "$TENANT_CONFIG")
+export TENANT_ENV_DNS_LABEL=$(yq '.dns.env_dns_label // ""' "$TENANT_CONFIG")
+export TENANT_COOKIE_DOMAIN=$(yq '.dns.cookie_domain // ""' "$TENANT_CONFIG")
+export TENANT_KEYCLOAK_REALM=$(yq '.keycloak.realm' "$TENANT_CONFIG")
+
+# S3 configuration
+export S3_CLUSTER=$(yq '.s3.cluster' "$TENANT_CONFIG")
+export S3_BUCKET_PREFIX=$(yq '.s3.bucket_prefix // ""' "$TENANT_CONFIG")
+export S3_DOCS_BUCKET=$(yq '.s3.docs_bucket' "$TENANT_CONFIG")
+export S3_MATRIX_BUCKET=$(yq '.s3.matrix_bucket' "$TENANT_CONFIG")
+export S3_FILES_BUCKET=$(yq '.s3.files_bucket' "$TENANT_CONFIG")
+
+# Database configuration (tenant-specific to avoid conflicts in shared PostgreSQL)
+export DOCS_DB_NAME=$(yq '.database.docs_db' "$TENANT_CONFIG")
+if [ -z "$DOCS_DB_NAME" ] || [ "$DOCS_DB_NAME" = "null" ]; then
+  echo "[ERROR] Missing required config: database.docs_db in $TENANT_CONFIG"
+  exit 1
+fi
+
+export NEXTCLOUD_DB_NAME=$(yq '.database.nextcloud_db' "$TENANT_CONFIG")
+if [ -z "$NEXTCLOUD_DB_NAME" ] || [ "$NEXTCLOUD_DB_NAME" = "null" ]; then
+  echo "[ERROR] Missing required config: database.nextcloud_db in $TENANT_CONFIG"
+  exit 1
+fi
+
+# Aliases for templates that use different variable names
+export BUCKET_NAME="$S3_DOCS_BUCKET"
+export BASE_DOMAIN="$TENANT_DOMAIN"
+export COOKIE_DOMAIN="${TENANT_COOKIE_DOMAIN:-.${TENANT_DOMAIN}}"
+
+# Email domain for SPF/DKIM/DMARC records and user email addresses
+# Read from config's smtp.domain, fallback to computed value based on env_dns_label
+SMTP_DOMAIN_CONFIG=$(yq '.smtp.domain // ""' "$TENANT_CONFIG")
+if [ -n "$SMTP_DOMAIN_CONFIG" ] && [ "$SMTP_DOMAIN_CONFIG" != "null" ]; then
+  export EMAIL_DOMAIN="$SMTP_DOMAIN_CONFIG"
+elif [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
+  export EMAIL_DOMAIN="${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+else
+  export EMAIL_DOMAIN="${TENANT_DOMAIN}"
+fi
+export SMTP_DOMAIN="${EMAIL_DOMAIN}"
+echo "[INFO] Email domain: $EMAIL_DOMAIN (for SPF/DKIM/DMARC records)"
+
+# DNS hostnames (computed from config)
+if [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
+  export MATRIX_HOST="matrix.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export SYNAPSE_HOST="synapse.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export SYNAPSE_ADMIN_HOST="synapse-admin.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export ADMIN_HOST="admin.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export ACCOUNT_HOST="account.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export DOCS_HOST="docs.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export FILES_HOST="files.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export JITSI_HOST="jitsi.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export HOME_HOST="home.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export AUTH_HOST="auth.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export MAIL_HOST="mail.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export IMAP_HOST="imap.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export SMTP_HOST="smtp.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export WEBMAIL_HOST="webmail.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export CALENDAR_HOST="calendar.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  export MATRIX_SERVER_NAME="${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+else
+  export MATRIX_HOST="matrix.${TENANT_DOMAIN}"
+  export SYNAPSE_HOST="synapse.${TENANT_DOMAIN}"
+  export SYNAPSE_ADMIN_HOST="synapse-admin.${TENANT_DOMAIN}"
+  export ADMIN_HOST="admin.${TENANT_DOMAIN}"
+  export ACCOUNT_HOST="account.${TENANT_DOMAIN}"
+  export DOCS_HOST="docs.${TENANT_DOMAIN}"
+  export FILES_HOST="files.${TENANT_DOMAIN}"
+  export JITSI_HOST="jitsi.${TENANT_DOMAIN}"
+  export HOME_HOST="home.${TENANT_DOMAIN}"
+  export AUTH_HOST="auth.${TENANT_DOMAIN}"
+  export MAIL_HOST="mail.${TENANT_DOMAIN}"
+  export IMAP_HOST="imap.${TENANT_DOMAIN}"
+  export SMTP_HOST="smtp.${TENANT_DOMAIN}"
+  export WEBMAIL_HOST="webmail.${TENANT_DOMAIN}"
+  export CALENDAR_HOST="calendar.${TENANT_DOMAIN}"
+  export MATRIX_SERVER_NAME="${TENANT_DOMAIN}"
+fi
+
+# Namespace prefix for tenant isolation
+export TENANT_NS_PREFIX="tn-$TENANT"
+
+# Tenant-specific namespaces (tn-<tenant>-*)
+export NS_MATRIX="${TENANT_NS_PREFIX}-matrix"
+export NS_DOCS="${TENANT_NS_PREFIX}-docs"
+export NS_FILES="${TENANT_NS_PREFIX}-files"
+export NS_JITSI="${TENANT_NS_PREFIX}-jitsi"
+export NS_STALWART="${TENANT_NS_PREFIX}-mail"
+export NS_WEBMAIL="${TENANT_NS_PREFIX}-webmail"
+export NS_ADMIN="${TENANT_NS_PREFIX}-admin"
+
+# Shared namespaces (infra-*)
+export NS_DB="infra-db"
+export NS_AUTH="infra-auth"
+export NS_MONITORING="infra-monitoring"
+export NS_INGRESS="infra-ingress"
+export NS_INGRESS_INTERNAL="infra-ingress-internal"
+export NS_CERTMANAGER="infra-cert-manager"
+export NS_MAIL="infra-mail"
+
+# Infrastructure domain (where shared services like mail live)
+export INFRA_DOMAIN=$(yq '.infra.domain // .dns.domain' "$TENANT_CONFIG")
+
+echo "[INFO] Tenant domain: $TENANT_DOMAIN"
+echo "[INFO] DNS label: ${TENANT_ENV_DNS_LABEL:-"(none - prod)"}"
+echo "[INFO] Namespace prefix: $TENANT_NS_PREFIX"
+echo "[INFO] Namespaces: matrix=$NS_MATRIX, docs=$NS_DOCS, files=$NS_FILES, jitsi=$NS_JITSI, mail=$NS_STALWART, webmail=$NS_WEBMAIL, admin=$NS_ADMIN"
+echo "[INFO] Hosts: matrix=$MATRIX_HOST, docs=$DOCS_HOST, files=$FILES_HOST, jitsi=$JITSI_HOST, mail=$MAIL_HOST, webmail=$WEBMAIL_HOST, admin=$ADMIN_HOST, calendar=$CALENDAR_HOST"
+echo "[INFO] S3 bucket (files): $S3_FILES_BUCKET"
+
+# Calendar feature flag (for OIDC config job)
+export CALENDAR_ENABLED=$(yq '.features.calendar_enabled // false' "$TENANT_CONFIG")
+
+# =============================================================================
+# Scaling Configuration (HPA uses min/max replicas, threshold is 80% CPU)
+# =============================================================================
+
+# Function to get required config value (fail-fast if missing)
+get_required_config() {
+  local path="$1"
+  local value
+  value=$(yq "$path" "$TENANT_CONFIG")
+  if [ -z "$value" ] || [ "$value" = "null" ]; then
+    echo "[ERROR] Required config missing: $path" >&2
+    echo "[ERROR] Add this to your tenant config file: $TENANT_CONFIG" >&2
+    exit 1
+  fi
+  echo "$value"
+}
+
+echo "[INFO] Loading scaling configuration..."
+
+# Docs - backend, frontend, y_provider
+export DOCS_BACKEND_MIN_REPLICAS=$(get_required_config '.resources.docs.backend.min_replicas')
+export DOCS_BACKEND_MAX_REPLICAS=$(get_required_config '.resources.docs.backend.max_replicas')
+export DOCS_FRONTEND_MIN_REPLICAS=$(get_required_config '.resources.docs.frontend.min_replicas')
+export DOCS_FRONTEND_MAX_REPLICAS=$(get_required_config '.resources.docs.frontend.max_replicas')
+export YPROVIDER_MIN_REPLICAS=$(get_required_config '.resources.docs.y_provider.min_replicas')
+export YPROVIDER_MAX_REPLICAS=$(get_required_config '.resources.docs.y_provider.max_replicas')
+
+# Element
+export ELEMENT_MIN_REPLICAS=$(get_required_config '.resources.element.min_replicas')
+export ELEMENT_MAX_REPLICAS=$(get_required_config '.resources.element.max_replicas')
+
+# Jitsi - web and JVB
+export JITSI_WEB_MIN_REPLICAS=$(get_required_config '.resources.jitsi.web.min_replicas')
+export JITSI_WEB_MAX_REPLICAS=$(get_required_config '.resources.jitsi.web.max_replicas')
+export JVB_MIN_REPLICAS=$(get_required_config '.resources.jitsi.jvb.min_replicas')
+export JVB_MAX_REPLICAS=$(get_required_config '.resources.jitsi.jvb.max_replicas')
+
+# Roundcube
+export ROUNDCUBE_MIN_REPLICAS=$(get_required_config '.resources.roundcube.min_replicas')
+export ROUNDCUBE_MAX_REPLICAS=$(get_required_config '.resources.roundcube.max_replicas')
+
+# Admin Portal
+export ADMIN_PORTAL_MIN_REPLICAS=$(get_required_config '.resources.admin_portal.min_replicas')
+export ADMIN_PORTAL_MAX_REPLICAS=$(get_required_config '.resources.admin_portal.max_replicas')
+
+# Account Portal
+export ACCOUNT_PORTAL_MIN_REPLICAS=$(yq '.resources.account_portal.min_replicas // 1' "$TENANT_CONFIG")
+export ACCOUNT_PORTAL_MAX_REPLICAS=$(yq '.resources.account_portal.max_replicas // 3' "$TENANT_CONFIG")
+
+# Synapse Admin
+export SYNAPSE_ADMIN_MIN_REPLICAS=$(get_required_config '.resources.synapse_admin.min_replicas')
+export SYNAPSE_ADMIN_MAX_REPLICAS=$(get_required_config '.resources.synapse_admin.max_replicas')
+
+# Stalwart
+export STALWART_MIN_REPLICAS=$(get_required_config '.resources.stalwart.min_replicas')
+export STALWART_MAX_REPLICAS=$(get_required_config '.resources.stalwart.max_replicas')
+
+# Keycloak (fixed replicas, no HPA)
+export KEYCLOAK_REPLICAS=$(get_required_config '.resources.keycloak.replicas')
+
+# PostgreSQL is shared infrastructure - configuration is in deploy_infra, not per-tenant
+# PostgreSQL service hostname - DETECT from actual cluster state
+# When using replication architecture, service is docs-postgresql-primary
+# When standalone architecture, service is docs-postgresql
+# We check what actually exists rather than relying on config
+if kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
+  export PG_SERVICE_NAME="docs-postgresql-primary"
+  echo "[INFO] PostgreSQL: detected replication mode (docs-postgresql-primary)"
+elif kubectl get service docs-postgresql -n "$NS_DB" >/dev/null 2>&1; then
+  export PG_SERVICE_NAME="docs-postgresql"
+  echo "[INFO] PostgreSQL: detected standalone mode (docs-postgresql)"
+else
+  echo "[ERROR] PostgreSQL service not found in $NS_DB namespace"
+  echo "Run './scripts/deploy_infra $MT_ENV' first to deploy PostgreSQL."
+  exit 1
+fi
+export PG_HOST="${PG_SERVICE_NAME}.${NS_DB}.svc.cluster.local"
+
+# Redis replicas (0 = standalone, 1+ = sentinel)
+export REDIS_REPLICAS=$(get_required_config '.resources.redis.replicas')
+
+echo "[INFO] Scaling config loaded: docs_backend=$DOCS_BACKEND_MIN_REPLICAS-$DOCS_BACKEND_MAX_REPLICAS, jvb=$JVB_MIN_REPLICAS-$JVB_MAX_REPLICAS, redis=$REDIS_REPLICAS"
+
+# Verify infrastructure is deployed
+echo "[INFO] Verifying shared infrastructure is deployed..."
+if ! kubectl get namespace "$NS_DB" >/dev/null 2>&1; then
+  echo "[ERROR] Infrastructure namespace $NS_DB not found." >&2
+  echo ""
+  echo "Shared infrastructure must be deployed before deploying tenants."
+  echo "Run './scripts/deploy_infra $MT_ENV' first."
+  exit 1
+fi
+
+if ! kubectl get deployment -n "$NS_INGRESS" ingress-nginx-controller >/dev/null 2>&1; then
+  echo "[ERROR] Ingress controller not found in $NS_INGRESS namespace." >&2
+  echo ""
+  echo "Shared infrastructure must be deployed before deploying tenants."
+  echo "Run './scripts/deploy_infra $MT_ENV' first."
+  exit 1
+fi
+
+echo "[INFO] Infrastructure verified"
+
+# Load secrets into environment variables for Terraform and Helm
+echo "[INFO] Loading tenant secrets..."
+
+# Linode
+export TF_VAR_linode_token=$(yq '.linode.token' "$TENANT_SECRETS")
+
+# Cloudflare
+export TF_VAR_cloudflare_api_token=$(yq '.cloudflare.api_token' "$TENANT_SECRETS")
+export TF_VAR_cloudflare_zone_id=$(yq '.cloudflare.zone_id' "$TENANT_SECRETS")
+
+# TLS
+export TF_VAR_tls_email=$(yq '.tls.email' "$TENANT_SECRETS")
+
+# Database
+export TF_VAR_postgres_password=$(yq '.database.postgres_password' "$TENANT_SECRETS")
+export TF_VAR_redis_password=$(yq '.database.redis_password' "$TENANT_SECRETS")
+export TF_VAR_docs_db_password=$(yq '.database.docs_password' "$TENANT_SECRETS")
+
+# OIDC
+export TF_VAR_oidc_rp_client_secret_docs=$(yq '.oidc.docs_client_secret' "$TENANT_SECRETS")
+export TF_VAR_nextcloud_oidc_client_secret=$(yq '.oidc.nextcloud_client_secret' "$TENANT_SECRETS")
+
+# Matrix
+export TF_VAR_matrix_registration_shared_secret=$(yq '.matrix.registration_shared_secret' "$TENANT_SECRETS")
+
+# Synapse registration shared secret (used by helmfile gotmpl to set chart's
+# config.registrationSharedSecret, preventing the chart from generating a new
+# random value on every helm upgrade which would change the config Secret)
+export SYNAPSE_REGISTRATION_SHARED_SECRET="$TF_VAR_matrix_registration_shared_secret"
+
+# Synapse macaroon secret key (derived deterministically from registration_shared_secret)
+# This MUST be stable across deploys — if it changes, all existing sessions are invalidated.
+# The Helm chart does NOT set this by default, so Synapse derives it from the signing key.
+# Setting it explicitly ensures stability regardless of signing key changes.
+export SYNAPSE_MACAROON_SECRET_KEY=$(echo -n "synapse_macaroon:${TF_VAR_matrix_registration_shared_secret}" | shasum -a 256 | cut -d' ' -f1)
+
+# Synapse database password (used by helmfile gotmpl for Synapse Helm chart)
+export SYNAPSE_DB_PASSWORD=$(yq '.matrix.synapse_password' "$TENANT_SECRETS")
+
+# Synapse Redis password (used by helmfile gotmpl for Synapse Helm chart)
+export SYNAPSE_REDIS_PASSWORD=$(yq '.database.redis_password' "$TENANT_SECRETS")
+
+# Synapse OIDC client secret (used by helmfile gotmpl for Synapse OIDC config)
+export SYNAPSE_OIDC_CLIENT_SECRET=$(yq '.oidc.synapse_client_secret' "$TENANT_SECRETS")
+
+# TURN
+export TF_VAR_turn_shared_secret=$(yq '.turn.shared_secret' "$TENANT_SECRETS")
+export TURN_SHARED_SECRET=$(yq '.turn.shared_secret' "$TENANT_SECRETS")
+
+# S3 Matrix
+export TF_VAR_linode_object_storage_access_key=$(yq '.s3_matrix.access_key' "$TENANT_SECRETS")
+export TF_VAR_linode_object_storage_secret_key=$(yq '.s3_matrix.secret_key' "$TENANT_SECRETS")
+
+# S3 Docs
+export TF_VAR_docs_s3_access_key=$(yq '.s3_docs.access_key' "$TENANT_SECRETS")
+export TF_VAR_docs_s3_secret_key=$(yq '.s3_docs.secret_key' "$TENANT_SECRETS")
+
+# S3 Files (Nextcloud)
+export TF_VAR_files_s3_access_key=$(yq '.s3_files.access_key' "$TENANT_SECRETS")
+export TF_VAR_files_s3_secret_key=$(yq '.s3_files.secret_key' "$TENANT_SECRETS")
+
+# SSH
+export TF_VAR_ssh_public_key=$(yq '.ssh.public_key' "$TENANT_SECRETS")
+
+# Grafana
+export TF_VAR_grafana_admin_password=$(yq '.grafana.admin_password' "$TENANT_SECRETS")
+
+# Jitsi
+export TF_VAR_jitsi_jwt_app_secret=$(yq '.jitsi.jwt_app_secret' "$TENANT_SECRETS")
+
+# Keycloak (shared infrastructure passwords)
+export KEYCLOAK_ADMIN_PASSWORD=$(yq '.keycloak.admin_password' "$TENANT_SECRETS")
+export KEYCLOAK_DB_PASSWORD=$(yq '.keycloak.db_password' "$TENANT_SECRETS")
+if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ] || [ "$KEYCLOAK_ADMIN_PASSWORD" = "null" ]; then
+  echo "[ERROR] Missing required secret: keycloak.admin_password in $TENANT_SECRETS"
+  exit 1
+fi
+if [ -z "$KEYCLOAK_DB_PASSWORD" ] || [ "$KEYCLOAK_DB_PASSWORD" = "null" ]; then
+  echo "[ERROR] Missing required secret: keycloak.db_password in $TENANT_SECRETS"
+  exit 1
+fi
+
+# Alertbot (optional)
+MATRIX_ALERTMANAGER_ACCESS_TOKEN=$(yq '.alertbot.access_token // ""' "$TENANT_SECRETS")
+if [ -n "$MATRIX_ALERTMANAGER_ACCESS_TOKEN" ] && [ "$MATRIX_ALERTMANAGER_ACCESS_TOKEN" != "null" ]; then
+  export MATRIX_ALERTMANAGER_ACCESS_TOKEN
+fi
+ALERTMANAGER_MATRIX_ROOM_ID=$(yq '.alertbot.room_id // ""' "$TENANT_SECRETS")
+if [ -n "$ALERTMANAGER_MATRIX_ROOM_ID" ] && [ "$ALERTMANAGER_MATRIX_ROOM_ID" != "null" ]; then
+  export ALERTMANAGER_MATRIX_ROOM_ID
+fi
+
+source "${REPO}/scripts/lib/notify.sh"
+mt_notify "————————————————————————————————" "<hr>"
+mt_deploy_start "create_env"
+
+# Get TURN server IP from phase1 outputs (if available)
+if [ -d "$REPO/phase1" ]; then
+  pushd "$REPO/phase1" >/dev/null
+    if terraform workspace select "$MT_ENV" >/dev/null 2>&1; then
+      TURN_SERVER_IP=$(terraform output -raw turn_server_ip 2>/dev/null || echo "")
+      if [ -n "$TURN_SERVER_IP" ] && [ "$TURN_SERVER_IP" != "null" ]; then
+        export TURN_SERVER_IP
+        echo "[INFO] TURN server IP: $TURN_SERVER_IP"
+      fi
+    fi
+  popd >/dev/null
+fi
+
+export HELM_DIFF_USE_HELM_TEMPLATE=true
+
+# =============================================================================
+# Consolidate helm repo updates (done once here, skipped in sub-scripts)
+# =============================================================================
+echo "[INFO] Updating helm repositories (consolidated)..."
+helm repo add bitnami https://charts.bitnami.com/bitnami 2>/dev/null || true
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
+helm repo add jetstack https://charts.jetstack.io 2>/dev/null || true
+helm repo add ananace https://ananace.gitlab.io/charts/ 2>/dev/null || true
+helm repo add halkeye https://halkeye.github.io/helm-charts 2>/dev/null || true
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
+helm repo add vector https://helm.vector.dev 2>/dev/null || true
+helm repo add nextcloud https://nextcloud.github.io/helm/ 2>/dev/null || true
+helm repo add codecentric https://codecentric.github.io/helm-charts 2>/dev/null || true
+helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ 2>/dev/null || true
+helm repo update >/dev/null 2>&1 &
+HELM_REPO_UPDATE_PID=$!
+echo "[INFO] Helm repo update started in background (PID: $HELM_REPO_UPDATE_PID)"
+
+# Create tenant namespaces (tn-<tenant>-*)
+echo "[INFO] Creating tenant namespaces..."
+kubectl create namespace "$NS_MATRIX" 2>/dev/null || true
+kubectl create namespace "$NS_DOCS" 2>/dev/null || true
+kubectl create namespace "$NS_FILES" 2>/dev/null || true
+kubectl create namespace "$NS_JITSI" 2>/dev/null || true
+kubectl create namespace "$NS_STALWART" 2>/dev/null || true
+kubectl create namespace "$NS_WEBMAIL" 2>/dev/null || true
+kubectl create namespace "$NS_ADMIN" 2>/dev/null || true
+echo "[INFO] Tenant namespaces created/verified"
+
+# =============================================================================
+# Deploy NetworkPolicies for tenant isolation
+# =============================================================================
+echo "[INFO] Deploying NetworkPolicies for tenant isolation..."
+if [ -x "$REPO/apps/deploy-network-policies.sh" ]; then
+  if MT_ENV="$MT_ENV" TENANT="$TENANT" REPO_ROOT="$REPO" \
+     "$REPO/apps/deploy-network-policies.sh" --nesting-level=$((NESTING_LEVEL+1)); then
+    echo "[INFO] NetworkPolicies deployed successfully"
+  else
+    echo "[WARNING] NetworkPolicy deployment had issues (non-fatal, continuing)"
+  fi
+else
+  echo "[WARNING] deploy-network-policies.sh not found, skipping network policy deployment"
+fi
+
+# =============================================================================
+# Create tenant DNS records (Cloudflare API)
+# =============================================================================
+# Validate Cloudflare IP ranges before creating DNS records (firewall depends on these)
+echo "[INFO] Validating Cloudflare IP ranges..."
+"$REPO/scripts/check-cloudflare-ips" || { echo "[ERROR] Cloudflare IPs changed. Run: ./scripts/check-cloudflare-ips --update"; exit 1; }
+
+# Each tenant needs DNS records for their subdomains pointing to the ingress
+echo "[INFO] Creating tenant DNS records..."
+
+# Get the ingress IP from the cluster
+INGRESS_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+if [ -z "$INGRESS_IP" ]; then
+  echo "[WARNING] Could not get ingress IP - DNS records will not be created"
+  echo "[WARNING] You may need to create DNS records manually for $TENANT_DOMAIN"
+else
+  echo "[INFO] Ingress IP: $INGRESS_IP"
+  
+  # Function to create/update Cloudflare DNS record
+  # Args: record_name record_type record_content [proxied]
+  # proxied: "true" to enable Cloudflare proxy (orange cloud), default "false"
+  create_dns_record() {
+    local record_name="$1"
+    local record_type="$2"
+    local record_content="$3"
+    local proxied="${4:-false}"
+    local ttl=300
+
+    # Cloudflare requires ttl=1 (automatic) when proxied is enabled
+    if [ "$proxied" = "true" ]; then
+      ttl=1
+    fi
+
+    # Check if record of the same type exists
+    EXISTING=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records?name=${record_name}&type=${record_type}" \
+      -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+      -H "Content-Type: application/json")
+
+    RECORD_ID=$(echo "$EXISTING" | jq -r '.result[0].id // empty')
+
+    if [ -z "$RECORD_ID" ]; then
+      # No record of the same type — check for a conflicting record of a different type
+      # (e.g., stale A record when we want to create a CNAME, or vice versa)
+      CONFLICTING=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records?name=${record_name}" \
+        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+        -H "Content-Type: application/json")
+      CONFLICT_ID=$(echo "$CONFLICTING" | jq -r '.result[0].id // empty')
+      CONFLICT_TYPE=$(echo "$CONFLICTING" | jq -r '.result[0].type // empty')
+
+      if [ -n "$CONFLICT_ID" ] && [ "$CONFLICT_TYPE" != "$record_type" ]; then
+        # Delete the conflicting record so we can create the correct type
+        echo "[INFO] Removing conflicting ${CONFLICT_TYPE} record for $record_name (replacing with ${record_type})"
+        curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records/${CONFLICT_ID}" \
+          -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+          -H "Content-Type: application/json" >/dev/null
+      fi
+    fi
+
+    if [ -n "$RECORD_ID" ]; then
+      # Update existing record (same type)
+      RESULT=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records/${RECORD_ID}" \
+        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+        -H "Content-Type: application/json" \
+        --data "{\"type\":\"${record_type}\",\"name\":\"${record_name}\",\"content\":\"${record_content}\",\"ttl\":${ttl},\"proxied\":${proxied}}")
+      if echo "$RESULT" | jq -e '.success' >/dev/null 2>&1; then
+        echo "[INFO] Updated DNS: $record_name -> $record_content (proxied=$proxied)"
+      else
+        echo "[ERROR] Failed to update DNS: $record_name — $(echo "$RESULT" | jq -r '.errors[0].message // "unknown error"')"
+      fi
+    else
+      # Create new record
+      RESULT=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records" \
+        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+        -H "Content-Type: application/json" \
+        --data "{\"type\":\"${record_type}\",\"name\":\"${record_name}\",\"content\":\"${record_content}\",\"ttl\":${ttl},\"proxied\":${proxied}}")
+      if echo "$RESULT" | jq -e '.success' >/dev/null 2>&1; then
+        echo "[INFO] Created DNS: $record_name -> $record_content (proxied=$proxied)"
+      else
+        echo "[ERROR] Failed to create DNS: $record_name — $(echo "$RESULT" | jq -r '.errors[0].message // "unknown error"')"
+      fi
+    fi
+  }
+  
+  # Function to create/update Cloudflare SRV record (for mail autodiscovery)
+  # SRV records have different structure: service, proto, name, priority, weight, port, target
+  create_srv_record() {
+    local srv_service="$1"   # e.g., "_imaps"
+    local srv_proto="$2"     # e.g., "_tcp"
+    local srv_domain="$3"    # e.g., "example.com"
+    local srv_priority="$4"  # e.g., 0
+    local srv_weight="$5"    # e.g., 1
+    local srv_port="$6"      # e.g., 99301
+    local srv_target="$7"    # e.g., "mail.example.com"
+    
+    # Full record name: _imaps._tcp.example.com
+    local record_name="${srv_service}.${srv_proto}.${srv_domain}"
+    
+    # Check if SRV record exists
+    EXISTING=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records?name=${record_name}&type=SRV" \
+      -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+      -H "Content-Type: application/json")
+    
+    RECORD_ID=$(echo "$EXISTING" | jq -r '.result[0].id // empty')
+    
+    # Cloudflare SRV record data structure
+    local srv_data="{\"type\":\"SRV\",\"name\":\"${record_name}\",\"data\":{\"service\":\"${srv_service}\",\"proto\":\"${srv_proto}\",\"name\":\"${srv_domain}\",\"priority\":${srv_priority},\"weight\":${srv_weight},\"port\":${srv_port},\"target\":\"${srv_target}\"},\"ttl\":300}"
+    
+    if [ -n "$RECORD_ID" ]; then
+      # Update existing SRV record
+      curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records/${RECORD_ID}" \
+        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+        -H "Content-Type: application/json" \
+        --data "$srv_data" >/dev/null
+      echo "[INFO] Updated SRV: ${record_name} -> ${srv_target}:${srv_port}"
+    else
+      # Create new SRV record
+      curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records" \
+        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+        -H "Content-Type: application/json" \
+        --data "$srv_data" >/dev/null
+      echo "[INFO] Created SRV: ${record_name} -> ${srv_target}:${srv_port}"
+    fi
+  }
+  
+  # Create lb1 A record for this tenant's domain
+  # This is the single source of truth for the cluster IP - all other records CNAME to it
+  # For prod: lb1.prod.<domain>, for dev: lb1.dev.<domain>
+  if [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
+    LB1_RECORD="lb1.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  else
+    # For prod, use lb1.prod (not just lb1) for consistency
+    LB1_RECORD="lb1.prod.${TENANT_DOMAIN}"
+  fi
+  # Cloudflare proxy: prod only (Universal SSL covers *.domain but not *.dev.domain)
+  if [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; then
+    CF_PROXIED="true"
+  else
+    CF_PROXIED="false"
+  fi
+
+  create_dns_record "$LB1_RECORD" "A" "$INGRESS_IP" "$CF_PROXIED"
+  echo "[INFO] Created lb1 A record: $LB1_RECORD -> $INGRESS_IP (proxied=$CF_PROXIED)"
+  
+  # Create CNAME records for all tenant subdomains pointing to lb1
+  # This allows easy IP changes - only update lb1, all CNAMEs follow
+  # Note: 'mail' is excluded - its A record is managed by Terraform (modules/dns/main.tf)
+  # pointing to VPN server for inbound mail routing via VPN's Postfix relay
+
+  # Web services: proxied through Cloudflare (orange cloud)
+  # HTTP/S traffic gets DDoS protection and WAF
+  PROXIED_SUBDOMAINS="matrix synapse docs files auth home admin account element webmail calendar jitsi"
+  # Non-HTTP services: DNS-only (grey cloud)
+  # IMAP/SMTP use non-HTTP protocols that can't be proxied
+  DNS_ONLY_SUBDOMAINS="imap smtp"
+
+  for subdomain in $PROXIED_SUBDOMAINS; do
+    if [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
+      record_name="${subdomain}.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+    else
+      record_name="${subdomain}.${TENANT_DOMAIN}"
+    fi
+    create_dns_record "$record_name" "CNAME" "$LB1_RECORD" "$CF_PROXIED"
+  done
+
+  for subdomain in $DNS_ONLY_SUBDOMAINS; do
+    if [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
+      record_name="${subdomain}.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+    else
+      record_name="${subdomain}.${TENANT_DOMAIN}"
+    fi
+    create_dns_record "$record_name" "CNAME" "$LB1_RECORD" "false"
+  done
+  
+  # Create MX record for email domain (points to mail subdomain for inbound email)
+  # MX records point to the mail host which routes to Stalwart via ingress TCP proxy
+  # Uses EMAIL_DOMAIN (e.g., dev.example.com for dev, example.com for prod)
+  MAIL_ENABLED=$(yq '.features.mail_enabled // false' "$TENANT_CONFIG")
+  if [ "$MAIL_ENABLED" = "true" ]; then
+    echo "[INFO] Creating MX record for $EMAIL_DOMAIN..."
+    # MX record content is just the hostname (priority is set separately in Cloudflare)
+    # Using priority 10 for primary mail server
+    MX_HOST="${MAIL_HOST}"
+    
+    # Check if MX record exists
+    MX_EXISTING=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records?name=${EMAIL_DOMAIN}&type=MX" \
+      -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+      -H "Content-Type: application/json")
+    
+    MX_RECORD_ID=$(echo "$MX_EXISTING" | jq -r '.result[0].id // empty')
+    
+    if [ -n "$MX_RECORD_ID" ]; then
+      # Update existing MX record
+      curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records/${MX_RECORD_ID}" \
+        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+        -H "Content-Type: application/json" \
+        --data "{\"type\":\"MX\",\"name\":\"${EMAIL_DOMAIN}\",\"content\":\"${MX_HOST}\",\"ttl\":300,\"priority\":10}" >/dev/null
+      echo "[INFO] Updated MX: $EMAIL_DOMAIN -> $MX_HOST (priority 10)"
+    else
+      # Create new MX record
+      curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records" \
+        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+        -H "Content-Type: application/json" \
+        --data "{\"type\":\"MX\",\"name\":\"${EMAIL_DOMAIN}\",\"content\":\"${MX_HOST}\",\"ttl\":300,\"priority\":10}" >/dev/null
+      echo "[INFO] Created MX: $EMAIL_DOMAIN -> $MX_HOST (priority 10)"
+    fi
+    
+    # ==========================================================================
+    # Create SRV records for mail client autodiscovery (RFC 6186)
+    # ==========================================================================
+    # These SRV records enable native email clients (iOS Mail, Thunderbird) to
+    # auto-discover the correct ports. Points to app-password listeners (PLAIN/LOGIN)
+    # since native clients can't do OAUTHBEARER. Roundcube doesn't use SRV — it
+    # connects directly to Stalwart's ClusterIP on the OAUTHBEARER ports.
+    echo "[INFO] Creating SRV records for mail autodiscovery..."
+
+    # Read tenant-specific app-password ports from config
+    STALWART_IMAPS_APP_PORT=$(yq '.resources.stalwart.imaps_app_port' "$TENANT_CONFIG")
+    STALWART_SUBMISSION_APP_PORT=$(yq '.resources.stalwart.submission_app_port' "$TENANT_CONFIG")
+
+    if [ -z "$STALWART_IMAPS_APP_PORT" ] || [ "$STALWART_IMAPS_APP_PORT" = "null" ]; then
+      echo "[WARNING] App password ports not configured in tenant config - skipping SRV records"
+      echo "[WARNING] Add resources.stalwart.{imaps_app_port,submission_app_port} to tenant config"
+    else
+      # _imaps._tcp - IMAP with implicit TLS (RFC 6186)
+      # Points to app-password listener for native mail clients using PLAIN/LOGIN
+      create_srv_record "_imaps" "_tcp" "$EMAIL_DOMAIN" 0 1 "$STALWART_IMAPS_APP_PORT" "$IMAP_HOST"
+
+      # _submission._tcp - SMTP submission with STARTTLS (RFC 6409)
+      # Points to app-password listener for native mail clients using PLAIN/LOGIN
+      create_srv_record "_submission" "_tcp" "$EMAIL_DOMAIN" 0 1 "$STALWART_SUBMISSION_APP_PORT" "$SMTP_HOST"
+
+      echo "[SUCCESS] Mail autodiscovery SRV records created for $EMAIL_DOMAIN"
+      echo "[INFO] Email clients supporting RFC 6186 will auto-discover:"
+      echo "[INFO]   IMAPS: $IMAP_HOST:$STALWART_IMAPS_APP_PORT"
+      echo "[INFO]   Submission: $SMTP_HOST:$STALWART_SUBMISSION_APP_PORT (STARTTLS)"
+    fi
+  fi
+  
+  # Base domain (e.g., example.com) is managed by Terraform as a CNAME to www
+  # (external website). Do NOT create an A record here — it would conflict.
+  
+  echo "[SUCCESS] Tenant DNS records created/updated"
+  
+  # =============================================================================
+  # Email: Create SPF/DKIM/DMARC DNS records for tenant
+  # =============================================================================
+  echo "[INFO] Email: Creating email authentication DNS records for $EMAIL_DOMAIN..."
+  
+  # Read DKIM keys from tenant secrets
+  DKIM_PRIVATE_KEY=$(yq '.dkim.private_key' "$TENANT_SECRETS")
+  DKIM_PUBLIC_KEY=$(yq '.dkim.public_key' "$TENANT_SECRETS")
+  
+  if [ -z "$DKIM_PRIVATE_KEY" ] || [ "$DKIM_PRIVATE_KEY" = "null" ]; then
+    echo "[WARNING] Missing 'dkim.private_key' in tenant secrets - email signing will not work"
+    echo "[WARNING] Generate with: openssl genrsa 2048"
+  elif [ -z "$DKIM_PUBLIC_KEY" ] || [ "$DKIM_PUBLIC_KEY" = "null" ]; then
+    echo "[WARNING] Missing 'dkim.public_key' in tenant secrets - email signing will not work"
+  else
+    # Get MX mail host from shared infrastructure (mail.* = VPN Postfix, MX target)
+    # prod: mail.<infra_domain>, dev: mail.<env>.<infra_domain>
+    if [ "$MT_ENV" = "prod" ]; then
+      MAIL_RELAY_HOST="mail.${INFRA_DOMAIN}"
+    else
+      MAIL_RELAY_HOST="mail.${MT_ENV}.${INFRA_DOMAIN}"
+    fi
+
+    # Create/update SPF record - include BOTH dev and prod mail hosts since domain is shared
+    SPF_CONTENT="v=spf1 a:mail.${INFRA_DOMAIN} a:mail.dev.${INFRA_DOMAIN} include:_spf.mx.cloudflare.net ~all"
+    create_dns_record "${EMAIL_DOMAIN}" "TXT" "$SPF_CONTENT"
+    echo "[INFO] SPF record created for ${EMAIL_DOMAIN}"
+    
+    # Create/update DKIM record
+    # Uses tenant's public key for EMAIL_DOMAIN (e.g., dev.example.com for dev)
+    DKIM_CONTENT="v=DKIM1; k=rsa; p=${DKIM_PUBLIC_KEY}"
+    create_dns_record "default._domainkey.${EMAIL_DOMAIN}" "TXT" "$DKIM_CONTENT"
+    echo "[INFO] DKIM record created for default._domainkey.${EMAIL_DOMAIN}"
+    
+    # Create/update DMARC record
+    DMARC_CONTENT="v=DMARC1; p=quarantine; rua=mailto:postmaster@${EMAIL_DOMAIN}; ruf=mailto:postmaster@${EMAIL_DOMAIN}; sp=quarantine; adkim=r; aspf=r"
+    create_dns_record "_dmarc.${EMAIL_DOMAIN}" "TXT" "$DMARC_CONTENT"
+    echo "[INFO] DMARC record created for _dmarc.${EMAIL_DOMAIN}"
+    
+    echo "[SUCCESS] Email DNS records created for $EMAIL_DOMAIN"
+    
+    # =============================================================================
+    # Email: Create/update DKIM key secret and OpenDKIM config
+    # =============================================================================
+    echo "[INFO] Email: Configuring DKIM signing for $EMAIL_DOMAIN..."
+    
+    # Create k8s secret for this tenant's DKIM private key
+    kubectl create secret generic "dkim-key-${TENANT_NAME}" \
+      -n "$NS_MAIL" \
+      --from-literal="dkim.private=${DKIM_PRIVATE_KEY}" \
+      --dry-run=client -o yaml | kubectl apply -f -
+    echo "[INFO] DKIM key secret created: dkim-key-${TENANT_NAME}"
+    
+    # Patch OpenDKIM ConfigMap to include this tenant's email domain
+    # Get current SigningTable and KeyTable
+    CURRENT_SIGNING=$(kubectl get configmap opendkim-config -n "$NS_MAIL" -o jsonpath='{.data.SigningTable}' 2>/dev/null || echo "")
+    CURRENT_KEYTABLE=$(kubectl get configmap opendkim-config -n "$NS_MAIL" -o jsonpath='{.data.KeyTable}' 2>/dev/null || echo "")
+    
+    # Check if email domain already configured
+    if echo "$CURRENT_SIGNING" | grep -q "$EMAIL_DOMAIN"; then
+      echo "[INFO] OpenDKIM already configured for $EMAIL_DOMAIN"
+    else
+      # Append tenant config to SigningTable and KeyTable
+      # Uses EMAIL_DOMAIN for correct DKIM signing per environment
+      NEW_SIGNING="${CURRENT_SIGNING}
+*@${EMAIL_DOMAIN} default._domainkey.${EMAIL_DOMAIN}"
+      NEW_KEYTABLE="${CURRENT_KEYTABLE}
+default._domainkey.${EMAIL_DOMAIN} ${EMAIL_DOMAIN}:default:/etc/dkim-keys/${TENANT_NAME}/dkim.private"
+      
+      # Use jq to properly escape values for JSON (portable across macOS/Linux)
+      PATCH_JSON=$(jq -n \
+        --arg signing "$NEW_SIGNING" \
+        --arg keytable "$NEW_KEYTABLE" \
+        '{"data": {"SigningTable": $signing, "KeyTable": $keytable}}')
+      
+      # Patch the ConfigMap
+      kubectl patch configmap opendkim-config -n "$NS_MAIL" --type=merge -p "$PATCH_JSON"
+      
+      echo "[INFO] OpenDKIM ConfigMap updated for $EMAIL_DOMAIN"
+    fi
+    
+    # Patch Postfix deployment to mount this tenant's DKIM key
+    # Check if volume already exists
+    EXISTING_VOLUMES=$(kubectl get deployment postfix -n "$NS_MAIL" -o jsonpath='{.spec.template.spec.volumes[*].name}' 2>/dev/null || echo "")
+    if echo "$EXISTING_VOLUMES" | grep -q "dkim-key-${TENANT_NAME}"; then
+      echo "[INFO] DKIM key volume already mounted for $TENANT_NAME"
+    else
+      echo "[INFO] Patching Postfix deployment to mount DKIM key for $TENANT_NAME..."
+      # Add volume and volumeMount for this tenant's DKIM key
+      kubectl patch deployment postfix -n "$NS_MAIL" --type=json -p="[
+        {\"op\": \"add\", \"path\": \"/spec/template/spec/volumes/-\", \"value\": {
+          \"name\": \"dkim-key-${TENANT_NAME}\",
+          \"secret\": {
+            \"secretName\": \"dkim-key-${TENANT_NAME}\",
+            \"items\": [{\"key\": \"dkim.private\", \"path\": \"dkim.private\"}]
+          }
+        }},
+        {\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/volumeMounts/-\", \"value\": {
+          \"name\": \"dkim-key-${TENANT_NAME}\",
+          \"mountPath\": \"/etc/dkim-keys/${TENANT_NAME}\",
+          \"readOnly\": true
+        }}
+      ]" 2>/dev/null || echo "[WARNING] Could not patch Postfix deployment - may need manual configuration"
+      echo "[INFO] Postfix deployment patched with DKIM key mount"
+    fi
+    
+    # =============================================================================
+    # Email: Configure Postfix mail routing for all tenants
+    # =============================================================================
+    # Uses shared configure-mail-routing script that scans ALL tenants to ensure
+    # consistent ALLOWED_SENDER_DOMAINS and transport maps whether running
+    # create_env or deploy_infra.
+    echo "[INFO] Email: Configuring Postfix mail routing for all tenants..."
+    if [ -x "$REPO/scripts/configure-mail-routing" ]; then
+      "$REPO/scripts/configure-mail-routing" "$MT_ENV" --nesting-level=$((NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+      echo "[INFO] Postfix mail routing configured"
+    else
+      echo "[WARN] configure-mail-routing script not found - skipping routing config"
+      # Fallback: just restart Postfix to pick up DKIM volume mounts
+      kubectl rollout restart deployment/postfix -n "$NS_MAIL" 2>/dev/null || echo "[WARNING] Could not restart Postfix (may not exist yet)"
+    fi
+    
+    echo "[SUCCESS] Email signing configured for $EMAIL_DOMAIN"
+  fi
+fi
+
+# Apply PriorityClass for critical services (must exist before JVB/y-provider deploy)
+echo "[INFO] Applying PriorityClass for critical services..."
+kubectl apply -f "$REPO/apps/manifests/priority-class.yaml"
+
+# Wait for helm repo update to complete before first helm operation
+if [ -n "${HELM_REPO_UPDATE_PID:-}" ]; then
+  echo "[INFO] Waiting for helm repo update to complete..."
+  wait $HELM_REPO_UPDATE_PID 2>/dev/null || true
+  echo "[INFO] Helm repo update complete"
+fi
+
+# Export flag to tell sub-scripts to skip repo updates
+export SKIP_HELM_REPO_UPDATE=true
+
+# Deploy Docs (backend, frontend, y-provider, Redis)
+echo "[INFO] Docs: deploy to $NS_DOCS namespace"
+pushd "$REPO" >/dev/null
+  if [ ! -f "$REPO/apps/deploy-docs.sh" ]; then
+    echo "[ERROR] deploy-docs.sh not found at $REPO/apps/deploy-docs.sh"
+    exit 1
+  fi
+  if ! MT_ENV="$MT_ENV" "$REPO/apps/deploy-docs.sh" --nesting-level=$((NESTING_LEVEL+1)); then
+    echo "[ERROR] deploy-docs.sh failed"
+    exit 1
+  fi
+popd >/dev/null
+
+# Keycloak: create Google OAuth secret (required for realm import)
+echo "[INFO] Keycloak: create Google OAuth secret (required for realm import)"
+pushd "$REPO" >/dev/null
+  if ! kubectl get secret keycloak-google-oauth -n "$NS_AUTH" >/dev/null 2>&1; then
+    if [ -f "$REPO/docs/keycloak-google-oauth-secret.yaml" ]; then
+      cat "$REPO/docs/keycloak-google-oauth-secret.yaml" | sed "s/namespace: docs/namespace: $NS_AUTH/" | kubectl apply -f -
+      echo "[INFO] Google OAuth secret created in namespace $NS_AUTH"
+    else
+      echo "[WARNING] keycloak-google-oauth-secret.yaml not found, realm import may fail"
+    fi
+  else
+    echo "[INFO] Google OAuth secret already exists"
+  fi
+popd >/dev/null
+
+# Note: Keycloak theme ConfigMap is created by deploy_infra (shared infrastructure)
+# Note: Keycloak ingress patching moved to AFTER helmfile tier=apps to avoid conflicts
+
+# Keycloak: import realm configuration for this tenant
+echo "[INFO] Keycloak: import realm configuration"
+pushd "$REPO" >/dev/null
+  if [ ! -f "$REPO/docs/import-keycloak-realm.sh" ]; then
+    echo "[ERROR] import-keycloak-realm.sh not found at $REPO/docs/import-keycloak-realm.sh"
+    exit 1
+  fi
+  if ! MT_ENV="$MT_ENV" "$REPO/docs/import-keycloak-realm.sh"; then
+    echo "[ERROR] import-keycloak-realm.sh failed"
+    exit 1
+  fi
+popd >/dev/null
+
+# Deploy Nextcloud
+echo "[INFO] Nextcloud: deploy to $NS_FILES namespace"
+pushd "$REPO" >/dev/null
+  if [ ! -f "$REPO/apps/deploy-nextcloud.sh" ]; then
+    echo "[ERROR] deploy-nextcloud.sh not found at $REPO/apps/deploy-nextcloud.sh"
+    exit 1
+  fi
+  if ! MT_ENV="$MT_ENV" "$REPO/apps/deploy-nextcloud.sh" --nesting-level=$((NESTING_LEVEL+1)); then
+    echo "[ERROR] deploy-nextcloud.sh failed"
+    exit 1
+  fi
+popd >/dev/null
+
+# Deploy Synapse/Element TLS certificate (explicit cert-manager Certificate resource)
+# Applied before helmfile sync so cert-manager can start issuing while Helm deploys
+echo "[INFO] Deploying Synapse/Element TLS certificate..."
+envsubst < "$REPO/apps/manifests/element/certificate.yaml.tpl" | kubectl apply -f -
+echo "[INFO] Synapse/Element TLS certificate resource applied"
+
+# Migrate Synapse deployment strategy from RollingUpdate to Recreate.
+# Helm's strategic merge patch can't remove the rollingUpdate field, so we use a JSON patch.
+# Idempotent: no-op if already Recreate or if the deployment doesn't exist yet.
+if kubectl get deployment matrix-synapse -n "$NS_MATRIX" &>/dev/null; then
+  CURRENT_STRATEGY=$(kubectl get deployment matrix-synapse -n "$NS_MATRIX" -o jsonpath='{.spec.strategy.type}')
+  if [ "$CURRENT_STRATEGY" = "RollingUpdate" ]; then
+    echo "[INFO] Patching Synapse deployment strategy from RollingUpdate to Recreate..."
+    kubectl patch deployment matrix-synapse -n "$NS_MATRIX" \
+      --type='json' -p='[{"op": "replace", "path": "/spec/strategy", "value": {"type": "Recreate"}}]'
+  fi
+fi
+
+# Deploy Synapse and Element via helmfile
+# Use sync instead of apply to skip slow diff operation
+echo "[INFO] Apps: helmfile sync (Synapse, Element)"
+pushd "$REPO/apps" >/dev/null
+  max_retries=3
+  retry_count=0
+  while [ $retry_count -lt $max_retries ]; do
+    # Use --skip-deps since repos are already updated at start of create_env
+    if helmfile -e "$MT_ENV" -l tier=apps sync --skip-deps; then
+      break
+    fi
+    retry_count=$((retry_count + 1))
+    if [ $retry_count -lt $max_retries ]; then
+      echo "[WARN] helmfile sync failed (attempt $retry_count/$max_retries), retrying in 10 seconds..."
+      sleep 10
+    else
+      echo "[ERROR] helmfile sync failed after $max_retries attempts"
+      exit 1
+    fi
+  done
+popd >/dev/null
+
+# Deploy Element HPA (deployed after helmfile because Element is a Helm release)
+echo "[INFO] Deploying Element HPA..."
+envsubst < "$REPO/apps/manifests/element/element-hpa.yaml.tpl" | kubectl apply -f -
+echo "[INFO] Element HPA deployed (CPU 80% threshold)"
+
+# Keycloak: Create tenant-specific auth ingress
+# Each tenant has their own ingress resource pointing to the shared Keycloak service
+# This avoids field manager conflicts that occur when patching a helm-managed ingress
+echo "[INFO] Keycloak: Creating tenant auth ingress for $AUTH_HOST"
+envsubst '${AUTH_HOST} ${TENANT} ${NS_AUTH} ${TENANT_DOMAIN}' < "$REPO/apps/manifests/keycloak/tenant-auth-ingress.yaml.tpl" | kubectl apply -f -
+echo "[INFO] Tenant auth ingress created: keycloak-${TENANT}"
+
+# Show all auth ingresses
+echo "[INFO] All Keycloak auth ingresses:"
+kubectl get ingress -n "$NS_AUTH" -l app=keycloak -o custom-columns='NAME:.metadata.name,HOST:.spec.rules[*].host'
+
+# Deploy Synapse Admin
+echo "[INFO] Synapse Admin: deploying to $NS_MATRIX namespace..."
+pushd "$REPO" >/dev/null
+  export MATRIX_REGISTRATION_SHARED_SECRET=$(yq '.matrix.registration_shared_secret' "$TENANT_SECRETS")
+  envsubst < "$REPO/apps/manifests/synapse-admin/synapse-admin.yaml.tpl" | kubectl apply -f -
+  # Deploy HPA for synapse-admin auto-scaling
+  envsubst < "$REPO/apps/manifests/synapse-admin/synapse-admin-hpa.yaml.tpl" | kubectl apply -f -
+  echo "[INFO] Synapse Admin HPA deployed (CPU 80% threshold)"
+  kubectl -n "$NS_MATRIX" wait --for=condition=available deployment/synapse-admin --timeout=120s || echo "[WARNING] Synapse Admin may not be fully ready"
+  echo "[INFO] Synapse Admin deployed to https://$SYNAPSE_ADMIN_HOST"
+  
+  # Deploy Matrix .well-known ingress for federation (prod only)
+  if [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; then
+    echo "[INFO] Deploying Matrix .well-known ingress for federation on $TENANT_DOMAIN..."
+    envsubst < "$REPO/apps/manifests/synapse-admin/matrix-wellknown.yaml.tpl" | kubectl apply -f -
+    echo "[INFO] Matrix federation .well-known endpoints available at https://$TENANT_DOMAIN/.well-known/matrix/*"
+  else
+    echo "[INFO] Skipping .well-known ingress (dev environment uses matrix subdomain for federation)"
+  fi
+popd >/dev/null
+
+# Create alertbot user if requested
+if [ "$CREATE_ALERT_USER" = "true" ]; then
+  echo "[INFO] Creating alertbot Matrix user for alerting..."
+  if [ -f "$REPO/apps/scripts/create-alertbot-user.sh" ]; then
+    echo "[INFO] Waiting for Synapse to be ready..."
+    kubectl -n "$NS_MATRIX" wait --for=condition=available deployment -l app.kubernetes.io/name=matrix-synapse --timeout=300s || echo "[WARNING] Synapse may not be fully ready"
+    
+    if MT_ENV="$MT_ENV" "$REPO/apps/scripts/create-alertbot-user.sh" --save; then
+      echo "[INFO] Alertbot user created and token saved"
+      # Reload the token from secrets (subprocess can't export back to parent)
+      MATRIX_ALERTMANAGER_ACCESS_TOKEN=$(yq '.alertbot.access_token // ""' "$TENANT_SECRETS")
+      if [ -n "$MATRIX_ALERTMANAGER_ACCESS_TOKEN" ] && [ "$MATRIX_ALERTMANAGER_ACCESS_TOKEN" != "null" ]; then
+        export MATRIX_ALERTMANAGER_ACCESS_TOKEN
+      fi
+    else
+      echo "[WARNING] Failed to create alertbot user (non-fatal, continuing)"
+    fi
+  else
+    echo "[WARNING] create-alertbot-user.sh not found, skipping alertbot creation"
+  fi
+fi
+
+# Deploy alerting (matrix-alertmanager) if access token is available
+if [ -n "${MATRIX_ALERTMANAGER_ACCESS_TOKEN:-}" ]; then
+  echo "[INFO] Deploying alerting (matrix-alertmanager)..."
+  if [ -f "$REPO/apps/scripts/deploy-alerting.sh" ]; then
+    if MT_ENV="$MT_ENV" "$REPO/apps/scripts/deploy-alerting.sh"; then
+      echo "[INFO] Alerting deployment complete"
+    else
+      echo "[WARNING] deploy-alerting.sh failed (non-fatal, continuing)"
+    fi
+  else
+    echo "[WARNING] deploy-alerting.sh not found, skipping alerting deployment"
+  fi
+fi
+
+# Deploy Jitsi
+echo "[INFO] Jitsi: deploy to $NS_JITSI namespace"
+pushd "$REPO" >/dev/null
+  if [ ! -f "$REPO/apps/deploy-jitsi.sh" ]; then
+    echo "[ERROR] deploy-jitsi.sh not found at $REPO/apps/deploy-jitsi.sh"
+    exit 1
+  fi
+  if ! MT_ENV="$MT_ENV" "$REPO/apps/deploy-jitsi.sh" --nesting-level=$((NESTING_LEVEL+1)); then
+    echo "[ERROR] deploy-jitsi.sh failed"
+    exit 1
+  fi
+popd >/dev/null
+
+# Deploy Jitsi metrics exporter
+echo "[INFO] Jitsi: deploy metrics exporter"
+pushd "$REPO" >/dev/null
+  cat "$REPO/apps/manifests/jitsi/jitsi-metrics-exporter.yaml" | \
+    sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+  
+  if kubectl get deployment jitsi-metrics-exporter -n "$NS_JITSI" >/dev/null 2>&1; then
+    kubectl rollout restart deployment/jitsi-metrics-exporter -n "$NS_JITSI"
+  fi
+  
+  kubectl wait --for=condition=available deployment/jitsi-metrics-exporter -n "$NS_JITSI" --timeout=120s || echo "[WARNING] Metrics exporter may not be ready yet"
+  
+  # Deploy ServiceMonitors
+  cat "$REPO/apps/manifests/jitsi/jitsi-metrics-exporter-servicemonitor.yaml" | \
+    sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+  cat "$REPO/apps/manifests/jitsi/jvb-servicemonitor.yaml" | \
+    sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+  cat "$REPO/apps/manifests/jitsi/jicofo-servicemonitor.yaml" | \
+    sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+  
+  echo "[INFO] Jitsi monitoring resources deployed to namespace $NS_JITSI"
+popd >/dev/null
+
+# =============================================================================
+# Deploy Stalwart Mail Server (if enabled)
+# =============================================================================
+MAIL_ENABLED=$(yq '.features.mail_enabled // false' "$TENANT_CONFIG")
+if [ "$MAIL_ENABLED" = "true" ]; then
+  echo "[INFO] Stalwart: deploy to $NS_STALWART namespace"
+  pushd "$REPO" >/dev/null
+    if [ -f "$REPO/apps/deploy-stalwart.sh" ]; then
+      # Export NS_MAIL for the deploy script (it expects NS_MAIL not NS_STALWART)
+      export NS_MAIL="$NS_STALWART"
+      if ! MT_ENV="$MT_ENV" TENANT="$TENANT" "$REPO/apps/deploy-stalwart.sh" --nesting-level=$((NESTING_LEVEL+1)); then
+        echo "[ERROR] deploy-stalwart.sh failed"
+        exit 1
+      fi
+    else
+      echo "[ERROR] deploy-stalwart.sh not found at $REPO/apps/deploy-stalwart.sh"
+      exit 1
+    fi
+  popd >/dev/null
+else
+  echo "[INFO] Stalwart: skipping (features.mail_enabled is not true)"
+fi
+
+# =============================================================================
+# Deploy Roundcube Webmail (if enabled)
+# =============================================================================
+WEBMAIL_ENABLED=$(yq '.features.webmail_enabled // false' "$TENANT_CONFIG")
+if [ "$WEBMAIL_ENABLED" = "true" ]; then
+  echo "[INFO] Roundcube: deploy to $NS_WEBMAIL namespace"
+  pushd "$REPO" >/dev/null
+    if [ -f "$REPO/apps/deploy-roundcube.sh" ]; then
+      if ! MT_ENV="$MT_ENV" TENANT="$TENANT" NS_WEBMAIL="$NS_WEBMAIL" NS_MAIL="$NS_STALWART" "$REPO/apps/deploy-roundcube.sh" --nesting-level=$((NESTING_LEVEL+1)); then
+        echo "[ERROR] deploy-roundcube.sh failed"
+        exit 1
+      fi
+    else
+      echo "[ERROR] deploy-roundcube.sh not found at $REPO/apps/deploy-roundcube.sh"
+      exit 1
+    fi
+  popd >/dev/null
+else
+  echo "[INFO] Roundcube: skipping (features.webmail_enabled is not true)"
+fi
+
+# =============================================================================
+# Deploy Admin Portal (if enabled)
+# =============================================================================
+ADMIN_PORTAL_ENABLED=$(yq '.features.admin_portal_enabled // false' "$TENANT_CONFIG")
+if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
+  echo "[INFO] Admin Portal: deploy to $NS_ADMIN namespace"
+  
+  # Read admin portal secrets
+  ADMIN_PORTAL_OIDC_SECRET=$(yq '.oidc.admin_portal_client_secret // ""' "$TENANT_SECRETS" 2>/dev/null)
+  ADMIN_PORTAL_NEXTAUTH_SECRET=$(yq '.admin_portal.nextauth_secret // ""' "$TENANT_SECRETS" 2>/dev/null)
+  
+  if [ -z "$ADMIN_PORTAL_OIDC_SECRET" ] || [ "$ADMIN_PORTAL_OIDC_SECRET" = "null" ] || [[ "$ADMIN_PORTAL_OIDC_SECRET" == *"PLACEHOLDER"* ]]; then
+    echo "[WARNING] Admin Portal OIDC secret not configured, generating one..."
+    ADMIN_PORTAL_OIDC_SECRET=$(openssl rand -base64 32)
+  fi
+  
+  if [ -z "$ADMIN_PORTAL_NEXTAUTH_SECRET" ] || [ "$ADMIN_PORTAL_NEXTAUTH_SECRET" = "null" ] || [[ "$ADMIN_PORTAL_NEXTAUTH_SECRET" == *"PLACEHOLDER"* ]]; then
+    echo "[WARNING] Admin Portal NextAuth secret not configured, generating one..."
+    ADMIN_PORTAL_NEXTAUTH_SECRET=$(openssl rand -base64 32)
+  fi
+  
+  export ADMIN_PORTAL_OIDC_SECRET
+  export ADMIN_PORTAL_NEXTAUTH_SECRET
+
+  # Redis session password (shared between admin-portal and account-portal)
+  if [ -z "${REDIS_SESSION_PASSWORD:-}" ]; then
+    REDIS_SESSION_PASSWORD=$(yq '.admin_portal.redis_password // ""' "$TENANT_SECRETS" 2>/dev/null)
+    if [ -z "$REDIS_SESSION_PASSWORD" ] || [ "$REDIS_SESSION_PASSWORD" = "null" ] || [[ "$REDIS_SESSION_PASSWORD" == *"PLACEHOLDER"* ]]; then
+      echo "[WARNING] Redis session password not configured, generating one..."
+      REDIS_SESSION_PASSWORD=$(openssl rand -base64 24)
+    fi
+  fi
+  export REDIS_SESSION_PASSWORD
+
+  # HMAC secret for beginSetup token (shared between admin-portal and account-portal)
+  if [ -z "${BEGINSETUP_SECRET:-}" ]; then
+    BEGINSETUP_SECRET=$(yq '.admin_portal.beginsetup_secret // ""' "$TENANT_SECRETS" 2>/dev/null)
+    if [ -z "$BEGINSETUP_SECRET" ] || [ "$BEGINSETUP_SECRET" = "null" ] || [[ "$BEGINSETUP_SECRET" == *"PLACEHOLDER"* ]]; then
+      echo "[WARNING] BeginSetup HMAC secret not configured, generating one..."
+      BEGINSETUP_SECRET=$(openssl rand -base64 32)
+    fi
+  fi
+  export BEGINSETUP_SECRET
+
+  # Stalwart integration (device passwords / app passwords)
+  # NS_MAIL must point to the tenant mail namespace for the deployment template
+  export NS_MAIL="$NS_STALWART"
+  STALWART_ADMIN_PASSWORD=$(yq '.stalwart.admin_password // ""' "$TENANT_SECRETS" 2>/dev/null)
+  if [ -z "$STALWART_ADMIN_PASSWORD" ] || [ "$STALWART_ADMIN_PASSWORD" = "null" ] || [[ "$STALWART_ADMIN_PASSWORD" == *"PLACEHOLDER"* ]]; then
+    echo "[WARNING] Stalwart admin password not configured - device passwords will not work"
+  fi
+  export STALWART_ADMIN_PASSWORD
+
+  # Ensure mail ports are exported for admin portal deployment template
+  if [ -z "${STALWART_IMAPS_PORT:-}" ]; then
+    STALWART_IMAPS_PORT=$(yq '.resources.stalwart.imaps_port // ""' "$TENANT_CONFIG" 2>/dev/null)
+  fi
+  if [ -z "${STALWART_SUBMISSION_PORT:-}" ]; then
+    STALWART_SUBMISSION_PORT=$(yq '.resources.stalwart.submission_port // ""' "$TENANT_CONFIG" 2>/dev/null)
+  fi
+  export STALWART_IMAPS_PORT
+  export STALWART_SUBMISSION_PORT
+
+  # App password ports (separate IMAP/SMTP listeners for PLAIN/LOGIN auth)
+  if [ -z "${STALWART_IMAPS_APP_PORT:-}" ]; then
+    STALWART_IMAPS_APP_PORT=$(yq '.resources.stalwart.imaps_app_port // ""' "$TENANT_CONFIG" 2>/dev/null)
+  fi
+  if [ -z "${STALWART_SUBMISSION_APP_PORT:-}" ]; then
+    STALWART_SUBMISSION_APP_PORT=$(yq '.resources.stalwart.submission_app_port // ""' "$TENANT_CONFIG" 2>/dev/null)
+  fi
+  export STALWART_IMAPS_APP_PORT
+  export STALWART_SUBMISSION_APP_PORT
+
+  # Create DNS record for tenant admin portal
+  echo "[INFO] Creating DNS record for tenant admin portal: $ADMIN_HOST"
+  DNS_RECORD_EXISTS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records?name=${ADMIN_HOST}&type=A" \
+    -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+    -H "Content-Type: application/json" | jq -r '.result | length')
+  
+  if [ "$DNS_RECORD_EXISTS" -gt 0 ]; then
+    echo "[INFO] DNS record for $ADMIN_HOST already exists"
+  else
+    # Get the ingress load balancer IP
+    INGRESS_IP=$(kubectl get svc -n "$NS_INGRESS" ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+    if [ -n "$INGRESS_IP" ]; then
+      curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records" \
+        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+        -H "Content-Type: application/json" \
+        --data "{\"type\":\"A\",\"name\":\"${ADMIN_HOST}\",\"content\":\"${INGRESS_IP}\",\"ttl\":300,\"proxied\":false}" > /dev/null
+      echo "[INFO] DNS record created for $ADMIN_HOST -> $INGRESS_IP"
+    else
+      echo "[WARNING] Could not get ingress IP, DNS record not created"
+    fi
+  fi
+  
+  # Build admin portal image (smart build - only if source changed)
+  ADMIN_PORTAL_SRC="$REPO/apps/admin-portal"
+  ADMIN_PORTAL_IMAGE_TAG="${ADMIN_PORTAL_IMAGE_TAG:-${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-admin-portal:${MT_ENV}}"
+  
+  # Compute hash of source files for smart rebuilding
+  # IMPORTANT: Exclude node_modules/ - only hash actual source files
+  # Otherwise node_modules changes mask real source changes and make hash unreliable
+  echo "[INFO] Computing admin portal source hash..."
+  SOURCE_HASH=$(find "$ADMIN_PORTAL_SRC" -type f \( -name "*.js" -o -name "*.ejs" -o -name "package.json" -o -name "Dockerfile" \) -not -path "*/node_modules/*" 2>/dev/null | xargs sha256sum 2>/dev/null | sort | sha256sum | cut -c1-12)
+  
+  # Store hash per-environment to detect changes
+  # Using per-env hash files prevents a dev build from masking a missing prod build
+  HASH_FILE="$ADMIN_PORTAL_SRC/.source-hash.${MT_ENV}"
+  PREVIOUS_HASH=""
+  if [ -f "$HASH_FILE" ]; then
+    PREVIOUS_HASH=$(cat "$HASH_FILE")
+  fi
+  
+  echo "[INFO] Admin Portal image: $ADMIN_PORTAL_IMAGE_TAG"
+  echo "[INFO] Source hash: $SOURCE_HASH (previous: ${PREVIOUS_HASH:-none})"
+  
+  # Check if we need to rebuild
+  NEEDS_BUILD=false
+  
+  if [ "$SOURCE_HASH" != "$PREVIOUS_HASH" ]; then
+    echo "[INFO] Source files have changed, rebuild needed"
+    NEEDS_BUILD=true
+  elif ! docker image inspect "$ADMIN_PORTAL_IMAGE_TAG" >/dev/null 2>&1; then
+    # Image not found locally, try to pull
+    echo "[INFO] Image not found locally, attempting to pull..."
+    if ! docker pull "$ADMIN_PORTAL_IMAGE_TAG" 2>/dev/null; then
+      echo "[INFO] Image not in registry, rebuild needed"
+      NEEDS_BUILD=true
+    else
+      echo "[INFO] Image pulled from registry"
+    fi
+  else
+    echo "[INFO] Image exists locally and source unchanged"
+  fi
+  
+  if [ "$NEEDS_BUILD" = "true" ]; then
+    echo "[INFO] Building Admin Portal image..."
+    
+    # Use buildx for cross-platform support (consistent with other images)
+    pushd "$ADMIN_PORTAL_SRC" >/dev/null
+    
+    # Install npm dependencies if needed
+    if [ ! -d "node_modules" ]; then
+      echo "[INFO] Installing npm dependencies..."
+      npm install
+    fi
+    
+    # Build with buildx (linux/amd64 for Linode nodes)
+    docker buildx build \
+      --platform linux/amd64 \
+      -t "$ADMIN_PORTAL_IMAGE_TAG" \
+      --load \
+      .
+    
+    if [ $? -ne 0 ]; then
+      echo "[ERROR] Failed to build Admin Portal image"
+      popd >/dev/null
+      exit 1
+    fi
+    
+    popd >/dev/null
+    
+    echo "[INFO] Admin Portal image built successfully"
+    
+    # Push to registry - REQUIRED for k8s to get the new image
+    echo "[INFO] Pushing image to registry..."
+    if docker push "$ADMIN_PORTAL_IMAGE_TAG"; then
+      echo "[INFO] Admin Portal image pushed to registry"
+      # Only save hash AFTER successful push to ensure k8s gets the new image
+      echo "$SOURCE_HASH" > "$HASH_FILE"
+      # Mark that we need to restart the pod to pick up new image
+      ADMIN_PORTAL_IMAGE_UPDATED=true
+    else
+      echo "[ERROR] Could not push to registry - image not updated in cluster!"
+      echo "[ERROR] Fix registry credentials and re-run deploy"
+      rm -f "$HASH_FILE"  # Force rebuild next time
+      exit 1
+    fi
+  fi
+  
+  # Export for deployment template
+  export ADMIN_PORTAL_IMAGE="$ADMIN_PORTAL_IMAGE_TAG"
+  
+  # Deploy Redis for session storage (enables HA with multiple replicas)
+  # This Redis is also used by Nextcloud when scaled to multiple replicas
+  echo "[INFO] Deploying Redis for session storage to $NS_ADMIN namespace..."
+  kubectl apply -n "$NS_ADMIN" -f "$REPO/apps/manifests/admin-portal/redis.yaml"
+  kubectl wait --for=condition=available deployment/redis -n "$NS_ADMIN" --timeout=60s || {
+    echo "[WARNING] Redis may not be fully ready yet"
+  }
+  
+  # Apply admin portal manifests
+  echo "[INFO] Deploying admin portal manifests..."
+  
+  # Apply secrets
+  envsubst < "$REPO/apps/manifests/admin-portal/secrets.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+  
+  # Apply service
+  kubectl apply -n "$NS_ADMIN" -f "$REPO/apps/manifests/admin-portal/service.yaml"
+  
+  # Apply ingress
+  envsubst < "$REPO/apps/manifests/admin-portal/ingress.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+  
+  # Apply deployment
+  envsubst < "$REPO/apps/manifests/admin-portal/deployment.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+  
+  # Deploy HPA for admin-portal auto-scaling
+  envsubst < "$REPO/apps/manifests/admin-portal/admin-portal-hpa.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+  echo "[INFO] Admin Portal HPA deployed (CPU 80% threshold)"
+  
+  # Restart to pick up any secret or image changes
+  echo "[INFO] Restarting Admin Portal deployment..."
+  kubectl rollout restart deployment/admin-portal -n "$NS_ADMIN"
+  
+  # Wait for deployment to be ready
+  echo "[INFO] Waiting for Admin Portal deployment..."
+  kubectl rollout status deployment/admin-portal -n "$NS_ADMIN" --timeout=120s || {
+    echo "[WARNING] Admin Portal deployment may not be fully ready"
+  }
+  
+  echo "[INFO] Admin Portal deployed to https://$ADMIN_HOST"
+  
+else
+  echo "[INFO] Admin Portal: skipping (features.admin_portal_enabled is not true)"
+fi
+
+# =============================================================================
+# Deploy Account Portal (if enabled)
+# =============================================================================
+ACCOUNT_PORTAL_ENABLED=$(yq '.features.account_portal_enabled // false' "$TENANT_CONFIG")
+if [ "$ACCOUNT_PORTAL_ENABLED" = "true" ]; then
+  echo "[INFO] Account Portal: deploy to $NS_ADMIN namespace"
+
+  # Read account portal secrets
+  ACCOUNT_PORTAL_OIDC_SECRET=$(yq '.oidc.account_portal_client_secret // ""' "$TENANT_SECRETS" 2>/dev/null)
+  ACCOUNT_PORTAL_NEXTAUTH_SECRET=$(yq '.account_portal.session_secret // ""' "$TENANT_SECRETS" 2>/dev/null)
+
+  if [ -z "$ACCOUNT_PORTAL_OIDC_SECRET" ] || [ "$ACCOUNT_PORTAL_OIDC_SECRET" = "null" ] || [[ "$ACCOUNT_PORTAL_OIDC_SECRET" == *"PLACEHOLDER"* ]]; then
+    echo "[ERROR] Account Portal OIDC secret not configured in $TENANT_SECRETS"
+    echo "[ERROR] Add 'account_portal_client_secret' under the 'oidc' section"
+    exit 1
+  fi
+
+  if [ -z "$ACCOUNT_PORTAL_NEXTAUTH_SECRET" ] || [ "$ACCOUNT_PORTAL_NEXTAUTH_SECRET" = "null" ] || [[ "$ACCOUNT_PORTAL_NEXTAUTH_SECRET" == *"PLACEHOLDER"* ]]; then
+    echo "[WARNING] Account Portal session secret not configured, generating one..."
+    ACCOUNT_PORTAL_NEXTAUTH_SECRET=$(openssl rand -base64 32)
+  fi
+
+  export ACCOUNT_PORTAL_OIDC_SECRET
+  export ACCOUNT_PORTAL_NEXTAUTH_SECRET
+
+  # Stalwart integration (device passwords / app passwords)
+  # NS_MAIL must point to the tenant mail namespace for the deployment template
+  export NS_MAIL="${NS_STALWART:-tn-${TENANT}-mail}"
+
+  # Ensure Stalwart secrets are available (may already be exported by admin portal section)
+  if [ -z "${STALWART_ADMIN_PASSWORD:-}" ]; then
+    STALWART_ADMIN_PASSWORD=$(yq '.stalwart.admin_password // ""' "$TENANT_SECRETS" 2>/dev/null)
+    export STALWART_ADMIN_PASSWORD
+  fi
+
+  # Ensure mail ports are exported for account portal deployment template
+  if [ -z "${STALWART_IMAPS_PORT:-}" ]; then
+    STALWART_IMAPS_PORT=$(yq '.resources.stalwart.imaps_port // ""' "$TENANT_CONFIG" 2>/dev/null)
+    export STALWART_IMAPS_PORT
+  fi
+  if [ -z "${STALWART_SUBMISSION_PORT:-}" ]; then
+    STALWART_SUBMISSION_PORT=$(yq '.resources.stalwart.submission_port // ""' "$TENANT_CONFIG" 2>/dev/null)
+    export STALWART_SUBMISSION_PORT
+  fi
+  if [ -z "${STALWART_IMAPS_APP_PORT:-}" ]; then
+    STALWART_IMAPS_APP_PORT=$(yq '.resources.stalwart.imaps_app_port // ""' "$TENANT_CONFIG" 2>/dev/null)
+    export STALWART_IMAPS_APP_PORT
+  fi
+  if [ -z "${STALWART_SUBMISSION_APP_PORT:-}" ]; then
+    STALWART_SUBMISSION_APP_PORT=$(yq '.resources.stalwart.submission_app_port // ""' "$TENANT_CONFIG" 2>/dev/null)
+    export STALWART_SUBMISSION_APP_PORT
+  fi
+
+  # Build account portal image (smart build - only if source changed)
+  ACCOUNT_PORTAL_SRC="$REPO/apps/account-portal"
+  ACCOUNT_PORTAL_IMAGE_TAG="${ACCOUNT_PORTAL_IMAGE_TAG:-${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-account-portal:${MT_ENV}}"
+
+  # Compute hash of source files for smart rebuilding
+  echo "[INFO] Computing account portal source hash..."
+  ACCOUNT_SOURCE_HASH=$(find "$ACCOUNT_PORTAL_SRC" -type f \( -name "*.js" -o -name "*.ejs" -o -name "package.json" -o -name "Dockerfile" \) -not -path "*/node_modules/*" 2>/dev/null | xargs sha256sum 2>/dev/null | sort | sha256sum | cut -c1-12)
+
+  ACCOUNT_HASH_FILE="$ACCOUNT_PORTAL_SRC/.source-hash.${MT_ENV}"
+  ACCOUNT_PREVIOUS_HASH=""
+  if [ -f "$ACCOUNT_HASH_FILE" ]; then
+    ACCOUNT_PREVIOUS_HASH=$(cat "$ACCOUNT_HASH_FILE")
+  fi
+
+  echo "[INFO] Account Portal image: $ACCOUNT_PORTAL_IMAGE_TAG"
+  echo "[INFO] Source hash: $ACCOUNT_SOURCE_HASH (previous: ${ACCOUNT_PREVIOUS_HASH:-none})"
+
+  # Check if we need to rebuild
+  ACCOUNT_NEEDS_BUILD=false
+
+  if [ "$ACCOUNT_SOURCE_HASH" != "$ACCOUNT_PREVIOUS_HASH" ]; then
+    echo "[INFO] Source files have changed, rebuild needed"
+    ACCOUNT_NEEDS_BUILD=true
+  elif ! docker image inspect "$ACCOUNT_PORTAL_IMAGE_TAG" >/dev/null 2>&1; then
+    echo "[INFO] Image not found locally, attempting to pull..."
+    if ! docker pull "$ACCOUNT_PORTAL_IMAGE_TAG" 2>/dev/null; then
+      echo "[INFO] Image not in registry, rebuild needed"
+      ACCOUNT_NEEDS_BUILD=true
+    else
+      echo "[INFO] Image pulled from registry"
+    fi
+  else
+    echo "[INFO] Image exists locally and source unchanged"
+  fi
+
+  ACCOUNT_PORTAL_IMAGE_UPDATED=false
+  if [ "$ACCOUNT_NEEDS_BUILD" = "true" ]; then
+    echo "[INFO] Building Account Portal image..."
+
+    pushd "$ACCOUNT_PORTAL_SRC" >/dev/null
+
+    # Install npm dependencies if needed
+    if [ ! -d "node_modules" ]; then
+      echo "[INFO] Installing npm dependencies..."
+      npm install
+    fi
+
+    # Build with buildx (linux/amd64 for Linode nodes)
+    docker buildx build \
+      --platform linux/amd64 \
+      -t "$ACCOUNT_PORTAL_IMAGE_TAG" \
+      --load \
+      .
+
+    if [ $? -ne 0 ]; then
+      echo "[ERROR] Failed to build Account Portal image"
+      popd >/dev/null
+      exit 1
+    fi
+
+    popd >/dev/null
+
+    echo "[INFO] Account Portal image built successfully"
+
+    # Push to registry
+    echo "[INFO] Pushing image to registry..."
+    if docker push "$ACCOUNT_PORTAL_IMAGE_TAG"; then
+      echo "[INFO] Account Portal image pushed to registry"
+      echo "$ACCOUNT_SOURCE_HASH" > "$ACCOUNT_HASH_FILE"
+      ACCOUNT_PORTAL_IMAGE_UPDATED=true
+    else
+      echo "[ERROR] Could not push to registry - image not updated in cluster!"
+      rm -f "$ACCOUNT_HASH_FILE"
+      exit 1
+    fi
+  fi
+
+  # Export for deployment template
+  export ACCOUNT_PORTAL_IMAGE="$ACCOUNT_PORTAL_IMAGE_TAG"
+
+  # Apply account portal manifests
+  echo "[INFO] Deploying account portal manifests..."
+
+  # Apply secrets
+  envsubst < "$REPO/apps/manifests/account-portal/secrets.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+
+  # Apply service
+  kubectl apply -n "$NS_ADMIN" -f "$REPO/apps/manifests/account-portal/service.yaml"
+
+  # Apply ingress
+  envsubst < "$REPO/apps/manifests/account-portal/ingress.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+
+  # Apply deployment
+  envsubst < "$REPO/apps/manifests/account-portal/deployment.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+
+  # Deploy HPA for account-portal auto-scaling
+  envsubst < "$REPO/apps/manifests/account-portal/account-portal-hpa.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+  echo "[INFO] Account Portal HPA deployed (CPU 80% threshold)"
+
+  # Restart to pick up any secret or image changes
+  echo "[INFO] Restarting Account Portal deployment..."
+  kubectl rollout restart deployment/account-portal -n "$NS_ADMIN"
+
+  # Wait for deployment to be ready
+  echo "[INFO] Waiting for Account Portal deployment..."
+  kubectl rollout status deployment/account-portal -n "$NS_ADMIN" --timeout=120s || {
+    echo "[WARNING] Account Portal deployment may not be fully ready"
+  }
+
+  echo "[INFO] Account Portal deployed to https://$ACCOUNT_HOST"
+
+else
+  echo "[INFO] Account Portal: skipping (features.account_portal_enabled is not true)"
+fi
+
+# =============================================================================
+# Setup Keycloak OIDC clients for Admin + Account Portals (idempotent)
+# =============================================================================
+if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
+  echo "[INFO] Setting up portal OIDC clients in Keycloak..."
+  TENANT_NAME="$TENANT" "$REPO/scripts/setup-admin-portal-client" "$MT_ENV" || {
+    echo "[WARNING] Failed to setup portal clients - may need manual configuration"
+  }
+fi
+
+# Wait for TLS certificates
+echo "[INFO] Waiting for TLS certificates to be issued..."
+CERT_TIMEOUT=300
+for secret in $(kubectl get ingress -n "$NS_MATRIX" -o jsonpath='{.items[*].spec.tls[*].secretName}' 2>/dev/null); do
+  if [ -n "$secret" ]; then
+    echo "[INFO] Waiting for secret $secret in namespace $NS_MATRIX"
+    attempts=0
+    while [ $attempts -lt $((CERT_TIMEOUT / 5)) ]; do
+      if kubectl get secret "$secret" -n "$NS_MATRIX" >/dev/null 2>&1; then
+        echo "[INFO] Secret $secret is ready"
+        break
+      fi
+      attempts=$((attempts + 1))
+      sleep 5
+    done
+  fi
+done
+
+echo ""
+echo "[SUCCESS] Tenant $TENANT deployed for $MT_ENV environment!"
+echo ""
+echo "Tenant namespaces:"
+echo "  - $NS_MATRIX (Synapse, Element)"
+echo "  - $NS_JITSI (Jitsi)"
+echo "  - $NS_DOCS (Docs backend/frontend)"
+echo "  - $NS_FILES (Nextcloud)"
+if [ "$MAIL_ENABLED" = "true" ]; then
+  echo "  - $NS_STALWART (Stalwart Mail)"
+fi
+if [ "$WEBMAIL_ENABLED" = "true" ]; then
+  echo "  - $NS_WEBMAIL (Roundcube Webmail)"
+fi
+if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
+  echo "  - $NS_ADMIN (Admin Portal)"
+fi
+echo ""
+echo "URLs:"
+echo "  - Matrix: https://$MATRIX_HOST"
+echo "  - Synapse Admin: https://$SYNAPSE_ADMIN_HOST"
+echo "  - Docs: https://docs.${TENANT_ENV_DNS_LABEL:+$TENANT_ENV_DNS_LABEL.}$TENANT_DOMAIN"
+echo "  - Files: https://files.${TENANT_ENV_DNS_LABEL:+$TENANT_ENV_DNS_LABEL.}$TENANT_DOMAIN"
+if [ "$MAIL_ENABLED" = "true" ]; then
+  echo "  - Mail Admin: https://$MAIL_HOST"
+fi
+if [ "$WEBMAIL_ENABLED" = "true" ]; then
+  echo "  - Webmail: https://$WEBMAIL_HOST"
+fi
+if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
+  echo "  - Admin Portal: https://$ADMIN_HOST"
+fi
+echo ""
+echo "To check status:"
+echo "  kubectl get pods -n $NS_MATRIX"
+echo "  kubectl get pods -n $NS_JITSI"
+echo "  kubectl get pods -n $NS_DOCS"
+echo "  kubectl get pods -n $NS_FILES"
+if [ "$MAIL_ENABLED" = "true" ]; then
+  echo "  kubectl get pods -n $NS_STALWART"
+fi
+if [ "$WEBMAIL_ENABLED" = "true" ]; then
+  echo "  kubectl get pods -n $NS_WEBMAIL"
+fi
+if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
+  echo "  kubectl get pods -n $NS_ADMIN"
+fi

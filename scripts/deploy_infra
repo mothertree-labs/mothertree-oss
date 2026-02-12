@@ -1,0 +1,1065 @@
+#!/bin/bash
+
+# Deploy Shared Infrastructure Components
+# Purpose: Deploy shared Kubernetes infrastructure that all tenants use
+#
+# This script deploys:
+#   - Ingress controllers (public and internal)
+#   - Cert-manager for TLS certificates
+#   - Monitoring stack (Prometheus, Grafana, Vector)
+#   - PostgreSQL (shared database)
+#   - Keycloak (shared authentication)
+#   - Postfix SMTP server
+#
+# Run this ONCE per environment, not per tenant.
+# For tenant deployments, use: ./scripts/create_env --tenant=<name> <env>
+#
+# Usage:
+#   ./scripts/deploy_infra <env>
+#
+# Examples:
+#   ./scripts/deploy_infra prod
+#   ./scripts/deploy_infra dev
+
+set -euo pipefail
+
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# Pre-scan for nesting level (must be set before sourcing notify.sh)
+NESTING_LEVEL=0
+for arg in "$@"; do
+  case "$arg" in
+    --nesting-level=*) NESTING_LEVEL="${arg#*=}" ;;
+  esac
+done
+_MT_NOTIFY_NESTING_LEVEL=$NESTING_LEVEL
+
+source "${REPO}/scripts/lib/notify.sh"
+mt_notify "————————————————————————————————" "<hr>"
+mt_deploy_start "deploy_infra"
+
+MT_ENV="${1:-}"
+
+if [ -z "$MT_ENV" ]; then
+  echo "Usage: $0 <env>"
+  echo ""
+  echo "Deploy shared infrastructure components for an environment."
+  echo ""
+  echo "Examples:"
+  echo "  $0 prod    # Deploy infrastructure for production"
+  echo "  $0 dev     # Deploy infrastructure for development"
+  exit 1
+fi
+
+# Verify kubeconfig exists
+export KUBECONFIG="$REPO/kubeconfig.$MT_ENV.yaml"
+if [ ! -f "$KUBECONFIG" ]; then
+  echo "[ERROR] Kubeconfig not found: $KUBECONFIG"
+  echo "Run './scripts/manage_infra $MT_ENV' first to create the cluster."
+  exit 1
+fi
+
+# Load infrastructure config
+INFRA_CONFIG="$REPO/infra/$MT_ENV.config.yaml"
+if [ -f "$INFRA_CONFIG" ]; then
+  echo "[INFO] Loading infrastructure config from $INFRA_CONFIG"
+  # PostgreSQL read replicas (defaults to 1 for HA if not specified)
+  PG_READ_REPLICAS=$(yq '.postgresql.read_replicas // 1' "$INFRA_CONFIG")
+  # Keycloak replicas (defaults to 2 for HA if not specified)
+  KEYCLOAK_REPLICAS=$(yq '.keycloak.replicas // 2' "$INFRA_CONFIG")
+  export PG_READ_REPLICAS KEYCLOAK_REPLICAS
+else
+  echo "[WARNING] Infrastructure config not found: $INFRA_CONFIG"
+  echo "[WARNING] Using defaults: PG_READ_REPLICAS=1, KEYCLOAK_REPLICAS=2"
+  export PG_READ_REPLICAS=1
+  export KEYCLOAK_REPLICAS=2
+fi
+
+# Check for required tools
+for cmd in kubectl helm helmfile yq; do
+  if ! command -v $cmd &> /dev/null; then
+    echo "[ERROR] $cmd is required but not installed."
+    exit 1
+  fi
+done
+
+# Validate Cloudflare IP ranges before deploying (firewall rules depend on these)
+echo "[INFO] Validating Cloudflare IP ranges..."
+"$REPO/scripts/check-cloudflare-ips" || { echo "[ERROR] Cloudflare IPs changed. Run: ./scripts/check-cloudflare-ips --update"; exit 1; }
+
+echo "[INFO] Deploying shared infrastructure for environment: $MT_ENV"
+echo "[INFO] Kubeconfig: $KUBECONFIG"
+
+# Define infrastructure namespace names
+export NS_DB="infra-db"
+export NS_AUTH="infra-auth"
+export NS_MONITORING="infra-monitoring"
+export NS_INGRESS="infra-ingress"
+export NS_INGRESS_INTERNAL="infra-ingress-internal"
+export NS_CERTMANAGER="infra-cert-manager"
+export NS_MAIL="infra-mail"
+
+# Main infrastructure domain - used for shared services (monitoring, auth, etc.)
+# This is the primary domain that hosts the shared infrastructure.
+# Read from first available tenant config: infra.domain, falling back to dns.domain.
+INFRA_DOMAIN=""
+for _td in "$REPO/tenants"/*/; do
+  _tcf="$_td/${MT_ENV}.config.yaml"
+  if [ -f "$_tcf" ]; then
+    INFRA_DOMAIN=$(yq '.infra.domain // .dns.domain' "$_tcf")
+    break
+  fi
+done
+if [ -z "$INFRA_DOMAIN" ] || [ "$INFRA_DOMAIN" = "null" ]; then
+  echo "[ERROR] Could not determine INFRA_DOMAIN from any tenant config" >&2
+  exit 1
+fi
+export INFRA_DOMAIN
+export INFRA_NAME="Mothertree"  # Used in alert email subjects
+
+# Environment DNS label for infrastructure hostnames
+# - prod: empty (e.g., grafana.internal.example.com)
+# - dev: "dev" (e.g., grafana.internal.dev.example.com)
+if [ "$MT_ENV" = "prod" ]; then
+  export INFRA_ENV_DNS_LABEL=""
+  INFRA_SUBDOMAIN=""
+else
+  export INFRA_ENV_DNS_LABEL="$MT_ENV"
+  INFRA_SUBDOMAIN="${MT_ENV}."
+fi
+
+# Infrastructure hostnames - used by shared services
+export AUTH_HOST="auth.${INFRA_SUBDOMAIN}${INFRA_DOMAIN}"
+export PROMETHEUS_HOST="prometheus.internal.${INFRA_SUBDOMAIN}${INFRA_DOMAIN}"
+export GRAFANA_HOST="grafana.internal.${INFRA_SUBDOMAIN}${INFRA_DOMAIN}"
+export ALERTMANAGER_HOST="alertmanager.internal.${INFRA_SUBDOMAIN}${INFRA_DOMAIN}"
+export SMTP_DOMAIN="${INFRA_SUBDOMAIN}${INFRA_DOMAIN}"
+
+echo "[INFO] Infrastructure domain: $INFRA_DOMAIN"
+echo "[INFO] Infrastructure DNS label: ${INFRA_ENV_DNS_LABEL:-<none>}"
+echo "[INFO] Auth host: $AUTH_HOST"
+echo "[INFO] Grafana host: $GRAFANA_HOST"
+
+# Tenant namespace placeholders (required by helmfile parsing, but not used for tier=system)
+# These are set to valid values so helmfile can parse the file, even though
+# we only deploy system tier releases
+export NS_MATRIX="placeholder-matrix"
+export NS_DOCS="placeholder-docs"
+export NS_FILES="placeholder-files"
+export NS_JITSI="placeholder-jitsi"
+
+# Create infrastructure namespaces
+echo "[INFO] Creating infrastructure namespaces..."
+for ns in $NS_DB $NS_AUTH $NS_MONITORING $NS_INGRESS $NS_INGRESS_INTERNAL $NS_CERTMANAGER $NS_MAIL; do
+  kubectl create namespace "$ns" 2>/dev/null || echo "[INFO] Namespace $ns already exists"
+done
+
+# =============================================================================
+# Consolidate helm repo updates (done once here, skipped in later steps)
+# =============================================================================
+echo "[INFO] Updating helm repositories (consolidated)..."
+helm repo add bitnami https://charts.bitnami.com/bitnami 2>/dev/null || true
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
+helm repo add jetstack https://charts.jetstack.io 2>/dev/null || true
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
+helm repo add vector https://helm.vector.dev 2>/dev/null || true
+helm repo add codecentric https://codecentric.github.io/helm-charts 2>/dev/null || true
+helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ 2>/dev/null || true
+helm repo add linode-cfw https://linode.github.io/cloud-firewall-controller 2>/dev/null || true
+helm repo update >/dev/null 2>&1 &
+HELM_REPO_UPDATE_PID=$!
+echo "[INFO] Helm repo update started in background (PID: $HELM_REPO_UPDATE_PID)"
+
+# =============================================================================
+# Start linkeditor build early (runs in background while other work proceeds)
+# =============================================================================
+LINKEDITOR_BUILD_PID=""
+if [ -d "$REPO/submodules/files_linkeditor" ] && [ -f "$REPO/scripts/build-linkeditor.sh" ]; then
+  echo "[INFO] Starting files_linkeditor build in background..."
+  "$REPO/scripts/build-linkeditor.sh" --nesting-level=$((NESTING_LEVEL+1)) > /tmp/linkeditor-build.log 2>&1 &
+  LINKEDITOR_BUILD_PID=$!
+  echo "[INFO] files_linkeditor build started (PID: $LINKEDITOR_BUILD_PID)"
+fi
+
+# =============================================================================
+# Start Roundcube image build early (runs in background while other work proceeds)
+# =============================================================================
+ROUNDCUBE_BUILD_PID=""
+if [ -d "$REPO/submodules/roundcubemail-plugins-kolab/plugins" ] && [ -f "$REPO/apps/scripts/build-roundcube-image.sh" ]; then
+  echo "[INFO] Starting Roundcube custom image build in background..."
+  "$REPO/apps/scripts/build-roundcube-image.sh" --nesting-level=$((NESTING_LEVEL+1)) > /tmp/roundcube-build.log 2>&1 &
+  ROUNDCUBE_BUILD_PID=$!
+  echo "[INFO] Roundcube image build started (PID: $ROUNDCUBE_BUILD_PID)"
+fi
+
+# Wait for helm repo update before first helm command
+echo "[INFO] Waiting for helm repo update to complete..."
+wait $HELM_REPO_UPDATE_PID 2>/dev/null || true
+echo "[INFO] Helm repo update complete"
+
+# =============================================================================
+# Internal ingress allowlist (stable CIDRs; not dependent on node churn)
+# =============================================================================
+echo "[INFO] Setting internal ingress whitelist CIDRs (stable)..."
+
+# Rationale:
+# - The internal ingress is exposed via NodePort and is intended to be reachable via VPN.
+# - In practice, VPN-to-cluster traffic may be NAT'd and/or routed through different
+#   private subnets over time (VPN server subnet changes, node pool churn, etc.).
+# - Enumerating current node /24s is brittle and can lead to unexpected 403s.
+#
+# We therefore allow:
+# - 10.8.0.0/24: VPN client network
+# - 192.168.0.0/16: private networking range used in this deployment (covers VPN/private subnets)
+# - 10.2.0.0/16: pod CIDR (Linode LKE default)
+STABLE_CIDRS="10.8.0.0/24,192.168.0.0/16,10.2.0.0/16"
+export INGRESS_INTERNAL_WHITELIST="$STABLE_CIDRS"
+export INGRESS_INTERNAL_REAL_IP_FROM="$STABLE_CIDRS"
+echo "[INFO] Internal ingress whitelist: $STABLE_CIDRS"
+
+# =============================================================================
+# One-time cleanup: Clear field manager conflicts from previous kubectl patches
+# =============================================================================
+# This block only runs ONCE when migrating from kubectl-managed to Helm-managed ingress.
+# A marker annotation on the namespace tracks whether migration is complete.
+# After migration, this entire block is skipped on future deploys.
+#
+# We check BOTH Deployment AND Service for conflicts (kubectl or kubectl-patch managers).
+# IMPORTANT: --show-managed-fields is required; kubectl doesn't include managedFields by default.
+
+# Check if migration marker exists - if so, skip the entire cleanup check
+MIGRATION_MARKER=$(kubectl get namespace "$NS_INGRESS" -o jsonpath='{.metadata.annotations.mothertree\.io/ingress-helm-migration}' 2>/dev/null || echo "")
+if [ "$MIGRATION_MARKER" = "complete" ]; then
+  echo "[INFO] Ingress Helm migration already complete (marker found), skipping cleanup check"
+else
+  KUBECTL_CONFLICT_FOUND=""
+
+  if kubectl get deployment ingress-nginx-controller -n "$NS_INGRESS" >/dev/null 2>&1; then
+    DEPLOY_MANAGERS=$(kubectl get deployment ingress-nginx-controller -n "$NS_INGRESS" -o json --show-managed-fields 2>/dev/null | \
+      jq -r '.metadata.managedFields[]?.manager // empty' | grep -E '^kubectl' || true)
+    if [ -n "$DEPLOY_MANAGERS" ]; then
+      echo "[DEBUG] Deployment has kubectl managers: $DEPLOY_MANAGERS"
+      KUBECTL_CONFLICT_FOUND="deployment"
+    fi
+  fi
+
+  if kubectl get service ingress-nginx-controller -n "$NS_INGRESS" >/dev/null 2>&1; then
+    SVC_MANAGERS=$(kubectl get service ingress-nginx-controller -n "$NS_INGRESS" -o json --show-managed-fields 2>/dev/null | \
+      jq -r '.metadata.managedFields[]?.manager // empty' | grep -E '^kubectl' || true)
+    if [ -n "$SVC_MANAGERS" ]; then
+      echo "[DEBUG] Service has kubectl managers: $SVC_MANAGERS"
+      KUBECTL_CONFLICT_FOUND="${KUBECTL_CONFLICT_FOUND:+$KUBECTL_CONFLICT_FOUND,}service"
+    fi
+  fi
+
+  if [ -n "$KUBECTL_CONFLICT_FOUND" ]; then
+    echo "[WARNING] One-time cleanup: kubectl field managers detected on ingress-nginx ($KUBECTL_CONFLICT_FOUND)"
+    echo "[INFO] Deleting ingress-nginx resources to allow clean Helm install (brief downtime)..."
+    echo "[INFO] This only happens once - future deploys will be normal Helm upgrades."
+    
+    # Uninstall helm release first (if exists)
+    helm uninstall ingress-nginx -n "$NS_INGRESS" --wait 2>/dev/null || true
+    
+    # Force delete all ingress-nginx resources to ensure clean slate
+    kubectl delete deployment ingress-nginx-controller -n "$NS_INGRESS" --ignore-not-found=true --grace-period=0 --force 2>/dev/null || true
+    kubectl delete service ingress-nginx-controller -n "$NS_INGRESS" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete service ingress-nginx-controller-admission -n "$NS_INGRESS" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete configmap tcp-services -n "$NS_INGRESS" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete configmap ingress-nginx-controller -n "$NS_INGRESS" --ignore-not-found=true 2>/dev/null || true
+    
+    # Wait for resources to be fully deleted
+    echo "[INFO] Waiting for resources to be deleted..."
+    for i in $(seq 1 30); do
+      if ! kubectl get deployment ingress-nginx-controller -n "$NS_INGRESS" >/dev/null 2>&1 && \
+         ! kubectl get service ingress-nginx-controller -n "$NS_INGRESS" >/dev/null 2>&1; then
+        echo "[INFO] Cleanup complete, helmfile will reinstall ingress-nginx"
+        break
+      fi
+      sleep 2
+    done
+    
+    # Verify cleanup succeeded - fail fast if resources still exist
+    if kubectl get deployment ingress-nginx-controller -n "$NS_INGRESS" >/dev/null 2>&1 || \
+       kubectl get service ingress-nginx-controller -n "$NS_INGRESS" >/dev/null 2>&1; then
+      echo "[ERROR] Failed to delete ingress-nginx resources. Manual cleanup required:"
+      echo "  kubectl delete deployment ingress-nginx-controller -n $NS_INGRESS --force --grace-period=0"
+      echo "  kubectl delete service ingress-nginx-controller -n $NS_INGRESS"
+      exit 1
+    fi
+  else
+    echo "[INFO] No field manager conflicts detected on ingress-nginx"
+  fi
+  
+  # Set migration marker to prevent future cleanup attempts
+  echo "[INFO] Setting ingress Helm migration marker..."
+  kubectl annotate namespace "$NS_INGRESS" "mothertree.io/ingress-helm-migration=complete" --overwrite
+fi
+
+# =============================================================================
+# Cloud Firewall Controller - create API token secret
+# =============================================================================
+echo "[INFO] Setting up Cloud Firewall Controller API token..."
+if [ -f "$REPO/secrets.$MT_ENV.tfvars.env" ]; then
+  source "$REPO/secrets.$MT_ENV.tfvars.env"
+fi
+if [ -n "${TF_VAR_linode_token:-}" ]; then
+  kubectl create secret generic linode-cfw -n kube-system \
+    --from-literal=token="$TF_VAR_linode_token" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  echo "[INFO] Cloud Firewall Controller secret created/updated in kube-system"
+else
+  echo "[WARN] TF_VAR_linode_token not set - Cloud Firewall Controller will not have API access"
+fi
+
+# Migrate metrics-server from kubectl-managed to Helm-managed
+# If metrics-server exists but isn't managed by Helm, remove it so Helm can install cleanly.
+# This is a one-time migration — on subsequent runs, Helm already owns the resources.
+if kubectl get sa metrics-server -n kube-system &>/dev/null; then
+  if ! kubectl get sa metrics-server -n kube-system -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null | grep -q "Helm"; then
+    echo "[INFO] Migrating metrics-server from kubectl to Helm management..."
+    kubectl delete deployment metrics-server -n kube-system --ignore-not-found=true
+    kubectl delete service metrics-server -n kube-system --ignore-not-found=true
+    kubectl delete serviceaccount metrics-server -n kube-system --ignore-not-found=true
+    kubectl delete clusterrole system:metrics-server --ignore-not-found=true
+    kubectl delete clusterrolebinding system:metrics-server --ignore-not-found=true
+    kubectl delete clusterrolebinding metrics-server:system:auth-delegator --ignore-not-found=true
+    kubectl delete rolebinding metrics-server-auth-reader -n kube-system --ignore-not-found=true
+    kubectl delete apiservice v1beta1.metrics.k8s.io --ignore-not-found=true
+    echo "[INFO] Old metrics-server resources removed, Helm will reinstall"
+  fi
+fi
+
+# Deploy system components via helmfile
+# Use 'sync' instead of 'apply' to skip the slow diff operation
+# For large charts like kube-prometheus-stack, diff can take 10+ minutes
+echo "[INFO] Deploying system components (ingress, cert-manager, monitoring)..."
+pushd "$REPO/apps" >/dev/null
+  # Retry helmfile sync for transient errors only
+  # Use --skip-deps since repos are already updated above
+  # FAIL FAST: Do not retry on field manager conflicts - these require cleanup, not retries
+  max_retries=3
+  retry_count=0
+  HELMFILE_OUTPUT=""
+  while [ $retry_count -lt $max_retries ]; do
+    set +e
+    HELMFILE_OUTPUT=$(helmfile -e "$MT_ENV" -l tier=system sync --skip-deps 2>&1)
+    HELMFILE_EXIT=$?
+    set -e
+    
+    echo "$HELMFILE_OUTPUT"
+    
+    if [ $HELMFILE_EXIT -eq 0 ]; then
+      break
+    fi
+    
+    # FAIL FAST: Check for field manager conflicts - these won't be fixed by retrying
+    if echo "$HELMFILE_OUTPUT" | grep -q "conflicts with.*kubectl"; then
+      echo ""
+      echo "[ERROR] Field manager conflict detected - this cannot be fixed by retrying."
+      echo "[ERROR] The ingress-nginx resources have kubectl-managed fields that conflict with Helm."
+      echo ""
+      echo "This happens when kubectl patch/apply was used on Helm-managed resources."
+      echo "The cleanup logic should have caught this, but resources may still exist."
+      echo ""
+      echo "Manual fix required:"
+      echo "  helm uninstall ingress-nginx -n $NS_INGRESS"
+      echo "  kubectl delete deployment ingress-nginx-controller -n $NS_INGRESS --force --grace-period=0"
+      echo "  kubectl delete service ingress-nginx-controller -n $NS_INGRESS"
+      echo "  kubectl delete service ingress-nginx-controller-admission -n $NS_INGRESS"
+      echo "  kubectl delete configmap tcp-services ingress-nginx-controller -n $NS_INGRESS"
+      echo ""
+      echo "Then re-run: ./scripts/deploy_infra $MT_ENV"
+      exit 1
+    fi
+    
+    retry_count=$((retry_count + 1))
+    if [ $retry_count -lt $max_retries ]; then
+      echo "[WARN] helmfile sync failed (attempt $retry_count/$max_retries), retrying in 10 seconds..."
+      sleep 10
+    else
+      echo "[ERROR] helmfile sync failed after $max_retries attempts"
+      exit 1
+    fi
+  done
+popd >/dev/null
+
+# Wait for ingress controller to get an external IP
+echo "[INFO] Waiting for ingress controller LoadBalancer IP..."
+for i in $(seq 1 60); do
+  INGRESS_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+  if [ -n "$INGRESS_IP" ]; then
+    echo "[INFO] Ingress controller LoadBalancer IP: $INGRESS_IP"
+    break
+  fi
+  echo "Waiting for LoadBalancer IP... (attempt $i/60)"
+  sleep 5
+done
+
+if [ -z "$INGRESS_IP" ]; then
+  echo "[ERROR] Ingress controller did not get an external IP after 5 minutes"
+  exit 1
+fi
+
+# Deploy nginx ingress ServiceMonitor for metrics
+echo "[INFO] Deploying nginx ingress ServiceMonitor..."
+kubectl apply -f "$REPO/apps/manifests/nginx-ingress-servicemonitor.yaml"
+
+# =============================================================================
+# Wait for monitoring stack (with pre-check to avoid hanging on already-ready)
+# =============================================================================
+echo "[INFO] Checking monitoring stack readiness..."
+
+# Check if Prometheus is already ready (avoid kubectl wait hang on already-ready pods)
+PROM_READY=$(kubectl get pods -n "$NS_MONITORING" -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[?(@.status.conditions[?(@.type=="Ready")].status=="True")].metadata.name}' 2>/dev/null || true)
+if [ -n "$PROM_READY" ]; then
+  echo "[INFO] Prometheus already ready: $PROM_READY"
+else
+  echo "[INFO] Waiting for Prometheus to be ready (max 3 min)..."
+  kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=prometheus -n "$NS_MONITORING" --timeout=180s 2>/dev/null || echo "[WARN] Prometheus may not be fully ready yet"
+fi
+
+# Check if Grafana is already ready
+GRAFANA_READY=$(kubectl get pods -n "$NS_MONITORING" -l app.kubernetes.io/name=grafana -o jsonpath='{.items[?(@.status.conditions[?(@.type=="Ready")].status=="True")].metadata.name}' 2>/dev/null || true)
+if [ -n "$GRAFANA_READY" ]; then
+  echo "[INFO] Grafana already ready: $GRAFANA_READY"
+else
+  echo "[INFO] Waiting for Grafana to be ready (max 2 min)..."
+  kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=grafana -n "$NS_MONITORING" --timeout=120s 2>/dev/null || echo "[WARN] Grafana may not be fully ready yet"
+fi
+
+# Shared dashboards (Grafana auto-imports these ConfigMaps)
+echo "[INFO] Deploying shared Grafana dashboards..."
+kubectl apply -f "$REPO/apps/manifests/jitsi/jitsi-dashboard-configmap.yaml"
+
+# Wait for cert-manager to be ready (parallel waits for all deployments)
+echo "[INFO] Waiting for cert-manager to be ready (parallel)..."
+CERTMANAGER_PIDS=""
+for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+  if kubectl -n "$NS_CERTMANAGER" get deploy "$d" >/dev/null 2>&1; then
+    kubectl -n "$NS_CERTMANAGER" rollout status deploy/"$d" --timeout=300s &
+    CERTMANAGER_PIDS="$CERTMANAGER_PIDS $!"
+  fi
+done
+# Wait for all cert-manager deployments
+for pid in $CERTMANAGER_PIDS; do
+  wait $pid || echo "[WARNING] A cert-manager deployment rollout may not have completed"
+done
+echo "[INFO] Cert-manager is ready"
+
+# Deploy PostgreSQL to shared database namespace
+# Note: Helm repos already updated at start of script
+echo "[INFO] Deploying PostgreSQL to $NS_DB namespace..."
+
+# SAFETY CHECK: Detect existing PostgreSQL PVC to prevent data loss
+# This prevents accidental data loss if namespace or PVC naming changes
+EXISTING_PVC=$(kubectl get pvc -n "$NS_DB" -l app.kubernetes.io/name=postgresql -o name 2>/dev/null | head -1 || echo "")
+if [ -z "$EXISTING_PVC" ]; then
+  RELEASED_PVS=$(kubectl get pv -o json 2>/dev/null | jq -r '.items[] | select(.status.phase=="Released") | select(.spec.claimRef.namespace=="'"$NS_DB"'") | select(.spec.claimRef.name | startswith("data-docs-postgresql")) | .metadata.name' || echo "")
+  if [ -n "$RELEASED_PVS" ]; then
+    echo "[ERROR] No PostgreSQL PVC found in $NS_DB but Released PVs exist with postgres data!"
+    echo "[ERROR] Released PVs: $RELEASED_PVS"
+    echo "[ERROR] This may indicate a namespace issue that would cause DATA LOSS."
+    echo "[ERROR] Set ALLOW_NEW_PVC=true to proceed (data will NOT be migrated)"
+    if [ "${ALLOW_NEW_PVC:-}" != "true" ]; then
+      exit 1
+    fi
+    echo "[WARNING] ALLOW_NEW_PVC=true set - proceeding with new PVC"
+  else
+    echo "[INFO] No existing PostgreSQL PVC - this appears to be a fresh install"
+  fi
+else
+  echo "[INFO] Existing PostgreSQL PVC found: $EXISTING_PVC"
+fi
+
+# Check for existing PostgreSQL secret and add replication-password if missing
+if kubectl get secret docs-postgresql -n "$NS_DB" &>/dev/null; then
+  if ! kubectl get secret docs-postgresql -n "$NS_DB" -o jsonpath='{.data.replication-password}' 2>/dev/null | grep -q .; then
+    echo "[INFO] PostgreSQL: patching existing secret to add replication-password"
+    REPL_PASSWORD=$(openssl rand -base64 18)
+    kubectl patch secret docs-postgresql -n "$NS_DB" --type='json' \
+      -p="[{\"op\": \"add\", \"path\": \"/data/replication-password\", \"value\": \"$(echo -n "$REPL_PASSWORD" | base64)\"}]"
+  fi
+fi
+
+# Deploy with replication enabled
+# PG_READ_REPLICAS is loaded from infra config at the start of script
+PG_READ_REPLICAS="${PG_READ_REPLICAS:-1}"
+helm upgrade --install docs-postgresql oci://registry-1.docker.io/bitnamicharts/postgresql \
+  --version 18.2.3 \
+  --namespace "$NS_DB" \
+  --values "$REPO/apps/values/docs-postgresql.yaml" \
+  --set "architecture=replication" \
+  --set "readReplicas.replicaCount=${PG_READ_REPLICAS}" \
+  --set "global.security.allowInsecureImages=true" \
+  --wait \
+  --timeout 600s
+
+echo "[INFO] Waiting for PostgreSQL to be ready..."
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql -n "$NS_DB" --timeout=300s
+
+# Create Keycloak theme ConfigMap BEFORE deploying Keycloak
+echo "[INFO] Creating Keycloak theme ConfigMap..."
+THEMES_DIR="$REPO/apps/themes"
+if [ -d "$THEMES_DIR/platform" ]; then
+  echo "[INFO] Packaging platform theme..."
+  TMP_TAR=$(mktemp /tmp/platform-theme-XXXXXX.tar.gz)
+  pushd "$THEMES_DIR" >/dev/null
+    tar -czf "$TMP_TAR" platform
+  popd >/dev/null
+
+  kubectl -n "$NS_AUTH" create configmap keycloak-platform-theme \
+      --from-file=theme.tar.gz="$TMP_TAR" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  rm -f "$TMP_TAR"
+  echo "[INFO] Platform theme ConfigMap created in namespace $NS_AUTH"
+else
+  echo "[WARNING] Theme directory not found at $THEMES_DIR/platform, skipping theme ConfigMap"
+fi
+
+# Detect PostgreSQL service hostname from cluster state
+# This is needed for Keycloak and other apps that connect to PostgreSQL
+if kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
+  export PG_SERVICE_NAME="docs-postgresql-primary"
+  echo "[INFO] PostgreSQL: detected replication mode (docs-postgresql-primary)"
+else
+  export PG_SERVICE_NAME="docs-postgresql"
+  echo "[INFO] PostgreSQL: detected standalone mode (docs-postgresql)"
+fi
+export PG_HOST="${PG_SERVICE_NAME}.${NS_DB}.svc.cluster.local"
+
+# Load Keycloak secrets from first available tenant's secrets file
+# Keycloak is shared infrastructure but passwords are stored in tenant secrets
+echo "[INFO] Loading Keycloak secrets from tenant secrets..."
+KEYCLOAK_SECRETS_LOADED=false
+for tenant_dir in "$REPO/tenants"/*/; do
+  tenant_secrets_file="$tenant_dir/${MT_ENV}.secrets.yaml"
+  if [ -f "$tenant_secrets_file" ]; then
+    export KEYCLOAK_ADMIN_PASSWORD=$(yq '.keycloak.admin_password' "$tenant_secrets_file")
+    export KEYCLOAK_DB_PASSWORD=$(yq '.keycloak.db_password' "$tenant_secrets_file")
+    if [ -n "$KEYCLOAK_ADMIN_PASSWORD" ] && [ "$KEYCLOAK_ADMIN_PASSWORD" != "null" ] && \
+       [ -n "$KEYCLOAK_DB_PASSWORD" ] && [ "$KEYCLOAK_DB_PASSWORD" != "null" ]; then
+      KEYCLOAK_SECRETS_LOADED=true
+      echo "[INFO] Keycloak secrets loaded from $tenant_secrets_file"
+      break
+    fi
+  fi
+done
+if [ "$KEYCLOAK_SECRETS_LOADED" != "true" ]; then
+  echo "[ERROR] Could not load keycloak.admin_password and keycloak.db_password from any tenant secrets file"
+  echo "[ERROR] Add keycloak.admin_password and keycloak.db_password to tenants/<tenant>/${MT_ENV}.secrets.yaml"
+  exit 1
+fi
+
+# Sync Keycloak DB password in PostgreSQL to match secrets file
+# The password may have been set to a different value during initial DB creation,
+# so we always ensure it matches the current secrets file value.
+echo "[INFO] Syncing Keycloak DB password in PostgreSQL..."
+PG_SUPERUSER_PASS=$(kubectl get secret docs-postgresql -n "$NS_DB" --kubeconfig="$REPO/kubeconfig.$MT_ENV.yaml" -o jsonpath='{.data.postgres-password}' | base64 -d)
+# Use \password-style approach via stdin to avoid SQL injection from special chars in password
+kubectl exec -i "${PG_SERVICE_NAME}-0" -n "$NS_DB" --kubeconfig="$REPO/kubeconfig.$MT_ENV.yaml" -- \
+  env PGPASSWORD="$PG_SUPERUSER_PASS" psql -U postgres -c "ALTER ROLE keycloak WITH PASSWORD '$(echo "$KEYCLOAK_DB_PASSWORD" | sed "s/'/''/g")';" 2>/dev/null || \
+  echo "[WARN] Could not update keycloak DB password — PostgreSQL may not be ready yet"
+
+# Deploy Keycloak (needs PostgreSQL)
+# KEYCLOAK_REPLICAS is loaded from infra config at the start of script
+echo "[INFO] Deploying Keycloak to $NS_AUTH namespace (replicas: $KEYCLOAK_REPLICAS)..."
+pushd "$REPO/apps" >/dev/null
+  # Use sync instead of apply to skip slow diff
+  # Use --skip-deps since repos are already updated at start of script
+  helmfile -e "$MT_ENV" -l name=keycloak sync --skip-deps
+popd >/dev/null
+
+# Sync Keycloak admin password
+# The KEYCLOAK_ADMIN_PASSWORD env var only applies on first boot; afterwards the
+# password is stored in Keycloak's database. Use kcadm.sh to update it if it
+# doesn't match. This handles credential rotation and first-time migration from
+# hardcoded passwords.
+echo "[INFO] Waiting for Keycloak to be ready before syncing admin password..."
+kubectl wait --for=condition=ready pod/keycloak-keycloakx-0 -n "$NS_AUTH" \
+  --kubeconfig="$REPO/kubeconfig.$MT_ENV.yaml" --timeout=180s 2>/dev/null || true
+
+echo "[INFO] Syncing Keycloak admin password..."
+# Try the new password first (already up to date)
+if kubectl exec keycloak-keycloakx-0 -n "$NS_AUTH" -c keycloak \
+    --kubeconfig="$REPO/kubeconfig.$MT_ENV.yaml" -- \
+    /opt/keycloak/bin/kcadm.sh config credentials \
+    --server http://localhost:8080 --realm master \
+    --user admin --password "$KEYCLOAK_ADMIN_PASSWORD" 2>/dev/null; then
+  echo "[INFO] Keycloak admin password already matches secrets file"
+else
+  # Try known legacy passwords and update to the new one
+  LEGACY_PASSWORDS=("keycloak-admin-password-change-me" "admin" "changeme")
+  ADMIN_UPDATED=false
+  for old_pass in "${LEGACY_PASSWORDS[@]}"; do
+    if kubectl exec keycloak-keycloakx-0 -n "$NS_AUTH" -c keycloak \
+        --kubeconfig="$REPO/kubeconfig.$MT_ENV.yaml" -- \
+        /opt/keycloak/bin/kcadm.sh config credentials \
+        --server http://localhost:8080 --realm master \
+        --user admin --password "$old_pass" 2>/dev/null; then
+      echo "[INFO] Authenticated with legacy password, updating to new password..."
+      kubectl exec keycloak-keycloakx-0 -n "$NS_AUTH" -c keycloak \
+          --kubeconfig="$REPO/kubeconfig.$MT_ENV.yaml" -- \
+          /opt/keycloak/bin/kcadm.sh set-password \
+          --server http://localhost:8080 --realm master \
+          --username admin --new-password "$KEYCLOAK_ADMIN_PASSWORD" 2>/dev/null && \
+        echo "[INFO] Keycloak admin password updated successfully" && ADMIN_UPDATED=true
+      break
+    fi
+  done
+  if [ "$ADMIN_UPDATED" != "true" ]; then
+    echo "[WARN] Could not sync Keycloak admin password — manual reset may be needed"
+  fi
+fi
+
+# Run Terraform for DNS, ClusterIssuers, etc.
+echo "[INFO] Running Terraform for DNS and certificates..."
+pushd "$REPO/infra" >/dev/null
+  # Source secrets
+  if [ -f "$REPO/secrets.$MT_ENV.tfvars.env" ]; then
+    source "$REPO/secrets.$MT_ENV.tfvars.env"
+  fi
+  
+  terraform init -input=false
+  terraform workspace select "$MT_ENV" 2>/dev/null || terraform workspace new "$MT_ENV"
+  
+  VAR_FILE_FLAG=""
+  [ -f "$REPO/terraform.tfvars" ] && VAR_FILE_FLAG="-var-file=$REPO/terraform.tfvars"
+  
+  ENV_DNS_LABEL="$MT_ENV"
+  [ "$MT_ENV" = "prod" ] && ENV_DNS_LABEL=""
+
+  # Build ALLOWED_SENDER_DOMAINS from tenant configs (env-aware)
+  SMTP_ALLOWED_SENDER_DOMAINS=""
+  for tenant_dir in "$REPO/tenants"/*/; do
+    config_file="$tenant_dir/${MT_ENV}.config.yaml"
+    if [ -f "$config_file" ]; then
+      base_domain=$(yq '.dns.domain' "$config_file")
+      env_label=$(yq '.dns.env_dns_label // ""' "$config_file")
+      if [ -n "$env_label" ] && [ "$env_label" != "null" ]; then
+        domain="${env_label}.${base_domain}"
+      else
+        domain="$base_domain"
+      fi
+      if [ -n "$domain" ] && [ "$domain" != "null" ]; then
+        SMTP_ALLOWED_SENDER_DOMAINS="${SMTP_ALLOWED_SENDER_DOMAINS:+$SMTP_ALLOWED_SENDER_DOMAINS,}$domain"
+      fi
+    fi
+  done
+
+  # Detect VPN tunnel for SSH access to VPN server (Terraform provisioners)
+  # Same logic as Ansible section below — prefer tunnel IP when reachable
+  VPN_SSH_HOST=""
+  VPN_TUNNEL_IP="10.8.0.1"
+  if ping -c 1 -W 2 "$VPN_TUNNEL_IP" >/dev/null 2>&1; then
+    echo "[INFO] VPN tunnel reachable — Terraform will SSH via $VPN_TUNNEL_IP"
+    VPN_SSH_HOST="$VPN_TUNNEL_IP"
+  fi
+
+  terraform apply -input=false -auto-approve $VAR_FILE_FLAG \
+    -var env="$MT_ENV" \
+    -var env_dns_label="$ENV_DNS_LABEL" \
+    -var smtp_allowed_sender_domains="$SMTP_ALLOWED_SENDER_DOMAINS" \
+    -var vpn_ssh_host="$VPN_SSH_HOST"
+
+  # Read NodeBalancer firewall ID for LB annotation
+  NB_FIREWALL_ID=$(terraform output -raw nodebalancer_firewall_id 2>/dev/null || echo "")
+  export NB_FIREWALL_ID
+popd >/dev/null
+
+# Annotate ingress LoadBalancer Service with Cloud Firewall ID
+if [ -n "$NB_FIREWALL_ID" ]; then
+  echo "[INFO] Attaching Cloud Firewall $NB_FIREWALL_ID to ingress LoadBalancer..."
+  kubectl annotate svc ingress-nginx-controller -n "$NS_INGRESS" \
+    "service.beta.kubernetes.io/linode-loadbalancer-firewall-id=$NB_FIREWALL_ID" --overwrite
+  echo "[INFO] Cloud Firewall attached to NodeBalancer"
+else
+  echo "[WARN] No NodeBalancer firewall ID found — skipping LB firewall annotation"
+fi
+
+# Get VPN server IPs from phase1 outputs
+# CRITICAL: Must select the correct workspace first! Each Terraform directory maintains
+# its own workspace state. Without this, we'd read from whichever workspace was last
+# used by manage_infra, potentially getting the wrong environment's VPN IP.
+pushd "$REPO/phase1" >/dev/null
+  terraform workspace select "$MT_ENV" >/dev/null 2>&1 || {
+    echo "[ERROR] phase1 workspace '$MT_ENV' not found. Run './scripts/manage_infra $MT_ENV' first."
+    popd >/dev/null
+    exit 1
+  }
+  VPN_SERVER_IP=$(terraform output -raw openvpn_server_ip 2>/dev/null || echo "")
+  VPN_SERVER_PRIVATE_IP=$(terraform output -raw openvpn_server_private_ip 2>/dev/null || echo "")
+  VPN_SERVER_TUNNEL_IP=$(terraform output -raw vpn_server_tunnel_ip 2>/dev/null || echo "")
+  TURN_SERVER_IP=$(terraform output -raw turn_server_ip 2>/dev/null || echo "")
+  LKE_CLUSTER_ID=$(terraform output -raw cluster_id 2>/dev/null || echo "")
+popd >/dev/null
+
+# =============================================================================
+# Ensure LKE firewall allows JVB (Jitsi) UDP from the internet
+# =============================================================================
+# LKE auto-creates a Cloud Firewall on cluster nodes that restricts NodePorts to
+# the NodeBalancer subnet (192.168.255.0/24). This blocks JVB media traffic since
+# WebRTC clients connect directly to JVB via UDP hostPort, not through the
+# NodeBalancer. We add rules for each tenant's JVB port so media can flow.
+
+if [ -n "$LKE_CLUSTER_ID" ] && [ -n "${TF_VAR_linode_token:-}" ]; then
+  # Find the LKE-managed firewall by label pattern
+  LKE_FW_ID=$(curl -s -H "Authorization: Bearer $TF_VAR_linode_token" \
+    "https://api.linode.com/v4/networking/firewalls" \
+    | jq -r ".data[] | select(.label == \"lke-${LKE_CLUSTER_ID}\") | .id // empty")
+
+  if [ -n "$LKE_FW_ID" ]; then
+    # Collect all JVB ports from tenant configs for this environment
+    JVB_PORTS=""
+    for config_file in "$REPO"/tenants/*/$(echo "$MT_ENV" | tr '[:upper:]' '[:lower:]').config.yaml; do
+      [ -f "$config_file" ] || continue
+      port=$(yq '.resources.jitsi.jvb_port' "$config_file" 2>/dev/null)
+      if [ -n "$port" ] && [ "$port" != "null" ]; then
+        JVB_PORTS="${JVB_PORTS:+$JVB_PORTS,}$port"
+      fi
+    done
+
+    if [ -n "$JVB_PORTS" ]; then
+      # Get current firewall rules
+      LKE_FW_RULES=$(curl -s -H "Authorization: Bearer $TF_VAR_linode_token" \
+        "https://api.linode.com/v4/networking/firewalls/$LKE_FW_ID/rules")
+
+      # Check if JVB rule already exists with the right ports
+      EXISTING_JVB_PORTS=$(echo "$LKE_FW_RULES" | jq -r '.inbound[] | select(.label == "allow-jvb-udp") | .ports // empty')
+
+      if [ "$EXISTING_JVB_PORTS" = "$JVB_PORTS" ]; then
+        echo "[INFO] LKE firewall $LKE_FW_ID already has JVB UDP rule for ports $JVB_PORTS"
+      else
+        echo "[INFO] Updating LKE firewall $LKE_FW_ID to allow JVB UDP ports $JVB_PORTS from internet..."
+
+        # Remove any existing JVB rule, then insert new one before the nodeports-udp rule.
+        # Use heredoc for jq filter to avoid bash escaping issues with '!'.
+        JQ_FILTER=$(cat <<'JQEOF'
+.inbound |= (
+  [.[] | select(.label == "allow-jvb-udp" | not)] |
+  to_entries |
+  map(
+    if .value.label == "allow-cluster-nodeports-udp" then
+      {key: .key, value: {"protocol":"UDP","addresses":{"ipv4":["0.0.0.0/0"],"ipv6":["::/0"]},"action":"ACCEPT","label":"allow-jvb-udp","ports":$ports,"description":"Jitsi JVB media UDP - managed by deploy_infra"}},
+      .
+    else . end
+  ) | [.[].value]
+)
+JQEOF
+        )
+        UPDATED_RULES=$(echo "$LKE_FW_RULES" | jq --arg ports "$JVB_PORTS" "$JQ_FILTER")
+
+        RESULT=$(curl -s -X PUT -H "Authorization: Bearer $TF_VAR_linode_token" \
+          -H "Content-Type: application/json" \
+          "https://api.linode.com/v4/networking/firewalls/$LKE_FW_ID/rules" \
+          -d "$UPDATED_RULES")
+
+        if echo "$RESULT" | jq -e '.inbound' >/dev/null 2>&1; then
+          echo "[INFO] LKE firewall updated — JVB UDP ports $JVB_PORTS open from internet"
+        else
+          echo "[WARN] Failed to update LKE firewall: $(echo "$RESULT" | jq -r '.errors[0].reason // "unknown error"')"
+        fi
+      fi
+    else
+      echo "[INFO] No JVB ports found in tenant configs — skipping LKE firewall JVB rule"
+    fi
+  else
+    echo "[INFO] No LKE-managed firewall found for cluster $LKE_CLUSTER_ID — skipping JVB rule"
+  fi
+else
+  echo "[INFO] No LKE cluster ID available — skipping LKE firewall JVB rule"
+fi
+
+# =============================================================================
+# Configure K8s Postfix mail routing using shared script
+# =============================================================================
+# Uses shared configure-mail-routing script that scans ALL tenants to ensure
+# consistent configuration. This creates the ConfigMap and sets ALLOWED_SENDER_DOMAINS.
+
+echo "[INFO] Configuring K8s Postfix mail routing..."
+if [ -x "$REPO/scripts/configure-mail-routing" ]; then
+  "$REPO/scripts/configure-mail-routing" "$MT_ENV" --nesting-level=$((NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+else
+  echo "[WARN] configure-mail-routing script not found"
+fi
+
+# =============================================================================
+# Scan tenants for VPN Postfix Ansible configuration
+# =============================================================================
+# Ansible needs the tenant domains list to configure VPN Postfix transport maps.
+# This is separate from the K8s configuration above.
+
+echo "[INFO] Scanning tenants for VPN Postfix configuration..."
+TENANT_DOMAINS=""
+
+for tenant_dir in "$REPO/tenants"/*/; do
+  tenant_name=$(basename "$tenant_dir")
+  config_file="$tenant_dir/${MT_ENV}.config.yaml"
+  
+  if [ -f "$config_file" ]; then
+    base_domain=$(yq '.dns.domain' "$config_file")
+    env_label=$(yq '.dns.env_dns_label // ""' "$config_file")
+    
+    # Construct the actual mail domain using env_dns_label prefix if set
+    # e.g., dev.example.com for dev, example.com for prod
+    if [ -n "$env_label" ] && [ "$env_label" != "null" ]; then
+      domain="${env_label}.${base_domain}"
+    else
+      domain="$base_domain"
+    fi
+    
+    if [ -n "$domain" ] && [ "$domain" != "null" ]; then
+      # Build space-separated domain list for Ansible
+      TENANT_DOMAINS="${TENANT_DOMAINS:+$TENANT_DOMAINS }$domain"
+    fi
+  fi
+done
+
+if [ -z "$TENANT_DOMAINS" ]; then
+  echo "[WARN] No tenant configs found for environment $MT_ENV"
+fi
+
+# Note: TCP services for port 25 -> Postfix are configured via Helm values (apps/values/ingress-nginx.yaml)
+# This avoids Helm/kubectl conflicts. Tenant mail ports (465/587/993) use per-tenant hostPorts.
+
+# =============================================================================
+# Deploy VPN Route DaemonSet (enables pods to reach VPN server for SMTP relay)
+# =============================================================================
+if [ -n "$VPN_SERVER_PRIVATE_IP" ]; then
+  echo "[INFO] Deploying VPN route DaemonSet for VPN server: $VPN_SERVER_PRIVATE_IP"
+  
+  # Substitute VPN IP into template and apply
+  sed "s|\${VPN_SERVER_PRIVATE_IP}|$VPN_SERVER_PRIVATE_IP|g" \
+    "$REPO/apps/manifests/vpn-route-daemonset.yaml.tpl" | kubectl apply -f -
+  
+  echo "[INFO] VPN route DaemonSet deployed - pods can now reach $VPN_SERVER_PRIVATE_IP"
+else
+  echo "[WARN] VPN server private IP not found in Terraform outputs, skipping route DaemonSet"
+fi
+
+# =============================================================================
+# Configure SMTP relay on VPN server (Ansible)
+# =============================================================================
+# VPN Postfix accepts inbound mail and routes to K8s Postfix via VPC NodePort.
+# Tenant domains are passed from the scan above.
+echo "[INFO] Configuring SMTP relay on VPN server..."
+if command -v ansible-playbook >/dev/null 2>&1; then
+  pushd "$REPO/ansible" >/dev/null
+  
+  # Get VPN server hostname from DNS (vpn.prod or vpn.dev based on environment)
+  VPN_DNS_LABEL="$MT_ENV"
+  [ "$MT_ENV" = "prod" ] && VPN_DNS_LABEL="prod"
+  VPN_HOST="vpn.${VPN_DNS_LABEL}.${INFRA_DOMAIN}"
+  
+  # Disable host key checking for automation (VPN server is trusted internal infra)
+  export ANSIBLE_HOST_KEY_CHECKING=False
+  
+  # MX_MAIL_HOST_FQDN is the MX hostname (mail.*) - what external mail servers connect to
+  # prod: mail.<infra_domain>, dev: mail.<env>.<infra_domain>
+  if [ -n "$INFRA_ENV_DNS_LABEL" ]; then
+    MX_MAIL_HOST_FQDN="mail.${INFRA_ENV_DNS_LABEL}.${INFRA_DOMAIN}"
+  else
+    MX_MAIL_HOST_FQDN="mail.${INFRA_DOMAIN}"
+  fi
+  
+  # Fail fast: we need either a routable IP (preferred) or resolvable DNS
+  if [ -z "${VPN_SERVER_IP:-}" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+      if ! python3 - <<'PY' "$VPN_HOST" >/dev/null 2>&1
+import socket, sys
+socket.getaddrinfo(sys.argv[1], None)
+PY
+      then
+        echo "[ERROR] Could not resolve $VPN_HOST and no VPN server IP was found in phase1 Terraform outputs."
+        echo "  This usually means phase1 hasn't been applied for env '$MT_ENV' or DNS hasn't been created yet."
+        echo "  Expected Terraform output: openvpn_server_ip (in $REPO/phase1 workspace '$MT_ENV')."
+        exit 1
+      fi
+    else
+      echo "[ERROR] python3 not found; cannot preflight DNS for $VPN_HOST, and no VPN server IP was found in phase1 outputs."
+      echo "  Install python3 or ensure phase1 output openvpn_server_ip is available."
+      exit 1
+    fi
+  fi
+  
+  # Validate VPN IP matches environment (prevent cross-env misconfiguration)
+  # This is a warning, not a hard failure, because DNS may not exist on first deployment
+  if command -v dig >/dev/null 2>&1; then
+    EXPECTED_VPN_IP=$(dig +short @1.1.1.1 A "vpn.${VPN_DNS_LABEL}.${INFRA_DOMAIN}" 2>/dev/null | head -1)
+    if [ -z "$EXPECTED_VPN_IP" ]; then
+      echo "[INFO] DNS record vpn.${VPN_DNS_LABEL}.${INFRA_DOMAIN} not found (may be first deployment)"
+    elif [ -n "$VPN_SERVER_IP" ] && [ "$VPN_SERVER_IP" != "$EXPECTED_VPN_IP" ]; then
+      echo "[WARNING] VPN IP mismatch - please verify this is correct!"
+      echo "  Terraform output: $VPN_SERVER_IP"
+      echo "  DNS resolution:   $EXPECTED_VPN_IP"
+      echo "  If this is unexpected, check that phase1 workspace matches environment."
+    fi
+  fi
+
+  # Get K8s node VPC IP for VPN Postfix to route inbound mail
+  # VPN Postfix routes to any K8s node's VPC IP, kube-proxy forwards to the Postfix pod
+  K8S_NODE_VPC_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "")
+  if [ -z "$K8S_NODE_VPC_IP" ]; then
+    echo "[WARN] Could not get K8s node VPC IP - VPN inbound mail routing may not work"
+    K8S_NODE_VPC_IP="192.168.64.2"  # Fallback to expected VPC range
+  fi
+  echo "[INFO] K8s node VPC IP for mail routing: $K8S_NODE_VPC_IP"
+
+  # Prefer VPN tunnel IP when connected to VPN, since public SSH is blocked
+  # by firewall (admin_ssh_cidrs). Fall back to public IP if not on VPN.
+  ANSIBLE_TARGET_IP="${VPN_SERVER_IP:-$VPN_HOST}"
+  if [ -n "$VPN_SERVER_TUNNEL_IP" ] && ping -c 1 -W 2 "$VPN_SERVER_TUNNEL_IP" >/dev/null 2>&1; then
+    echo "[INFO] VPN tunnel reachable — using $VPN_SERVER_TUNNEL_IP for Ansible"
+    ANSIBLE_TARGET_IP="$VPN_SERVER_TUNNEL_IP"
+  else
+    echo "[WARN] VPN tunnel not reachable — using public IP $ANSIBLE_TARGET_IP for Ansible (SSH must be allowed in admin_ssh_cidrs)"
+  fi
+
+  TEMP_INVENTORY=$(mktemp)
+  cat > "$TEMP_INVENTORY" <<EOF
+[vpn_servers]
+${VPN_HOST} ansible_host=${ANSIBLE_TARGET_IP} ansible_user=root mail_domain=${INFRA_DOMAIN} mx_mail_host_fqdn=${MX_MAIL_HOST_FQDN}
+EOF
+
+  # Add TURN server to inventory if available.
+  # SSH reaches the TURN server via ProxyJump through the VPN server (tunnel IP),
+  # since the TURN firewall only allows SSH from the VPN server's public IP.
+  if [ -n "$TURN_SERVER_IP" ]; then
+    if [ -n "$VPN_SERVER_TUNNEL_IP" ] && ping -c 1 -W 2 "$VPN_SERVER_TUNNEL_IP" >/dev/null 2>&1; then
+      TURN_JUMP_HOST="root@${VPN_SERVER_TUNNEL_IP}"
+      echo "[INFO] TURN server ${TURN_SERVER_IP} will be reached via ProxyJump through VPN server"
+    else
+      TURN_JUMP_HOST=""
+      echo "[WARN] VPN tunnel not reachable — TURN server SSH requires direct access (admin_ssh_cidrs must include your IP)"
+    fi
+    cat >> "$TEMP_INVENTORY" <<EOF
+
+[turn_servers]
+turn-server ansible_host=${TURN_SERVER_IP} ansible_user=root${TURN_JUMP_HOST:+ ansible_ssh_common_args=-o StrictHostKeyChecking=no -J ${TURN_JUMP_HOST}}
+EOF
+  else
+    echo "[INFO] No TURN server IP found — skipping TURN server provisioning"
+  fi
+
+  # Source secrets so tls_email is available for Certbot
+  if [ -f "$REPO/secrets.$MT_ENV.tfvars.env" ]; then
+    source "$REPO/secrets.$MT_ENV.tfvars.env"
+  fi
+
+  # Create Ansible extra vars file with tenant domains for VPN Postfix routing
+  TEMP_EXTRA_VARS=$(mktemp)
+  cat > "$TEMP_EXTRA_VARS" <<EOF
+# Auto-generated by deploy_infra for VPN Postfix mail routing
+# Tenant domains to accept inbound mail for
+tenant_domains:
+EOF
+  for domain in $TENANT_DOMAINS; do
+    echo "  - $domain" >> "$TEMP_EXTRA_VARS"
+  done
+  cat >> "$TEMP_EXTRA_VARS" <<EOF
+
+# K8s Postfix NodePort for inbound mail routing
+k8s_postfix_nodeport: 30025
+k8s_node_vpc_ip: "$K8S_NODE_VPC_IP"
+EOF
+  if [ -n "${TF_VAR_tls_email:-}" ]; then
+    echo "tls_email: \"${TF_VAR_tls_email}\"" >> "$TEMP_EXTRA_VARS"
+  fi
+
+  # TURN shared secret (required by the TURN server play in playbook.yml)
+  if [ -n "${TF_VAR_turn_shared_secret:-}" ]; then
+    echo "turn_shared_secret: \"${TF_VAR_turn_shared_secret}\"" >> "$TEMP_EXTRA_VARS"
+  fi
+
+  # Log what will be configured for visibility
+  echo "[INFO] === VPN POSTFIX CONFIGURATION ==="
+  echo "[INFO] Environment:        $MT_ENV"
+  echo "[INFO] VPN Host:           $VPN_HOST"
+  echo "[INFO] VPN IP:             ${VPN_SERVER_IP:-<resolving from DNS>}"
+  echo "[INFO] MX mail host FQDN:  $MX_MAIL_HOST_FQDN"
+  echo "[INFO] TLS email:          ${TF_VAR_tls_email:-<not set, Certbot/TLS skipped>}"
+  echo "[INFO] Tenant Domains:     ${TENANT_DOMAINS:-<none>}"
+  echo "[INFO] K8s Node VPC IP:    $K8S_NODE_VPC_IP"
+  echo "[INFO] ==================================="
+  
+  # Run playbook with dynamic inventory and extra vars - fail fast on errors
+  set +e
+  ansible-playbook playbook.yml -i "$TEMP_INVENTORY" -e "@$TEMP_EXTRA_VARS" 2>&1 | while read line; do
+    echo "  $line"
+  done
+  ANSIBLE_EXIT=${PIPESTATUS[0]}
+  set -e
+  
+  rm -f "$TEMP_INVENTORY" "$TEMP_EXTRA_VARS"
+  
+  if [ $ANSIBLE_EXIT -eq 0 ]; then
+    echo "[SUCCESS] Ansible playbook completed — VPN server ($VPN_HOST)${TURN_SERVER_IP:+ + TURN server ($TURN_SERVER_IP)}"
+  else
+    echo "[ERROR] Ansible playbook failed with exit code $ANSIBLE_EXIT"
+    exit 1
+  fi
+  
+  popd >/dev/null
+else
+  echo "[ERROR] ansible-playbook not found - required for SMTP relay configuration"
+  echo "  Install with: pip install ansible"
+  exit 1
+fi
+
+# Wait for linkeditor build that was started in background at the beginning
+if [ -n "$LINKEDITOR_BUILD_PID" ]; then
+  echo "[INFO] Waiting for files_linkeditor build to complete..."
+  if wait $LINKEDITOR_BUILD_PID; then
+    echo "[SUCCESS] files_linkeditor app built"
+  else
+    echo "[WARNING] files_linkeditor build may have failed. Check /tmp/linkeditor-build.log"
+    cat /tmp/linkeditor-build.log 2>/dev/null | tail -20 || true
+  fi
+elif [ -d "$REPO/submodules/files_linkeditor" ]; then
+  # Build wasn't started earlier, run it now
+  if [ -f "$REPO/scripts/build-linkeditor.sh" ]; then
+    echo "[INFO] Building files_linkeditor Nextcloud app..."
+    "$REPO/scripts/build-linkeditor.sh" --nesting-level=$((NESTING_LEVEL+1))
+    echo "[SUCCESS] files_linkeditor app built"
+  else
+    echo "[WARNING] build-linkeditor.sh not found, skipping files_linkeditor build"
+  fi
+else
+  echo "[INFO] files_linkeditor submodule not found, skipping (optional component)"
+fi
+
+# Wait for Roundcube image build that was started in background at the beginning
+if [ -n "$ROUNDCUBE_BUILD_PID" ]; then
+  echo "[INFO] Waiting for Roundcube image build to complete..."
+  if wait $ROUNDCUBE_BUILD_PID; then
+    echo "[SUCCESS] Roundcube custom image built"
+  else
+    echo "[WARNING] Roundcube image build may have failed. Check /tmp/roundcube-build.log"
+    cat /tmp/roundcube-build.log 2>/dev/null | tail -20 || true
+  fi
+elif [ -d "$REPO/submodules/roundcubemail-plugins-kolab/plugins" ]; then
+  # Build wasn't started earlier, run it now
+  if [ -f "$REPO/apps/scripts/build-roundcube-image.sh" ]; then
+    echo "[INFO] Building Roundcube custom image..."
+    "$REPO/apps/scripts/build-roundcube-image.sh" --nesting-level=$((NESTING_LEVEL+1))
+    echo "[SUCCESS] Roundcube custom image built"
+  else
+    echo "[WARNING] build-roundcube-image.sh not found, skipping Roundcube image build"
+  fi
+else
+  echo "[INFO] roundcubemail-plugins-kolab submodule not found, skipping Roundcube image build (optional)"
+fi
+
+echo ""
+echo "[SUCCESS] Shared infrastructure deployed for $MT_ENV!"
+echo ""
+echo "Infrastructure namespaces:"
+echo "  - $NS_DB (PostgreSQL)"
+echo "  - $NS_AUTH (Keycloak)"
+echo "  - $NS_MONITORING (Prometheus, Grafana)"
+echo "  - $NS_INGRESS (Public ingress)"
+echo "  - $NS_INGRESS_INTERNAL (VPN-only ingress)"
+echo "  - $NS_CERTMANAGER (Cert-manager)"
+echo "  - $NS_MAIL (Postfix SMTP)"
+echo ""
+echo "Next steps:"
+echo "  Deploy tenants with: ./scripts/create_env --tenant=<name> $MT_ENV"

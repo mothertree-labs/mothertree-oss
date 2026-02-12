@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= title %> - MotherTree</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            sage: { DEFAULT: '#7C9A6C', dark: '#5A7A4C' },
+            cream: '#FAF8F5',
+            'warm-gray': '#6B6B6B',
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-cream min-h-screen flex items-center justify-center p-8">
+  <div class="bg-white rounded-xl shadow-lg p-8 max-w-md w-full">
+    <div class="text-center mb-6">
+      <h1 class="text-3xl text-sage mb-2">MotherTree</h1>
+      <p class="text-warm-gray">Guest Registration</p>
+    </div>
+
+    <!-- Success State -->
+    <div id="successState" class="hidden">
+      <div class="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
+        <div class="flex items-center mb-2">
+          <svg class="w-5 h-5 text-green-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+          </svg>
+          <span class="text-green-800 font-medium">Registration Started</span>
+        </div>
+        <p class="text-green-700 text-sm">
+          Check your email inbox for a link to complete your registration and set up your passkey.
+          Once complete, you'll be taken to the shared document.
+        </p>
+      </div>
+    </div>
+
+    <!-- Form State -->
+    <div id="formState">
+      <div id="errorAlert" class="hidden bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+        <div class="flex items-center">
+          <svg class="w-5 h-5 text-red-600 mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+          </svg>
+          <span id="errorMessage" class="text-red-800"></span>
+        </div>
+      </div>
+
+      <% if (maskedEmail) { %>
+      <p class="text-warm-gray text-sm mb-6">
+        You've been invited to collaborate on a document. Create your guest account for <strong><%= maskedEmail %></strong> to get started.
+      </p>
+      <% } else { %>
+      <p class="text-warm-gray text-sm mb-6">
+        Been invited to collaborate on a document? Register here to create your guest account.
+      </p>
+      <% } %>
+
+      <form id="registerForm" class="space-y-4">
+        <input type="hidden" id="email" name="email" value="<%= email %>">
+        <input type="hidden" id="doc" name="doc" value="<%= doc %>">
+
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label for="firstName" class="block text-sm font-medium text-gray-700 mb-1">
+              First Name
+            </label>
+            <input
+              type="text"
+              id="firstName"
+              name="firstName"
+              required
+              placeholder="Jane"
+              class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-sage focus:border-transparent outline-none"
+            >
+          </div>
+          <div>
+            <label for="lastName" class="block text-sm font-medium text-gray-700 mb-1">
+              Last Name
+            </label>
+            <input
+              type="text"
+              id="lastName"
+              name="lastName"
+              required
+              placeholder="Doe"
+              class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-sage focus:border-transparent outline-none"
+            >
+          </div>
+        </div>
+
+        <% if (!email) { %>
+        <div>
+          <label for="emailInput" class="block text-sm font-medium text-gray-700 mb-1">
+            Your Email Address
+          </label>
+          <input
+            type="email"
+            id="emailInput"
+            name="emailInput"
+            required
+            placeholder="you@example.com"
+            class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-sage focus:border-transparent outline-none"
+          >
+          <p class="text-xs text-warm-gray mt-1">Use the same email address that was used to share documents with you</p>
+        </div>
+        <% } %>
+
+        <button
+          type="submit"
+          id="submitBtn"
+          class="w-full bg-sage text-white px-6 py-3 rounded-lg hover:bg-sage-dark transition-colors font-medium"
+        >
+          Register
+        </button>
+      </form>
+
+      <div class="mt-6 pt-4 border-t border-gray-200 text-center">
+        <p class="text-xs text-warm-gray mb-2">Already have an account?</p>
+        <a href="#" id="loginLink" class="text-sm text-sage hover:text-sage-dark">
+          Sign in instead
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Set login link to Keycloak auth page
+    (function() {
+      var currentHost = window.location.hostname;
+      var authHost = currentHost.replace(/^account\./, 'auth.');
+      var loginLink = document.getElementById('loginLink');
+      if (loginLink) {
+        loginLink.href = 'https://' + authHost;
+      }
+    })();
+
+    var emailDomain = '<%= emailDomain %>';
+
+    document.getElementById('registerForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
+
+      var errorAlert = document.getElementById('errorAlert');
+      var errorMessage = document.getElementById('errorMessage');
+      var submitBtn = document.getElementById('submitBtn');
+
+      errorAlert.classList.add('hidden');
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Registering...';
+
+      // Use hidden email if present, otherwise use the email input field
+      var emailField = document.getElementById('email');
+      var emailInputField = document.getElementById('emailInput');
+      var email = emailField.value || (emailInputField ? emailInputField.value.trim().toLowerCase() : '');
+      var firstName = document.getElementById('firstName').value.trim();
+      var lastName = document.getElementById('lastName').value.trim();
+      var doc = document.getElementById('doc').value;
+
+      if (!email) {
+        errorMessage.textContent = 'Email address is required';
+        errorAlert.classList.remove('hidden');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Register';
+        return;
+      }
+
+      // Client-side domain validation
+      if (emailDomain && email.endsWith('@' + emailDomain.toLowerCase())) {
+        errorMessage.textContent = 'This email belongs to the organization. Please ask your admin for an invitation instead.';
+        errorAlert.classList.remove('hidden');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Register';
+        return;
+      }
+
+      try {
+        var response = await fetch('/api/register-guest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email, firstName: firstName, lastName: lastName, doc: doc }),
+        });
+
+        var data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Registration failed');
+        }
+
+        // Show success state
+        document.getElementById('formState').classList.add('hidden');
+        document.getElementById('successState').classList.remove('hidden');
+      } catch (err) {
+        errorMessage.textContent = err.message;
+        errorAlert.classList.remove('hidden');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Register';
+      }
+    });
+  </script>
+</body>
+</html>

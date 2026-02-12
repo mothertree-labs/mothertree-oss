@@ -1,0 +1,122 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - openvpn
+  - easy-rsa
+  - iptables-persistent
+  - ufw
+
+write_files:
+  - path: /etc/openvpn/server.conf
+    permissions: '0644'
+    content: |
+      port 1194
+      proto udp
+      dev tun
+      ca ca.crt
+      cert server.crt
+      key server.key
+      dh dh.pem
+      server 10.8.0.0/24
+      ifconfig-pool-persist ipp.txt
+      push "route 10.96.0.0/12"
+      push "dhcp-option DNS 10.8.0.1"
+      push "dhcp-option DOMAIN prod.example.com"
+      keepalive 10 120
+      cipher AES-256-GCM
+      auth SHA256
+      user nobody
+      group nogroup
+      persist-key
+      persist-tun
+      status openvpn-status.log
+      verb 3
+      explicit-exit-notify 1
+
+  - path: /etc/openvpn/setup-ca.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      cd /etc/openvpn
+      make-cadir /etc/openvpn/easy-rsa
+      cd /etc/openvpn/easy-rsa
+      
+      # Initialize PKI
+      ./easyrsa init-pki
+      
+      # Build CA
+      echo "CA" | ./easyrsa build-ca nopass
+      
+      # Generate server certificate
+      echo "server" | ./easyrsa gen-req server nopass
+      echo "yes" | ./easyrsa sign-req server server
+      
+      # Generate Diffie-Hellman parameters
+      ./easyrsa gen-dh
+      
+      # Copy certificates to OpenVPN directory
+      cp pki/ca.crt /etc/openvpn/
+      cp pki/issued/server.crt /etc/openvpn/
+      cp pki/private/server.key /etc/openvpn/
+      cp pki/dh.pem /etc/openvpn/
+      
+      # Set proper permissions
+      chmod 600 /etc/openvpn/server.key
+      chmod 644 /etc/openvpn/ca.crt
+      chmod 644 /etc/openvpn/server.crt
+      chmod 644 /etc/openvpn/dh.pem
+
+runcmd:
+  - mkdir -p /etc/openvpn/client-configs
+  
+  # Mount persistent volume for PKI (attached as /dev/sdc)
+  - mkdir -p /mnt/openvpn-pki
+  - |
+    # Wait for volume to be available (with timeout)
+    timeout=300
+    elapsed=0
+    while [ ! -b /dev/sdc ] && [ $elapsed -lt $timeout ]; do
+      sleep 5
+      elapsed=$((elapsed + 5))
+    done
+    if [ -b /dev/sdc ]; then
+      # Format and mount
+      mkfs.ext4 -F /dev/sdc || true
+      mount /dev/sdc /mnt/openvpn-pki
+      echo "/dev/sdc /mnt/openvpn-pki ext4 defaults 0 0" >> /etc/fstab
+    else
+      echo "Volume /dev/sdc not available after timeout, continuing without persistent storage"
+    fi
+  
+  # Setup PKI - use existing if available, create new if not
+  - |
+    if [ -d /mnt/openvpn-pki/easy-rsa ]; then
+      ln -s /mnt/openvpn-pki/easy-rsa /etc/openvpn/easy-rsa
+    else
+      /etc/openvpn/setup-ca.sh
+      if [ -d /mnt/openvpn-pki ]; then
+        mv /etc/openvpn/easy-rsa /mnt/openvpn-pki/
+        ln -s /mnt/openvpn-pki/easy-rsa /etc/openvpn/easy-rsa
+      fi
+    fi
+  
+  # Setup client-configs - use existing if available, create new if not
+  - |
+    if [ -d /mnt/openvpn-pki/client-configs ]; then
+      ln -s /mnt/openvpn-pki/client-configs /etc/openvpn/client-configs
+    else
+      if [ -d /mnt/openvpn-pki ]; then
+        mkdir -p /mnt/openvpn-pki/client-configs
+        ln -s /mnt/openvpn-pki/client-configs /etc/openvpn/client-configs
+      fi
+    fi
+  
+  # Enable IP forwarding
+  - echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+  - sysctl -p
+  
+  # Start OpenVPN
+  - systemctl enable openvpn@server
+  - systemctl start openvpn@server

@@ -1,0 +1,215 @@
+/* Platform Custom Theme - Warm, relaxing colors */
+
+/* === COLOR PALETTE === */
+:root {
+    --mt-bg-primary: #f5f0e8;      /* Warm cream background */
+    --mt-bg-secondary: #e8e0d4;    /* Slightly darker cream */
+    --mt-accent: #6b8e6b;          /* Sage green - nature/tree inspired */
+    --mt-accent-hover: #5a7a5a;    /* Darker sage for hover */
+    --mt-text-primary: #3d3d3d;    /* Warm dark gray */
+    --mt-text-secondary: #6b6b6b;  /* Medium gray */
+    --mt-white: #fefefe;           /* Off-white */
+    --mt-shadow: rgba(107, 142, 107, 0.15);
+}
+
+/* === GLOBAL OVERRIDES - Target specific Keycloak/PatternFly classes === */
+/* The login-pf class is on the HTML element, not body */
+/* Background color matches platform theme: #f2efe8 */
+html.login-pf,
+html.login-pf body,
+body,
+.login-pf-page {
+    background: #f2efe8 !important;
+    background-image: none !important;
+    background-color: #f2efe8 !important;
+    min-height: 100vh !important;
+}
+
+/* Remove the dark header bar */
+.login-pf-page-header {
+    background: transparent !important;
+    background-color: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    min-height: 0 !important;
+    height: auto !important;
+}
+
+/* Hide the default header content (duplicate title text) */
+.login-pf-page-header > * {
+    display: none !important;
+}
+
+/* Override the default dark header */
+.pf-c-login__header,
+.pf-c-brand,
+header {
+    background: transparent !important;
+}
+
+/* Main login container */
+.pf-c-login,
+#kc-content,
+#kc-content-wrapper {
+    background: transparent !important;
+}
+
+/* Remove the white card/box styling */
+.pf-c-login__main,
+.card-pf,
+.pf-c-card {
+    background: transparent !important;
+    box-shadow: none !important;
+    border: none !important;
+    max-width: 100% !important;
+}
+
+/* === PLATFORM HEADER STYLES === */
+.platform-header {
+    text-align: center;
+    padding: 3rem 2rem 2rem;
+}
+
+.platform-title {
+    font-family: 'Tomorrow', sans-serif;
+    font-size: 2.5rem;
+    font-weight: 400;
+    color: #4a6741;
+    margin: 0 0 0.5rem 0;
+    letter-spacing: 0.03em;
+}
+
+.platform-welcome {
+    font-family: 'Instrument Sans', sans-serif;
+    font-size: 1.1rem;
+    color: #6b6b6b;
+    margin: 0;
+    font-weight: 400;
+}
+
+/* === SOCIAL PROVIDER BUTTONS === */
+#kc-social-providers {
+    display: block !important;
+    margin-top: 2rem !important;
+    padding: 0 2rem;
+}
+
+#kc-social-providers ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+}
+
+#kc-social-providers li {
+    width: 100%;
+    max-width: 320px;
+}
+
+#kc-social-providers a,
+.kc-social-provider-link {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: 1rem 2rem !important;
+    background: var(--mt-white) !important;
+    border: 2px solid var(--mt-accent) !important;
+    border-radius: 8px !important;
+    color: var(--mt-text-primary) !important;
+    font-size: 1.1rem !important;
+    font-weight: 500 !important;
+    text-decoration: none !important;
+    transition: all 0.2s ease !important;
+    box-shadow: 0 2px 8px var(--mt-shadow) !important;
+}
+
+#kc-social-providers a:hover,
+.kc-social-provider-link:hover {
+    background: var(--mt-accent) !important;
+    color: var(--mt-white) !important;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px var(--mt-shadow) !important;
+}
+
+/* Google icon styling */
+#kc-social-providers i,
+#kc-social-providers .kc-social-icon {
+    font-size: 1.5rem;
+}
+
+/* === HIDE USERNAME/PASSWORD FORM BY DEFAULT === */
+/* Show when admin-login class is toggled via JavaScript */
+form#kc-form-login,
+form[id="kc-form-login"],
+#kc-form-login,
+.kc-login-form {
+    display: none !important;
+}
+
+/* Show form when admin-login mode is active */
+body.show-admin-login form#kc-form-login,
+body.show-admin-login form[id="kc-form-login"],
+body.show-admin-login #kc-form-login,
+body.show-admin-login .kc-login-form {
+    display: block !important;
+}
+
+#kc-form-options,
+#kc-form-buttons,
+input#username,
+input#password,
+input[name="username"],
+input[name="password"],
+label[for="username"],
+label[for="password"] {
+    display: none !important;
+}
+
+/* Show inputs when admin-login mode is active */
+body.show-admin-login input#username,
+body.show-admin-login input#password,
+body.show-admin-login input[name="username"],
+body.show-admin-login input[name="password"],
+body.show-admin-login label[for="username"],
+body.show-admin-login label[for="password"],
+body.show-admin-login #kc-form-buttons {
+    display: block !important;
+}
+
+/* Admin login toggle link */
+.admin-login-toggle {
+    display: block;
+    text-align: center;
+    margin-top: 2rem;
+    color: var(--mt-text-secondary);
+    font-size: 0.9rem;
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+.admin-login-toggle:hover {
+    color: var(--mt-accent);
+}
+
+/* Hide dividers */
+hr, .kc-divider-text {
+    display: none !important;
+}
+
+/* === FOOTER / MISC CLEANUP === */
+.pf-c-login__footer,
+.login-pf-page-footer {
+    background: transparent !important;
+}
+
+/* Remove any remaining dark backgrounds */
+div[style*="background"],
+.pf-c-background-image {
+    background: transparent !important;
+    background-image: none !important;
+}

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: docs
+  labels:
+    app.kubernetes.io/name: docs-frontend
+    app.kubernetes.io/part-of: mother-tree
+spec:
+  selector:
+    io.kompose.service: frontend
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  type: ClusterIP

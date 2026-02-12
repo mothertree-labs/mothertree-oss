@@ -1,0 +1,414 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - openvpn
+  - easy-rsa
+  - iptables-persistent
+  - ufw
+  - docker.io
+  - docker-compose
+  - curl
+  - jq
+
+write_files:
+  - path: /etc/openvpn/server.conf
+    content: |
+      port 1194
+      proto udp
+      dev tun
+      ca ca.crt
+      cert server.crt
+      key server.key
+      dh dh.pem
+      mode server
+      tls-server
+      ifconfig 10.8.0.1 10.8.0.2
+      ifconfig-pool 10.8.0.4 10.8.0.254
+      ifconfig-pool-persist ipp.txt
+      push "route 10.8.0.0 255.255.255.0"
+%{ if service_cidr != "" }
+      push "route ${service_cidr}"
+%{ endif }
+%{ if cluster_subnet_cidr != "" }
+      push "route ${cluster_subnet_cidr}"
+%{ endif }
+%{ if vpn_server_subnet_cidr != "" }
+      push "route ${vpn_server_subnet_cidr}"
+%{ endif }
+      push "dhcp-option DNS ${dns_server_ip}"
+      push "dhcp-option DOMAIN ${domain}"
+      keepalive 10 120
+      cipher AES-256-GCM
+      auth SHA256
+      user nobody
+      group nogroup
+      persist-key
+      persist-tun
+      status openvpn-status.log
+      verb 3
+      explicit-exit-notify 1
+
+  - path: /etc/openvpn/setup-ca.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      cd /etc/openvpn
+      make-cadir /etc/openvpn/easy-rsa
+      cd /etc/openvpn/easy-rsa
+      
+      # Initialize PKI
+      ./easyrsa init-pki
+      
+      # Build CA
+      echo "CA" | ./easyrsa build-ca nopass
+      
+      # Generate server certificate
+      echo "server" | ./easyrsa gen-req server nopass
+      echo "yes" | ./easyrsa sign-req server server
+      
+      # Generate Diffie-Hellman parameters
+      ./easyrsa gen-dh
+      
+      # Copy certificates to OpenVPN directory
+      cp pki/ca.crt /etc/openvpn/
+      cp pki/issued/server.crt /etc/openvpn/
+      cp pki/private/server.key /etc/openvpn/
+      cp pki/dh.pem /etc/openvpn/
+      
+      # Set proper permissions
+      chmod 600 /etc/openvpn/server.key
+      chmod 644 /etc/openvpn/ca.crt
+      chmod 644 /etc/openvpn/server.crt
+      chmod 644 /etc/openvpn/dh.pem
+
+  - path: /etc/openvpn/generate-client.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      CLIENT_NAME=$1
+      if [ -z "$CLIENT_NAME" ]; then
+          echo "Usage: $0 <client-name>"
+          exit 1
+      fi
+      
+      cd /etc/openvpn/easy-rsa
+      
+      # Generate client certificate
+      echo "$CLIENT_NAME" | ./easyrsa gen-req $CLIENT_NAME nopass
+      echo "yes" | ./easyrsa sign-req client $CLIENT_NAME
+      
+      # Create client configuration
+      cat > /etc/openvpn/client-configs/$CLIENT_NAME.ovpn << EOF
+      client
+      dev tun
+      proto udp
+      remote vpn.${domain} 1194
+      resolv-retry infinite
+      nobind
+      user nobody
+      group nogroup
+      persist-key
+      persist-tun
+      remote-cert-tls server
+      cipher AES-256-GCM
+      auth SHA256
+      verb 3
+      
+      <ca>
+      $(cat /etc/openvpn/ca.crt)
+      </ca>
+      
+      <cert>
+      $(cat /etc/openvpn/easy-rsa/pki/issued/$CLIENT_NAME.crt)
+      </cert>
+      
+      <key>
+      $(cat /etc/openvpn/easy-rsa/pki/private/$CLIENT_NAME.key)
+      </key>
+      EOF
+      
+      echo "Client configuration created: /etc/openvpn/client-configs/$CLIENT_NAME.ovpn"
+
+  - path: /opt/unbound/unbound.conf
+    permissions: '0644'
+    content: |
+      server:
+        verbosity: 1
+        interface: 0.0.0.0
+        port: 53
+        do-ip4: yes
+        do-ip6: no
+        do-udp: yes
+        do-tcp: yes
+        access-control: 10.8.0.0/24 allow
+        access-control: 127.0.0.0/8 allow
+        access-control: 0.0.0.0/0 refuse
+        access-control: ::/0 refuse
+        local-zone: "${domain}." static
+
+      stub-zone:
+        name: "cluster.local."
+        stub-addr: 10.96.0.10
+        stub-first: yes
+
+  - path: /opt/unbound/docker-compose.yml
+    permissions: '0644'
+    content: |
+      version: '3.8'
+      services:
+        unbound:
+          image: mvance/unbound:1.22.0
+          container_name: unbound-dns
+          network_mode: host
+          volumes:
+            - ./unbound.conf:/opt/unbound/etc/unbound/unbound.conf:ro
+          restart: unless-stopped
+
+runcmd:
+  - mkdir -p /etc/openvpn/client-configs
+  
+  # Mount volume for PKI
+  - mkdir -p /mnt/openvpn-pki
+  - |
+    # Wait for volume to be available (with timeout)
+    timeout=300
+    elapsed=0
+    while [ ! -b /dev/sdc ] && [ $elapsed -lt $timeout ]; do
+      sleep 5
+      elapsed=$((elapsed + 5))
+    done
+    if [ -b /dev/sdc ]; then
+      # Check if volume already has a filesystem
+      if ! blkid /dev/sdc >/dev/null 2>&1; then
+        # No filesystem found, format the volume
+        echo "Formatting volume /dev/sdc..."
+        mkfs.ext4 -F /dev/sdc
+      else
+        echo "Volume /dev/sdc already has a filesystem, skipping format"
+      fi
+      # Mount the volume
+      mount /dev/sdc /mnt/openvpn-pki
+      # Add to fstab if not already present
+      if ! grep -q "/dev/sdc /mnt/openvpn-pki" /etc/fstab; then
+        echo "/dev/sdc /mnt/openvpn-pki ext4 defaults 0 0" >> /etc/fstab
+      fi
+    else
+      echo "Volume /dev/sdc not available after timeout, continuing without persistent storage"
+    fi
+  
+  # Setup PKI
+  - |
+    if [ -d /mnt/openvpn-pki ] && mountpoint -q /mnt/openvpn-pki; then
+      # Volume is mounted, check for existing PKI
+      if [ -d /mnt/openvpn-pki/easy-rsa ] && [ -f /mnt/openvpn-pki/easy-rsa/pki/ca.crt ]; then
+        # Existing PKI found on volume - use it
+        echo "Found existing PKI on volume, copying certificates..."
+        ln -sf /mnt/openvpn-pki/easy-rsa /etc/openvpn/easy-rsa
+        cp /mnt/openvpn-pki/easy-rsa/pki/ca.crt /etc/openvpn/
+        cp /mnt/openvpn-pki/easy-rsa/pki/issued/server.crt /etc/openvpn/
+        cp /mnt/openvpn-pki/easy-rsa/pki/private/server.key /etc/openvpn/
+        cp /mnt/openvpn-pki/easy-rsa/pki/dh.pem /etc/openvpn/ 2>/dev/null || true
+        chmod 600 /etc/openvpn/server.key
+        chmod 644 /etc/openvpn/ca.crt /etc/openvpn/server.crt /etc/openvpn/dh.pem
+        echo "Certificates copied from volume to /etc/openvpn/"
+      else
+        # No existing PKI, create new one
+        echo "No existing PKI found, creating new certificates..."
+        /etc/openvpn/setup-ca.sh
+        # Move PKI to volume for persistence
+        if [ -d /etc/openvpn/easy-rsa ]; then
+          mv /etc/openvpn/easy-rsa /mnt/openvpn-pki/
+          ln -sf /mnt/openvpn-pki/easy-rsa /etc/openvpn/easy-rsa
+          echo "PKI moved to volume for persistence"
+        fi
+      fi
+    else
+      # Volume not available, create PKI on root disk (will be lost on recreation)
+      echo "WARNING: Volume not mounted, creating PKI on root disk (will be lost on recreation)"
+      /etc/openvpn/setup-ca.sh
+    fi
+  
+  # Setup client-configs
+  - |
+    if mountpoint -q /mnt/openvpn-pki; then
+      # Volume is mounted, use it for client-configs
+      if [ -d /mnt/openvpn-pki/client-configs ]; then
+        ln -sf /mnt/openvpn-pki/client-configs /etc/openvpn/client-configs
+      else
+        mkdir -p /mnt/openvpn-pki/client-configs
+        ln -sf /mnt/openvpn-pki/client-configs /etc/openvpn/client-configs
+      fi
+    else
+      # Volume not mounted, use local directory
+      mkdir -p /etc/openvpn/client-configs
+    fi
+  
+  # Setup Docker
+  - systemctl enable docker
+  - systemctl start docker
+  - usermod -aG docker root
+  
+  # Stop systemd-resolved to free up port 53
+  - systemctl stop systemd-resolved
+  - systemctl disable systemd-resolved
+  
+  # Configure DNS for Docker daemon
+  - echo 'nameserver 8.8.8.8' > /etc/resolv.conf
+  - systemctl restart docker
+  
+  # Start OpenVPN first so tun0 interface is available
+  - systemctl enable openvpn@server
+  - systemctl start openvpn@server
+  - sleep 5  # Wait for tun0 to be ready
+  # Add VPN network route
+  - ip route add ${vpn_network_cidr} dev tun0 2>/dev/null || true
+  # Create systemd service to ensure VPN route persists after reboot
+  - |
+    cat > /etc/systemd/system/vpn-route.service << EOFSERVICE
+    [Unit]
+    Description=Add VPN network route
+    After=network.target openvpn@server.service
+    Requires=openvpn@server.service
+
+    [Service]
+    Type=oneshot
+    ExecStart=/bin/bash -c 'sleep 3 && ip route add ${vpn_network_cidr} dev tun0 2>/dev/null || true'
+    RemainAfterExit=yes
+
+    [Install]
+    WantedBy=multi-user.target
+    EOFSERVICE
+  - systemctl daemon-reload
+  - systemctl enable vpn-route.service
+  
+  # Route for service CIDR to cluster nodes
+  - |
+    SERVICE_NET=$(echo "${service_cidr}" | awk '{print $1}' | cut -d. -f1-2)
+    CLUSTER_NODE="${cluster_node_ip}"
+    if ! ping -c 1 -W 1 $CLUSTER_NODE >/dev/null 2>&1; then
+      CLUSTER_NODE="192.168.64.1"
+    fi
+    ip route add $${SERVICE_NET}.0.0/16 via $CLUSTER_NODE dev eth0 2>/dev/null || true
+  - |
+    SERVICE_NET=$(echo "${service_cidr}" | awk '{print $1}' | cut -d. -f1-2)
+    cat > /etc/systemd/system/k8s-service-route.service << EOFSERVICE
+    [Unit]
+    Description=Add Kubernetes service CIDR route
+    After=network.target
+
+    [Service]
+    Type=oneshot
+    ExecStart=/bin/bash -c 'SERVICE_NET=$(echo "${service_cidr}" | awk "{print \\$1}" | cut -d. -f1-2); CLUSTER_NODE="${cluster_node_ip}"; if ! ping -c 1 -W 1 $CLUSTER_NODE >/dev/null 2>&1; then CLUSTER_NODE="192.168.64.1"; fi; ip route add $${SERVICE_NET}.0.0/16 via $CLUSTER_NODE dev eth0 2>/dev/null || true'
+    RemainAfterExit=yes
+
+    [Install]
+    WantedBy=multi-user.target
+    EOFSERVICE
+  - systemctl daemon-reload
+  - systemctl enable k8s-service-route.service
+  
+  # Route for cluster node subnet
+  - |
+    NODE_SUBNET=$(echo "${vpn_server_subnet_cidr}" | awk '{print $1}')
+    ip route add $${NODE_SUBNET}/24 dev eth0 2>/dev/null || true
+  - |
+    NODE_SUBNET=$(echo "${vpn_server_subnet_cidr}" | awk '{print $1}')
+    cat > /etc/systemd/system/cluster-node-subnet-route.service << EOFSERVICE
+    [Unit]
+    Description=Add cluster node subnet route
+    After=network.target
+
+    [Service]
+    Type=oneshot
+    ExecStart=/bin/bash -c 'NODE_SUBNET=$(echo "${vpn_server_subnet_cidr}" | awk "{print \\$1}"); ip route add $${NODE_SUBNET}/24 dev eth0 2>/dev/null || true'
+    RemainAfterExit=yes
+
+    [Install]
+    WantedBy=multi-user.target
+    EOFSERVICE
+  - systemctl daemon-reload
+  - systemctl enable cluster-node-subnet-route.service
+  
+  # Setup Unbound DNS (after tun0 exists)
+  - mkdir -p /opt/unbound
+  - |
+    # Wait for Docker to be ready
+    while ! docker info >/dev/null 2>&1; do
+      sleep 2
+    done
+    # Pull image and start container
+    docker pull mvance/unbound:1.22.0
+    cd /opt/unbound && docker-compose up -d
+  
+  # Setup firewall
+  - ufw --force enable
+  - ufw allow 22/tcp
+  - ufw allow 1194/udp
+  - ufw allow from ${vpn_network_cidr} to any port 6443
+  - ufw allow from ${vpn_network_cidr} to any port 80
+  - ufw allow from ${vpn_network_cidr} to any port 443
+  - ufw allow from ${vpn_network_cidr} to any port 53
+  - echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+  - sysctl -p
+  # Add FORWARD rules for VPN traffic (must be before iptables-save)
+  - iptables -I FORWARD -i tun0 -j ACCEPT
+  - iptables -I FORWARD -o tun0 -j ACCEPT
+  - iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+  # NAT rules - NAT VPN client traffic to cluster nodes so they can route back
+  # Cluster nodes don't have routes for VPN network (10.8.0.0/24), so we must NAT
+  - |
+    SERVICE_NET=$(echo "${service_cidr}" | awk '{print $1}' | cut -d. -f1-2)
+    NODE_SUBNET=$(echo "${vpn_server_subnet_cidr}" | awk '{print $1}')
+    # NAT traffic from VPN clients to service CIDR and cluster nodes (they can't route back to VPN network)
+    iptables -t nat -A POSTROUTING -s ${vpn_network_cidr} -d $${SERVICE_NET}.0.0/16 -o eth0 -j MASQUERADE
+    iptables -t nat -A POSTROUTING -s ${vpn_network_cidr} -d $${NODE_SUBNET}/24 -o eth0 -j MASQUERADE
+    # Exclude other VPC ranges from NAT (keep in VPC)
+    iptables -t nat -A POSTROUTING -s ${vpn_network_cidr} -d 192.168.64.0/18 -o eth0 -j ACCEPT
+    # NAT everything else going to internet
+    iptables -t nat -A POSTROUTING -s ${vpn_network_cidr} -o eth0 -j MASQUERADE
+  # Save iptables rules
+  - mkdir -p /etc/iptables
+  - iptables-save > /etc/iptables/rules.v4
+  
+  # Create systemd service for Unbound
+  - |
+    cat > /etc/systemd/system/unbound-dns.service << 'EOF'
+    [Unit]
+    Description=Unbound DNS Server
+    After=docker.service
+    Requires=docker.service
+
+    [Service]
+    Type=oneshot
+    RemainAfterExit=yes
+    WorkingDirectory=/opt/unbound
+    ExecStart=/usr/bin/docker-compose up -d
+    ExecStop=/usr/bin/docker-compose down
+    TimeoutStartSec=60
+
+    [Install]
+    WantedBy=multi-user.target
+    EOF
+  
+  # Create systemd service to restore iptables rules on boot
+  - |
+    cat > /etc/systemd/system/iptables-restore.service << EOFSERVICE
+    [Unit]
+    Description=Restore iptables rules
+    After=network.target
+
+    [Service]
+    Type=oneshot
+    ExecStart=/sbin/iptables-restore /etc/iptables/rules.v4
+    RemainAfterExit=yes
+
+    [Install]
+    WantedBy=multi-user.target
+    EOFSERVICE
+  
+  # Enable services
+  - systemctl daemon-reload
+  - systemctl enable unbound-dns.service
+  - systemctl enable iptables-restore.service

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: docs
+  labels:
+    app.kubernetes.io/name: docs-backend
+    app.kubernetes.io/part-of: mother-tree
+spec:
+  selector:
+    io.kompose.service: backend
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP

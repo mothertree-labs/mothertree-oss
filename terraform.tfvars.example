@@ -1,0 +1,104 @@
+# Example terraform.tfvars file for Matrix infrastructure
+# Copy this file to terraform.tfvars and fill in your actual values
+
+# Cluster Configuration
+cluster_label = "matrix-cluster"
+linode_region = "us-east"
+linode_k8s_version = "1.28"
+
+# Node pool configuration - optimized for cost (~$60-70/month)
+# g6-standard-2: 2 vCPU, 4GB RAM, $12/month per node
+# Optional: Add autoscaler block to enable automatic scaling
+linode_node_pools = [
+  {
+    type  = "g6-standard-2"
+    count = 2 # Initial/current node count
+    tags  = ["matrix", "production"]
+    # Uncomment to enable autoscaling:
+    # autoscaler = {
+    #   min = 2  # Minimum nodes (never scale below this)
+    #   max = 4  # Maximum nodes (never scale above this)
+    # }
+  }
+]
+
+# Domain Configuration
+domain = "example.com"
+matrix_subdomain = "matrix"
+element_subdomain = "element"
+
+# DNS Configuration
+dns_provider = "cloudflare"  # Using Cloudflare DNS
+# cloudflare_api_token = "your-cloudflare-api-token-here"
+# cloudflare_zone_id = "your-cloudflare-zone-id-here"
+
+# TLS Configuration
+# tls_email = "your-email@example.com"
+
+# Matrix Configuration
+matrix_server_name = "example.com"
+matrix_report_stats = false
+matrix_enable_registration = false
+matrix_admin_users = []
+
+# Database Configuration
+postgres_enabled = true
+# postgres_host = ""  # Leave empty for in-cluster PostgreSQL
+postgres_port = 5432
+postgres_database = "synapse"
+postgres_username = "synapse"
+# postgres_password = "your-secure-postgres-password-here"
+
+# Redis Configuration
+redis_enabled = true
+# redis_host = ""  # Leave empty for in-cluster Redis
+redis_port = 6379
+# redis_password = "your-secure-redis-password-here"
+
+# Storage Configuration
+storage_enabled = true
+storage_size = 20  # 20GB for media storage
+
+# Ingress Configuration
+ingress_class = "nginx"
+ingress_annotations = {
+  "kubernetes.io/ingress.class" = "nginx"
+  "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
+}
+
+# TURN Server Configuration
+turn_server_enabled = true
+turn_server_type = "g6-standard-2"  # 4GB RAM, 2 vCPU
+turn_server_image = "linode/ubuntu22.04"
+turn_server_label = "turn-server"
+# ssh_public_key = "ssh-rsa AAAAB3... your-public-key-here"  # Set in secrets.tfvars.env
+
+# SMTP/Email Configuration (Postfix mail server for sending emails)
+# Deploys a send-only Postfix server with OpenDKIM for email signing
+smtp_enabled = true
+# smtp_domain = "example.com"  # Defaults to main domain if empty
+dkim_selector = "default"  # DKIM selector for DNS record
+smtp_relay_networks = "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"  # Networks allowed to relay
+
+# TURN Server Settings (for phase2)
+turn_external_port = 3478
+turn_alt_port = 3479
+turn_realm = "matrix"
+# turn_shared_secret = "your-secure-turn-shared-secret-here"  # Set in secrets.tfvars.env
+
+# OpenVPN Server Configuration
+openvpn_label = "openvpn-server"
+openvpn_type = "g6-nanode-1"  # 1GB RAM, 1 vCPU - cost effective for VPN
+openvpn_image = "linode/ubuntu22.04"
+vpn_network_cidr = "10.8.0.0/24"
+openvpn_disk_size = 25
+
+# Jitsi Tester Configuration
+# jitsi_tester_enabled = false  # Set to true to enable Jitsi tester instance
+# jitsi_tester_region = "us-east"  # Linode region for Jitsi tester (default: us-east)
+
+# Common tags
+common_tags = ["production", "matrix", "terraform"] 
+
+export TF_VAR_docs_db_password="SET_A_STRONG_PASSWORD"
+export TF_VAR_oidc_rp_client_secret_docs="SET_TO_KEYCLOAK_DOCS_APP_SECRET"

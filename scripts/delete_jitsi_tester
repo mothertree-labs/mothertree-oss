@@ -1,0 +1,82 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [ $# -ne 1 ]; then
+  echo "Usage: $0 <env>" >&2
+  echo "Example: $0 dev" >&2
+  exit 1
+fi
+
+MT_ENV="$1"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+echo "[INFO] Destroying Jitsi tester instance for environment: $MT_ENV"
+
+# Load secrets (Cloudflare, Linode, DB, etc.) - prefer env-specific
+if [ -f "$REPO/secrets.${MT_ENV}.tfvars.env" ]; then
+  # shellcheck disable=SC1091
+  source "$REPO/secrets.${MT_ENV}.tfvars.env"
+  echo "[INFO] Loaded secrets from secrets.${MT_ENV}.tfvars.env"
+else
+  echo "[ERROR] No secrets file found. Create $REPO/secrets.${MT_ENV}.tfvars.env (e.g., secrets.prod.tfvars.env)" >&2
+  exit 1
+fi
+
+pushd "$REPO/phase1" >/dev/null
+  echo "[INFO] Phase1: init & workspace select"
+  terraform init -input=false
+  terraform workspace select "$MT_ENV" 2>/dev/null || {
+    echo "[ERROR] Workspace '$MT_ENV' does not exist" >&2
+    exit 1
+  }
+  
+  # Load variables from parent terraform.tfvars if it exists
+  VAR_FILE_FLAG=""
+  if [ -f "$REPO/terraform.tfvars" ]; then
+    VAR_FILE_FLAG="-var-file=$REPO/terraform.tfvars"
+  fi
+  
+  # Check if jitsi_tester instance exists
+  JITSI_TESTER_ID=$(terraform output -raw jitsi_tester_id 2>/dev/null || echo "")
+  if [ -z "$JITSI_TESTER_ID" ] || [ "$JITSI_TESTER_ID" = "null" ]; then
+    echo "[INFO] Jitsi tester instance not found (may already be destroyed or never created)"
+    exit 0
+  fi
+  
+  echo "[INFO] Found Jitsi tester instance ID: $JITSI_TESTER_ID"
+  echo "[INFO] Phase1: destroying Jitsi tester resources"
+  
+  # Destroy only the jitsi_tester resources
+  # For prod, use empty env_dns_label
+  if [ "$MT_ENV" = "prod" ]; then
+    terraform destroy -input=false -auto-approve $VAR_FILE_FLAG \
+      -var env="$MT_ENV" \
+      -var env_dns_label="" \
+      -var jitsi_tester_enabled=true \
+      -target=linode_instance.jitsi_tester \
+      -target=linode_firewall.jitsi_tester_firewall \
+      -target=linode_sshkey.jitsi_tester_key || {
+      echo "[WARNING] Some resources may have already been destroyed"
+    }
+  else
+    terraform destroy -input=false -auto-approve $VAR_FILE_FLAG \
+      -var env="$MT_ENV" \
+      -var env_dns_label="$MT_ENV" \
+      -var jitsi_tester_enabled=true \
+      -target=linode_instance.jitsi_tester \
+      -target=linode_firewall.jitsi_tester_firewall \
+      -target=linode_sshkey.jitsi_tester_key || {
+      echo "[WARNING] Some resources may have already been destroyed"
+    }
+  fi
+  
+  echo "[SUCCESS] Jitsi tester instance destroyed"
+popd >/dev/null
+
+
+
+
+
+
+

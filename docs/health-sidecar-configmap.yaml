@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: health-sidecar-scripts
+  namespace: docs
+  labels:
+    app.kubernetes.io/name: docs
+    app.kubernetes.io/component: yProvider
+    app.kubernetes.io/part-of: mother-tree
+data:
+  health-check.sh: |
+    #!/bin/sh
+    # Health check sidecar for y-provider
+    # Tests connectivity to backend API and exposes /healthz endpoint
+    
+    BACKEND_URL="${COLLABORATION_BACKEND_BASE_URL:?ERROR: COLLABORATION_BACKEND_BASE_URL must be set}"
+    CHECK_INTERVAL="${HEALTH_CHECK_INTERVAL:-10}"
+    HEALTH_DIR="/tmp/www"
+    PORT="${HEALTH_PORT:-8081}"
+    
+    # Create web directory
+    mkdir -p "$HEALTH_DIR"
+    
+    # Initialize as unhealthy until first successful check
+    echo "ERROR: Backend unreachable" > "$HEALTH_DIR/healthz"
+    
+    # Background process: periodically check backend connectivity
+    check_backend() {
+      while true; do
+        # Test backend API - we expect 200 for /api/v1.0/config/
+        if wget -q -O /dev/null --timeout=5 "${BACKEND_URL}/api/v1.0/config/"; then
+          echo "OK: Backend reachable" > "$HEALTH_DIR/healthz"
+          echo "$(date -Iseconds) Backend check passed: ${BACKEND_URL}"
+        else
+          echo "ERROR: Backend unreachable" > "$HEALTH_DIR/healthz"
+          echo "$(date -Iseconds) Backend check FAILED: ${BACKEND_URL}"
+        fi
+        sleep "$CHECK_INTERVAL"
+      done
+    }
+    
+    # Start background health checker
+    check_backend &
+    
+    # Use busybox httpd to serve the health file
+    echo "Starting health server on port $PORT..."
+    exec httpd -f -p "$PORT" -h "$HEALTH_DIR"
+

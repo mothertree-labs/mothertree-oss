@@ -1,0 +1,24 @@
+# Dev environment overrides for Jitsi
+# Note: Jitsi is primarily deployed via apps/manifests/jitsi/*.yaml.tpl templates
+# This values file is for the Helm chart fallback (currently not used)
+global:
+  publicURL: 'https://{{ env "JITSI_HOST" }}'
+
+web:
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    hosts:
+      - host: '{{ env "JITSI_HOST" }}'
+        paths: ["/"]
+    tls:
+      - secretName: jitsi-tls
+        hosts:
+          - '{{ env "JITSI_HOST" }}'
+
+# Disable JVB initially to avoid service issues (as in base values)
+jvb:
+  enabled: false
+  useNodeIP: true  # Required by chart validation even when disabled

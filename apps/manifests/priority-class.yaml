@@ -1,0 +1,8 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: critical-service
+value: 1000000
+globalDefault: false
+description: "Critical services (JVB, y-provider) - evicted last during resource pressure"
+

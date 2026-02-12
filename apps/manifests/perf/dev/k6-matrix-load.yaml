@@ -1,0 +1,86 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6-matrix-load
+  namespace: perf
+  labels:
+    env: dev
+    app: matrix
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        env: dev
+        app: matrix
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: k6
+          image: ghcr.io/YOUR_ORG/mothertree-perf:latest
+          env:
+            - name: USERS_CSV_PATH
+              value: /data/users.csv
+          args:
+            - run
+            - k6/matrix/load.js
+            - --env
+            - ENV=dev
+            - --out
+            - json=/shared/k6-results.json
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          volumeMounts:
+            - name: users
+              mountPath: /data
+              readOnly: true
+            - name: shared
+              mountPath: /shared
+        - name: converter
+          image: python:3-alpine
+          command: ["sh", "-c", "pip install -q requests && python3 /scripts/converter.py"]
+          env:
+            - name: K6_JSON_FILE
+              value: /shared/k6-results.json
+            - name: PUSHGATEWAY_URL
+              value: http://prometheus-pushgateway.monitoring.svc.cluster.local:9091
+            - name: JOB_NAME
+              value: k6-matrix-load
+            - name: ENV
+              value: dev
+            - name: APP
+              value: matrix
+            - name: POLL_INTERVAL
+              value: "5.0"
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+            - name: converter-script
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+      volumes:
+        - name: users
+          secret:
+            secretName: perf-users
+            items:
+              - key: users.csv
+                path: users.csv
+        - name: shared
+          emptyDir: {}
+        - name: converter-script
+          configMap:
+            name: k6-json-converter
+            defaultMode: 0755
+
+

@@ -1,0 +1,27 @@
+# Matrix Synapse rate limit configuration for dev environment
+# These values override Synapse defaults to allow more permissive limits for testing/development
+
+rate_limits:
+  rc_message:
+    per_second: 2.0      # Allow 2 messages per second (default: 0.2)
+    burst_count: 50      # Allow bursts of up to 50 messages (default: 10)
+  
+  rc_login:
+    address:
+      per_second: 1.0     # Allow 1 login per second per IP (default: 0.003)
+      burst_count: 10     # Allow bursts of up to 10 logins (default: 5)
+    account:
+      per_second: 0.5     # Allow 0.5 logins per second per account (default: 0.003)
+      burst_count: 5      # Allow bursts of up to 5 logins (default: 5)
+    failed_attempts:
+      per_second: 1.0     # Allow 1 failed login per second (default: 0.17)
+      burst_count: 10      # Allow bursts of up to 10 failed logins (default: 3)
+  
+  rc_joins:
+    local:
+      per_second: 0.5     # Allow 0.5 joins per second (default: 0.1)
+      burst_count: 20      # Allow bursts of up to 20 joins (default: 10)
+    remote:
+      per_second: 0.1      # Allow 0.1 remote joins per second (default: 0.01)
+      burst_count: 10      # Allow bursts of up to 10 remote joins (default: 10)
+

@@ -1,0 +1,11 @@
+# Infrastructure Configuration - Development
+# Shared infrastructure settings (not tenant-specific)
+# Used by deploy_infra script
+
+# PostgreSQL - shared database (no replication for cost savings)
+postgresql:
+  read_replicas: 0  # No read replicas in dev to save costs
+
+# Keycloak - shared auth (reduced replicas for cost savings)
+keycloak:
+  replicas: 1  # Single replica in dev to save costs

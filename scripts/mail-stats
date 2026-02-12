@@ -1,0 +1,188 @@
+#!/bin/bash
+# Mail Statistics Report
+#
+# Analyzes mail logs from VPN Postfix and K8s Postfix for all environments
+# and provides summary statistics.
+#
+# Usage:
+#   ./scripts/mail-stats [env]
+#   ./scripts/mail-stats          # Check all environments (prod, dev)
+#   ./scripts/mail-stats prod     # Check only prod
+
+set -euo pipefail
+
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Get VPN IP from terraform
+get_vpn_ip() {
+  local env="$1"
+  cd "$REPO/phase1" >/dev/null
+  terraform workspace select "$env" >/dev/null 2>&1 || true
+  terraform output -raw openvpn_server_ip 2>/dev/null
+  cd - >/dev/null
+}
+
+print_header() {
+  echo ""
+  echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
+  echo -e "${BLUE}  $1${NC}"
+  echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
+}
+
+print_subheader() {
+  echo ""
+  echo -e "${YELLOW}── $1 ──${NC}"
+}
+
+# Process environment
+process_env() {
+  local env="$1"
+  local env_upper=$(echo "$env" | tr '[:lower:]' '[:upper:]')
+  
+  print_header "Environment: $env_upper"
+  
+  # Get VPN IP
+  local vpn_ip
+  vpn_ip=$(get_vpn_ip "$env" 2>/dev/null) || {
+    echo -e "${RED}Could not get VPN IP for $env${NC}"
+    return 1
+  }
+  echo "VPN Server: $vpn_ip"
+  
+  # ═══════════════════════════════════════════════════════════════
+  # VPN Postfix Stats
+  # ═══════════════════════════════════════════════════════════════
+  print_subheader "VPN Postfix ($vpn_ip)"
+  
+  echo "Analyzing logs..."
+  
+  # Fetch all stats in one SSH call
+  local vpn_result
+  vpn_result=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$vpn_ip" '
+    LOG="/var/log/mail.log"
+    
+    # Counts from full log
+    SENT=$(grep -c "status=sent" "$LOG" 2>/dev/null || echo 0)
+    BOUNCED=$(grep -c "status=bounced" "$LOG" 2>/dev/null || echo 0)
+    DEFERRED=$(grep -c "status=deferred" "$LOG" 2>/dev/null || echo 0)
+    REJECTED=$(grep -c "NOQUEUE.*reject" "$LOG" 2>/dev/null || echo 0)
+    INBOUND=$(grep "status=sent" "$LOG" 2>/dev/null | grep -c ":30025" || echo 0)
+    
+    # Queue
+    QUEUE_INFO=$(postqueue -p 2>/dev/null | tail -1)
+    QUEUE_COUNT=$(echo "$QUEUE_INFO" | grep -oE "^[0-9]+" || echo 0)
+    if echo "$QUEUE_INFO" | grep -q "empty"; then
+      QUEUE_COUNT=0
+    fi
+    
+    echo "$SENT $BOUNCED $DEFERRED $REJECTED $INBOUND $QUEUE_COUNT"
+  ' 2>/dev/null) || vpn_result="0 0 0 0 0 0"
+  
+  read SENT BOUNCED DEFERRED REJECTED INBOUND QUEUE_COUNT <<< "$vpn_result"
+  OUTBOUND=$((SENT - INBOUND))
+  
+  echo ""
+  echo "  Statistics (from current log):"
+  printf "    %-20s %s\n" "Sent total:" "$SENT"
+  printf "    %-20s %s\n" "  → Inbound (to K8s):" "$INBOUND"
+  printf "    %-20s %s\n" "  → Outbound:" "$OUTBOUND"
+  printf "    %-20s %s\n" "Bounced:" "$BOUNCED"
+  printf "    %-20s %s\n" "Deferred:" "$DEFERRED"
+  printf "    %-20s %s\n" "Rejected (blocked):" "$REJECTED"
+  echo ""
+  if [ "$QUEUE_COUNT" -gt 0 ] 2>/dev/null; then
+    echo -e "  Queue: ${YELLOW}$QUEUE_COUNT messages${NC}"
+  else
+    echo -e "  Queue: ${GREEN}Empty${NC}"
+  fi
+  
+  # ═══════════════════════════════════════════════════════════════
+  # K8s Postfix Stats
+  # ═══════════════════════════════════════════════════════════════
+  print_subheader "K8s Postfix (infra-mail)"
+  
+  local KUBECONFIG="$REPO/kubeconfig.$env.yaml"
+  if [ ! -f "$KUBECONFIG" ]; then
+    echo -e "  ${RED}Kubeconfig not found${NC}"
+  else
+    echo "Analyzing logs (last 24h)..."
+    
+    local k8s_logs
+    k8s_logs=$(KUBECONFIG="$KUBECONFIG" kubectl logs -n infra-mail deploy/postfix -c postfix --since=24h 2>/dev/null || echo "")
+    
+    local k8s_sent=0 k8s_bounced=0 k8s_rejected=0 k8s_inbound=0
+    if [ -n "$k8s_logs" ]; then
+      k8s_sent=$(echo "$k8s_logs" | grep -c "status=sent" || true)
+      k8s_bounced=$(echo "$k8s_logs" | grep -c "status=bounced" || true)
+      k8s_rejected=$(echo "$k8s_logs" | grep -c "NOQUEUE.*reject" || true)
+      k8s_inbound=$(echo "$k8s_logs" | grep "status=sent" | grep -c "stalwart" || true)
+    fi
+    
+    # Clean up - ensure integers
+    k8s_sent=$((k8s_sent + 0))
+    k8s_bounced=$((k8s_bounced + 0))
+    k8s_rejected=$((k8s_rejected + 0))
+    k8s_inbound=$((k8s_inbound + 0))
+    
+    local k8s_outbound=$((k8s_sent - k8s_inbound))
+    
+    echo ""
+    echo "  Statistics (last 24h):"
+    printf "    %-20s %s\n" "Sent total:" "$k8s_sent"
+    printf "    %-20s %s\n" "  → To Stalwart:" "$k8s_inbound"
+    printf "    %-20s %s\n" "  → To VPN/External:" "$k8s_outbound"
+    printf "    %-20s %s\n" "Bounced:" "$k8s_bounced"
+    printf "    %-20s %s\n" "Rejected:" "$k8s_rejected"
+  fi
+  
+  # ═══════════════════════════════════════════════════════════════
+  # Security Check - Recent Rejections
+  # ═══════════════════════════════════════════════════════════════
+  print_subheader "Recent Relay Rejections (security)"
+  
+  local rejects
+  rejects=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$vpn_ip" \
+    'grep "NOQUEUE.*reject" /var/log/mail.log 2>/dev/null | tail -5' 2>/dev/null) || rejects=""
+  
+  if [ -n "$rejects" ]; then
+    echo "$rejects" | while read -r line; do
+      local ts=$(echo "$line" | awk '{print $1, $2, $3}')
+      local from_host=$(echo "$line" | grep -oE 'from [^[]+\[[0-9.]+\]' | head -1 || echo "unknown")
+      echo -e "  ${GREEN}✓ Blocked${NC} $ts - $from_host"
+    done
+  else
+    echo "  No recent rejections found"
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════
+
+echo ""
+echo -e "${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║           MAIL INFRASTRUCTURE STATUS REPORT                  ║${NC}"
+echo -e "${BLUE}║                 $(date '+%Y-%m-%d %H:%M:%S')                        ║${NC}"
+echo -e "${BLUE}╚══════════════════════════════════════════════════════════════╝${NC}"
+
+# Which environments to check
+if [ $# -gt 0 ]; then
+  ENVS=("$1")
+else
+  ENVS=("prod" "dev")
+fi
+
+for env in "${ENVS[@]}"; do
+  process_env "$env" || true
+done
+
+echo ""
+print_header "Report Complete"
+echo ""

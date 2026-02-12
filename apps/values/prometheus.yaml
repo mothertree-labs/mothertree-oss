@@ -1,0 +1,247 @@
+prometheus:
+  prometheusSpec:
+    # Reduced from 5s to 15s to reduce data volume (3x less data generation)
+    scrapeInterval: 15s
+    # Increased from 7d to 14d - with slower scrape interval, 14 days fits in storage
+    retention: 14d
+    # Size-based retention cap to prevent storage fill-up (enforced independently of time retention)
+    retentionSize: 8GiB
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              # NOTE: Temporarily set to 15Gi to allow Prometheus to start and compact.
+              # After compaction is verified, this can be set back to 10Gi for consistency.
+              # However, Kubernetes does not support PVC shrinking, so the actual PVC will
+              # remain at 15Gi capacity. The retentionSize: 8Gi setting ensures actual
+              # data usage stays capped at 8Gi regardless of PVC size.
+              storage: 15Gi
+          storageClassName: linode-block-storage-retain
+    # Memory INCREASED based on actual usage (~1Gi observed)
+    resources:
+      requests:
+        cpu: 200m  # Prometheus is heavily utilized, needs higher baseline
+        memory: 1280Mi
+      limits:
+        cpu: 500m
+        memory: 2Gi
+  ingress:
+    enabled: true
+    ingressClassName: nginx-internal
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod-dns01
+      kubernetes.io/ingress.class: nginx-internal
+    # hosts and tls are set in environment-specific files
+    # Additional ServiceMonitor configurations
+    additionalServiceMonitors:
+      - name: matrix-synapse
+        selector:
+          matchLabels:
+            app: matrix-synapse
+        endpoints:
+          - port: metrics
+            path: /_synapse/metrics
+            interval: 30s
+        namespaceSelector:
+          matchNames: [matrix]
+      - name: matrix-postgresql
+        selector:
+          matchLabels:
+            app: postgresql
+        endpoints:
+          - port: metrics
+            interval: 30s
+        namespaceSelector:
+          matchNames: [matrix]
+      - name: matrix-redis
+        selector:
+          matchLabels:
+            app: redis
+        endpoints:
+          - port: metrics
+            interval: 30s
+        namespaceSelector:
+          matchNames: [matrix]
+    # Additional PrometheusRule configurations
+    additionalPrometheusRules:
+      - name: matrix-alerts
+        groups:
+          - name: matrix.rules
+            rules:
+              - alert: MatrixSynapseDown
+                expr: up{job="matrix-synapse"} == 0
+                for: 1m
+                labels:
+                  severity: critical
+                annotations:
+                  summary: Matrix Synapse is down
+                  description: Matrix Synapse has been down for more than 1 minute
+              - alert: MatrixSynapseHighCPU
+                expr: rate(container_cpu_usage_seconds_total{container="matrix-synapse"}[5m]) > 0.8
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: Matrix Synapse high CPU usage
+                  description: Matrix Synapse CPU usage is above 80% for 5 minutes
+              - alert: MatrixSynapseHighMemory
+                expr: container_memory_usage_bytes{container="matrix-synapse"} / container_spec_memory_limit_bytes{container="matrix-synapse"} > 0.8
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: Matrix Synapse high memory usage
+                  description: Matrix Synapse memory usage is above 80% for 5 minutes
+              - alert: MatrixPostgreSQLDown
+                expr: up{job="matrix-postgresql"} == 0
+                for: 1m
+                labels:
+                  severity: critical
+                annotations:
+                  summary: Matrix PostgreSQL is down
+                  description: Matrix PostgreSQL has been down for more than 1 minute
+              - alert: MatrixRedisDown
+                expr: up{job="matrix-redis"} == 0
+                for: 1m
+                labels:
+                  severity: critical
+                annotations:
+                  summary: Matrix Redis is down
+                  description: Matrix Redis has been down for more than 1 minute
+
+grafana:
+  adminPassword: "changeme"  # This should be set via environment variable
+  persistence:
+    enabled: false  # Disabled to reduce PVC count - dashboards are provisioned via ConfigMaps
+  # Memory INCREASED based on actual usage (~230Mi observed)
+  resources:
+    requests:
+      cpu: 10m
+      memory: 320Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+  ingress:
+    enabled: true
+    ingressClassName: nginx-internal
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod-dns01
+      kubernetes.io/ingress.class: nginx-internal
+    # hosts and tls are set in environment-specific files
+  
+  # Additional datasources configuration
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.monitoring.svc.cluster.local:3100
+      isDefault: false
+      editable: true
+      jsonData:
+        maxLines: 1000
+        derivedFields:
+          - datasourceUid: prometheus
+            matcherRegex: "traceID=(\\w+)"
+            name: TraceID
+            url: "$${__value.raw}"
+
+alertmanager:
+  alertmanagerSpec:
+    retention: 24h
+    # Storage disabled to reduce PVC count - alert state is ephemeral
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+  ingress:
+    enabled: true
+    ingressClassName: nginx-internal
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod-dns01
+      kubernetes.io/ingress.class: nginx-internal
+    # hosts and tls are set in environment-specific files
+
+nodeExporter:
+  enabled: true
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+kubeStateMetrics:
+  enabled: true
+
+# Prometheus operator resources
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+# Kube-state-metrics resources  
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 512Mi
+
+# Disable noisy default alert rules
+defaultRules:
+  disabled:
+    CPUThrottlingHigh: true
+
+# Custom replacement for CPUThrottlingHigh with 50% threshold (default is 25%)
+additionalPrometheusRulesMap:
+  cpu-throttling:
+    groups:
+      - name: cpu-throttling.rules
+        rules:
+          - alert: CPUThrottlingHigh
+            annotations:
+              description: '{{ $value | humanizePercentage }} throttling of CPU in namespace {{ $labels.namespace }} for container {{ $labels.container }} in pod {{ $labels.pod }}.'
+              summary: Processes experience elevated CPU throttling.
+            expr: |-
+              sum without (id, metrics_path, name, image, endpoint, job, node) (
+                topk by (cluster, namespace, pod, container, instance) (1,
+                  increase(
+                    container_cpu_cfs_throttled_periods_total{container!="", job="kubelet", metrics_path="/metrics/cadvisor"}
+                  [5m])
+                )
+              )
+              / on (cluster, namespace, pod, container, instance) group_left
+              sum without (id, metrics_path, name, image, endpoint, job, node) (
+                topk by (cluster, namespace, pod, container, instance) (1,
+                  increase(
+                    container_cpu_cfs_periods_total{job="kubelet", metrics_path="/metrics/cadvisor"}
+                  [5m])
+                )
+              )
+              > ( 50 / 100 )
+            for: 15m
+            labels:
+              severity: info
+
+# Disable scraping of control plane components managed by LKE
+# These are inaccessible on managed Kubernetes and cause false alerts
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false

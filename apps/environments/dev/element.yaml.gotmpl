@@ -1,0 +1,25 @@
+# Replica count from tenant config (HPA will manage scaling)
+replicaCount: {{ env "ELEMENT_MIN_REPLICAS" }}
+
+configjson:
+  default_server_config:
+    m.homeserver:
+      base_url: 'https://{{ env "MATRIX_HOST" }}'
+      server_name: '{{ env "MATRIX_HOST" }}'
+  jitsi:
+    preferredDomain: '{{ env "JITSI_HOST" }}'
+  sso_redirect_options:
+    immediate: true
+
+ingress:
+  hosts:
+    - host: '{{ env "MATRIX_HOST" }}'
+      paths: ["/"]
+  tls:
+    - secretName: synapse-tls
+      hosts:
+        - '{{ env "MATRIX_HOST" }}'
+  annotations:
+    nginx.ingress.kubernetes.io/server-snippet: |
+      more_clear_headers "X-Frame-Options";
+      add_header Content-Security-Policy "frame-ancestors 'self' https://home.{{ env "TENANT_ENV_DNS_LABEL" }}.{{ env "TENANT_DOMAIN" }}" always;

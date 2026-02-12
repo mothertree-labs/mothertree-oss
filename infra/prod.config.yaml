@@ -1,0 +1,11 @@
+# Infrastructure Configuration - Production
+# Shared infrastructure settings (not tenant-specific)
+# Used by deploy_infra script
+
+# PostgreSQL - shared database with replication for HA
+postgresql:
+  read_replicas: 1  # 1 read replica for production HA
+
+# Keycloak - shared auth with HA
+keycloak:
+  replicas: 2  # 2 replicas for production HA

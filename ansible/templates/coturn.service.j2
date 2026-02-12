@@ -1,0 +1,17 @@
+[Unit]
+Description=TURN Server
+After=network.target
+
+[Service]
+Type=simple
+User=turnserver
+Group=turnserver
+ExecStartPre=/bin/bash -c 'EXTERNAL_IP=$(curl -s https://ipv4.icanhazip.com/) && sed -i "s/\$(curl -s https:\/\/ipv4.icanhazip.com\/)/$EXTERNAL_IP/g" /etc/turnserver/turnserver.conf'
+ExecStart=/usr/bin/turnserver -c /etc/turnserver/turnserver.conf
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

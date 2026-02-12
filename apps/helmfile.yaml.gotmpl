@@ -1,0 +1,229 @@
+environments:
+  dev: {}
+  prod: {}
+
+---
+
+repositories:
+  # Note: Repos are updated once at start of create_env, use --skip-deps on helmfile commands
+  - name: ingress-nginx
+    url: https://kubernetes.github.io/ingress-nginx
+  - name: jetstack
+    url: https://charts.jetstack.io
+  - name: ananace
+    url: https://ananace.gitlab.io/charts/
+  - name: halkeye
+    url: https://halkeye.github.io/helm-charts
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+  - name: vector
+    url: https://helm.vector.dev
+  - name: bitnami
+    url: https://charts.bitnami.com/bitnami
+  - name: impress
+    url: https://suitenumerique.github.io/docs/
+  - name: jitsi
+    url: https://jitsi-contrib.github.io/jitsi-helm
+  - name: nextcloud
+    url: https://nextcloud.github.io/helm/
+  - name: codecentric
+    url: https://codecentric.github.io/helm-charts
+  - name: metrics-server
+    url: https://kubernetes-sigs.github.io/metrics-server/
+  - name: linode-cfw
+    url: https://linode.github.io/cloud-firewall-controller
+
+releases:
+  # =============================================================================
+  # SHARED INFRASTRUCTURE COMPONENTS (infra-* namespaces)
+  # =============================================================================
+
+  # Ingress Controller
+  - name: ingress-nginx
+    namespace: {{ requiredEnv "NS_INGRESS" }}
+    chart: ingress-nginx/ingress-nginx
+    version: 4.7.1
+    wait: true
+    timeout: 600
+    labels:
+      tier: system
+    values:
+      - values/ingress-nginx.yaml
+    createNamespace: false  # Created by create_env
+
+  # Cert Manager
+  - name: cert-manager
+    namespace: {{ requiredEnv "NS_CERTMANAGER" }}
+    chart: jetstack/cert-manager
+    version: v1.13.3
+    wait: true
+    timeout: 600
+    labels:
+      tier: system
+    values:
+      - values/cert-manager.yaml
+    createNamespace: false  # Created by create_env
+
+  # Metrics Server — provides metrics.k8s.io API for HPA and kubectl top
+  # LKE does not ship metrics-server by default (unlike EKS/GKE/AKS)
+  - name: metrics-server
+    namespace: kube-system
+    chart: metrics-server/metrics-server
+    version: 3.12.1
+    wait: true
+    timeout: 300
+    labels:
+      tier: system
+    createNamespace: false
+
+  # Prometheus Stack
+  # NOTE: wait: false because this chart is huge and --wait hangs for minutes
+  # Readiness is checked separately in deploy_infra after helmfile completes
+  - name: kube-prometheus-stack
+    namespace: {{ requiredEnv "NS_MONITORING" }}
+    chart: prometheus-community/kube-prometheus-stack
+    version: 58.0.0
+    disableValidation: true
+    needs:
+      - {{ requiredEnv "NS_INGRESS" }}/ingress-nginx
+      - {{ requiredEnv "NS_CERTMANAGER" }}/cert-manager
+    wait: false
+    atomic: false
+    labels:
+      tier: system
+    values:
+      - values/prometheus.yaml
+      - environments/{{ .Environment.Name }}/prometheus.yaml.gotmpl
+    createNamespace: false  # Created by create_env
+
+  # Vector (Log Collection)
+  - name: vector
+    namespace: {{ requiredEnv "NS_MONITORING" }}
+    chart: vector/vector
+    version: 0.46.0
+    needs:
+      - {{ requiredEnv "NS_MONITORING" }}/kube-prometheus-stack
+    labels:
+      tier: system
+    values:
+      - values/vector.yaml
+    createNamespace: false  # Created by create_env
+
+  # Internal Ingress Controller
+  - name: ingress-nginx-internal
+    namespace: {{ requiredEnv "NS_INGRESS_INTERNAL" }}
+    chart: ingress-nginx/ingress-nginx
+    version: 4.7.1
+    wait: true
+    timeout: 600
+    labels:
+      tier: system
+    values:
+      - values/ingress-nginx-internal.yaml
+      - environments/{{ .Environment.Name }}/ingress-nginx-internal.yaml.gotmpl
+    createNamespace: false  # Created by create_env
+
+  # Cloud Firewall CRD (must deploy before controller)
+  - name: cloud-firewall-crd
+    namespace: kube-system
+    chart: linode-cfw/cloud-firewall-crd
+    version: 0.2.0
+    wait: true
+    timeout: 120
+    labels:
+      tier: system
+    createNamespace: false
+
+  # Cloud Firewall Controller - manages Linode Cloud Firewall for LKE nodes
+  # Automatically discovers cluster nodes and attaches them to the firewall.
+  # Reconciles on node add/remove events and every 10 hours.
+  - name: cloud-firewall-controller
+    namespace: kube-system
+    chart: linode-cfw/cloud-firewall-controller
+    version: 0.2.0
+    needs:
+      - kube-system/cloud-firewall-crd
+    wait: true
+    timeout: 300
+    labels:
+      tier: system
+    values:
+      - values/cloud-firewall-controller.yaml
+    createNamespace: false
+
+  # =============================================================================
+  # SHARED AUTH/DB COMPONENTS (infra-* namespaces)
+  # =============================================================================
+
+  # PostgreSQL for all apps - DEPLOYED VIA deploy-docs.sh to NS_DB namespace
+  # (not here to avoid duplication)
+
+  # Keycloak for authentication (shared, multi-realm)
+  # Note: Depends on PostgreSQL which is deployed by deploy-docs.sh to NS_DB namespace
+  # Keycloak will retry connection until PostgreSQL is ready
+  # IMPORTANT: tier=infra ensures Keycloak is NOT synced by create_env (which uses tier=apps)
+  # Keycloak is deployed only by deploy_infra using -l name=keycloak
+  - name: keycloak
+    namespace: {{ requiredEnv "NS_AUTH" }}
+    chart: codecentric/keycloakx
+    version: 7.1.7
+    labels:
+      tier: infra
+      name: keycloak
+    values:
+      - values/keycloak-codecentric.yaml
+      - environments/{{ .Environment.Name }}/keycloak.yaml.gotmpl
+    createNamespace: false  # Created by create_env
+
+  # =============================================================================
+  # TENANT-SPECIFIC APPS (tn-<tenant>-* namespaces)
+  # Namespaces are set via environment variables:
+  #   NS_MATRIX, NS_DOCS, NS_FILES, NS_JITSI
+  # =============================================================================
+
+  # Synapse (Matrix homeserver)
+  - name: matrix-synapse
+    namespace: {{ requiredEnv "NS_MATRIX" }}
+    chart: ananace/matrix-synapse
+    version: 3.12.18
+    needs:
+      - {{ requiredEnv "NS_INGRESS_INTERNAL" }}/ingress-nginx-internal
+    labels:
+      tier: apps
+    values:
+      - values/synapse.yaml
+      - environments/{{ .Environment.Name }}/synapse.yaml.gotmpl
+    createNamespace: false  # Created by create_env
+
+  # Element Web
+  - name: element-web
+    namespace: {{ requiredEnv "NS_MATRIX" }}
+    chart: halkeye/element-web
+    version: 1.30.0
+    needs:
+      - {{ requiredEnv "NS_INGRESS" }}/ingress-nginx
+    labels:
+      tier: apps
+    values:
+      - values/element.yaml
+      - environments/{{ .Environment.Name }}/element.yaml.gotmpl
+    createNamespace: false  # Created by create_env
+
+  # NOTE: Redis for Docs is deployed via deploy-docs.sh (simple single-replica deployment)
+  # The bitnami/redis helm chart was removed as it was unused and had image pull issues.
+  # For HA Redis needs, deploy a dedicated Redis to the relevant namespace.
+
+  # Nextcloud for file management
+  # Note: Depends on PostgreSQL in NS_DB namespace
+  # Nextcloud will use shared PostgreSQL with separate database
+  - name: nextcloud
+    namespace: {{ requiredEnv "NS_FILES" }}
+    chart: nextcloud/nextcloud
+    version: 8.9.0
+    labels:
+      tier: apps
+      name: nextcloud
+    values:
+      - values/nextcloud.yaml
+      - environments/{{ .Environment.Name }}/nextcloud.yaml.gotmpl
+    createNamespace: false  # Created by create_env

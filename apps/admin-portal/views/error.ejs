@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= title %> - MotherTree</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            sage: { DEFAULT: '#7C9A6C', dark: '#5A7A4C' },
+            cream: '#FAF8F5',
+            'warm-gray': '#6B6B6B',
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-cream min-h-screen flex items-center justify-center p-8">
+  <div class="bg-white rounded-xl shadow-lg p-8 max-w-md w-full text-center">
+    <h1 class="text-2xl text-red-600 mb-4"><%= title %></h1>
+    <p class="text-warm-gray mb-8"><%= message %></p>
+    
+    <a href="/auth/logout" class="inline-block bg-sage text-white px-6 py-3 rounded-lg hover:bg-sage-dark transition-colors">
+      Logout
+    </a>
+  </div>
+</body>
+</html>

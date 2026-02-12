@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: save-status-scripts
+  namespace: docs
+  labels:
+    app.kubernetes.io/name: docs
+    app.kubernetes.io/part-of: mother-tree
+data:
+  save-status.js: |
+    /**
+     * Save Persistence Fix for La Suite Docs
+     * 
+     * Problem: The frontend's useSaveDoc hook triggers saves on beforeunload,
+     * but regular fetch() requests get killed during page navigation/refresh.
+     * 
+     * Solution: Intercept fetch() and add keepalive:true to document save
+     * PATCH requests, ensuring they complete even when the page unloads.
+     * For WebKit browsers (Safari), also use synchronous XHR as fallback.
+     * 
+     * Injected via FRONTEND_JS_URL environment variable.
+     */
+    (function() {
+      'use strict';
+      
+      // Detect WebKit browsers (Safari, etc.) for sync XHR fallback
+      var isWebKit = /AppleWebKit/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
+      
+      // Store pending save for WebKit fallback
+      var pendingSave = null;
+      
+      // Intercept fetch to add keepalive for document saves
+      var originalFetch = window.fetch;
+      window.fetch = function(url, options) {
+        options = options || {};
+        
+        var urlStr = typeof url === 'string' ? url : (url.url || url.toString());
+        
+        // If this is a document save (PATCH to /documents/)
+        if (urlStr.includes('/documents/') && options.method === 'PATCH') {
+          options.keepalive = true;
+          pendingSave = { url: urlStr, body: options.body };
+        }
+        
+        return originalFetch.call(this, url, options);
+      };
+      
+      // WebKit fallback: Use synchronous XHR on beforeunload
+      window.addEventListener('beforeunload', function() {
+        if (isWebKit && pendingSave) {
+          try {
+            var xhr = new XMLHttpRequest();
+            xhr.open('PATCH', pendingSave.url, false); // synchronous
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.send(pendingSave.body);
+          } catch (err) {
+            // Silently fail - best effort
+          }
+        }
+      });
+      
+      // WebKit fallback: Also use pagehide which is more reliable
+      window.addEventListener('pagehide', function(e) {
+        if (isWebKit && pendingSave && !e.persisted) {
+          try {
+            var xhr = new XMLHttpRequest();
+            xhr.open('PATCH', pendingSave.url, false);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.send(pendingSave.body);
+          } catch (err) {
+            // Silently fail - best effort
+          }
+        }
+      });
+    })();

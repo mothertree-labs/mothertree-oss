@@ -1,0 +1,132 @@
+#!/bin/bash
+# check-component-versions - Check for available updates to major components
+#
+# This script compares currently configured versions against latest available
+# versions for all major components in the MotherTree stack.
+#
+# Usage: ./scripts/check-component-versions
+#
+# Run this monthly to check for available updates.
+
+set -euo pipefail
+
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+echo "=============================================="
+echo "MotherTree Component Version Check"
+echo "=============================================="
+echo ""
+
+# Function to compare versions and print status
+print_status() {
+    local component="$1"
+    local current="$2"
+    local latest="$3"
+    
+    if [ "$current" = "$latest" ]; then
+        echo -e "${GREEN}✓${NC} $component: $current (up to date)"
+    else
+        echo -e "${YELLOW}⚠${NC} $component: $current → $latest (update available)"
+    fi
+}
+
+# Function to extract version from helmfile
+get_helm_version() {
+    local chart_name="$1"
+    grep -A1 "chart: $chart_name" "$REPO/apps/helmfile.yaml.gotmpl" | grep "version:" | awk '{print $2}' | head -1
+}
+
+# Function to extract tag from JSON response
+extract_tag() {
+    # Works on both macOS and Linux
+    grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' | head -1
+}
+
+# Function to extract image tag from file (portable version)
+extract_image_tag() {
+    local image_name="$1"
+    local file="$2"
+    # Use awk for better portability, filter for lines containing 'image:'
+    grep "image:.*$image_name" "$file" | awk -F: '{print $NF}' | tr -d ' "' | head -1
+}
+
+echo "=== Helm Chart Versions ==="
+echo ""
+
+# Update helm repos
+echo "Updating Helm repositories..."
+helm repo update >/dev/null 2>&1 || echo "Warning: Could not update helm repos"
+echo ""
+
+# Keycloak (codecentric/keycloakx)
+CURRENT_KEYCLOAK=$(get_helm_version "codecentric/keycloakx")
+LATEST_KEYCLOAK=$(helm search repo codecentric/keycloakx --versions 2>/dev/null | awk 'NR==2{print $2}' || echo "unknown")
+LATEST_KEYCLOAK_APP=$(helm search repo codecentric/keycloakx --versions 2>/dev/null | awk 'NR==2{print $3}' || echo "unknown")
+print_status "Keycloak chart" "$CURRENT_KEYCLOAK" "$LATEST_KEYCLOAK"
+echo "  └─ App version: $LATEST_KEYCLOAK_APP"
+
+# Matrix Synapse (ananace/matrix-synapse)
+CURRENT_SYNAPSE=$(get_helm_version "ananace/matrix-synapse")
+LATEST_SYNAPSE=$(helm search repo ananace/matrix-synapse --versions 2>/dev/null | awk 'NR==2{print $2}' || echo "unknown")
+LATEST_SYNAPSE_APP=$(helm search repo ananace/matrix-synapse --versions 2>/dev/null | awk 'NR==2{print $3}' || echo "unknown")
+print_status "Matrix Synapse chart" "$CURRENT_SYNAPSE" "$LATEST_SYNAPSE"
+echo "  └─ App version: $LATEST_SYNAPSE_APP"
+
+# Element Web (halkeye/element-web)
+CURRENT_ELEMENT=$(get_helm_version "halkeye/element-web")
+LATEST_ELEMENT=$(helm search repo halkeye/element-web --versions 2>/dev/null | awk 'NR==2{print $2}' || echo "unknown")
+LATEST_ELEMENT_APP=$(helm search repo halkeye/element-web --versions 2>/dev/null | awk 'NR==2{print $3}' || echo "unknown")
+print_status "Element Web chart" "$CURRENT_ELEMENT" "$LATEST_ELEMENT"
+echo "  └─ App version: $LATEST_ELEMENT_APP"
+
+# Nextcloud (nextcloud/nextcloud)
+CURRENT_NEXTCLOUD=$(get_helm_version "nextcloud/nextcloud")
+LATEST_NEXTCLOUD=$(helm search repo nextcloud/nextcloud --versions 2>/dev/null | awk 'NR==2{print $2}' || echo "unknown")
+LATEST_NEXTCLOUD_APP=$(helm search repo nextcloud/nextcloud --versions 2>/dev/null | awk 'NR==2{print $3}' || echo "unknown")
+print_status "Nextcloud chart" "$CURRENT_NEXTCLOUD" "$LATEST_NEXTCLOUD"
+echo "  └─ App version: $LATEST_NEXTCLOUD_APP"
+
+echo ""
+echo "=== Docker Image Versions ==="
+echo ""
+
+# Jitsi (from manifests)
+CURRENT_JITSI=$(extract_image_tag "jitsi/prosody" "$REPO/apps/manifests/jitsi/prosody.yaml.tpl")
+LATEST_JITSI=$(curl -s "https://api.github.com/repos/jitsi/docker-jitsi-meet/releases/latest" 2>/dev/null | extract_tag || echo "unknown")
+print_status "Jitsi" "$CURRENT_JITSI" "$LATEST_JITSI"
+
+# LaSuite Docs (from deployments)
+CURRENT_DOCS=$(extract_image_tag "lasuite/impress-backend" "$REPO/docs/backend-deployment.yaml")
+LATEST_DOCS=$(curl -s "https://api.github.com/repos/suitenumerique/docs/releases/latest" 2>/dev/null | extract_tag || echo "unknown")
+print_status "LaSuite Docs" "$CURRENT_DOCS" "$LATEST_DOCS"
+
+# Jitsi Keycloak Adapter
+CURRENT_ADAPTER=$(extract_image_tag "jitsi-keycloak-adapter" "$REPO/apps/manifests/jitsi/keycloak-adapter.yaml.tpl")
+LATEST_ADAPTER=$(curl -s "https://api.github.com/repos/nordeck/jitsi-keycloak-adapter/releases/latest" 2>/dev/null | extract_tag || echo "unknown")
+print_status "Jitsi Keycloak Adapter" "$CURRENT_ADAPTER" "$LATEST_ADAPTER"
+
+# Keycloak image tag (from values)
+CURRENT_KC_IMAGE=$(grep 'tag:' "$REPO/apps/values/keycloak-codecentric.yaml" | head -1 | awk '{print $2}' | tr -d '"')
+echo ""
+echo "  Keycloak image tag: $CURRENT_KC_IMAGE"
+
+echo ""
+echo "=== Release Notes Links ==="
+echo ""
+echo "Jitsi: https://github.com/jitsi/docker-jitsi-meet/releases"
+echo "LaSuite Docs: https://github.com/suitenumerique/docs/releases"
+echo "Keycloak: https://www.keycloak.org/docs/latest/release_notes/"
+echo "Matrix Synapse: https://github.com/element-hq/synapse/releases"
+echo "Element Web: https://github.com/element-hq/element-web/releases"
+echo "Nextcloud: https://nextcloud.com/changelog/"
+echo ""
+echo "=============================================="
+echo "Done. Review updates and test in dev before prod."
+echo "=============================================="

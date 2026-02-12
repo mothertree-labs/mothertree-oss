@@ -1,0 +1,28 @@
+# configjson is set in environment-specific files (apps/environments/<env>/element.yaml.gotmpl)
+# to include the correct Matrix server and Jitsi URLs for each tenant
+
+# replicaCount is set in environment-specific files from tenant config
+
+persistence:
+  enabled: true
+  existingClaim: element-web
+  size: 1Gi
+
+resources:
+  requests:
+    cpu: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+ingress:
+  enabled: true
+  className: nginx
+  ingressClassName: nginx
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/priority: "10"  # Lower priority than API paths
+  # hosts, tls, and iframe annotations are set in environment-specific files
+  # NOTE: No cert-manager annotation here — Element shares MATRIX_HOST with Synapse,
+  # so Synapse's Ingress handles certificate provisioning (synapse-tls secret).

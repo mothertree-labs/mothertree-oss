@@ -1,0 +1,94 @@
+# Vector Configuration for Log Collection
+# Minimal configuration using chart defaults
+
+# Vector role - Agent for log collection
+role: Agent
+
+# Agent configuration
+agent:
+  # DaemonSet configuration
+  daemonSet:
+    enabled: true
+  
+  # Resource limits
+  resources:
+    requests:
+      cpu: 40m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# Use dataDir to specify a different data directory
+dataDir: /tmp/vector-data
+
+# Use customConfig with minimal overrides
+customConfig:
+  data_dir: /tmp/vector-data
+  api:
+    enabled: true
+    address: 127.0.0.1:8686
+    playground: false
+  sources:
+    kubernetes_logs:
+      type: kubernetes_logs
+    host_metrics:
+      filesystem:
+        devices:
+          excludes: [binfmt_misc]
+        filesystems:
+          excludes: [binfmt_misc]
+        mountpoints:
+          excludes: ["*/proc/sys/fs/binfmt_misc"]
+      type: host_metrics
+    internal_metrics:
+      type: internal_metrics
+  
+  # NEW: Add transforms section here
+  transforms:
+    kubernetes_metadata:
+      type: remap
+      inputs: [kubernetes_logs]
+      source: |
+        # Extract Kubernetes metadata from the log event
+        .namespace = .kubernetes.pod_namespace
+        .pod_name = .kubernetes.pod_name
+        .container_name = .kubernetes.container_name
+        .node_name = .kubernetes.pod_node_name
+        
+        # Extract common Kubernetes labels if they exist
+        .app = .kubernetes.pod_labels.app
+        .component = .kubernetes.pod_labels.component
+  
+  sinks:
+    # Keep default stdout sink for debugging
+    stdout:
+      type: console
+      inputs: [kubernetes_metadata]  # CHANGED: was kubernetes_logs
+      encoding:
+        codec: json
+    
+    # Update Loki sink
+    loki:
+      type: loki
+      inputs: [kubernetes_metadata]  # CHANGED: was kubernetes_logs
+      endpoint: "http://loki.monitoring.svc.cluster.local:3100"
+      labels:
+        job: "kubernetes-pods"
+        namespace: "{{ `{{ namespace }}` }}"
+        pod_name: "{{ `{{ pod_name }}` }}"
+        container_name: "{{ `{{ container_name }}` }}"
+        node_name: "{{ `{{ node_name }}` }}"
+        app: "{{ `{{ app }}` }}"
+      encoding:
+        codec: json
+      remove_label_fields: true
+    prom_exporter:
+      type: prometheus_exporter
+      inputs: [host_metrics, internal_metrics]
+      address: 0.0.0.0:9090
+
+# Service account
+serviceAccount:
+  create: true
+  name: vector

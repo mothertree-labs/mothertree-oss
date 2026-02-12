@@ -1,0 +1,90 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: docs-migrations
+  namespace: docs
+  labels:
+    app.kubernetes.io/name: docs
+    app.kubernetes.io/part-of: mother-tree
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: docs
+        app.kubernetes.io/part-of: mother-tree
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: backend
+          image: lasuite/impress-backend:v4.4.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir 'boto3==1.35.99' 'botocore<1.36' || true
+              python manage.py migrate --noinput
+          envFrom:
+            - configMapRef:
+                name: docs-config
+            - configMapRef:
+                name: env-d-yprovider
+          env:
+            - name: DJANGO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: docs-secrets
+                  key: DJANGO_SECRET_KEY
+            - name: COLLABORATION_SERVER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: docs-secrets
+                  key: COLLABORATION_SERVER_SECRET
+            - name: Y_PROVIDER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: docs-secrets
+                  key: Y_PROVIDER_API_KEY
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: docs-secrets
+                  key: DATABASE_PASSWORD
+            - name: AWS_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: docs-secrets
+                  key: AWS_S3_ACCESS_KEY_ID
+            - name: AWS_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: docs-secrets
+                  key: AWS_S3_SECRET_ACCESS_KEY
+            - name: OIDC_RP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: docs-secrets
+                  key: OIDC_RP_CLIENT_SECRET
+            - name: DEFAULT_FILE_STORAGE
+              value: "storage_backends.LinodeS3Boto3Storage"
+          volumeMounts:
+            - name: storage-backends
+              mountPath: /app/storage_backends.py
+              subPath: storage_backends.py
+          # Memory tuned - migrations are short-lived jobs
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: storage-backends
+          configMap:
+            name: storage-backends
+

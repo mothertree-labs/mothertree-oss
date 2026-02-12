@@ -1,0 +1,87 @@
+# Nextcloud Dev Environment Configuration
+# Uses environment variables for multi-tenant support
+
+# Database configuration - tenant-specific database and user (required, no default)
+# Host varies based on PostgreSQL architecture (standalone vs replication)
+externalDatabase:
+  host: '{{ env "PG_HOST" }}'
+  database: '{{ requiredEnv "NEXTCLOUD_DB_NAME" }}'
+  user: '{{ requiredEnv "TENANT_DB_USER" }}'
+
+# Hostname and S3 Object Storage
+nextcloud:
+  host: '{{ env "FILES_HOST" }}'
+  trustedDomains:
+    - '{{ env "FILES_HOST" }}'
+    - '{{ env "CALENDAR_HOST" }}'
+  # S3 Primary Object Storage (Linode Object Storage)
+  objectStore:
+    s3:
+      enabled: true
+      host: '{{ env "S3_CLUSTER" }}.linodeobjects.com'
+      ssl: true
+      port: "443"
+      region: '{{ env "S3_CLUSTER" }}'
+      bucket: '{{ env "S3_FILES_BUCKET" }}'
+      usePathStyle: false
+      autoCreate: false
+      existingSecret: "nextcloud-s3-credentials"
+      secretKeys:
+        accessKey: "access_key"
+        secretKey: "secret_key"
+
+# Ingress configuration (files subdomain only)
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: 4G
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+  hosts:
+    - host: '{{ env "FILES_HOST" }}'
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: files-tls
+      hosts:
+        - '{{ env "FILES_HOST" }}'
+
+# Calendar subdomain ingress with redirect to /apps/calendar
+extraManifests:
+  - apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: nextcloud-calendar
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-prod
+        nginx.ingress.kubernetes.io/proxy-body-size: 4G
+        nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+        nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+        # Redirect root and /apps/files to /apps/calendar
+        nginx.ingress.kubernetes.io/configuration-snippet: |
+          if ($request_uri = /) {
+            return 302 /apps/calendar;
+          }
+          if ($request_uri ~ ^/apps/files) {
+            return 302 /apps/calendar;
+          }
+    spec:
+      ingressClassName: nginx
+      tls:
+        - hosts:
+            - '{{ env "CALENDAR_HOST" }}'
+          secretName: calendar-tls
+      rules:
+        - host: '{{ env "CALENDAR_HOST" }}'
+          http:
+            paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: nextcloud
+                    port:
+                      number: 8080

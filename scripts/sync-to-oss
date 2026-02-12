@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Sync tracked files from this repo's main branch to the open-source repo,
+# excluding paths listed in oss-omit.
+#
+# Usage:
+#   scripts/sync-to-oss                        # sync, commit, and push
+#   scripts/sync-to-oss --dry-run              # preview changes only
+#   scripts/sync-to-oss --no-push              # sync but leave checkout for manual review
+#   scripts/sync-to-oss --message "Release v2" # non-interactive commit message
+
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# --- Colors ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_status()  { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+print_error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
+
+# --- Parse flags ---
+DRY_RUN=false
+NO_PUSH=false
+COMMIT_MSG=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)   DRY_RUN=true; shift ;;
+    --no-push)   NO_PUSH=true; shift ;;
+    --message)   COMMIT_MSG="$2"; shift 2 ;;
+    -h|--help)
+      echo "Usage: $(basename "$0") [--dry-run] [--no-push] [--message \"...\"]"
+      echo ""
+      echo "Sync main branch to the open-source repo, excluding paths in oss-omit."
+      echo ""
+      echo "Flags:"
+      echo "  --dry-run   Preview changes without modifying the OSS repo"
+      echo "  --no-push   Sync files but leave the OSS checkout for manual review"
+      echo "  --message   Commit message (prompted interactively if omitted)"
+      exit 0
+      ;;
+    *) print_error "Unknown flag: $1"; exit 1 ;;
+  esac
+done
+
+# --- Validate config ---
+CONF_FILE="$REPO/oss.conf"
+OMIT_FILE="$REPO/oss-omit"
+
+if [[ ! -f "$CONF_FILE" ]]; then
+  print_error "Missing $CONF_FILE — create it with: OSS_REPO=git@github.com:org/repo.git"
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONF_FILE"
+
+if [[ -z "${OSS_REPO:-}" ]]; then
+  print_error "OSS_REPO not set in $CONF_FILE"
+  exit 1
+fi
+
+if [[ ! -f "$OMIT_FILE" ]]; then
+  print_error "Missing $OMIT_FILE — create it with paths to exclude"
+  exit 1
+fi
+
+print_status "OSS repo: $OSS_REPO"
+print_status "Omit file: $OMIT_FILE"
+
+# --- Temp dirs (cleaned up on exit) ---
+STAGING_DIR=$(mktemp -d)
+OSS_DIR=$(mktemp -d)
+cleanup() { rm -rf "$STAGING_DIR" "$OSS_DIR"; }
+trap cleanup EXIT
+
+# --- Step 1: Export main branch to staging dir ---
+print_status "Exporting main branch (tracked files only)..."
+git -C "$REPO" archive main | tar -x -C "$STAGING_DIR"
+print_success "Exported $(find "$STAGING_DIR" -type f | wc -l | tr -d ' ') files"
+
+# --- Step 2: Clone OSS repo ---
+print_status "Cloning OSS repo..."
+if git clone --single-branch "$OSS_REPO" "$OSS_DIR" 2>/dev/null; then
+  print_success "Cloned existing OSS repo"
+else
+  # Empty repo — init and set up
+  print_warning "OSS repo appears empty, initializing..."
+  git init "$OSS_DIR" >/dev/null
+  git -C "$OSS_DIR" remote add origin "$OSS_REPO"
+  git -C "$OSS_DIR" checkout -b main
+fi
+
+# --- Step 3: Rsync with exclusions ---
+# Build rsync exclude args from oss-omit (skip blank lines and comments)
+RSYNC_ARGS=(-a --delete)
+
+while IFS= read -r line; do
+  # Skip empty lines and comments
+  [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+  # Trim whitespace
+  line=$(echo "$line" | xargs)
+  [[ -z "$line" ]] && continue
+  RSYNC_ARGS+=(--exclude="$line")
+done < "$OMIT_FILE"
+
+# Always exclude .git
+RSYNC_ARGS+=(--exclude=".git/")
+
+print_status "Syncing files (excluding $(grep -cve '^\s*$' -e '^\s*#' "$OMIT_FILE") omitted patterns)..."
+rsync "${RSYNC_ARGS[@]}" "$STAGING_DIR/" "$OSS_DIR/"
+
+# --- Step 3b: Tenant directory handling ---
+# Only the .example tenant is published to OSS, renamed to example.
+# Remove all other tenant subdirectories, then unhide .example.
+for dir in "$OSS_DIR"/tenants/*/; do
+  [[ -d "$dir" ]] || continue
+  rm -rf "$dir"
+done
+if [[ -d "$OSS_DIR/tenants/.example" ]]; then
+  mv "$OSS_DIR/tenants/.example" "$OSS_DIR/tenants/example"
+  print_status "Renamed tenants/.example -> tenants/example"
+fi
+
+# --- Step 4: Show results ---
+# (rsync always runs for real — we're in a temp dir, so it's safe.
+#  dry-run just means we don't commit/push.)
+echo ""
+
+git -C "$OSS_DIR" add -A
+CHANGE_COUNT=$(git -C "$OSS_DIR" status --short | wc -l | tr -d ' ')
+
+if [[ "$CHANGE_COUNT" -eq 0 ]]; then
+  print_success "OSS repo is already up to date. Nothing to do."
+  exit 0
+fi
+
+if $DRY_RUN; then
+  print_status "Dry run — changes that would be made in OSS repo:"
+  git -C "$OSS_DIR" diff --cached --stat | tail -20
+  echo ""
+  git -C "$OSS_DIR" status --short | head -40
+  if [[ "$CHANGE_COUNT" -gt 40 ]]; then
+    print_status "... and $((CHANGE_COUNT - 40)) more files"
+  fi
+  echo ""
+  print_status "Total: $CHANGE_COUNT files changed"
+  exit 0
+fi
+
+print_status "Changes in OSS repo:"
+git -C "$OSS_DIR" diff --cached --stat | tail -20
+echo ""
+print_status "Total: $CHANGE_COUNT files changed"
+
+if $NO_PUSH; then
+  # Keep OSS dir for manual inspection, but clean up staging dir
+  rm -rf "$STAGING_DIR"
+  trap - EXIT
+  echo ""
+  print_success "OSS checkout ready for manual review at:"
+  echo "  $OSS_DIR"
+  echo ""
+  echo "When done, commit and push manually:"
+  echo "  cd $OSS_DIR"
+  echo "  git commit -m \"your message\""
+  echo "  git push origin main"
+  exit 0
+fi
+
+# --- Step 5: Commit and push ---
+if [[ -z "$COMMIT_MSG" ]]; then
+  echo ""
+  read -rp "Commit message: " COMMIT_MSG
+  if [[ -z "$COMMIT_MSG" ]]; then
+    print_error "Commit message cannot be empty"
+    exit 1
+  fi
+fi
+
+git -C "$OSS_DIR" commit -m "$COMMIT_MSG"
+print_status "Pushing to $OSS_REPO..."
+git -C "$OSS_DIR" push origin main
+print_success "Synced and pushed to OSS repo."

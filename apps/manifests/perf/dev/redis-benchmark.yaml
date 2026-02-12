@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redis-benchmark
+  namespace: perf
+  labels:
+    env: dev
+    app: redis
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        env: dev
+        app: redis
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: redis-benchmark
+          image: redis:7
+          env:
+            - name: REDIS_ADDR
+              value: "${REDIS_ADDR}"
+          command: ["sh", "-lc"]
+          args:
+            - |
+              hostport=${REDIS_ADDR:-redis:6379}; host=${hostport%:*}; port=${hostport##*:}; \
+              echo "Benchmarking $host:$port" && \
+              redis-benchmark -h "$host" -p "$port" -n 100000 -c 50 -t set,get,incr,lpush,rpush
+
+
