@@ -4,8 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Source project config if available (provides GITHUB_ORG)
-[[ -f "$REPO_DIR/project.conf" ]] && source "$REPO_DIR/project.conf"
+# Source project config and resolve paths (provides GITHUB_ORG, MT_TENANTS_DIR)
+REPO_ROOT="$REPO_DIR"
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_project_conf
+[[ -n "$MT_PROJECT_CONF" ]] && source "$MT_PROJECT_CONF"
+_mt_resolve_tenants_dir
 IMAGE_NAME="mothertree-dev"
 BASE_DIR="$HOME/.mothertree-dev"
 
@@ -34,10 +38,10 @@ TENANT="$2"
 BRANCH="${3:-claude/$INSTANCE}"
 
 # --- Validate tenant ---
-if [[ ! -f "$REPO_DIR/tenants/$TENANT/dev.config.yaml" ]]; then
-    echo "Error: Unknown tenant '$TENANT'. Expected tenants/\$TENANT/dev.config.yaml to exist."
+if [[ ! -f "$MT_TENANTS_DIR/$TENANT/dev.config.yaml" ]]; then
+    echo "Error: Unknown tenant '$TENANT'. Expected tenant config at $MT_TENANTS_DIR/\$TENANT/dev.config.yaml"
     echo "Available tenants:"
-    ls -1 "$REPO_DIR/tenants/"
+    ls -1 "$MT_TENANTS_DIR/" 2>/dev/null | grep -v README || echo "  (none found)"
     exit 1
 fi
 
@@ -135,8 +139,10 @@ echo "Copying secrets into clone..."
 cp -f "$REPO_DIR/kubeconfig.dev.yaml" "$CLONE_DIR/kubeconfig.dev.yaml" 2>/dev/null || echo "Warning: kubeconfig.dev.yaml not found"
 
 # Tenant secrets (only the assigned tenant)
-mkdir -p "$CLONE_DIR/tenants/$TENANT"
-cp -f "$REPO_DIR/tenants/$TENANT/dev.secrets.yaml" "$CLONE_DIR/tenants/$TENANT/dev.secrets.yaml" 2>/dev/null || echo "Warning: tenants/$TENANT/dev.secrets.yaml not found"
+# Copy to the same relative path in the clone (supports both submodule and legacy layouts)
+TENANT_REL_PATH="${MT_TENANTS_DIR#$REPO_DIR/}"
+mkdir -p "$CLONE_DIR/$TENANT_REL_PATH/$TENANT"
+cp -f "$MT_TENANTS_DIR/$TENANT/dev.secrets.yaml" "$CLONE_DIR/$TENANT_REL_PATH/$TENANT/dev.secrets.yaml" 2>/dev/null || echo "Warning: $TENANT_REL_PATH/$TENANT/dev.secrets.yaml not found"
 
 # Terraform secrets
 cp -f "$REPO_DIR/secrets.dev.tfvars.env" "$CLONE_DIR/secrets.dev.tfvars.env" 2>/dev/null || echo "Warning: secrets.dev.tfvars.env not found"

@@ -5,7 +5,10 @@ set -euo pipefail
 # Apple Silicon note: use buildx to build linux/amd64 (or multi-arch) so it runs on Linode nodes.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-[[ -f "$SCRIPT_DIR/../../../project.conf" ]] && source "$SCRIPT_DIR/../../../project.conf"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_project_conf
+[[ -n "$MT_PROJECT_CONF" ]] && source "$MT_PROJECT_CONF"
 
 IMAGE_TAG=${IMAGE_TAG:-${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-perf:latest}
 K6_IMAGE=${K6_IMAGE:-grafana/k6:0.49.0}

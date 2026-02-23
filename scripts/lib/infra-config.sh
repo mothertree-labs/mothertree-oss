@@ -40,6 +40,11 @@ mt_load_infra_config() {
     exit 1
   fi
 
+  # Resolve config paths (supports submodule and legacy layouts)
+  source "${REPO_ROOT}/scripts/lib/paths.sh"
+  _mt_resolve_tenants_dir
+  _mt_resolve_infra_config "$MT_ENV"
+
   _mt_infra_set_kubeconfig
   _mt_infra_set_namespaces
   _mt_infra_load_env_config
@@ -80,8 +85,8 @@ _mt_infra_set_namespaces() {
 # Internal: load environment-level infra config (infra/<env>.config.yaml)
 # ---------------------------------------------------------------------------
 _mt_infra_load_env_config() {
-  local infra_config="$REPO_ROOT/infra/$MT_ENV.config.yaml"
-  if [ -f "$infra_config" ]; then
+  local infra_config="${MT_INFRA_CONFIG:-}"
+  if [ -n "$infra_config" ] && [ -f "$infra_config" ]; then
     echo "[INFO] Loading infrastructure config from $infra_config"
     PG_READ_REPLICAS=$(yq '.postgresql.read_replicas // 1' "$infra_config")
     KEYCLOAK_REPLICAS=$(yq '.keycloak.replicas // 2' "$infra_config")
@@ -101,7 +106,7 @@ _mt_infra_discover_domain() {
   # Find INFRA_DOMAIN from first available tenant config
   INFRA_DOMAIN=""
   local _td _tcf
-  for _td in "$REPO_ROOT/tenants"/*/; do
+  for _td in "$MT_TENANTS_DIR"/*/; do
     _tcf="$_td/${MT_ENV}.config.yaml"
     if [ -f "$_tcf" ]; then
       INFRA_DOMAIN=$(yq '.infra.domain // .dns.domain' "$_tcf")
@@ -118,7 +123,7 @@ _mt_infra_discover_domain() {
   # Find the "infra tenant" — the tenant whose dns.domain matches INFRA_DOMAIN
   INFRA_TENANT_DIR=""
   local _td2 _tcf2 _td_domain
-  for _td2 in "$REPO_ROOT/tenants"/*/; do
+  for _td2 in "$MT_TENANTS_DIR"/*/; do
     _tcf2="${_td2}/${MT_ENV}.config.yaml"
     if [ -f "$_tcf2" ]; then
       _td_domain=$(yq '.dns.domain // ""' "$_tcf2")

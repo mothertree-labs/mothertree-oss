@@ -40,6 +40,9 @@ if mt_has_flag "--vpn"; then
   CONFIGURE_VPN="--vpn"
 fi
 
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_tenants_dir
+
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "configure-mail-routing"
 
@@ -60,7 +63,7 @@ TENANT_TRANSPORTS=""
 TENANT_RELAY_DOMAINS=""
 ALLOWED_SENDER_DOMAINS=""
 
-for tenant_dir in "$REPO_ROOT/tenants"/*/; do
+for tenant_dir in "$MT_TENANTS_DIR"/*/; do
   tenant_name=$(basename "$tenant_dir")
   config_file="$tenant_dir/${MT_ENV}.config.yaml"
 

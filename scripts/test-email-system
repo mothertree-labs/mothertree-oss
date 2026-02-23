@@ -43,9 +43,13 @@ mt_parse_args "$@"
 mt_require_env
 mt_require_tenant
 
+# Resolve config paths
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_tenants_dir
+
 # Load configuration
-TENANT_CONFIG="$REPO_ROOT/tenants/$MT_TENANT/$MT_ENV.config.yaml"
-TENANT_SECRETS="$REPO_ROOT/tenants/$MT_TENANT/$MT_ENV.secrets.yaml"
+TENANT_CONFIG="$MT_TENANTS_DIR/$MT_TENANT/$MT_ENV.config.yaml"
+TENANT_SECRETS="$MT_TENANTS_DIR/$MT_TENANT/$MT_ENV.secrets.yaml"
 KUBECONFIG="$REPO_ROOT/kubeconfig.$MT_ENV.yaml"
 
 if [ ! -f "$TENANT_CONFIG" ]; then

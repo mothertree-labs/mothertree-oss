@@ -43,8 +43,12 @@ mt_parse_args "$@"
 mt_require_env
 mt_require_tenant
 
+# Resolve config paths
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_tenants_dir
+
 # Load tenant config
-TENANT_CONFIG="$REPO_ROOT/tenants/$MT_TENANT/${MT_ENV}.config.yaml"
+TENANT_CONFIG="$MT_TENANTS_DIR/$MT_TENANT/${MT_ENV}.config.yaml"
 if [ ! -f "$TENANT_CONFIG" ]; then
   print_error "Tenant config not found: $TENANT_CONFIG"
   exit 1

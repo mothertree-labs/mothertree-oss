@@ -78,7 +78,5 @@ apps/manifests/jitsi/secrets.yaml
 
 # Tenant secrets (sensitive credentials per tenant/environment)
 tenants/*/*.secrets.yaml
+config/tenants/*/*.secrets.yaml
 *.secrets.yaml
-
-# OSS sync config (contains repo URL, per-developer)
-oss.conf

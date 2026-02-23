@@ -51,6 +51,10 @@ mt_load_tenant_config() {
     exit 1
   fi
 
+  # Resolve config paths (supports submodule and legacy layouts)
+  source "${REPO_ROOT}/scripts/lib/paths.sh"
+  _mt_resolve_tenants_dir
+
   _mt_validate_paths
   _mt_set_kubeconfig
   _mt_load_tenant_yaml
@@ -67,12 +71,12 @@ mt_load_tenant_config() {
 # Internal: validate tenant directory and file paths
 # ---------------------------------------------------------------------------
 _mt_validate_paths() {
-  local tenant_dir="$REPO_ROOT/tenants/$MT_TENANT"
+  local tenant_dir="$MT_TENANTS_DIR/$MT_TENANT"
   if [ ! -d "$tenant_dir" ]; then
     echo "[ERROR] Tenant directory not found: $tenant_dir" >&2
     echo "" >&2
     echo "Available tenants:" >&2
-    ls -1 "$REPO_ROOT/tenants/" 2>/dev/null | grep -v README || echo "  (none found)" >&2
+    ls -1 "$MT_TENANTS_DIR/" 2>/dev/null | grep -v README || echo "  (none found)" >&2
     exit 1
   fi
 

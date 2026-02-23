@@ -68,14 +68,14 @@ data:
   EMAIL_PORT: "587"
   EMAIL_USE_TLS: "False"
   EMAIL_USE_SSL: "False"
-  DEFAULT_FROM_EMAIL: "${TENANT_DISPLAY_NAME:-Platform} Docs <noreply@${SMTP_DOMAIN}>"
+  DEFAULT_FROM_EMAIL: "MotherTree Docs <noreply@${SMTP_DOMAIN}>"
 
   # Impress/LaSuite Docs specific email settings
   DJANGO_EMAIL_HOST: "postfix-internal.infra-mail.svc.cluster.local"
   DJANGO_EMAIL_PORT: "587"
   DJANGO_EMAIL_USE_TLS: "False"
-  DJANGO_EMAIL_FROM: "${TENANT_DISPLAY_NAME:-Platform} Docs <noreply@${SMTP_DOMAIN}>"
-  DJANGO_EMAIL_BRAND_NAME: "${TENANT_DISPLAY_NAME:-Platform} Docs"
+  DJANGO_EMAIL_FROM: "MotherTree Docs <noreply@${SMTP_DOMAIN}>"
+  DJANGO_EMAIL_BRAND_NAME: "Mother Tree Docs"
   
   # Logging
   LOG_LEVEL: "INFO"

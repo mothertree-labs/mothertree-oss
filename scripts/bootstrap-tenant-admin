@@ -67,8 +67,12 @@ if [ -z "$LAST_NAME" ]; then
   LAST_NAME="Admin"
 fi
 
+# Resolve config paths
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_tenants_dir
+
 # Set up environment
-TENANT_DIR="$REPO_ROOT/tenants/$MT_TENANT"
+TENANT_DIR="$MT_TENANTS_DIR/$MT_TENANT"
 TENANT_CONFIG="$TENANT_DIR/${MT_ENV}.config.yaml"
 TENANT_SECRETS="$TENANT_DIR/${MT_ENV}.secrets.yaml"
 

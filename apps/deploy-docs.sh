@@ -287,7 +287,7 @@ if [ -n "$BACKEND_POD" ]; then
 from django.contrib.sites.models import Site
 site = Site.objects.get(pk=1)
 site.domain = 'https://${DOCS_HOST}'
-site.name = '${TENANT_DISPLAY_NAME:-Platform} Docs'
+site.name = '${TENANT_DISPLAY_NAME:-MotherTree} Docs'
 site.save()
 print(f'Site domain set to: {site.domain}')
 " 2>/dev/null && print_success "Django Site domain configured" || print_warning "Failed to set Site domain (non-critical)"

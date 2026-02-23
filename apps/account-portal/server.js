@@ -308,7 +308,7 @@ app.get('/', (req, res) => {
   if (req.isAuthenticated()) {
     return res.redirect('/app-passwords');
   }
-  res.render('home', { title: `${process.env.PLATFORM_NAME || 'Platform'} Account` });
+  res.render('home', { title: 'MotherTree Account' });
 });
 
 app.get('/auth/login', (req, res, next) => {

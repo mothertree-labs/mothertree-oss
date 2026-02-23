@@ -71,13 +71,13 @@ alertmanager:
             send_resolved: true
             headers:
               # Note: These are AlertManager Go templates, escaped with raw string blocks
-              Subject: '{{ "{{" }} printf "[%s] %s: %s" "{{ env "INFRA_NAME" | default "Platform" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+              Subject: '{{ "{{" }} printf "[%s] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
       - name: 'critical-alerts'
         email_configs:
           - to: '{{ requiredEnv "ALERTMANAGER_EMAIL_TO" }}'
             send_resolved: true
             headers:
-              Subject: '{{ "{{" }} printf "[%s CRITICAL] %s: %s" "{{ env "INFRA_NAME" | default "Platform" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+              Subject: '{{ "{{" }} printf "[%s CRITICAL] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
         webhook_configs:
           # TODO: Matrix room ID should come from tenant config
           # Room ID: #alerts on Matrix server

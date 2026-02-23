@@ -57,7 +57,7 @@ extraConfig:
   # OIDC provider configuration for Keycloak (prod environment)
   oidc_providers:
     - idp_id: keycloak
-      idp_name: "Sign in with SSO"
+      idp_name: "Sign in with MotherTree"
       discover: true
       issuer: 'https://{{ env "AUTH_HOST" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}'
       client_id: "matrix-synapse"

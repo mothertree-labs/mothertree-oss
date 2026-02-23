@@ -463,7 +463,7 @@ async function sendNotificationEmail(toEmail, subject, message) {
   const smtpHost = process.env.SMTP_HOST || 'postfix-internal.infra-mail.svc.cluster.local';
   const smtpPort = process.env.SMTP_PORT || 587;
   const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.TENANT_DOMAIN || 'example.com'}`;
-  const smtpFromName = process.env.SMTP_FROM_NAME || process.env.PLATFORM_NAME || 'Platform';
+  const smtpFromName = process.env.SMTP_FROM_NAME || 'MotherTree';
 
   try {
     const transporter = nodemailer.createTransport({

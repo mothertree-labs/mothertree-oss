@@ -186,10 +186,11 @@ spec:
                 kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:install richdocuments" 2>/dev/null || true
                 kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable richdocuments"
                 kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set richdocuments wopi_url --value='https://${OFFICE_HOST}'"
-                # Allow both pod IPs (10.x) and node IPs (172.232-239.x) for WOPI callbacks.
-                # When Collabora calls back to Nextcloud via the external URL, the request hairpins
-                # through the LB/ingress and gets SNAT'd to a node IP, not a pod IP.
-                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set richdocuments wopi_allowlist --value='10.0.0.0/8,172.232.0.0/13'"
+                # No wopi_allowlist — Collabora callbacks go through the external URL which may
+                # traverse Cloudflare (prod) or hairpin through the LB (dev). The source IP varies
+                # (Cloudflare edge, node IP, pod IP) making an IP allowlist fragile. WOPI security
+                # relies on the per-request access_token instead.
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set richdocuments wopi_allowlist --value=''"
                 # Wait for Collabora discovery endpoint to be reachable before activating.
                 # Try internal ClusterIP first (avoids NB hairpin on dev where PROXY protocol
                 # isn't injected for in-cluster traffic). Fall back to external URL for prod

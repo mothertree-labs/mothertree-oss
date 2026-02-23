@@ -43,14 +43,17 @@ Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Eleme
 ### 1. Configure
 
 ```bash
-# Copy example configs
-cp terraform.tfvars.example terraform.tfvars
-cp secrets.tfvars.env.example secrets.tfvars.env
+# Initialize submodules (if you have access to private config repos)
+make setup
 
-# Create your tenant config
-cp -r tenants/example tenants/my-org
+# OR create your own tenant config from the example template
+cp -r tenants/.example tenants/my-org
 # Edit tenants/my-org/dev.config.yaml with your domain and settings
 # Copy and fill in secrets: cp tenants/my-org/dev.secrets.yaml.example tenants/my-org/dev.secrets.yaml
+
+# Copy Terraform and infra secrets
+cp terraform.tfvars.example terraform.tfvars
+cp secrets.tfvars.env.example secrets.tfvars.env
 ```
 
 ### 2. Deploy Infrastructure
@@ -77,6 +80,9 @@ kubectl get pods -A | grep -E 'infra-|tn-my-org'
 ## Directory Structure
 
 ```
+config/          Private config submodules (optional, for operators with access)
+  platform/      Container registry, infra sizing, theme overrides
+  tenants/       Real tenant configs (domains, databases, S3 buckets)
 phase1/          Terraform: LKE cluster, VPN server, TURN server, base DNS
 infra/           Terraform: K8s infra (Postfix, cert-manager, DNS records, certs)
 modules/         Terraform modules: lke-cluster/, dns/, openvpn-server/, helm-bootstrap/
@@ -90,7 +96,8 @@ apps/            Application deployment layer
   admin-portal/          Node.js admin app (Express + EJS + OIDC)
   account-portal/        Node.js user self-service app
 scripts/         Orchestration scripts (manage_infra, deploy_infra, create_env)
-tenants/         Per-tenant config: <name>/{env}.config.yaml + {env}.secrets.yaml
+  lib/             Shared libraries (common.sh, config.sh, paths.sh, etc.)
+tenants/         Tenant config template (.example/) or local configs
 ansible/         VPN server config (OpenVPN, Postfix relay)
 ```
 

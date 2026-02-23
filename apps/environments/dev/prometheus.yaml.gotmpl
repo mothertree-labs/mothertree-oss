@@ -86,13 +86,13 @@ alertmanager:
             send_resolved: true
             headers:
               # Note: These are AlertManager Go templates, escaped with raw string blocks
-              Subject: '{{ "{{" }} printf "[%s DEV] %s: %s" "{{ env "INFRA_NAME" | default "Platform" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+              Subject: '{{ "{{" }} printf "[%s DEV] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
       - name: 'critical-alerts'
         email_configs:
           - to: '{{ requiredEnv "ALERTMANAGER_EMAIL_TO" }}'
             send_resolved: true
             headers:
-              Subject: '{{ "{{" }} printf "[%s DEV CRITICAL] %s: %s" "{{ env "INFRA_NAME" | default "Platform" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+              Subject: '{{ "{{" }} printf "[%s DEV CRITICAL] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
         webhook_configs:
           - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ env "ALERTMANAGER_MATRIX_ROOM_ID" | default "!room:matrix.example.org" }}'
             send_resolved: true

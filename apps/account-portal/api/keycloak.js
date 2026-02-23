@@ -206,7 +206,7 @@ async function sendNotificationEmail(toEmail, subject, message) {
   const smtpHost = process.env.SMTP_HOST || 'postfix-internal.infra-mail.svc.cluster.local';
   const smtpPort = process.env.SMTP_PORT || 587;
   const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.TENANT_DOMAIN || 'example.com'}`;
-  const smtpFromName = process.env.SMTP_FROM_NAME || process.env.PLATFORM_NAME || 'Platform';
+  const smtpFromName = process.env.SMTP_FROM_NAME || 'MotherTree';
 
   console.log(`[NOTIFICATION EMAIL] Sending to: ${toEmail}`);
   console.log(`[NOTIFICATION EMAIL] Subject: ${subject}`);
@@ -229,7 +229,7 @@ async function sendNotificationEmail(toEmail, subject, message) {
       text: message,
       html: `
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-          <h1 style="color: #4a6741; font-size: 24px; margin-bottom: 20px;">${process.env.PLATFORM_NAME || 'Platform'}</h1>
+          <h1 style="color: #4a6741; font-size: 24px; margin-bottom: 20px;">MotherTree</h1>
           <div style="background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
             <p style="color: #9a3412; margin: 0; font-size: 14px;">
               <strong>Security Notice</strong>
@@ -448,8 +448,8 @@ async function initiateAccountRecovery({ tenantEmail, recoveryEmail }) {
   // 7. Send notification to tenant email
   await sendNotificationEmail(
     tenantEmail,
-    `${process.env.PLATFORM_NAME || 'Platform'} Account Recovery Initiated`,
-    `A passkey recovery was requested for your ${process.env.PLATFORM_NAME || 'Platform'} account (${tenantEmail}). ` +
+    'MotherTree Account Recovery Initiated',
+    `A passkey recovery was requested for your MotherTree account (${tenantEmail}). ` +
     `A recovery link has been sent to your recovery email address. ` +
     `If you did not request this, please contact support immediately.`
   );

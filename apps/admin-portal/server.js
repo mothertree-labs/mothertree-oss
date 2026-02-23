@@ -280,7 +280,7 @@ app.get('/', (req, res) => {
   if (req.isAuthenticated()) {
     return res.redirect('/dashboard');
   }
-  res.render('home', { title: `${process.env.PLATFORM_NAME || 'Platform'} Admin Portal` });
+  res.render('home', { title: 'MotherTree Admin Portal' });
 });
 
 app.get('/auth/login', (req, res, next) => {

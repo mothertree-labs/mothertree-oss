@@ -8,8 +8,9 @@ Thank you for your interest in contributing to Mothertree! This document provide
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/YOUR_ORG/mothertree.git
+   git clone --recurse-submodules https://github.com/YOUR_ORG/mothertree.git
    cd mothertree
+   make setup  # Initialize submodules if you have access
    ```
 
 2. **Install prerequisites**
@@ -22,7 +23,8 @@ Thank you for your interest in contributing to Mothertree! This document provide
 
 3. **Set up tenant configuration**
    ```bash
-   cp -r tenants/example tenants/my-dev-tenant
+   # Create your own tenant from the example template
+   cp -r tenants/.example tenants/my-dev-tenant
    # Edit config files with your domain and settings
    ```
 
@@ -102,6 +104,7 @@ npm start
 - **Configuration over code**: Domains, ports, and features come from tenant config files
 - **Three-phase deployment**: Infrastructure -> Shared services -> Tenant apps
 - **No hardcoded defaults**: Scripts should fail if required configuration is missing
+- **Config separation**: Operator-specific config (domains, registries, sizing) lives in private `config/` submodules. The main repo contains only generic, public-safe code. See `scripts/lib/paths.sh` for the path resolution logic that supports both submodule and flat layouts.
 
 ## Reporting Issues
 

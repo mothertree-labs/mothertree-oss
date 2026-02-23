@@ -37,7 +37,9 @@ mt_require_tenant
 source "${REPO_ROOT}/scripts/lib/config.sh"
 mt_load_tenant_config
 
-[[ -f "$REPO_ROOT/project.conf" ]] && source "$REPO_ROOT/project.conf"
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_project_conf
+[[ -n "$MT_PROJECT_CONF" ]] && source "$MT_PROJECT_CONF"
 
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy-roundcube"

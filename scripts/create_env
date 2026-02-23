@@ -44,7 +44,9 @@ mt_require_env
 mt_require_tenant
 
 # Source project config if available (provides CONTAINER_REGISTRY, GITHUB_ORG)
-[[ -f "$REPO_ROOT/project.conf" ]] && source "$REPO_ROOT/project.conf"
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_project_conf
+[[ -n "$MT_PROJECT_CONF" ]] && source "$MT_PROJECT_CONF"
 
 # Load all tenant configuration and secrets
 source "${REPO_ROOT}/scripts/lib/config.sh"

@@ -64,7 +64,9 @@ print_status "Deploying shared infrastructure for environment: $MT_ENV"
 print_status "Kubeconfig: $KUBECONFIG"
 
 # Source project config if available (provides CONTAINER_REGISTRY, GITHUB_ORG)
-[[ -f "$REPO_ROOT/project.conf" ]] && source "$REPO_ROOT/project.conf"
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_project_conf
+[[ -n "$MT_PROJECT_CONF" ]] && source "$MT_PROJECT_CONF"
 
 # Create infrastructure namespaces
 print_status "Creating infrastructure namespaces..."
@@ -582,7 +584,7 @@ pushd "$REPO_ROOT/infra" >/dev/null
 
   # Build ALLOWED_SENDER_DOMAINS from tenant configs (env-aware)
   SMTP_ALLOWED_SENDER_DOMAINS=""
-  for tenant_dir in "$REPO_ROOT/tenants"/*/; do
+  for tenant_dir in "$MT_TENANTS_DIR"/*/; do
     config_file="$tenant_dir/${MT_ENV}.config.yaml"
     if [ -f "$config_file" ]; then
       base_domain=$(yq '.dns.domain' "$config_file")
@@ -629,7 +631,7 @@ if [ -n "$LKE_CLUSTER_ID" ] && [ -n "${TF_VAR_linode_token:-}" ]; then
 
   if [ -n "$LKE_FW_ID" ]; then
     JVB_PORTS=""
-    for config_file in "$REPO_ROOT"/tenants/*/$(echo "$MT_ENV" | tr '[:upper:]' '[:lower:]').config.yaml; do
+    for config_file in "$MT_TENANTS_DIR"/*/$(echo "$MT_ENV" | tr '[:upper:]' '[:lower:]').config.yaml; do
       [ -f "$config_file" ] || continue
       port=$(yq '.resources.jitsi.jvb_port' "$config_file" 2>/dev/null)
       if [ -n "$port" ] && [ "$port" != "null" ]; then
@@ -744,7 +746,7 @@ fi
 print_status "Scanning tenants for VPN Postfix configuration..."
 TENANT_DOMAINS=""
 
-for tenant_dir in "$REPO_ROOT/tenants"/*/; do
+for tenant_dir in "$MT_TENANTS_DIR"/*/; do
   tenant_name=$(basename "$tenant_dir")
   config_file="$tenant_dir/${MT_ENV}.config.yaml"
 

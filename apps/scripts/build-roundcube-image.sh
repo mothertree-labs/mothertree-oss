@@ -20,8 +20,11 @@ for arg in "$@"; do
 done
 _MT_NOTIFY_NESTING_LEVEL=$NESTING_LEVEL
 
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_project_conf
+[[ -n "$MT_PROJECT_CONF" ]] && source "$MT_PROJECT_CONF"
+
 source "${REPO_ROOT}/scripts/lib/notify.sh"
-[[ -f "$REPO_ROOT/project.conf" ]] && source "$REPO_ROOT/project.conf"
 mt_deploy_start "build-roundcube-image"
 
 IMAGE_TAG=${IMAGE_TAG:-${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-roundcube:latest}
