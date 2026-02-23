@@ -211,7 +211,13 @@ spec:
                   echo "  Waiting for Collabora... (attempt $i/30)"
                   sleep 10
                 done
-                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ richdocuments:activate-config"
+                # activate-config pre-caches MIME type mappings by fetching the discovery
+                # endpoint from wopi_url. This can fail on dev due to PROXY protocol hairpin
+                # (in-cluster traffic to the external URL bypasses the NodeBalancer, so nginx
+                # rejects the connection). Non-fatal: Nextcloud lazily discovers MIME types
+                # when users open documents, and the internal endpoint was already verified above.
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ richdocuments:activate-config" || \
+                  echo "WARNING: richdocuments:activate-config failed (MIME types will be discovered lazily)"
                 echo "Collabora Online enabled (wopi_url: https://${OFFICE_HOST})"
               else
                 echo "Disabling document editing apps..."
