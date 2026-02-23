@@ -59,9 +59,23 @@ fi
 # dns.domain matches infra.domain (the "infra tenant").
 if [ -z "${MT_NOTIFY_TOKEN:-}" ] || [ -z "${MT_NOTIFY_ROOM_ID:-}" ] || [ -z "${MT_NOTIFY_HOMESERVER:-}" ]; then
   if [ -n "${MT_ENV:-}" ] && command -v yq &>/dev/null; then
+    # Resolve tenant config directory via paths.sh (supports config/tenants/
+    # submodule layout and legacy tenants/ flat layout).
+    # Run in a subshell because _mt_resolve_tenants_dir calls exit 1 on
+    # failure, and notifications must never kill the calling script.
+    _nt_tenants_dir="${MT_TENANTS_DIR:-}"
+    if [ -z "$_nt_tenants_dir" ]; then
+      _nt_tenants_dir=$(
+        REPO_ROOT="${REPO_ROOT:-$_MT_NOTIFY_REPO}" \
+          source "${_MT_NOTIFY_REPO}/scripts/lib/paths.sh"
+        _mt_resolve_tenants_dir
+        echo "$MT_TENANTS_DIR"
+      ) 2>/dev/null || true
+    fi
+
     # Step 1: discover INFRA_DOMAIN from any tenant config
     _nt_infra_domain=""
-    for _nt_td in "$_MT_NOTIFY_REPO/tenants"/*/; do
+    for _nt_td in "$_nt_tenants_dir"/*/; do
       _nt_config="${_nt_td}${MT_ENV}.config.yaml"
       if [ -f "$_nt_config" ]; then
         _nt_infra_domain=$(yq '.infra.domain // .dns.domain' "$_nt_config" 2>/dev/null)
@@ -71,7 +85,7 @@ if [ -z "${MT_NOTIFY_TOKEN:-}" ] || [ -z "${MT_NOTIFY_ROOM_ID:-}" ] || [ -z "${M
 
     # Step 2: find the tenant whose dns.domain == INFRA_DOMAIN
     if [ -n "$_nt_infra_domain" ] && [ "$_nt_infra_domain" != "null" ]; then
-      for _nt_td in "$_MT_NOTIFY_REPO/tenants"/*/; do
+      for _nt_td in "$_nt_tenants_dir"/*/; do
         _nt_config="${_nt_td}${MT_ENV}.config.yaml"
         _nt_secrets="${_nt_td}${MT_ENV}.secrets.yaml"
         [ -f "$_nt_config" ] && [ -f "$_nt_secrets" ] || continue
@@ -107,7 +121,7 @@ if [ -z "${MT_NOTIFY_TOKEN:-}" ] || [ -z "${MT_NOTIFY_ROOM_ID:-}" ] || [ -z "${M
         break
       done
     fi
-    unset _nt_td _nt_secrets _nt_config _nt_token _nt_room _nt_hs _nt_dns_label _nt_domain _nt_infra_domain
+    unset _nt_td _nt_secrets _nt_config _nt_token _nt_room _nt_hs _nt_dns_label _nt_domain _nt_infra_domain _nt_tenants_dir
   fi
 fi
 

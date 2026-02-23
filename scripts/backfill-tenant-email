@@ -20,6 +20,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$REPO"
+source "${REPO_ROOT}/scripts/lib/paths.sh"
 
 TENANT=""
 MT_ENV=""
@@ -46,8 +48,9 @@ if [ -z "$TENANT" ] || [ -z "$MT_ENV" ]; then
 fi
 
 # Load tenant config
-TENANT_CONFIG="$REPO/tenants/$TENANT/$MT_ENV.config.yaml"
-TENANT_SECRETS="$REPO/tenants/$TENANT/$MT_ENV.secrets.yaml"
+_mt_resolve_tenants_dir
+TENANT_CONFIG="$MT_TENANTS_DIR/$TENANT/$MT_ENV.config.yaml"
+TENANT_SECRETS="$MT_TENANTS_DIR/$TENANT/$MT_ENV.secrets.yaml"
 
 if [ ! -f "$TENANT_CONFIG" ]; then
   echo "ERROR: Tenant config not found: $TENANT_CONFIG"

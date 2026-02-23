@@ -63,7 +63,7 @@ if [ -z "${KEYCLOAK_ADMIN_PASSWORD:-}" ]; then
     KEYCLOAK_ADMIN_PASSWORD=$(yq '.keycloak.admin_password // ""' "$TENANT_SECRETS" 2>/dev/null)
     if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ] || [ "$KEYCLOAK_ADMIN_PASSWORD" = "null" ]; then
         print_error "KEYCLOAK_ADMIN_PASSWORD is required but not set"
-        print_error "Set it in tenants/<tenant>/<env>.secrets.yaml under keycloak.admin_password"
+        print_error "Set it in <tenant-config-dir>/<env>.secrets.yaml under keycloak.admin_password"
         exit 1
     fi
 fi

@@ -192,6 +192,13 @@ _mt_infra_load_alerting() {
       echo "[WARN] alertbot.access_token not set in $INFRA_TENANT_NAME secrets"
     fi
 
+    local _alertbot_hs
+    _alertbot_hs=$(yq '.alertbot.homeserver // ""' "$_infra_secrets")
+    if [ -n "$_alertbot_hs" ] && [ "$_alertbot_hs" != "null" ]; then
+      export ALERTBOT_MATRIX_HOMESERVER="$_alertbot_hs"
+      echo "[INFO] Alertbot Matrix homeserver override: $ALERTBOT_MATRIX_HOMESERVER"
+    fi
+
     # TURN shared secret — infrastructure-level (one coturn server, one secret)
     local _turn_secret
     _turn_secret=$(yq '.turn.shared_secret // ""' "$_infra_secrets")

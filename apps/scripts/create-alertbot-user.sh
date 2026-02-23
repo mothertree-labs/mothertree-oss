@@ -44,7 +44,7 @@ if mt_has_flag "--save"; then
   SAVE_TO_SECRETS=true
 fi
 
-TENANT_SECRETS="${MT_SECRETS_FILE:-${REPO_ROOT}/tenants/${MT_TENANT}/${MT_ENV}.secrets.yaml}"
+TENANT_SECRETS="${MT_SECRETS_FILE:-${MT_TENANTS_DIR}/${MT_TENANT}/${MT_ENV}.secrets.yaml}"
 MATRIX_URL="https://$MATRIX_HOST"
 
 ALERTBOT_USER="alertbot"

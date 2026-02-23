@@ -38,6 +38,8 @@ print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+REPO_ROOT="$REPO"
+source "${REPO_ROOT}/scripts/lib/paths.sh"
 TENANT=""
 MT_ENV=""
 ACTION=""  # "", "list", "remove", "delete"
@@ -132,7 +134,8 @@ if [ "$ACTION" = "remove" ] && [ ${#MEMBERS[@]} -eq 0 ]; then
 fi
 
 # Load tenant config
-TENANT_DIR="$REPO/tenants/$TENANT"
+_mt_resolve_tenants_dir
+TENANT_DIR="$MT_TENANTS_DIR/$TENANT"
 TENANT_CONFIG="$TENANT_DIR/$MT_ENV.config.yaml"
 TENANT_SECRETS="$TENANT_DIR/$MT_ENV.secrets.yaml"
 
