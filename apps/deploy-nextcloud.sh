@@ -6,288 +6,61 @@
 # Namespace structure:
 #   - PostgreSQL in NS_DB (shared 'db' namespace)
 #   - Nextcloud in NS_FILES (tenant-prefixed namespace, e.g., 'tn-example-files')
+#
+# Architecture: Nextcloud uses emptyDir (no PVC) with identity values persisted
+# in a K8s Secret. The seed-identity init container populates the emptyDir on
+# every pod start, enabling RollingUpdate deploys with zero downtime.
+#
+# Usage:
+#   ./apps/deploy-nextcloud.sh -e dev -t example
 
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
 
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-dump_pod_diagnostics() {
-    local namespace="$1"
-    local selector="$2"
-    print_status "Diagnostics: pods matching selector '$selector' in namespace '$namespace'"
-    kubectl get pods -n "$namespace" -l "$selector" -o wide || true
-    local pod_name
-    pod_name=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-    if [ -n "$pod_name" ]; then
-        echo ""
-        print_status "Diagnostics: describe pod $namespace/$pod_name"
-        kubectl describe pod -n "$namespace" "$pod_name" || true
-    fi
+mt_usage() {
+    echo "Usage: $0 -e <env> -t <tenant>"
     echo ""
-    print_status "Diagnostics: recent events in namespace '$namespace'"
-    kubectl get events -n "$namespace" --sort-by=.lastTimestamp | tail -n 80 || true
+    echo "Deploy Nextcloud for a tenant."
+    echo ""
+    echo "Options:"
+    echo "  -e <env>       Environment (e.g., dev, prod)"
+    echo "  -t <tenant>    Tenant name (e.g., example)"
+    echo "  -h, --help     Show this help"
 }
 
-# Poll for a condition with timeout - replaces 'kubectl wait' which hangs on failures
-# Usage: poll_condition <check_command> <success_pattern> <timeout_seconds> <poll_interval> <description>
-poll_condition() {
-    local check_cmd="$1"
-    local success_pattern="$2"
-    local timeout="${3:-300}"
-    local interval="${4:-5}"
-    local description="${5:-condition}"
-    
-    local elapsed=0
-    while [ $elapsed -lt $timeout ]; do
-        local result
-        result=$(eval "$check_cmd" 2>&1) || true
-        
-        if echo "$result" | grep -qE "$success_pattern"; then
-            return 0
-        fi
-        
-        # Check for failure conditions
-        if echo "$result" | grep -qiE "CrashLoopBackOff|Error|Failed|ImagePullBackOff"; then
-            print_error "Detected failure while waiting for $description: $result"
-            return 1
-        fi
-        
-        echo "  Waiting for $description... (${elapsed}s/${timeout}s)"
-        sleep "$interval"
-        elapsed=$((elapsed + interval))
-    done
-    
-    print_error "Timeout waiting for $description after ${timeout}s"
-    return 1
-}
+mt_parse_args "$@"
+mt_require_env
+mt_require_tenant
 
-# Poll for job completion with failure detection
-poll_job_complete() {
-    local namespace="$1"
-    local job_name="$2"
-    local timeout="${3:-180}"
-    local interval="${4:-5}"
-    
-    local elapsed=0
-    while [ $elapsed -lt $timeout ]; do
-        local job_status
-        job_status=$(kubectl get job "$job_name" -n "$namespace" -o jsonpath='{.status.conditions[*].type}' 2>&1) || true
-        
-        if echo "$job_status" | grep -q "Complete"; then
-            return 0
-        fi
-        
-        if echo "$job_status" | grep -q "Failed"; then
-            print_error "Job $job_name failed"
-            kubectl logs -n "$namespace" "job/$job_name" --tail=50 || true
-            return 1
-        fi
-        
-        # Check pod status for early failure detection
-        local pod_phase
-        pod_phase=$(kubectl get pods -n "$namespace" -l "job-name=$job_name" -o jsonpath='{.items[0].status.phase}' 2>/dev/null) || true
-        if [ "$pod_phase" = "Failed" ]; then
-            print_error "Job pod failed"
-            kubectl logs -n "$namespace" "job/$job_name" --tail=50 || true
-            return 1
-        fi
-        
-        # Show current status in wait message
-        local display_status="${pod_phase:-pending}"
-        [ -n "$job_status" ] && display_status="$job_status"
-        echo "  Waiting for job $job_name... status=$display_status (${elapsed}s/${timeout}s)"
-        sleep "$interval"
-        elapsed=$((elapsed + interval))
-    done
-    
-    print_error "Timeout waiting for job $job_name after ${timeout}s"
-    kubectl logs -n "$namespace" "job/$job_name" --tail=50 || true
-    return 1
-}
-
-# Poll for pod ready with failure detection
-poll_pod_ready() {
-    local namespace="$1"
-    local selector="$2"
-    local timeout="${3:-300}"
-    local interval="${4:-5}"
-    
-    local elapsed=0
-    while [ $elapsed -lt $timeout ]; do
-        # Check if pod is ready using simple JSONPath (nested filters don't work in kubectl)
-        local ready_status
-        ready_status=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || true
-        
-        if [ "$ready_status" = "True" ]; then
-            local pod_name
-            pod_name=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-            print_success "Pod ready: $pod_name"
-            return 0
-        fi
-        
-        # Get current pod phase and any waiting reason for status display
-        local pod_phase
-        pod_phase=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].status.phase}' 2>/dev/null) || true
-        local waiting_reason
-        waiting_reason=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].status.containerStatuses[0].state.waiting.reason}' 2>/dev/null) || true
-        local scheduled_status
-        scheduled_status=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].status.conditions[?(@.type=="PodScheduled")].status}' 2>/dev/null) || true
-        local pod_node
-        pod_node=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null) || true
-        
-        # Check for failure conditions
-        if echo "$waiting_reason" | grep -qE "CrashLoopBackOff|ImagePullBackOff|ErrImagePull"; then
-            print_error "Pod failed with: $waiting_reason"
-            kubectl logs -n "$namespace" -l "$selector" --tail=30 || true
-            return 1
-        fi
-
-        # Fail fast if the pod exists but is unschedulable (no node assigned) for a while
-        # (Common on single-node Linode when exceeding max attached volume count.)
-        if [ "$pod_phase" = "Pending" ] && [ "${scheduled_status:-}" = "False" ] && [ -z "${pod_node:-}" ]; then
-            # Keep waiting, but once we're past 60s, dump diagnostics and stop.
-            if [ $elapsed -ge 60 ]; then
-                print_error "Pod is Pending and unscheduled (no node assigned). This is not a readiness issue; it's a scheduling constraint."
-                dump_pod_diagnostics "$namespace" "$selector"
-                return 1
-            fi
-        fi
-        
-        # Build status display
-        local display_status="${pod_phase:-no-pod}"
-        [ -n "$waiting_reason" ] && display_status="$pod_phase/$waiting_reason"
-        
-        echo "  Waiting for pod ($selector)... status=$display_status (${elapsed}s/${timeout}s)"
-        sleep "$interval"
-        elapsed=$((elapsed + interval))
-    done
-    
-    print_error "Timeout waiting for pod ($selector) after ${timeout}s"
-    dump_pod_diagnostics "$namespace" "$selector"
-    return 1
-}
-
-# Check if kubectl is available
-if ! command -v kubectl &> /dev/null; then
-    print_error "kubectl is not installed or not in PATH"
-    exit 1
-fi
-
-# Check if helm is available
-if ! command -v helm &> /dev/null; then
-    print_error "helm is not installed or not in PATH"
-    exit 1
-fi
-
-# Require MT_ENV and set kubeconfig statelessly
-REPO_ROOT="${REPO_ROOT:-/workspace}"
-
-# Parse nesting level for deploy notifications
-NESTING_LEVEL=0
-for arg in "$@"; do
-  case "$arg" in
-    --nesting-level=*) NESTING_LEVEL="${arg#*=}" ;;
-  esac
-done
-_MT_NOTIFY_NESTING_LEVEL=$NESTING_LEVEL
+source "${REPO_ROOT}/scripts/lib/config.sh"
+mt_load_tenant_config
 
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy-nextcloud"
 
-if [ -z "${MT_ENV:-}" ]; then
-  print_error "MT_ENV is not set. Usage: MT_ENV=dev ./apps/deploy-nextcloud.sh"
-  exit 1
-fi
-export KUBECONFIG="$REPO_ROOT/kubeconfig.$MT_ENV.yaml"
-
-# Namespace configuration
-NS_DB="${NS_DB:-infra-db}"
-NS_FILES="${NS_FILES:-tn-${TENANT_NAME:-example}-files}"
-NS_DOCS="${NS_DOCS:-tn-${TENANT_NAME:-example}-docs}"  # For docs-secrets reference
+mt_require_commands kubectl helm envsubst openssl
 
 print_status "Starting Nextcloud deployment for environment: $MT_ENV"
 print_status "Database namespace: $NS_DB"
 print_status "Files namespace: $NS_FILES"
-
-# Validate required environment variables (set by create_env from tenant config)
-required_vars=("FILES_HOST" "AUTH_HOST" "TENANT_DOMAIN" "NEXTCLOUD_DB_NAME" "TENANT_KEYCLOAK_REALM" "TENANT_NAME")
-missing_vars=()
-for var in "${required_vars[@]}"; do
-    if [ -z "${!var:-}" ]; then
-        missing_vars+=("$var")
-    fi
-done
-
-if [ ${#missing_vars[@]} -gt 0 ]; then
-    print_error "Required environment variables not set: ${missing_vars[*]}"
-    print_error "This script should be called from create_env which sets these from tenant config."
-    exit 1
-fi
-
-# Derive per-tenant database user from tenant name (e.g., docs_example)
-export TENANT_DB_USER="${TENANT_DB_USER:-docs_${TENANT_NAME}}"
 print_status "Using environment: FILES_HOST=$FILES_HOST, AUTH_HOST=$AUTH_HOST"
 print_status "Database user: $TENANT_DB_USER, Database: $NEXTCLOUD_DB_NAME"
 
-# Derive PG_HOST if not passed in from the environment
+# Verify PG_HOST is set (detected by config.sh)
 if [ -z "${PG_HOST:-}" ]; then
-    if kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
-        export PG_HOST="docs-postgresql-primary.${NS_DB}.svc.cluster.local"
-        print_status "PostgreSQL: detected replication mode (docs-postgresql-primary)"
-    elif kubectl get service docs-postgresql -n "$NS_DB" >/dev/null 2>&1; then
-        export PG_HOST="docs-postgresql.${NS_DB}.svc.cluster.local"
-        print_status "PostgreSQL: detected standalone mode (docs-postgresql)"
-    else
-        print_error "PostgreSQL not found in $NS_DB namespace and PG_HOST not set."
-        print_error "Either set PG_HOST or run 'deploy_infra $MT_ENV' first."
-        exit 1
-    fi
-else
-    print_status "Using PG_HOST from environment: $PG_HOST"
+    print_error "PostgreSQL not found in $NS_DB namespace and PG_HOST not set."
+    print_error "Either set PG_HOST or run 'deploy_infra $MT_ENV' first."
+    exit 1
 fi
-
-# Load secrets for OIDC configuration
-# When called from create_env, tenant-specific secrets are already exported.
-# Only source the shared secrets file as a fallback for standalone runs,
-# to avoid overwriting tenant-specific values with another tenant's secrets.
-if [ -z "${TF_VAR_nextcloud_oidc_client_secret:-}" ]; then
-    if [ -f "$REPO_ROOT/secrets.${MT_ENV}.tfvars.env" ]; then
-        # shellcheck disable=SC1091
-        source "$REPO_ROOT/secrets.${MT_ENV}.tfvars.env"
-        print_status "Loaded secrets from secrets.${MT_ENV}.tfvars.env"
-    else
-        print_error "Secrets file secrets.${MT_ENV}.tfvars.env not found"
-        exit 1
-    fi
-else
-    print_status "Using secrets from environment (set by create_env)"
-fi
+print_status "Using PostgreSQL: $PG_HOST"
 
 # Get OIDC client secret
 NEXTCLOUD_OIDC_SECRET="${TF_VAR_nextcloud_oidc_client_secret:-}"
 if [ -z "$NEXTCLOUD_OIDC_SECRET" ]; then
-    print_error "NEXTCLOUD_OIDC_CLIENT_SECRET not set. Add TF_VAR_nextcloud_oidc_client_secret to secrets.${MT_ENV}.tfvars.env"
+    print_error "NEXTCLOUD_OIDC_CLIENT_SECRET not set. Add nextcloud_client_secret to tenant secrets."
     exit 1
 fi
 print_success "OIDC client secret retrieved"
@@ -321,6 +94,8 @@ kubectl create secret generic nextcloud-db \
     --namespace "$NS_FILES" \
     --from-literal=db-username="$TENANT_DB_USER" \
     --from-literal=db-password="$DB_PASSWORD" \
+    --from-literal=db-hostname="$PG_HOST" \
+    --from-literal=db-database="$NEXTCLOUD_DB_NAME" \
     --dry-run=client -o yaml | kubectl apply -f -
 print_success "Nextcloud database secret created/updated (user: $TENANT_DB_USER)"
 
@@ -350,6 +125,50 @@ else
         --dry-run=client -o yaml | kubectl apply -f -
     print_success "Nextcloud S3 secret created/updated"
 fi
+
+# Step 4b.1: Create Nextcloud Google Integration secret (for Drive import)
+if [ "${GOOGLE_IMPORT_ENABLED:-false}" = "true" ]; then
+    print_status "Creating Nextcloud Google Integration secret..."
+    if [ -z "${GOOGLE_CLIENT_ID:-}" ] || [ -z "${GOOGLE_CLIENT_SECRET:-}" ]; then
+        print_warning "Google credentials not set (google.client_id/client_secret in secrets)"
+        print_warning "Google Drive import will not work until credentials are configured"
+    else
+        kubectl create secret generic nextcloud-google \
+            --namespace "$NS_FILES" \
+            --from-literal=google-client-id="$GOOGLE_CLIENT_ID" \
+            --from-literal=google-client-secret="$GOOGLE_CLIENT_SECRET" \
+            --dry-run=client -o yaml | kubectl apply -f -
+        print_success "Nextcloud Google Integration secret created/updated"
+    fi
+fi
+
+# Step 4c: Deploy Redis for Nextcloud file locking and distributed caching
+print_status "Deploying Redis for Nextcloud caching and file locking..."
+
+# Generate or reuse Redis password
+EXISTING_REDIS_PASS=$(kubectl get secret nextcloud-redis -n "$NS_FILES" -o jsonpath='{.data.redis-password}' 2>/dev/null | base64 -d || echo "")
+if [ -n "$EXISTING_REDIS_PASS" ]; then
+    REDIS_PASSWORD="$EXISTING_REDIS_PASS"
+    print_status "Reusing existing Redis password from nextcloud-redis secret"
+else
+    REDIS_PASSWORD=$(openssl rand -hex 24)
+    print_status "Generated new Redis password"
+fi
+
+kubectl create secret generic nextcloud-redis \
+    --namespace "$NS_FILES" \
+    --from-literal=redis-password="$REDIS_PASSWORD" \
+    --dry-run=client -o yaml | kubectl apply -f -
+print_success "Redis secret created/updated in $NS_FILES"
+
+# Apply Redis deployment and service
+kubectl apply -n "$NS_FILES" -f "$REPO_ROOT/apps/manifests/nextcloud/redis.yaml"
+
+# Wait for Redis to be ready
+if ! poll_pod_ready "$NS_FILES" "app=redis" 60 5; then
+    print_warning "Redis not ready yet, but continuing (Nextcloud will retry connection)"
+fi
+print_success "Redis deployed to $NS_FILES"
 
 # Step 5: Run Nextcloud database initialization job (in files namespace where secrets are accessible)
 print_status "Running Nextcloud database initialization..."
@@ -386,125 +205,152 @@ if ! poll_job_complete "$NS_FILES" "nextcloud-db-init" 180 5; then
 fi
 print_success "Nextcloud database initialized"
 
-# Step 5c: Pre-deployment credential reconciliation (fix config.php BEFORE pod starts)
-# This handles the case where PVC has stale credentials from a previous installation
-print_status "Checking for existing Nextcloud installation that needs credential update..."
+# Step 5b: Update PostgreSQL table statistics (ANALYZE)
+# Autoanalyze only triggers after enough row modifications (50 + 10% of rows).
+# Tables like oc_preferences and oc_mimetypes are bulk-loaded once and barely
+# change, so autoanalyze never fires and the planner uses stale stats from
+# table creation — causing full sequential scans on every request.
+print_status "Updating PostgreSQL table statistics (ANALYZE)..."
+PGPW=$(kubectl get secret docs-postgresql -n "$NS_DB" -o jsonpath='{.data.postgres-password}' | base64 -d 2>/dev/null || echo "")
+if [ -n "$PGPW" ]; then
+    kubectl exec -n "$NS_DB" docs-postgresql-primary-0 -c postgresql -- \
+        env PGPASSWORD="$PGPW" psql -U postgres -d "$NEXTCLOUD_DB_NAME" -c "ANALYZE;" 2>/dev/null \
+        && print_success "ANALYZE completed for $NEXTCLOUD_DB_NAME" \
+        || print_warning "ANALYZE failed (non-critical, will retry on next deploy)"
+else
+    print_warning "Could not retrieve postgres password, skipping ANALYZE"
+fi
+
+# Step 5c: Auto-migration from PVC to emptyDir
+# If a PVC exists but the identity secret doesn't, extract identity values from the running pod
+# before switching to emptyDir (so the identity is preserved across the migration).
+IDENTITY_SECRET_EXISTS=$(kubectl get secret nextcloud-identity -n "$NS_FILES" -o name 2>/dev/null || true)
 PVC_EXISTS=$(kubectl get pvc nextcloud-nextcloud -n "$NS_FILES" -o name 2>/dev/null || true)
-if [ -n "$PVC_EXISTS" ]; then
-    # Scale down Nextcloud to safely access PVC
-    print_status "Scaling down Nextcloud to check/fix config..."
-    kubectl scale deployment nextcloud -n "$NS_FILES" --replicas=0 2>/dev/null || true
-    
-    # Wait for all Nextcloud pods to fully terminate (RWO volume can only attach to one pod)
-    print_status "Waiting for Nextcloud pods to terminate..."
-    for i in $(seq 1 30); do
-        PODS=$(kubectl get pods -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud --no-headers 2>/dev/null | wc -l)
-        if [ "$PODS" -eq 0 ]; then
-            print_success "All Nextcloud pods terminated"
-            break
-        fi
-        echo "  Waiting for $PODS pod(s) to terminate... (${i}s/30s)"
-        sleep 1
-    done
-    sleep 2  # Extra buffer for volume detachment
-    
-    # Create a temporary pod to access the PVC
-    kubectl delete pod fix-nextcloud-config -n "$NS_FILES" --ignore-not-found=true 2>/dev/null || true
-    cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: fix-nextcloud-config
-  namespace: $NS_FILES
-  labels:
-    app: fix-nextcloud-config
-spec:
-  containers:
-  - name: fix
-    image: alpine
-    command: ["sleep", "120"]
-    volumeMounts:
-    - name: nc
-      mountPath: /mnt
-      subPath: config
-  volumes:
-  - name: nc
-    persistentVolumeClaim:
-      claimName: nextcloud-nextcloud
-  restartPolicy: Never
-EOF
-    
-    # Wait for fix pod to be ready (use label selector)
-    if poll_pod_ready "$NS_FILES" "app=fix-nextcloud-config" 60 3 2>/dev/null; then
-        # Check if config.php exists
-        if kubectl exec -n "$NS_FILES" fix-nextcloud-config -- test -f /mnt/config.php 2>/dev/null; then
-            print_status "Found existing config.php, checking database settings..."
-            
-            # Get current values from config.php
-            CONFIG_DB_NAME=$(kubectl exec -n "$NS_FILES" fix-nextcloud-config -- \
-                grep dbname /mnt/config.php 2>/dev/null | grep -o "'[^']*'" | tail -1 | tr -d "'" || true)
-            CONFIG_DB_USER=$(kubectl exec -n "$NS_FILES" fix-nextcloud-config -- \
-                grep dbuser /mnt/config.php 2>/dev/null | grep -o "'[^']*'" | tail -1 | tr -d "'" || true)
-            CONFIG_DB_PASSWORD=$(kubectl exec -n "$NS_FILES" fix-nextcloud-config -- \
-                grep dbpassword /mnt/config.php 2>/dev/null | grep -o "'[^']*'" | tail -1 | tr -d "'" || true)
-            
-            # Get authoritative values (NEXTCLOUD_DB_NAME is set by create_env from tenant config)
-            EXPECTED_DB_NAME="$NEXTCLOUD_DB_NAME"
-            SECRET_DB_USER=$(kubectl get secret nextcloud-db -n "$NS_FILES" -o jsonpath='{.data.db-username}' | base64 -d)
-            SECRET_DB_PASSWORD=$(kubectl get secret nextcloud-db -n "$NS_FILES" -o jsonpath='{.data.db-password}' | base64 -d)
-            
-            print_status "Config values: dbname='$CONFIG_DB_NAME', dbuser='$CONFIG_DB_USER'"
-            print_status "Expected values: dbname='$EXPECTED_DB_NAME', dbuser='$SECRET_DB_USER'"
-            
-            NEEDS_FIX=false
-            
-            # Check and fix database name
-            if [ -n "$CONFIG_DB_NAME" ] && [ "$CONFIG_DB_NAME" != "$EXPECTED_DB_NAME" ]; then
-                print_warning "Updating dbname: $CONFIG_DB_NAME -> $EXPECTED_DB_NAME"
-                kubectl exec -n "$NS_FILES" fix-nextcloud-config -- \
-                    sed -i "s|'dbname' => '$CONFIG_DB_NAME'|'dbname' => '$EXPECTED_DB_NAME'|" /mnt/config.php
-                NEEDS_FIX=true
-            fi
-            
-            # Check and fix username
-            if [ -n "$CONFIG_DB_USER" ] && [ "$CONFIG_DB_USER" != "$SECRET_DB_USER" ]; then
-                print_warning "Updating dbuser: $CONFIG_DB_USER -> $SECRET_DB_USER"
-                kubectl exec -n "$NS_FILES" fix-nextcloud-config -- \
-                    sed -i "s|'dbuser' => '$CONFIG_DB_USER'|'dbuser' => '$SECRET_DB_USER'|" /mnt/config.php
-                NEEDS_FIX=true
-            fi
-            
-            # Check and fix password
-            if [ -n "$CONFIG_DB_PASSWORD" ] && [ "$CONFIG_DB_PASSWORD" != "$SECRET_DB_PASSWORD" ]; then
-                print_warning "Updating dbpassword: ${CONFIG_DB_PASSWORD:0:8}... -> ${SECRET_DB_PASSWORD:0:8}..."
-                # Escape special regex characters in passwords for sed
-                # Pattern side: escape $ ^ * . [ ] \ /
-                # Replacement side: escape & \ /
-                ESCAPED_OLD_PW=$(printf '%s\n' "$CONFIG_DB_PASSWORD" | sed 's/[[\.*^$()+?{|\/&]/\\&/g')
-                ESCAPED_NEW_PW=$(printf '%s\n' "$SECRET_DB_PASSWORD" | sed 's/[[\.*^$()+?{|\/&]/\\&/g')
-                kubectl exec -n "$NS_FILES" fix-nextcloud-config -- \
-                    sed -i "s|$ESCAPED_OLD_PW|$ESCAPED_NEW_PW|g" /mnt/config.php
-                NEEDS_FIX=true
-            fi
-            
-            if [ "$NEEDS_FIX" = true ]; then
-                print_success "config.php database settings updated"
+if [ -n "$PVC_EXISTS" ] && [ -z "$IDENTITY_SECRET_EXISTS" ]; then
+    print_status "PVC migration: PVC exists but identity secret doesn't — extracting identity from running pod..."
+    NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [ -n "$NEXTCLOUD_POD" ]; then
+        if timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
+            # Extract identity values from config.php using PHP for accurate parsing
+            # (grep is unreliable — e.g. 'secret' key also appears inside objectstore.arguments)
+            MIGRATE_INSTANCE_ID=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+                php -r 'include "/var/www/html/config/config.php"; echo $CONFIG["instanceid"] ?? "";' 2>/dev/null || true)
+            MIGRATE_PASSWORD_SALT=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+                php -r 'include "/var/www/html/config/config.php"; echo $CONFIG["passwordsalt"] ?? "";' 2>/dev/null || true)
+            MIGRATE_SECRET=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+                php -r 'include "/var/www/html/config/config.php"; echo $CONFIG["secret"] ?? "";' 2>/dev/null || true)
+            # Get installed version from version.php
+            MIGRATE_VERSION=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+                php -r 'require "/var/www/html/version.php"; echo implode(".", $OC_Version);' 2>/dev/null || true)
+
+            if [ -n "$MIGRATE_INSTANCE_ID" ] && [ -n "$MIGRATE_PASSWORD_SALT" ] && [ -n "$MIGRATE_SECRET" ]; then
+                kubectl create secret generic nextcloud-identity \
+                    --namespace "$NS_FILES" \
+                    --from-literal=instanceid="$MIGRATE_INSTANCE_ID" \
+                    --from-literal=passwordsalt="$MIGRATE_PASSWORD_SALT" \
+                    --from-literal=secret="$MIGRATE_SECRET" \
+                    --from-literal=version="${MIGRATE_VERSION:-unknown}" \
+                    --from-literal=trusted-domains="localhost ${FILES_HOST} ${CALENDAR_HOST:-} nextcloud.${NS_FILES}.svc.cluster.local" \
+                    --dry-run=client -o yaml | kubectl apply -f -
+                print_success "PVC migration: Identity secret created from running pod"
             else
-                print_success "config.php database settings already correct"
+                print_warning "PVC migration: Could not extract all identity values (instanceid=$MIGRATE_INSTANCE_ID)"
+                print_warning "PVC migration: First install with emptyDir will create new identity"
             fi
         else
-            print_status "No existing config.php found (new installation)"
+            print_warning "PVC migration: No config.php found in running pod"
         fi
     else
-        print_warning "Could not start fix pod, will try post-deployment reconciliation"
+        print_warning "PVC migration: No running Nextcloud pod found — identity will be created on first install"
     fi
-    
-    # Cleanup fix pod
-    kubectl delete pod fix-nextcloud-config -n "$NS_FILES" --ignore-not-found=true 2>/dev/null || true
-    
-    # Scale Nextcloud back up (will be done by helmfile anyway)
-    kubectl scale deployment nextcloud -n "$NS_FILES" --replicas=1 2>/dev/null || true
 fi
+
+# Step 5d: Apply identity-init ConfigMap (the init container script)
+print_status "Applying identity-init ConfigMap..."
+kubectl apply -n "$NS_FILES" -f "$REPO_ROOT/apps/manifests/nextcloud/identity-init-configmap.yaml"
+print_success "Identity-init ConfigMap applied"
+
+# Step 5d.1: Ensure trusted-domains is set in existing identity secret (pre-sync)
+# The pod needs trusted_domains in config.php for health probes to pass.
+# If the identity secret already exists (from migration or previous deploy) but is
+# missing the trusted-domains key, patch it now — before helmfile sync starts the pod.
+if kubectl get secret nextcloud-identity -n "$NS_FILES" &>/dev/null; then
+    EXISTING_TD=$(kubectl get secret nextcloud-identity -n "$NS_FILES" \
+        -o jsonpath='{.data.trusted-domains}' 2>/dev/null || true)
+    DESIRED_TD="localhost ${FILES_HOST} ${CALENDAR_HOST:-} nextcloud.${NS_FILES}.svc.cluster.local"
+    DESIRED_TD=$(echo "$DESIRED_TD" | xargs)  # trim trailing whitespace
+    if [ -z "$EXISTING_TD" ]; then
+        print_status "Patching identity secret with trusted-domains (was missing)..."
+        kubectl patch secret nextcloud-identity -n "$NS_FILES" \
+            -p "{\"data\":{\"trusted-domains\":\"$(echo -n "$DESIRED_TD" | base64)\"}}"
+        print_success "trusted-domains added to identity secret"
+    else
+        DECODED_TD=$(echo "$EXISTING_TD" | base64 -d 2>/dev/null || true)
+        if [ "$DECODED_TD" != "$DESIRED_TD" ]; then
+            print_status "Updating trusted-domains in identity secret..."
+            kubectl patch secret nextcloud-identity -n "$NS_FILES" \
+                -p "{\"data\":{\"trusted-domains\":\"$(echo -n "$DESIRED_TD" | base64)\"}}"
+            print_success "trusted-domains updated in identity secret"
+        else
+            print_success "trusted-domains already correct in identity secret"
+        fi
+    fi
+else
+    print_status "No identity secret yet (first install) — trusted-domains will be set after install"
+fi
+
+# Step 5e: Package custom apps as ConfigMap for init container
+# Custom apps (files_linkeditor, jitsi_calendar) are packaged as a tar.gz and stored
+# in a ConfigMap. The seed-identity init container extracts them on every pod start,
+# so they survive pod restarts without needing kubectl cp.
+print_status "Packaging custom apps into ConfigMap..."
+CUSTOM_APPS_STAGING=$(mktemp -d)
+CUSTOM_APPS_CHANGED=false
+
+# files_linkeditor
+if [ -d "$REPO_ROOT/submodules/files_linkeditor" ]; then
+    if [ ! -d "$REPO_ROOT/submodules/files_linkeditor/js" ] && [ ! -f "$REPO_ROOT/submodules/files_linkeditor/js/files_linkeditor-main.js" ]; then
+        print_warning "files_linkeditor not built yet. Run './scripts/deploy_infra $MT_ENV' first, or build manually with './scripts/build-linkeditor.sh'"
+    fi
+    mkdir -p "$CUSTOM_APPS_STAGING/files_linkeditor"
+    rsync -a --exclude='node_modules' --exclude='.git' --exclude='dev' \
+        "$REPO_ROOT/submodules/files_linkeditor/" "$CUSTOM_APPS_STAGING/files_linkeditor/"
+    CUSTOM_APPS_CHANGED=true
+fi
+
+# jitsi_calendar (only if calendar is enabled)
+if [ "${CALENDAR_ENABLED:-false}" = "true" ] && [ -n "${JITSI_HOST:-}" ]; then
+    if [ -d "$REPO_ROOT/apps/jitsi_calendar" ]; then
+        mkdir -p "$CUSTOM_APPS_STAGING/jitsi_calendar"
+        rsync -a "$REPO_ROOT/apps/jitsi_calendar/" "$CUSTOM_APPS_STAGING/jitsi_calendar/"
+        CUSTOM_APPS_CHANGED=true
+    fi
+fi
+
+if [ "$CUSTOM_APPS_CHANGED" = true ]; then
+    # Create tar.gz from the staging directory
+    CUSTOM_APPS_TARBALL=$(mktemp /tmp/nextcloud-custom-apps-XXXXXX)
+    mv "$CUSTOM_APPS_TARBALL" "${CUSTOM_APPS_TARBALL}.tar.gz"
+    CUSTOM_APPS_TARBALL="${CUSTOM_APPS_TARBALL}.tar.gz"
+    # Exclude macOS resource fork files (._*) — Nextcloud tries to autoload them as PHP classes
+    COPYFILE_DISABLE=1 tar czf "$CUSTOM_APPS_TARBALL" --exclude='._*' -C "$CUSTOM_APPS_STAGING" .
+    TARBALL_SIZE=$(du -h "$CUSTOM_APPS_TARBALL" | cut -f1)
+    print_status "Custom apps tarball: $TARBALL_SIZE"
+
+    # Create/replace ConfigMap with binaryData
+    # Cannot use kubectl apply — the last-applied-configuration annotation would exceed
+    # the 262KB annotation size limit for binary data. Use delete+create instead.
+    kubectl delete configmap nextcloud-custom-apps --namespace "$NS_FILES" --ignore-not-found=true
+    kubectl create configmap nextcloud-custom-apps \
+        --namespace "$NS_FILES" \
+        --from-file=custom-apps.tar.gz="$CUSTOM_APPS_TARBALL"
+    print_success "Custom apps ConfigMap created/updated"
+
+    rm -f "$CUSTOM_APPS_TARBALL"
+else
+    print_status "No custom apps to package"
+fi
+rm -rf "$CUSTOM_APPS_STAGING"
 
 # Step 6: Deploy Nextcloud via helmfile
 print_status "Deploying Nextcloud via helmfile..."
@@ -531,102 +377,51 @@ if ! poll_pod_ready "$NS_FILES" "app.kubernetes.io/instance=nextcloud" 600 5; th
     exit 1
 fi
 
-# Step 5b: Check for stale installation and clean up if needed
-print_status "Checking for incomplete Nextcloud installation..."
+# Step 7b: Extract/update identity secret from running pod
+# After first install: extract instanceid, passwordsalt, secret and create the identity secret.
+# On every deploy: update the version key to match the installed version.
+print_status "Managing Nextcloud identity secret..."
 NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -n "$NEXTCLOUD_POD" ]; then
-    CONFIG_EXISTS=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null && echo "yes" || echo "no")
-    if [ "$CONFIG_EXISTS" = "yes" ]; then
-        INSTALLED=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- cat /var/www/html/config/config.php 2>/dev/null | grep "'installed'" | grep "true" || true)
-        if [ -z "$INSTALLED" ]; then
-            print_warning "Found incomplete Nextcloud installation (config.php exists but not installed)"
-            print_warning "Deleting Nextcloud release and PVC to force clean reinstallation..."
-            helm uninstall nextcloud -n "$NS_FILES" || true
-            kubectl delete job nextcloud-oidc-config -n "$NS_FILES" --ignore-not-found=true || true
-            kubectl delete pvc -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud --wait=true || true
-            print_success "Stale installation cleaned up"
-            sleep 5
-        else
-            print_status "Nextcloud installation is complete"
+    # Wait for config.php to appear (entrypoint creates it during first install)
+    for attempt in $(seq 1 60); do
+        if timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
+            break
         fi
-    fi
-fi
+        if [ $attempt -eq 60 ]; then
+            print_warning "config.php not found after 60 attempts, skipping identity extraction"
+        fi
+        sleep 5
+    done
 
-# Step 7b: Reconcile database credentials in config.php with K8s secret
-# This fixes drift when upgrading to per-tenant users or when secrets change
-print_status "Checking database credentials consistency..."
-NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-NEEDS_RESTART=false
+    if timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
+        # Extract identity values using PHP for accurate parsing
+        # (grep is unreliable — e.g. 'secret' key also appears inside objectstore.arguments)
+        CURRENT_INSTANCE_ID=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+            php -r 'include "/var/www/html/config/config.php"; echo $CONFIG["instanceid"] ?? "";' 2>/dev/null || true)
+        CURRENT_PASSWORD_SALT=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+            php -r 'include "/var/www/html/config/config.php"; echo $CONFIG["passwordsalt"] ?? "";' 2>/dev/null || true)
+        CURRENT_SECRET=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+            php -r 'include "/var/www/html/config/config.php"; echo $CONFIG["secret"] ?? "";' 2>/dev/null || true)
+        CURRENT_VERSION=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+            php -r 'require "/var/www/html/version.php"; echo implode(".", $OC_Version);' 2>/dev/null || true)
 
-if [ -n "$NEXTCLOUD_POD" ]; then
-    # Check if config.php exists and is accessible
-    if ! timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
-        print_warning "config.php not found yet (new installation), skipping reconciliation"
-    else
-        # Get current values from config.php
-        CONFIG_DB_USER=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
-            grep -oP "'dbuser'\s*=>\s*'\K[^']*" /var/www/html/config/config.php 2>/dev/null || true)
-        CONFIG_DB_PASSWORD=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
-            grep -oP "'dbpassword'\s*=>\s*'\K[^']*" /var/www/html/config/config.php 2>/dev/null || true)
-        
-        # Get authoritative values from K8s secret
-        SECRET_DB_USER=$(kubectl get secret nextcloud-db -n "$NS_FILES" -o jsonpath='{.data.db-username}' 2>/dev/null | base64 -d || true)
-        SECRET_DB_PASSWORD=$(kubectl get secret nextcloud-db -n "$NS_FILES" -o jsonpath='{.data.db-password}' 2>/dev/null | base64 -d || true)
-        
-        # Reconcile username (e.g., upgrading from 'docs' to 'docs_example')
-        if [ -n "$CONFIG_DB_USER" ] && [ -n "$SECRET_DB_USER" ] && [ "$CONFIG_DB_USER" != "$SECRET_DB_USER" ]; then
-            print_warning "Database user mismatch detected!"
-            print_warning "  config.php user: $CONFIG_DB_USER"
-            print_warning "  K8s secret user: $SECRET_DB_USER"
-            print_status "Updating config.php with correct database user..."
-            
-            if kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
-                sed -i "s/'dbuser' => '$CONFIG_DB_USER'/'dbuser' => '$SECRET_DB_USER'/" \
-                /var/www/html/config/config.php 2>/dev/null; then
-                print_success "config.php updated with correct user: $SECRET_DB_USER"
-                NEEDS_RESTART=true
-            else
-                print_error "Failed to update dbuser in config.php"
-            fi
+        if [ -n "$CURRENT_INSTANCE_ID" ] && [ -n "$CURRENT_PASSWORD_SALT" ] && [ -n "$CURRENT_SECRET" ]; then
+            kubectl create secret generic nextcloud-identity \
+                --namespace "$NS_FILES" \
+                --from-literal=instanceid="$CURRENT_INSTANCE_ID" \
+                --from-literal=passwordsalt="$CURRENT_PASSWORD_SALT" \
+                --from-literal=secret="$CURRENT_SECRET" \
+                --from-literal=version="${CURRENT_VERSION:-unknown}" \
+                --from-literal=trusted-domains="localhost ${FILES_HOST} ${CALENDAR_HOST:-} nextcloud.${NS_FILES}.svc.cluster.local" \
+                --dry-run=client -o yaml | kubectl apply -f -
+            print_success "Identity secret created/updated (instanceid=$CURRENT_INSTANCE_ID, version=$CURRENT_VERSION)"
         else
-            print_success "Database user is consistent: ${SECRET_DB_USER:-unknown}"
-        fi
-        
-        # Reconcile password
-        if [ -n "$CONFIG_DB_PASSWORD" ] && [ -n "$SECRET_DB_PASSWORD" ] && [ "$CONFIG_DB_PASSWORD" != "$SECRET_DB_PASSWORD" ]; then
-            print_warning "Database password mismatch detected!"
-            print_warning "  config.php password: ${CONFIG_DB_PASSWORD:0:8}..."
-            print_warning "  K8s secret password: ${SECRET_DB_PASSWORD:0:8}..."
-            print_status "Updating config.php with correct database password..."
-            
-            # Use pipe delimiter to avoid issues with special chars in passwords
-            if kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
-                sed -i "s|'dbpassword' => '$CONFIG_DB_PASSWORD'|'dbpassword' => '$SECRET_DB_PASSWORD'|" \
-                /var/www/html/config/config.php 2>/dev/null; then
-                print_success "config.php updated with correct password"
-                NEEDS_RESTART=true
-            else
-                print_error "Failed to update dbpassword in config.php"
-            fi
-        else
-            print_success "Database password is consistent"
-        fi
-        
-        # Restart pod if any changes were made
-        if [ "$NEEDS_RESTART" = true ]; then
-            print_status "Restarting Nextcloud pod to apply credential changes..."
-            kubectl delete pod -n "$NS_FILES" "$NEXTCLOUD_POD"
-            sleep 5
-            
-            if ! poll_pod_ready "$NS_FILES" "app.kubernetes.io/instance=nextcloud" 300 5; then
-                print_warning "Pod may still be starting. Continuing..."
-            fi
-            NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-            print_success "Nextcloud pod restarted with updated credentials"
+            print_warning "Could not extract identity values from config.php"
         fi
     fi
 else
-    print_warning "Nextcloud pod not found, skipping credential reconciliation"
+    print_warning "Nextcloud pod not found, skipping identity secret management"
 fi
 
 # Step 7c: Reconcile trusted_domains (ensure calendar host is included)
@@ -678,6 +473,13 @@ if [ -n "$NEXTCLOUD_POD" ]; then
         INSTALLED=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- cat /var/www/html/config/config.php 2>/dev/null | grep "'installed'" | grep "true" || true)
         if [ -n "$INSTALLED" ]; then
             print_success "Nextcloud installation confirmed"
+
+            # Add missing database indexes (safe to run repeatedly, only adds what's missing)
+            print_status "Checking for missing database indexes..."
+            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+                su -s /bin/sh www-data -c "php occ db:add-missing-indices" 2>/dev/null || \
+                print_warning "db:add-missing-indices failed (non-critical)"
+
             break
         fi
         if [ $attempt -eq 30 ]; then
@@ -701,17 +503,17 @@ if [ -f "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl" ]; then
         print_status "OIDC RBAC resources applied"
         sleep 2
     fi
-    
+
     # Generate the job manifest from template
-    envsubst '${FILES_HOST} ${AUTH_HOST} ${TENANT_KEYCLOAK_REALM} ${CALENDAR_ENABLED} ${SMTP_DOMAIN}' < "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl" | \
+    envsubst '${FILES_HOST} ${AUTH_HOST} ${TENANT_KEYCLOAK_REALM} ${CALENDAR_ENABLED} ${SMTP_DOMAIN} ${JITSI_HOST} ${OFFICE_ENABLED} ${OFFICE_HOST} ${NS_OFFICE} ${GOOGLE_IMPORT_ENABLED}' < "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl" | \
       sed "s/namespace: files/namespace: $NS_FILES/g" > /tmp/nextcloud-oidc-config-job.yaml
-    
+
     # Delete previous job if exists
     kubectl -n "$NS_FILES" delete job/nextcloud-oidc-config --ignore-not-found=true || true
-    
+
     # Apply the job
     kubectl apply -f /tmp/nextcloud-oidc-config-job.yaml
-    
+
     # Wait for job to complete
     if poll_job_complete "$NS_FILES" "nextcloud-oidc-config" 600 5; then
         print_success "OIDC configuration completed"
@@ -722,50 +524,43 @@ else
     print_warning "OIDC config job template not found, skipping OIDC configuration"
 fi
 
-# Step 9: Deploy custom files_linkeditor app (pre-built by deploy_infra)
-print_status "Deploying custom files_linkeditor app..."
+# Step 8b: Flush APCu route cache after OIDC job installs apps
+# The OIDC config job installs apps (user_oidc, calendar, richdocuments, external) to
+# custom_apps/. Nextcloud caches compiled route tables in APCu keyed by hostname.
+# If the route cache was built before these apps were installed (e.g. by a health probe),
+# the external hostname's cache won't include the new app routes, causing 404 errors.
+# Flushing APCu forces Nextcloud to rebuild the route table with all installed apps.
+print_status "Flushing APCu route cache (graceful Apache restart)..."
+NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$NEXTCLOUD_POD" ]; then
+    # APCu is per-process in Apache prefork mode. A graceful restart (SIGUSR1) recreates
+    # all child workers, clearing their APCu caches. The parent process stays alive (PID 1),
+    # so the container doesn't restart. This ensures ALL route caches are rebuilt fresh
+    # with the newly installed apps included.
+    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- apache2ctl graceful \
+        && print_success "APCu cache flushed (Apache graceful restart)" \
+        || print_warning "APCu cache flush failed (non-critical — cache will rebuild on next request)"
+fi
+
+# Step 9: Configure files_linkeditor app (custom apps are already deployed via ConfigMap)
+# The init container extracts custom apps from the ConfigMap on every boot.
+# Here we just run the occ commands to enable/configure the app.
+print_status "Configuring files_linkeditor app..."
 if [ -d "$REPO_ROOT/submodules/files_linkeditor" ]; then
-    # Check if the app has been built (by deploy_infra)
-    if [ ! -d "$REPO_ROOT/submodules/files_linkeditor/js" ] && [ ! -f "$REPO_ROOT/submodules/files_linkeditor/js/files_linkeditor-main.js" ]; then
-        print_warning "files_linkeditor not built yet. Run './scripts/deploy_infra $MT_ENV' first, or build manually with './scripts/build-linkeditor.sh'"
-    fi
-    
     NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
     if [ -n "$NEXTCLOUD_POD" ]; then
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- rm -rf /var/www/html/custom_apps/files_linkeditor 2>/dev/null || true
-        
-        rm -rf /tmp/files_linkeditor_deploy
-        mkdir -p /tmp/files_linkeditor_deploy
-        rsync -a --exclude='node_modules' --exclude='.git' --exclude='dev' \
-            "$REPO_ROOT/submodules/files_linkeditor/" /tmp/files_linkeditor_deploy/
-        
-        kubectl cp /tmp/files_linkeditor_deploy "$NS_FILES/$NEXTCLOUD_POD:/var/www/html/custom_apps/files_linkeditor"
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- chown -R www-data:www-data /var/www/html/custom_apps/files_linkeditor
-        rm -rf /tmp/files_linkeditor_deploy
-        
-        print_success "Custom files_linkeditor app deployed"
-        
-        # Register .mtd MIME type
-        print_status "Registering .mtd MIME type..."
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- sh -c 'cat > /var/www/html/config/mimetypemapping.json << EOF
-{
-    "mtd": ["application/x-mothertree-document"]
-}
-EOF'
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- chown www-data:www-data /var/www/html/config/mimetypemapping.json
-        
+        # Update MIME type mappings (mimetypemapping.json is written by init container)
         print_status "Updating MIME type mappings..."
         kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ maintenance:mimetype:update-js" 2>/dev/null || true
         kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ maintenance:mimetype:update-db --repair-filecache" 2>/dev/null || true
         print_success "MIME type mappings updated"
-        
+
         # Configure files_linkeditor app settings for DOCX conversion
         print_status "Configuring files_linkeditor app settings..."
-        DOCS_HOST="${DOCS_HOST:-docs.${TENANT_ENV_DNS_LABEL:+$TENANT_ENV_DNS_LABEL.}${TENANT_DOMAIN}}"
-        
+
         # Get Y-Provider API key from docs secrets
         YPROVIDER_API_KEY=$(kubectl get secret -n "$NS_DOCS" docs-secrets -o jsonpath='{.data.Y_PROVIDER_API_KEY}' 2>/dev/null | base64 -d) || true
-        
+
         if [ -n "$YPROVIDER_API_KEY" ]; then
             kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set files_linkeditor docs_url --value='https://$DOCS_HOST'"
             kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set files_linkeditor yprovider_url --value='http://y-provider.$NS_DOCS.svc.cluster.local:4444/api'"
@@ -775,20 +570,221 @@ EOF'
             print_warning "Could not retrieve Y-Provider API key from docs-secrets, skipping Y-Provider configuration"
         fi
     else
-        print_warning "Nextcloud pod not found, skipping custom app deployment"
+        print_warning "Nextcloud pod not found, skipping custom app configuration"
     fi
 else
     print_warning "files_linkeditor submodule not found at $REPO_ROOT/submodules/files_linkeditor"
 fi
 
+# Step 9b: jitsi_calendar app is deployed via ConfigMap (extracted by init container)
+# No kubectl cp needed — just log that it's included
+if [ "${CALENDAR_ENABLED:-false}" = "true" ] && [ -n "${JITSI_HOST:-}" ]; then
+    if [ -d "$REPO_ROOT/apps/jitsi_calendar" ]; then
+        print_success "jitsi_calendar app included in custom apps ConfigMap"
+    else
+        print_warning "jitsi_calendar app not found at $REPO_ROOT/apps/jitsi_calendar"
+    fi
+else
+    print_status "Skipping jitsi_calendar (calendar not enabled or JITSI_HOST not set)"
+fi
+
+# Step 9c: Deploy notify_push (Client Push) — replaces browser polling with WebSocket push
+print_status "Deploying notify_push (Client Push)..."
+NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$NEXTCLOUD_POD" ]; then
+    # Build connection URLs from values already available in this script
+    # URL-encode passwords: base64 can contain +, /, = which break URL parsing
+    url_encode() { python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.stdin.read().strip(), safe=''))"; }
+    DB_PASSWORD_ENCODED=$(printf '%s' "$DB_PASSWORD" | url_encode)
+    REDIS_PASSWORD_ENCODED=$(printf '%s' "$REDIS_PASSWORD" | url_encode)
+    NOTIFY_PUSH_DB_URL="postgres://${TENANT_DB_USER}:${DB_PASSWORD_ENCODED}@${PG_HOST}/${NEXTCLOUD_DB_NAME}"
+    NOTIFY_PUSH_REDIS_URL="redis://:${REDIS_PASSWORD_ENCODED}@redis.${NS_FILES}.svc.cluster.local:6379"
+
+    # Create/update the notify-push-config secret
+    kubectl create secret generic notify-push-config \
+        --namespace "$NS_FILES" \
+        --from-literal=DATABASE_URL="$NOTIFY_PUSH_DB_URL" \
+        --from-literal=REDIS_URL="$NOTIFY_PUSH_REDIS_URL" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    print_success "notify-push-config secret created/updated"
+
+    # Apply the Deployment + Service manifest (envsubst for NS_FILES)
+    envsubst '${NS_FILES}' < "$REPO_ROOT/apps/manifests/nextcloud/notify-push.yaml" | kubectl apply -n "$NS_FILES" -f -
+    print_success "notify-push Deployment and Service applied"
+
+    # Wait for the notify-push pod to be ready
+    if ! poll_pod_ready "$NS_FILES" "app=notify-push" 120 5; then
+        print_warning "notify-push pod not ready yet — check logs with: kubectl logs -n $NS_FILES -l app=notify-push"
+        print_warning "Continuing deployment (notify_push is non-critical)..."
+    else
+        # Install and enable the PHP-side notify_push app in Nextcloud
+        print_status "Installing notify_push PHP app..."
+        # app:install downloads from the app store; if already present, just enable
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+            su -s /bin/sh www-data -c "php occ app:install notify_push" 2>/dev/null || \
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+            su -s /bin/sh www-data -c "php occ app:enable notify_push" 2>/dev/null || true
+        print_success "notify_push PHP app installed/enabled"
+
+        # Configure the push endpoint URL (must match the ingress path)
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+            su -s /bin/sh www-data -c "php occ config:app:set notify_push base_endpoint --value='https://${FILES_HOST}/push'"
+        print_success "notify_push base_endpoint set to https://${FILES_HOST}/push"
+
+        # Add the internal push service as a trusted proxy so X-Forwarded-For is honoured
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+            su -s /bin/sh www-data -c "php occ config:system:set trusted_proxies 0 --value='10.0.0.0/8'" 2>/dev/null || true
+
+        # Run the built-in self-test (verifies Redis, DB, HTTP connectivity, and a test push event)
+        print_status "Running notify_push self-test..."
+        if kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+            su -s /bin/sh www-data -c "php occ notify_push:self-test" 2>&1; then
+            print_success "notify_push self-test passed"
+        else
+            print_warning "notify_push self-test failed (may need a moment to connect — re-run manually)"
+            print_warning "  kubectl exec -n $NS_FILES $NEXTCLOUD_POD -- su -s /bin/sh www-data -c 'php occ notify_push:self-test'"
+        fi
+    fi
+else
+    print_warning "Nextcloud pod not found, skipping notify_push deployment"
+fi
+
+# Step 9c.1: Create/update app store download URLs ConfigMap
+# App store apps (user_oidc, calendar, richdocuments, external, notify_push) are installed
+# by the OIDC config job during deploy, but live on emptyDir and are lost on pod restart.
+# To survive restarts, we query the Nextcloud app store API for download URLs and store
+# them in a ConfigMap. The init container reads these URLs and downloads+extracts the apps
+# on every boot. This adds ~15-30s to pod startup but ensures all apps are always present.
+print_status "Creating app store download URLs ConfigMap..."
+NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$NEXTCLOUD_POD" ]; then
+    # App store API requires 3-part version (32.0.5), not 4-part (32.0.5.0)
+    NC_API_VERSION=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+        php -r 'require "/var/www/html/version.php"; echo $OC_Version[0].".".$OC_Version[1].".".$OC_Version[2];' 2>/dev/null || true)
+    if [ -n "$NC_API_VERSION" ]; then
+        # Query app store API for download URLs of our required apps
+        # The API returns all compatible apps for a given platform version
+        APP_URLS=$(curl -sf "https://apps.nextcloud.com/api/v1/platform/${NC_API_VERSION}/apps.json" | python3 -c "
+import json, sys, os
+apps = json.load(sys.stdin)
+needed = {'user_oidc', 'calendar', 'richdocuments', 'external', 'notify_push'}
+if os.environ.get('GOOGLE_IMPORT_ENABLED') == 'true':
+    needed.add('integration_google')
+for a in apps:
+    if a['id'] in needed and a.get('releases'):
+        r = a['releases'][0]
+        print(f\"{a['id']}|{r['download']}\")
+" 2>/dev/null || true)
+        if [ -n "$APP_URLS" ]; then
+            kubectl create configmap nextcloud-appstore-urls \
+                --namespace "$NS_FILES" \
+                --from-literal=app-urls="$APP_URLS" \
+                --dry-run=client -o yaml | kubectl apply -f -
+            APP_COUNT=$(echo "$APP_URLS" | wc -l | tr -d ' ')
+            print_success "App store URLs ConfigMap created ($APP_COUNT apps for NC $NC_API_VERSION)"
+        else
+            print_warning "Could not fetch app store URLs (non-critical — apps already installed on current pod)"
+        fi
+    else
+        print_warning "Could not determine Nextcloud version, skipping app store URL ConfigMap"
+    fi
+else
+    print_warning "Nextcloud pod not found, skipping app store URL ConfigMap"
+fi
+
+# Step 9d: Configure Nextcloud theming (brand colors, logo, name)
+print_status "Configuring Nextcloud theming..."
+NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$NEXTCLOUD_POD" ]; then
+    # Ensure theming app is enabled
+    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable theming" 2>/dev/null || true
+
+    # Set primary brand color (sage green)
+    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config primary_color '#A7AE8D'"
+    print_success "Primary color set to #A7AE8D (sage)"
+
+    # Set instance name from tenant display name
+    THEMING_NAME="${TENANT_DISPLAY_NAME:-Mothertree}"
+    # Use env var passthrough to avoid shell injection from names with special chars
+    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" --  \
+        env "MT_THEMING_NAME=$THEMING_NAME" \
+        su -s /bin/sh www-data -c 'php occ theming:config name "$MT_THEMING_NAME"'
+    print_success "Instance name set to: $THEMING_NAME"
+
+    # Set URL (link target when clicking instance name)
+    THEMING_URL="https://${TENANT_DOMAIN}"
+    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config url '$THEMING_URL'"
+    print_success "Instance URL set to: $THEMING_URL"
+
+    # Set legal/policy links (from tenant config, exported by config.sh)
+    if [ -n "${TERMS_OF_USE_URL:-}" ]; then
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config imprintUrl '$TERMS_OF_USE_URL'"
+        print_success "Legal notice URL set"
+    fi
+    if [ -n "${PRIVACY_POLICY_URL:-}" ]; then
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config privacyUrl '$PRIVACY_POLICY_URL'"
+        print_success "Privacy policy URL set"
+    fi
+
+    # Copy logo files to the pod and apply them
+    ASSETS_DIR="$REPO_ROOT/apps/assets/nextcloud"
+    if [ -d "$ASSETS_DIR" ]; then
+        # Login page logo (dark/coal version for light backgrounds)
+        if [ -f "$ASSETS_DIR/logo.svg" ]; then
+            kubectl cp "$ASSETS_DIR/logo.svg" "$NS_FILES/$NEXTCLOUD_POD:/tmp/mt-logo.svg"
+            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config logo /tmp/mt-logo.svg"
+            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- rm -f /tmp/mt-logo.svg
+            print_success "Login logo applied (dark variant)"
+        fi
+
+        # Header logo (same coal version — visible on ash background)
+        if [ -f "$ASSETS_DIR/logo.svg" ]; then
+            kubectl cp "$ASSETS_DIR/logo.svg" "$NS_FILES/$NEXTCLOUD_POD:/tmp/mt-logoheader.svg"
+            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config logoheader /tmp/mt-logoheader.svg"
+            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- rm -f /tmp/mt-logoheader.svg
+            print_success "Header logo applied (coal variant)"
+        fi
+
+        # Favicon
+        if [ -f "$ASSETS_DIR/favicon.svg" ]; then
+            kubectl cp "$ASSETS_DIR/favicon.svg" "$NS_FILES/$NEXTCLOUD_POD:/tmp/mt-favicon.svg"
+            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config favicon /tmp/mt-favicon.svg"
+            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- rm -f /tmp/mt-favicon.svg
+            print_success "Favicon applied"
+        fi
+    else
+        print_warning "Theming assets not found at $ASSETS_DIR, skipping logo/favicon"
+    fi
+
+    # Set background to plain color mode (removes default blue watercolor wallpaper)
+    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c 'php occ theming:config background "backgroundColor"'
+    # Set the actual background color (ghost fern)
+    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config background_color '#A7AE8D'"
+
+    # Enforce brand colors for all users (users can still toggle light/dark mode)
+    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config disable-user-theming yes"
+
+    print_success "Nextcloud theming configured"
+else
+    print_warning "Nextcloud pod not found, skipping theming configuration"
+fi
+
 # Step 10: Deploy Grafana dashboard
 print_status "Deploying Nextcloud Grafana dashboard..."
-NS_MONITORING="${NS_MONITORING:-infra-monitoring}"
 if [ -f "$REPO_ROOT/apps/manifests/nextcloud/nextcloud-dashboard-configmap.yaml" ]; then
     cat "$REPO_ROOT/apps/manifests/nextcloud/nextcloud-dashboard-configmap.yaml" | sed "s/namespace: monitoring/namespace: $NS_MONITORING/g" | kubectl apply -f -
     print_success "Nextcloud Grafana dashboard deployed"
 else
     print_warning "Grafana dashboard configmap not found, skipping"
+fi
+
+# Migration notice: old PVC
+if [ -n "${PVC_EXISTS:-}" ]; then
+    echo ""
+    print_status "NOTE: Old PVC 'nextcloud-nextcloud' still exists in $NS_FILES."
+    print_status "Nextcloud now uses emptyDir with identity from K8s Secret."
+    print_status "After verifying everything works, you can safely delete it:"
+    print_status "  kubectl delete pvc nextcloud-nextcloud -n $NS_FILES"
 fi
 
 print_success "Nextcloud deployment completed!"

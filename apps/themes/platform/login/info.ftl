@@ -9,9 +9,9 @@
         <style>
             /* Colors matching Admin Portal */
             :root {
-                --sage: #7C9A6C;
-                --sage-dark: #5A7A4C;
-                --cream: #FAF8F5;
+                --sage: #A7AE8D;
+                --sage-dark: #8A9475;
+                --cream: #F3E8D6;
                 --warm-gray: #6B6B6B;
             }
             
@@ -36,7 +36,7 @@
                 font-size: 2rem;
                 color: var(--sage);
                 margin: 0 0 0.5rem 0;
-                font-weight: 400;
+                font-weight: 600;
             }
             
             .platform-welcome {
@@ -156,7 +156,7 @@
             }
         </style>
         <div class="platform-header">
-            <h1 class="platform-title">${realmDisplayName!"the platform"}</h1>
+            <h1 class="platform-title">${realm.displayName!"the platform"}</h1>
             <p class="platform-welcome">Complete your account setup</p>
         </div>
     <#elseif section = "form">

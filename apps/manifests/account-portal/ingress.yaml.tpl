@@ -5,15 +5,16 @@ metadata:
   namespace: ${NS_ADMIN}
   annotations:
     kubernetes.io/ingress.class: nginx
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
     nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header Cache-Control "no-store" always;
 spec:
   ingressClassName: nginx
   tls:
     - hosts:
         - ${ACCOUNT_HOST}
-      secretName: account-portal-tls
+      secretName: wildcard-tls-${TENANT_NAME}
   rules:
     - host: ${ACCOUNT_HOST}
       http:

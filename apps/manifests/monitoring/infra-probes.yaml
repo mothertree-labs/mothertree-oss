@@ -1,0 +1,24 @@
+# Infrastructure Probe CRD — monitors internal monitoring services via K8s ClusterIP
+# These are VPN-only services, probed directly via service DNS (no external DNS needed).
+# Deployed once per environment by deploy_infra.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: infra-probes
+  namespace: infra-monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  jobName: infra-probes
+  interval: 60s
+  module: http_2xx_internal
+  prober:
+    url: prometheus-blackbox-exporter.infra-monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      labels:
+        probe_type: infrastructure
+      static:
+        - http://kube-prometheus-stack-grafana.infra-monitoring.svc.cluster.local/login
+        - http://kube-prometheus-stack-prometheus.infra-monitoring.svc.cluster.local:9090/-/healthy
+        - http://kube-prometheus-stack-alertmanager.infra-monitoring.svc.cluster.local:9093/-/healthy

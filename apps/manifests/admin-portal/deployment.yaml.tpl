@@ -85,6 +85,16 @@ spec:
                 secretKeyRef:
                   name: admin-portal-secrets
                   key: REDIS_PASSWORD
+            # Default email quota per user in MB (0 = unlimited)
+            - name: DEFAULT_EMAIL_QUOTA_MB
+              value: "${DEFAULT_EMAIL_QUOTA_MB}"
+            # Policy URLs (externally hosted legal documents)
+            - name: PRIVACY_POLICY_URL
+              value: "${PRIVACY_POLICY_URL}"
+            - name: TERMS_OF_USE_URL
+              value: "${TERMS_OF_USE_URL}"
+            - name: ACCEPTABLE_USE_POLICY_URL
+              value: "${ACCEPTABLE_USE_POLICY_URL}"
             # HMAC secret for beginSetup token verification (shared with account portal)
             - name: BEGINSETUP_SECRET
               valueFrom:

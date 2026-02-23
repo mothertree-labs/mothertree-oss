@@ -9,6 +9,9 @@ node_modules/
 .next/
 out/
 
+# Tailwind build output
+public/css/tailwind.css
+
 # Production build
 build/
 

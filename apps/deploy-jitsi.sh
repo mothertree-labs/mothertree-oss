@@ -5,158 +5,71 @@
 #
 # Namespace structure:
 #   - Jitsi in NS_JITSI (tenant-prefixed namespace, e.g., 'tn-example-jitsi')
+#
+# Usage:
+#   ./apps/deploy-jitsi.sh -e dev -t example
 
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
 
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+mt_usage() {
+    echo "Usage: $0 -e <env> -t <tenant>"
+    echo ""
+    echo "Deploy Jitsi Meet for a tenant."
+    echo ""
+    echo "Options:"
+    echo "  -e <env>       Environment (e.g., dev, prod)"
+    echo "  -t <tenant>    Tenant name (e.g., example)"
+    echo "  -h, --help     Show this help"
 }
 
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
+mt_parse_args "$@"
+mt_require_env
+mt_require_tenant
 
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-# Require MT_ENV and TENANT
-MT_ENV=${MT_ENV:-prod}
-REPO_ROOT="${REPO_ROOT:-/workspace}"
-
-# Parse nesting level for deploy notifications
-NESTING_LEVEL=0
-for arg in "$@"; do
-  case "$arg" in
-    --nesting-level=*) NESTING_LEVEL="${arg#*=}" ;;
-  esac
-done
-_MT_NOTIFY_NESTING_LEVEL=$NESTING_LEVEL
+source "${REPO_ROOT}/scripts/lib/config.sh"
+mt_load_tenant_config
 
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy-jitsi"
 
-if [ -z "${MT_ENV:-}" ]; then
-    print_error "MT_ENV is not set. Usage: MT_ENV=dev TENANT=example ./apps/deploy-jitsi.sh"
-    exit 1
-fi
-
-if [ -z "${TENANT:-}" ]; then
-    print_error "TENANT is not set. Usage: MT_ENV=dev TENANT=example ./apps/deploy-jitsi.sh"
-    exit 1
-fi
-
-export KUBECONFIG="${KUBECONFIG:-$REPO_ROOT/kubeconfig.$MT_ENV.yaml}"
-
-# Namespace configuration
-NS_JITSI="${NS_JITSI:-tn-${TENANT}-jitsi}"
-
-# Tenant configuration
-TENANT_DIR="$REPO_ROOT/tenants/$TENANT"
-TENANT_CONFIG="$TENANT_DIR/$MT_ENV.config.yaml"
-
-if [ ! -f "$TENANT_CONFIG" ]; then
-    print_error "Tenant config not found: $TENANT_CONFIG"
-    exit 1
-fi
+mt_require_commands kubectl envsubst openssl
 
 print_status "Deploying Jitsi Meet for environment: $MT_ENV"
 print_status "Tenant: $TENANT"
 print_status "Jitsi namespace: $NS_JITSI"
-
-# Validate required environment variables (set by create_env from tenant config)
-# These must be exported before running this script
-required_vars=("JITSI_HOST" "AUTH_HOST" "MATRIX_HOST" "DOCS_HOST")
-missing_vars=()
-for var in "${required_vars[@]}"; do
-    if [ -z "${!var:-}" ]; then
-        missing_vars+=("$var")
-    fi
-done
-
-if [ ${#missing_vars[@]} -gt 0 ]; then
-    print_error "Required environment variables not set: ${missing_vars[*]}"
-    print_error "This script should be called from create_env which sets these from tenant config."
-    print_error "Or set them manually: JITSI_HOST=jitsi.example.org AUTH_HOST=auth.example.org ..."
-    exit 1
-fi
 print_status "Using environment: JITSI_HOST=$JITSI_HOST, AUTH_HOST=$AUTH_HOST"
 
-# Load secrets (for JWT_APP_SECRET)
-# When called from create_env, tenant-specific secrets are already exported.
-# Only source the shared secrets file as a fallback for standalone runs,
-# to avoid overwriting tenant-specific values with another tenant's secrets.
-if [ -z "${TF_VAR_jitsi_jwt_app_secret:-}" ]; then
-    if [ -f "$REPO_ROOT/secrets.${MT_ENV}.tfvars.env" ]; then
-        source "$REPO_ROOT/secrets.${MT_ENV}.tfvars.env"
-        print_status "Loaded secrets from secrets.${MT_ENV}.tfvars.env"
-    else
-        print_error "Secrets file secrets.${MT_ENV}.tfvars.env not found."
-        exit 1
-    fi
-else
-    print_status "Using secrets from environment (set by create_env)"
-fi
-
 # Validate required secrets
-if [ -z "${TF_VAR_jitsi_jwt_app_secret:-}" ]; then
-    print_error "TF_VAR_jitsi_jwt_app_secret not set in secrets.${MT_ENV}.tfvars.env"
+export JWT_APP_SECRET="${TF_VAR_jitsi_jwt_app_secret}"
+if [ -z "${JWT_APP_SECRET:-}" ]; then
+    print_error "TF_VAR_jitsi_jwt_app_secret not set in tenant secrets"
     print_error "Generate one with: openssl rand -hex 32"
     exit 1
 fi
-export JWT_APP_SECRET="${TF_VAR_jitsi_jwt_app_secret}"
 
-# Export TURN shared secret for prosody.yaml.tpl envsubst
-# Prefer TURN_SHARED_SECRET if already set by create_env, fallback to TF_VAR_turn_shared_secret
-if [ -z "${TURN_SHARED_SECRET:-}" ] && [ -n "${TF_VAR_turn_shared_secret:-}" ]; then
-    export TURN_SHARED_SECRET="${TF_VAR_turn_shared_secret}"
-fi
 if [ -z "${TURN_SHARED_SECRET:-}" ]; then
-    print_error "TURN_SHARED_SECRET not set. Set it in tenant secrets (turn.shared_secret) or secrets.${MT_ENV}.tfvars.env (TF_VAR_turn_shared_secret)."
+    print_error "TURN_SHARED_SECRET not set. Set turn.shared_secret in tenant secrets."
     exit 1
 fi
 
-# Get TURN server IP from phase1 outputs (if available)
-if [ -f "$REPO_ROOT/phase1/terraform.tfstate.d/${MT_ENV}/terraform.tfstate" ]; then
-    TURN_SERVER_IP=$(cd "$REPO_ROOT/phase1" && terraform output -raw turn_server_ip 2>/dev/null || echo "")
-    if [ -n "$TURN_SERVER_IP" ] && [ "$TURN_SERVER_IP" != "null" ]; then
-        export TURN_SERVER_IP
-        print_status "TURN server IP: $TURN_SERVER_IP"
-    else
-        print_error "TURN server IP not available. Ensure phase1 has been applied."
-        exit 1
-    fi
-else
-    print_error "Terraform state not found. Ensure phase1 has been applied."
+# Validate TURN server IP
+if [ -z "${TURN_SERVER_IP:-}" ]; then
+    print_error "TURN server IP not available. Ensure phase1 has been applied."
     exit 1
 fi
+print_status "TURN server IP: $TURN_SERVER_IP"
 
-# Get JVB port from tenant config (unique per tenant for multi-tenancy)
-JVB_PORT=$(yq '.resources.jitsi.jvb_port' "$TENANT_CONFIG")
+# Validate JVB port
 if [ -z "$JVB_PORT" ] || [ "$JVB_PORT" = "null" ]; then
-    print_error "jvb_port not configured in $TENANT_CONFIG"
+    print_error "jvb_port not configured in tenant config"
     print_error "Add 'resources.jitsi.jvb_port: <port>' to the tenant config (e.g., 31000)"
     exit 1
 fi
-export JVB_PORT
 print_status "JVB port: $JVB_PORT (hostPort for UDP media, IP discovered dynamically via Downward API)"
-
-# Load replica counts from tenant config (needed for Deployment replicas and HPAs)
-export JITSI_WEB_MIN_REPLICAS=$(yq '.resources.jitsi.web.min_replicas // 1' "$TENANT_CONFIG")
-export JITSI_WEB_MAX_REPLICAS=$(yq '.resources.jitsi.web.max_replicas // 3' "$TENANT_CONFIG")
-export JVB_MIN_REPLICAS=$(yq '.resources.jitsi.jvb.min_replicas // 1' "$TENANT_CONFIG")
-export JVB_MAX_REPLICAS=$(yq '.resources.jitsi.jvb.max_replicas // 3' "$TENANT_CONFIG")
 
 # Ensure namespace exists
 print_status "Ensuring $NS_JITSI namespace exists..."
@@ -209,8 +122,9 @@ kubectl create secret generic jitsi-secrets \
     --from-literal=JIBRI_AUTH_PASSWORD="$JIBRI_AUTH_PASSWORD" \
     --from-literal=JIBRI_RECORDER_PASSWORD="$JIBRI_RECORDER_PASSWORD" \
     --from-literal=JWT_APP_SECRET="$JWT_APP_SECRET" \
+    --from-literal=TURN_SHARED_SECRET="$TURN_SHARED_SECRET" \
     --dry-run=client -o yaml | kubectl apply -f -
-print_success "jitsi-secrets created/updated with strong passwords and JWT_APP_SECRET"
+print_success "jitsi-secrets created/updated with strong passwords, JWT_APP_SECRET, and TURN_SHARED_SECRET"
 
 # Apply templated manifests with environment variables
 print_status "Applying templated Jitsi manifests..."
@@ -229,8 +143,8 @@ envsubst < "$REPO_ROOT/apps/manifests/jitsi/keycloak-adapter.yaml.tpl" | sed "s/
 # Apply services and deployments with namespace substitution
 envsubst < "$REPO_ROOT/apps/manifests/jitsi/web.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 envsubst < "$REPO_ROOT/apps/manifests/jitsi/prosody.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
-# Force StatefulSet rollout restart to ensure pods pick up spec changes
-# (StatefulSets with CrashLoopBackOff pods may not auto-restart on apply)
+# Force StatefulSet rollout restart to ensure pods pick up spec changes.
+# StatefulSets with CrashLoopBackOff pods may not auto-restart on apply.
 kubectl rollout restart statefulset/jitsi-prosody -n "$NS_JITSI"
 # Delete existing pod if stuck in CrashLoopBackOff so the controller creates a new one
 if kubectl get pod jitsi-prosody-0 -n "$NS_JITSI" -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null | grep -q "CrashLoopBackOff"; then
@@ -246,6 +160,11 @@ envsubst < "$REPO_ROOT/apps/manifests/jitsi/web-config.yaml.tpl" | sed "s/namesp
 
 # Apply templated Ingress
 envsubst < "$REPO_ROOT/apps/manifests/jitsi/ingress.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+
+# Deploy metrics exporter (ServiceAccount + Deployment + Service + ConfigMap)
+print_status "Deploying Jitsi metrics exporter..."
+envsubst < "$REPO_ROOT/apps/manifests/jitsi/jitsi-metrics-exporter.yaml" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+cat "$REPO_ROOT/apps/manifests/jitsi/jitsi-metrics-exporter-servicemonitor.yaml" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 
 # Deploy HorizontalPodAutoscalers (HPA) for auto-scaling
 print_status "Deploying HPAs for Jitsi web and JVB..."

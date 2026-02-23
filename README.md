@@ -133,6 +133,8 @@ cd apps && helmfile -e dev -l tier=apps sync
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contribution guidelines.
 
+See [CLOUDFLARE_CACHING.md](CLOUDFLARE_CACHING.md) for CDN cache configuration (Cloudflare Cache Rules + origin headers).
+
 ## Security
 
 If you discover a security vulnerability, please report it responsibly by opening a GitHub issue marked `[SECURITY]` or contacting the maintainers directly. Do not open a public issue with exploit details.

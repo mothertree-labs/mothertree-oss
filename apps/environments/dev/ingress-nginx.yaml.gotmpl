@@ -1,0 +1,5 @@
+# Dev: no geo enforcement — dev DNS is not Cloudflare-proxied (gray cloud),
+# so all external traffic would be blocked. Monitoring probes (Blackbox Exporter)
+# also go through external FQDNs and would be blocked.
+# The $deny_non_cloudflare geo variable is still defined (base values) but not enforced.
+{}

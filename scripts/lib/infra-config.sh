@@ -1,0 +1,340 @@
+#!/bin/bash
+# Infrastructure configuration loader for Mothertree scripts
+#
+# Source this and call mt_load_infra_config to load all config needed by
+# deploy_infra (shared infrastructure deployment).
+#
+# Unlike config.sh (which is per-tenant), this operates per-environment.
+# It discovers the "infra tenant" (whose dns.domain matches infra.domain),
+# loads alerting config, derives infra hostnames, and sets namespace vars.
+#
+# Prerequisites:
+#   - MT_ENV must be set (via args.sh or directly)
+#   - REPO_ROOT must be set (via args.sh or directly)
+#   - yq must be installed
+#
+# Usage:
+#   source "${REPO_ROOT}/scripts/lib/infra-config.sh"
+#   mt_load_infra_config
+
+# Guard against double-sourcing
+if [ "${_MT_INFRA_CONFIG_LOADED:-}" = "1" ]; then
+  return 0 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
+# mt_load_infra_config — main entry point
+# ---------------------------------------------------------------------------
+mt_load_infra_config() {
+  if [ "${_MT_INFRA_CONFIG_LOADED:-}" = "1" ]; then
+    return 0
+  fi
+  _MT_INFRA_CONFIG_LOADED=1
+
+  if [ -z "${MT_ENV:-}" ]; then
+    echo "[ERROR] MT_ENV is not set." >&2
+    exit 1
+  fi
+  if [ -z "${REPO_ROOT:-}" ]; then
+    echo "[ERROR] REPO_ROOT is not set." >&2
+    exit 1
+  fi
+
+  _mt_infra_set_kubeconfig
+  _mt_infra_set_namespaces
+  _mt_infra_load_env_config
+  _mt_infra_discover_domain
+  _mt_infra_load_alerting
+  _mt_infra_load_shared_secrets
+  _mt_infra_derive_hostnames
+  _mt_infra_set_placeholder_namespaces
+  _mt_infra_load_terraform_outputs
+}
+
+# ---------------------------------------------------------------------------
+# Internal: set KUBECONFIG from convention
+# ---------------------------------------------------------------------------
+_mt_infra_set_kubeconfig() {
+  export KUBECONFIG="${KUBECONFIG:-$REPO_ROOT/kubeconfig.$MT_ENV.yaml}"
+  if [ ! -f "$KUBECONFIG" ]; then
+    echo "[ERROR] Kubeconfig not found: $KUBECONFIG" >&2
+    echo "Run './scripts/manage_infra $MT_ENV' first to create the cluster." >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Internal: set infrastructure namespace variables
+# ---------------------------------------------------------------------------
+_mt_infra_set_namespaces() {
+  export NS_DB="infra-db"
+  export NS_AUTH="infra-auth"
+  export NS_MONITORING="infra-monitoring"
+  export NS_INGRESS="infra-ingress"
+  export NS_INGRESS_INTERNAL="infra-ingress-internal"
+  export NS_CERTMANAGER="infra-cert-manager"
+  export NS_MAIL="infra-mail"
+}
+
+# ---------------------------------------------------------------------------
+# Internal: load environment-level infra config (infra/<env>.config.yaml)
+# ---------------------------------------------------------------------------
+_mt_infra_load_env_config() {
+  local infra_config="$REPO_ROOT/infra/$MT_ENV.config.yaml"
+  if [ -f "$infra_config" ]; then
+    echo "[INFO] Loading infrastructure config from $infra_config"
+    PG_READ_REPLICAS=$(yq '.postgresql.read_replicas // 1' "$infra_config")
+    KEYCLOAK_REPLICAS=$(yq '.keycloak.replicas // 2' "$infra_config")
+    export PG_READ_REPLICAS KEYCLOAK_REPLICAS
+  else
+    echo "[WARNING] Infrastructure config not found: $infra_config"
+    echo "[WARNING] Using defaults: PG_READ_REPLICAS=1, KEYCLOAK_REPLICAS=2"
+    export PG_READ_REPLICAS=1
+    export KEYCLOAK_REPLICAS=2
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Internal: discover INFRA_DOMAIN and INFRA_TENANT from tenant configs
+# ---------------------------------------------------------------------------
+_mt_infra_discover_domain() {
+  # Find INFRA_DOMAIN from first available tenant config
+  INFRA_DOMAIN=""
+  local _td _tcf
+  for _td in "$REPO_ROOT/tenants"/*/; do
+    _tcf="$_td/${MT_ENV}.config.yaml"
+    if [ -f "$_tcf" ]; then
+      INFRA_DOMAIN=$(yq '.infra.domain // .dns.domain' "$_tcf")
+      break
+    fi
+  done
+  if [ -z "$INFRA_DOMAIN" ] || [ "$INFRA_DOMAIN" = "null" ]; then
+    echo "[ERROR] Could not determine INFRA_DOMAIN from any tenant config" >&2
+    exit 1
+  fi
+  export INFRA_DOMAIN
+  export INFRA_NAME="Mothertree"
+
+  # Find the "infra tenant" — the tenant whose dns.domain matches INFRA_DOMAIN
+  INFRA_TENANT_DIR=""
+  local _td2 _tcf2 _td_domain
+  for _td2 in "$REPO_ROOT/tenants"/*/; do
+    _tcf2="${_td2}/${MT_ENV}.config.yaml"
+    if [ -f "$_tcf2" ]; then
+      _td_domain=$(yq '.dns.domain // ""' "$_tcf2")
+      if [ "$_td_domain" = "$INFRA_DOMAIN" ]; then
+        INFRA_TENANT_DIR="$_td2"
+        break
+      fi
+    fi
+  done
+
+  if [ -z "$INFRA_TENANT_DIR" ]; then
+    echo "[ERROR] No tenant found with dns.domain == '$INFRA_DOMAIN'" >&2
+    echo "[ERROR] One tenant's dns.domain must match INFRA_DOMAIN for alerting config." >&2
+    exit 1
+  fi
+
+  INFRA_TENANT_NAME=$(basename "$INFRA_TENANT_DIR")
+  export INFRA_TENANT_NAME INFRA_TENANT_DIR
+  echo "[INFO] Infra tenant: $INFRA_TENANT_NAME (dns.domain=$INFRA_DOMAIN)"
+}
+
+# ---------------------------------------------------------------------------
+# Internal: load alerting config/secrets from the infra tenant
+# ---------------------------------------------------------------------------
+_mt_infra_load_alerting() {
+  local _infra_secrets="${INFRA_TENANT_DIR}/${MT_ENV}.secrets.yaml"
+  local _infra_config="${INFRA_TENANT_DIR}/${MT_ENV}.config.yaml"
+
+  # Use override if provided
+  if [ -n "${MT_INFRA_SECRETS_FILE:-}" ] && [ -f "$MT_INFRA_SECRETS_FILE" ]; then
+    _infra_secrets="$MT_INFRA_SECRETS_FILE"
+  fi
+
+  # Load alerting secrets from infra tenant
+  if [ -f "$_infra_secrets" ]; then
+    local _room_id _deploy_room_id _deadman_url _access_token
+    _room_id=$(yq '.alertbot.room_id // ""' "$_infra_secrets")
+    if [ -n "$_room_id" ] && [ "$_room_id" != "null" ]; then
+      export ALERTMANAGER_MATRIX_ROOM_ID="$_room_id"
+      echo "[INFO] AlertManager Matrix room ID loaded from infra tenant secrets"
+    else
+      echo "[WARN] alertbot.room_id not set in $INFRA_TENANT_NAME secrets"
+    fi
+
+    _deploy_room_id=$(yq '.alertbot.deploy_room_id // ""' "$_infra_secrets")
+    if [ -n "$_deploy_room_id" ] && [ "$_deploy_room_id" != "null" ]; then
+      export DEPLOY_MATRIX_ROOM_ID="$_deploy_room_id"
+      echo "[INFO] Deploy Matrix room ID loaded from infra tenant secrets"
+    else
+      echo "[WARN] alertbot.deploy_room_id not set in $INFRA_TENANT_NAME secrets"
+    fi
+
+    _deadman_url=$(yq '.healthchecks.deadman_url // ""' "$_infra_secrets")
+    if [ -n "$_deadman_url" ] && [ "$_deadman_url" != "null" ]; then
+      export HEALTHCHECKS_DEADMAN_URL="$_deadman_url"
+      echo "[INFO] Healthchecks.io dead man's switch URL loaded"
+    else
+      echo "[WARN] healthchecks.deadman_url not set in $INFRA_TENANT_NAME secrets"
+    fi
+
+    _access_token=$(yq '.alertbot.access_token // ""' "$_infra_secrets")
+    if [ -n "$_access_token" ] && [ "$_access_token" != "null" ]; then
+      export MATRIX_ALERTMANAGER_ACCESS_TOKEN="$_access_token"
+      echo "[INFO] AlertManager Matrix access token loaded"
+    else
+      echo "[WARN] alertbot.access_token not set in $INFRA_TENANT_NAME secrets"
+    fi
+
+    # TURN shared secret — infrastructure-level (one coturn server, one secret)
+    local _turn_secret
+    _turn_secret=$(yq '.turn.shared_secret // ""' "$_infra_secrets")
+    if [ -n "$_turn_secret" ] && [ "$_turn_secret" != "null" ]; then
+      export TF_VAR_turn_shared_secret="$_turn_secret"
+      echo "[INFO] TURN shared secret loaded from infra tenant secrets"
+    else
+      echo "[WARN] turn.shared_secret not set in $INFRA_TENANT_NAME secrets"
+    fi
+  else
+    echo "[WARN] Infra tenant secrets file not found: $_infra_secrets"
+  fi
+
+  # Load oncall email from infra tenant config
+  local _oncall_email
+  _oncall_email=$(yq '.alerting.oncall_email // ""' "$_infra_config")
+  if [ -n "$_oncall_email" ] && [ "$_oncall_email" != "null" ] && [ "$_oncall_email" != "oncall@example.com" ]; then
+    export ALERTMANAGER_EMAIL_TO="$_oncall_email"
+    echo "[INFO] AlertManager email recipient: $ALERTMANAGER_EMAIL_TO"
+  else
+    echo "[ERROR] alerting.oncall_email is not configured in: $_infra_config" >&2
+    echo "[ERROR] Add 'alerting: oncall_email: you@example.com' to $_infra_config" >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Internal: load shared infrastructure secrets (Keycloak, Grafana)
+#
+# These are needed by helmfile tier=system sync (Grafana admin password)
+# and Keycloak deployment. Must be loaded early — before helmfile runs.
+# ---------------------------------------------------------------------------
+_mt_infra_load_shared_secrets() {
+  local _infra_secrets="${INFRA_TENANT_DIR}/${MT_ENV}.secrets.yaml"
+  if [ -n "${MT_INFRA_SECRETS_FILE:-}" ] && [ -f "$MT_INFRA_SECRETS_FILE" ]; then
+    _infra_secrets="$MT_INFRA_SECRETS_FILE"
+  fi
+
+  if [ ! -f "$_infra_secrets" ]; then
+    echo "[WARN] Infra tenant secrets not found: $_infra_secrets" >&2
+    echo "[WARN] Grafana admin password and Keycloak passwords will use defaults" >&2
+    return 0
+  fi
+
+  # Batch-extract shared infra secrets
+  local _kc_admin _kc_db _grafana_pw
+  _kc_admin=$(yq '.keycloak.admin_password // ""' "$_infra_secrets")
+  _kc_db=$(yq '.keycloak.db_password // ""' "$_infra_secrets")
+  _grafana_pw=$(yq '.grafana.admin_password // ""' "$_infra_secrets")
+
+  if [ -n "$_kc_admin" ] && [ "$_kc_admin" != "null" ]; then
+    export KEYCLOAK_ADMIN_PASSWORD="$_kc_admin"
+    echo "[INFO] Keycloak admin password loaded from infra tenant secrets"
+  else
+    echo "[WARN] keycloak.admin_password not set in $INFRA_TENANT_NAME secrets" >&2
+  fi
+
+  if [ -n "$_kc_db" ] && [ "$_kc_db" != "null" ]; then
+    export KEYCLOAK_DB_PASSWORD="$_kc_db"
+    echo "[INFO] Keycloak DB password loaded from infra tenant secrets"
+  else
+    echo "[WARN] keycloak.db_password not set in $INFRA_TENANT_NAME secrets" >&2
+  fi
+
+  if [ -n "$_grafana_pw" ] && [ "$_grafana_pw" != "null" ]; then
+    export TF_VAR_grafana_admin_password="$_grafana_pw"
+    echo "[INFO] Grafana admin password loaded from infra tenant secrets"
+  else
+    echo "[WARN] grafana.admin_password not set in $INFRA_TENANT_NAME secrets" >&2
+    echo "[WARN] Grafana will use default password ('changeme')" >&2
+  fi
+
+  local _microsocks_pw
+  _microsocks_pw=$(yq '.microsocks.password // ""' "$_infra_secrets")
+  if [ -n "$_microsocks_pw" ] && [ "$_microsocks_pw" != "null" ]; then
+    export MICROSOCKS_PASSWORD="$_microsocks_pw"
+    echo "[INFO] Microsocks SOCKS5 password loaded from infra tenant secrets"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Internal: derive infrastructure hostnames
+# ---------------------------------------------------------------------------
+_mt_infra_derive_hostnames() {
+  local infra_subdomain=""
+  if [ "$MT_ENV" = "prod" ]; then
+    export INFRA_ENV_DNS_LABEL=""
+  else
+    export INFRA_ENV_DNS_LABEL="$MT_ENV"
+    infra_subdomain="${MT_ENV}."
+  fi
+
+  export AUTH_HOST="auth.${infra_subdomain}${INFRA_DOMAIN}"
+  export PROMETHEUS_HOST="prometheus.internal.${infra_subdomain}${INFRA_DOMAIN}"
+  export GRAFANA_HOST="grafana.internal.${infra_subdomain}${INFRA_DOMAIN}"
+  export ALERTMANAGER_HOST="alertmanager.internal.${infra_subdomain}${INFRA_DOMAIN}"
+  export SMTP_DOMAIN="${infra_subdomain}${INFRA_DOMAIN}"
+
+  # Derive MATRIX_HOST from infra tenant config (needed by deploy-alerting.sh)
+  local _infra_config="${INFRA_TENANT_DIR}/${MT_ENV}.config.yaml"
+  local _infra_env_dns_label
+  _infra_env_dns_label=$(yq '.dns.env_dns_label // ""' "$_infra_config")
+  if [ -n "$_infra_env_dns_label" ] && [ "$_infra_env_dns_label" != "null" ]; then
+    export MATRIX_HOST="matrix.${_infra_env_dns_label}.${INFRA_DOMAIN}"
+  else
+    export MATRIX_HOST="matrix.${INFRA_DOMAIN}"
+  fi
+
+  echo "[INFO] Infrastructure domain: $INFRA_DOMAIN"
+  echo "[INFO] Infrastructure DNS label: ${INFRA_ENV_DNS_LABEL:-<none>}"
+  echo "[INFO] Auth host: $AUTH_HOST"
+  echo "[INFO] Grafana host: $GRAFANA_HOST"
+  echo "[INFO] Matrix host: $MATRIX_HOST"
+}
+
+# ---------------------------------------------------------------------------
+# Internal: set placeholder namespaces for helmfile parsing
+# (helmfile parses all releases, even those not in the deploy selector)
+# ---------------------------------------------------------------------------
+_mt_infra_set_placeholder_namespaces() {
+  export NS_MATRIX="placeholder-matrix"
+  export NS_DOCS="placeholder-docs"
+  export NS_FILES="placeholder-files"
+  export NS_JITSI="placeholder-jitsi"
+  export NS_OFFICE="placeholder-office"
+}
+
+# ---------------------------------------------------------------------------
+# Internal: load Terraform outputs from phase1
+# ---------------------------------------------------------------------------
+_mt_infra_load_terraform_outputs() {
+  echo "[INFO] Loading phase1 Terraform outputs..."
+  pushd "$REPO_ROOT/phase1" >/dev/null
+    terraform workspace select "$MT_ENV" >/dev/null 2>&1 || {
+      echo "[ERROR] phase1 workspace '$MT_ENV' not found. Run './scripts/manage_infra $MT_ENV' first." >&2
+      popd >/dev/null
+      exit 1
+    }
+    VPN_SERVER_IP=$(terraform output -raw openvpn_server_ip 2>/dev/null || echo "")
+    export VPN_SERVER_PRIVATE_IP=$(terraform output -raw openvpn_server_private_ip 2>/dev/null || echo "")
+    VPN_SERVER_TUNNEL_IP=$(terraform output -raw vpn_server_tunnel_ip 2>/dev/null || echo "")
+    VPN_NETWORK_CIDR=$(terraform output -raw vpn_network_cidr 2>/dev/null || echo "")
+    TURN_SERVER_IP=$(terraform output -raw turn_server_ip 2>/dev/null || echo "")
+    LKE_CLUSTER_ID=$(terraform output -raw cluster_id 2>/dev/null || echo "")
+  popd >/dev/null
+
+  export VPN_SERVER_IP VPN_SERVER_TUNNEL_IP VPN_NETWORK_CIDR TURN_SERVER_IP LKE_CLUSTER_ID
+
+  echo "[INFO] VPN server private IP: ${VPN_SERVER_PRIVATE_IP:-<not found>}"
+  echo "[INFO] VPN network CIDR: ${VPN_NETWORK_CIDR:-<not found>}"
+}

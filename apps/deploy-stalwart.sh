@@ -4,215 +4,90 @@
 # This script applies environment-specific Stalwart manifests using envsubst
 #
 # Namespace structure:
-#   - Stalwart in NS_MAIL (tenant-prefixed namespace, e.g., 'tn-example-mail')
+#   - Stalwart in NS_STALWART (tenant-prefixed namespace, e.g., 'tn-example-mail')
 #
 # Prerequisites:
 #   - PostgreSQL database created in infra-db namespace
 #   - S3 bucket created for mail storage
 #   - Keycloak OIDC client configured
+#
+# Usage:
+#   ./apps/deploy-stalwart.sh -e dev -t example
 
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
 
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+mt_usage() {
+    echo "Usage: $0 -e <env> -t <tenant>"
+    echo ""
+    echo "Deploy Stalwart Mail Server for a tenant."
+    echo ""
+    echo "Options:"
+    echo "  -e <env>       Environment (e.g., dev, prod)"
+    echo "  -t <tenant>    Tenant name (e.g., example)"
+    echo "  -h, --help     Show this help"
 }
 
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
+mt_parse_args "$@"
+mt_require_env
+mt_require_tenant
 
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-# Require MT_ENV and TENANT
-MT_ENV=${MT_ENV:-prod}
-REPO_ROOT="${REPO_ROOT:-/workspace}"
-
-# Parse nesting level for deploy notifications
-NESTING_LEVEL=0
-for arg in "$@"; do
-  case "$arg" in
-    --nesting-level=*) NESTING_LEVEL="${arg#*=}" ;;
-  esac
-done
-_MT_NOTIFY_NESTING_LEVEL=$NESTING_LEVEL
+source "${REPO_ROOT}/scripts/lib/config.sh"
+mt_load_tenant_config
 
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy-stalwart"
 
-if [ -z "${MT_ENV:-}" ]; then
-    print_error "MT_ENV is not set. Usage: MT_ENV=dev TENANT=example ./apps/deploy-stalwart.sh"
-    exit 1
-fi
+mt_require_commands kubectl envsubst
 
-if [ -z "${TENANT:-}" ]; then
-    print_error "TENANT is not set. Usage: MT_ENV=dev TENANT=example ./apps/deploy-stalwart.sh"
-    exit 1
-fi
-
-export KUBECONFIG="${KUBECONFIG:-$REPO_ROOT/kubeconfig.$MT_ENV.yaml}"
-
-# Namespace configuration - always derive from TENANT to avoid conflicts
-# NOTE: Must be exported for envsubst to substitute in templates
-export NS_MAIL="tn-${TENANT}-mail"
-export NS_INGRESS="${NS_INGRESS:-infra-ingress}"
-
-# Tenant configuration
-TENANT_DIR="$REPO_ROOT/tenants/$TENANT"
-TENANT_CONFIG="$TENANT_DIR/$MT_ENV.config.yaml"
-TENANT_SECRETS="$TENANT_DIR/$MT_ENV.secrets.yaml"
-
-if [ ! -f "$TENANT_CONFIG" ]; then
-    print_error "Tenant config not found: $TENANT_CONFIG"
-    exit 1
-fi
-
-if [ ! -f "$TENANT_SECRETS" ]; then
-    print_error "Tenant secrets not found: $TENANT_SECRETS"
-    exit 1
-fi
+# Override NS_MAIL for envsubst templates that use ${NS_MAIL} to mean
+# the tenant mail namespace (stalwart templates expect this)
+export NS_MAIL="$NS_STALWART"
 
 print_status "Deploying Stalwart Mail Server for environment: $MT_ENV"
 print_status "Tenant: $TENANT"
 print_status "Mail namespace: $NS_MAIL"
 
 # Check if mail_enabled feature flag is set
-MAIL_ENABLED=$(yq '.features.mail_enabled // false' "$TENANT_CONFIG")
 if [ "$MAIL_ENABLED" != "true" ]; then
     print_warning "Mail not enabled for tenant $TENANT (features.mail_enabled is not true)"
     print_warning "Skipping Stalwart deployment"
     exit 0
 fi
 
-# Load configuration from tenant config
-export TENANT_NAME="$TENANT"
-export TENANT_DOMAIN=$(yq '.dns.domain' "$TENANT_CONFIG")
-export MAIL_SUBDOMAIN=$(yq '.dns.mail_subdomain' "$TENANT_CONFIG")
-export ENV_DNS_LABEL=$(yq '.dns.env_dns_label // ""' "$TENANT_CONFIG")
-export KEYCLOAK_REALM=$(yq '.keycloak.realm' "$TENANT_CONFIG")
-export S3_MAIL_BUCKET=$(yq '.s3.mail_bucket' "$TENANT_CONFIG")
-export S3_CLUSTER=$(yq '.s3.cluster' "$TENANT_CONFIG")
-export STALWART_DB_NAME=$(yq '.database.stalwart_db' "$TENANT_CONFIG")
-export STALWART_DB_USER="stalwart_${TENANT}"
-
 # Validate database config
 if [ -z "$STALWART_DB_NAME" ] || [ "$STALWART_DB_NAME" = "null" ]; then
-    print_error "STALWART_DB_NAME not set. Add 'database.stalwart_db' to $TENANT_CONFIG"
+    print_error "STALWART_DB_NAME not set. Add 'database.stalwart_db' to tenant config"
     exit 1
 fi
 print_status "Database: $STALWART_DB_NAME (user: $STALWART_DB_USER)"
 
-# Derive PG_HOST if not passed in from the environment
-NS_DB="${NS_DB:-infra-db}"
+# Validate PG_HOST
 if [ -z "${PG_HOST:-}" ]; then
-    if kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
-        export PG_HOST="docs-postgresql-primary.${NS_DB}.svc.cluster.local"
-        print_status "PostgreSQL: detected replication mode (docs-postgresql-primary)"
-    elif kubectl get service docs-postgresql -n "$NS_DB" >/dev/null 2>&1; then
-        export PG_HOST="docs-postgresql.${NS_DB}.svc.cluster.local"
-        print_status "PostgreSQL: detected standalone mode (docs-postgresql)"
-    else
-        print_error "PostgreSQL not found in $NS_DB namespace and PG_HOST not set."
-        print_error "Either set PG_HOST or run 'deploy_infra $MT_ENV' first."
-        exit 1
-    fi
-else
-    print_status "Using PG_HOST from environment: $PG_HOST"
+    print_error "PostgreSQL not found. Run 'deploy_infra $MT_ENV' first."
+    exit 1
 fi
 
 # Resource configuration
-export STALWART_MEMORY_REQUEST=$(yq '.resources.stalwart.memory_request // "256Mi"' "$TENANT_CONFIG")
-export STALWART_MEMORY_LIMIT=$(yq '.resources.stalwart.memory_limit // "1Gi"' "$TENANT_CONFIG")
-export STALWART_CPU_REQUEST=$(yq '.resources.stalwart.cpu_request // "100m"' "$TENANT_CONFIG")
-export STALWART_CPU_LIMIT=$(yq '.resources.stalwart.cpu_limit // "500m"' "$TENANT_CONFIG")
-export STALWART_STORAGE_SIZE=$(yq '.resources.stalwart.storage_size // "1Gi"' "$TENANT_CONFIG")
-export STALWART_MIN_REPLICAS=$(yq '.resources.stalwart.min_replicas // 1' "$TENANT_CONFIG")
-export STALWART_MAX_REPLICAS=$(yq '.resources.stalwart.max_replicas // 5' "$TENANT_CONFIG")
-
-# Multi-tenant mail ports (unique per tenant, like jvb_port pattern)
-export STALWART_SMTPS_PORT=$(yq '.resources.stalwart.smtps_port' "$TENANT_CONFIG")
-export STALWART_SUBMISSION_PORT=$(yq '.resources.stalwart.submission_port' "$TENANT_CONFIG")
-export STALWART_IMAPS_PORT=$(yq '.resources.stalwart.imaps_port' "$TENANT_CONFIG")
-
-# App password ports (PLAIN/LOGIN via internal directory - for iOS Mail, Thunderbird)
-export STALWART_IMAPS_APP_PORT=$(yq '.resources.stalwart.imaps_app_port' "$TENANT_CONFIG")
-export STALWART_SUBMISSION_APP_PORT=$(yq '.resources.stalwart.submission_app_port' "$TENANT_CONFIG")
-
-# Validate mail ports are configured
-if [ -z "$STALWART_SMTPS_PORT" ] || [ "$STALWART_SMTPS_PORT" = "null" ]; then
-    print_error "STALWART_SMTPS_PORT not configured. Add 'resources.stalwart.smtps_port' to $TENANT_CONFIG"
-    exit 1
-fi
-if [ -z "$STALWART_SUBMISSION_PORT" ] || [ "$STALWART_SUBMISSION_PORT" = "null" ]; then
-    print_error "STALWART_SUBMISSION_PORT not configured. Add 'resources.stalwart.submission_port' to $TENANT_CONFIG"
-    exit 1
-fi
-if [ -z "$STALWART_IMAPS_PORT" ] || [ "$STALWART_IMAPS_PORT" = "null" ]; then
-    print_error "STALWART_IMAPS_PORT not configured. Add 'resources.stalwart.imaps_port' to $TENANT_CONFIG"
-    exit 1
-fi
-if [ -z "$STALWART_IMAPS_APP_PORT" ] || [ "$STALWART_IMAPS_APP_PORT" = "null" ]; then
-    print_error "STALWART_IMAPS_APP_PORT not configured. Add 'resources.stalwart.imaps_app_port' to $TENANT_CONFIG"
-    exit 1
-fi
-if [ -z "$STALWART_SUBMISSION_APP_PORT" ] || [ "$STALWART_SUBMISSION_APP_PORT" = "null" ]; then
-    print_error "STALWART_SUBMISSION_APP_PORT not configured. Add 'resources.stalwart.submission_app_port' to $TENANT_CONFIG"
-    exit 1
-fi
 print_status "Mail ports: SMTPS=${STALWART_SMTPS_PORT}, Submission=${STALWART_SUBMISSION_PORT}, IMAPS=${STALWART_IMAPS_PORT}"
 print_status "App password ports: IMAPS=${STALWART_IMAPS_APP_PORT}, Submission=${STALWART_SUBMISSION_APP_PORT}"
 
-# Build full hostnames
-if [ -n "$ENV_DNS_LABEL" ] && [ "$ENV_DNS_LABEL" != "null" ]; then
-    export MAIL_HOST="${MAIL_SUBDOMAIN}.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
-    export IMAP_HOST="imap.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
-    export SMTP_HOST="smtp.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
-    export AUTH_HOST="auth.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
-    # Admin UI follows the internal subdomain pattern (tenant-specific)
-    export WEBADMIN_HOST="webadmin.internal.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
-else
-    export MAIL_HOST="${MAIL_SUBDOMAIN}.${TENANT_DOMAIN}"
-    export IMAP_HOST="imap.${TENANT_DOMAIN}"
-    export SMTP_HOST="smtp.${TENANT_DOMAIN}"
-    export AUTH_HOST="auth.${TENANT_DOMAIN}"
-    # Admin UI for prod (tenant-specific)
-    export WEBADMIN_HOST="webadmin.prod.${TENANT_DOMAIN}"
-fi
-
-# Email domain for inbound mail routing (e.g., dev.example.com for dev, example.com for prod)
-# Read from config's smtp.domain, fallback to computed value based on env_dns_label
-SMTP_DOMAIN_CONFIG=$(yq '.smtp.domain // ""' "$TENANT_CONFIG")
-if [ -n "$SMTP_DOMAIN_CONFIG" ] && [ "$SMTP_DOMAIN_CONFIG" != "null" ]; then
-    export EMAIL_DOMAIN="$SMTP_DOMAIN_CONFIG"
-elif [ -n "$ENV_DNS_LABEL" ] && [ "$ENV_DNS_LABEL" != "null" ]; then
-    export EMAIL_DOMAIN="${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
-else
-    export EMAIL_DOMAIN="${TENANT_DOMAIN}"
-fi
+# Validate mail ports are configured
+for port_var in STALWART_SMTPS_PORT STALWART_SUBMISSION_PORT STALWART_IMAPS_PORT STALWART_IMAPS_APP_PORT STALWART_SUBMISSION_APP_PORT; do
+    val="${!port_var:-}"
+    if [ -z "$val" ] || [ "$val" = "null" ]; then
+        print_error "$port_var not configured. Add the corresponding resources.stalwart.* config"
+        exit 1
+    fi
+done
 
 print_status "Mail host: $MAIL_HOST"
 print_status "Auth host: $AUTH_HOST"
 print_status "Admin host: $WEBADMIN_HOST"
 print_status "Email domain: $EMAIL_DOMAIN (for inbound mail routing)"
-
-# Load secrets from tenant secrets file
-export STALWART_ADMIN_PASSWORD=$(yq '.stalwart.admin_password' "$TENANT_SECRETS")
-export STALWART_DB_PASSWORD=$(yq '.database.stalwart_password' "$TENANT_SECRETS")
-export STALWART_OIDC_SECRET=$(yq '.oidc.stalwart_client_secret' "$TENANT_SECRETS")
-export S3_MAIL_ACCESS_KEY=$(yq '.s3_mail.access_key' "$TENANT_SECRETS")
-export S3_MAIL_SECRET_KEY=$(yq '.s3_mail.secret_key' "$TENANT_SECRETS")
 
 # Validate required secrets
 required_secrets=("STALWART_ADMIN_PASSWORD" "STALWART_DB_PASSWORD" "STALWART_OIDC_SECRET" "S3_MAIL_ACCESS_KEY" "S3_MAIL_SECRET_KEY")
@@ -226,13 +101,13 @@ done
 
 if [ ${#missing_secrets[@]} -gt 0 ]; then
     print_error "Required secrets not set or are placeholders: ${missing_secrets[*]}"
-    print_error "Update $TENANT_SECRETS with actual values"
+    print_error "Update tenant secrets file with actual values"
     exit 1
 fi
 
 # Validate S3 bucket
 if [ -z "$S3_MAIL_BUCKET" ] || [ "$S3_MAIL_BUCKET" = "null" ]; then
-    print_error "S3 mail bucket not configured in $TENANT_CONFIG"
+    print_error "S3 mail bucket not configured in tenant config"
     print_error "Add 's3.mail_bucket' to the tenant config"
     exit 1
 fi
@@ -347,42 +222,25 @@ print_status "Deploying HPA for Stalwart..."
 envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-hpa.yaml.tpl" | kubectl apply -f -
 print_success "Stalwart HPA deployed (CPU 80% threshold)"
 
-# Apply Certificate for TLS
-envsubst < "$REPO_ROOT/apps/manifests/stalwart/certificate.yaml.tpl" | kubectl apply -f -
-print_success "TLS Certificate requested"
-
 # Apply public ingress for webmail
-# Note: nginx ingress controller may reject apply if host/path already exists, so we handle that gracefully
-if kubectl get ingress stalwart-webmail -n "$NS_MAIL" >/dev/null 2>&1; then
-    print_status "Public ingress already exists for $MAIL_HOST (skipping)"
-else
-    envsubst < "$REPO_ROOT/apps/manifests/stalwart/ingress.yaml.tpl" | kubectl apply -f -
-    print_success "Public ingress applied for $MAIL_HOST"
-fi
+envsubst < "$REPO_ROOT/apps/manifests/stalwart/ingress.yaml.tpl" | kubectl apply -f -
+print_success "Public ingress applied for $MAIL_HOST"
 
 # Apply internal ingress for admin UI
-if kubectl get ingress stalwart-webadmin -n "$NS_MAIL" >/dev/null 2>&1; then
-    print_status "Internal ingress already exists for $WEBADMIN_HOST (skipping)"
-else
-    envsubst < "$REPO_ROOT/apps/manifests/stalwart/ingress-internal.yaml.tpl" | kubectl apply -f -
-    print_success "Internal ingress applied for $WEBADMIN_HOST"
-fi
+envsubst < "$REPO_ROOT/apps/manifests/stalwart/ingress-internal.yaml.tpl" | kubectl apply -f -
+print_success "Internal ingress applied for $WEBADMIN_HOST"
 
 # =============================================================================
 # Register tenant with Postfix for inbound mail routing
 # =============================================================================
 # Multi-tenant mail routing: Postfix receives inbound mail on port 25 and routes
 # to the correct tenant's Stalwart based on recipient domain using transport_maps.
-#
-# Uses shared configure-mail-routing script that scans ALL tenants to ensure
-# consistent configuration whether running create_env or deploy_infra.
-
+# Uses the shared configure-mail-routing script that scans ALL tenants to ensure
+# consistent configuration whether running create_env or deploy-stalwart standalone.
 print_status "Configuring Postfix inbound mail routing for all tenants..."
 
-# Call shared mail routing configuration script
-# This scans all tenants and rebuilds the complete routing config
 if [ -x "$REPO_ROOT/scripts/configure-mail-routing" ]; then
-    "$REPO_ROOT/scripts/configure-mail-routing" "$MT_ENV" --nesting-level=$((NESTING_LEVEL+1)) 2>&1 | while read line; do
+    "$REPO_ROOT/scripts/configure-mail-routing" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | while read line; do
         echo "  $line"
     done
     print_success "Postfix mail routing configured"
@@ -395,9 +253,8 @@ fi
 # =============================================================================
 # nginx-ingress proxies TCP connections from unique external ports to Stalwart's
 # ClusterIP service on standard internal ports. Two things are needed:
-# 1. tcp-services ConfigMap entries (tells nginx where to proxy)
-# 2. LB service ports (tells the cloud LB to forward to nginx's NodePort)
-
+#   1. tcp-services ConfigMap entries (tells nginx where to proxy)
+#   2. LB service ports (tells the cloud LB to forward to nginx's NodePort)
 print_status "Configuring nginx TCP proxy for tenant mail ports..."
 
 # Create tcp-services ConfigMap if it doesn't exist
@@ -407,16 +264,14 @@ if ! kubectl get configmap tcp-services -n "$NS_INGRESS" >/dev/null 2>&1; then
 fi
 
 # Patch tcp-services ConfigMap with this tenant's port mappings
-# Each entry maps an external port to namespace/service:internal-port
-# Using strategic merge patch so other tenants' entries are preserved
 print_status "Updating tcp-services ConfigMap for tenant $TENANT..."
 kubectl patch configmap tcp-services -n "$NS_INGRESS" --type merge -p "$(cat <<EOF
 {"data": {
-  "${STALWART_SMTPS_PORT}": "${NS_MAIL}/stalwart:465",
-  "${STALWART_SUBMISSION_PORT}": "${NS_MAIL}/stalwart:587",
-  "${STALWART_IMAPS_PORT}": "${NS_MAIL}/stalwart:993",
-  "${STALWART_IMAPS_APP_PORT}": "${NS_MAIL}/stalwart:994",
-  "${STALWART_SUBMISSION_APP_PORT}": "${NS_MAIL}/stalwart:588"
+  "${STALWART_SMTPS_PORT}": "${NS_MAIL}/stalwart:465:PROXY:",
+  "${STALWART_SUBMISSION_PORT}": "${NS_MAIL}/stalwart:587:PROXY:",
+  "${STALWART_IMAPS_PORT}": "${NS_MAIL}/stalwart:993:PROXY:",
+  "${STALWART_IMAPS_APP_PORT}": "${NS_MAIL}/stalwart:994:PROXY:",
+  "${STALWART_SUBMISSION_APP_PORT}": "${NS_MAIL}/stalwart:588:PROXY:"
 }}
 EOF
 )"
@@ -452,12 +307,12 @@ fi
 # Register local domain in Stalwart
 # =============================================================================
 # Domain principals tell Stalwart which domains are local. Without this,
-# Stalwart treats all domains as external and recipient validation fails.
-# This is essential for is_local_domain() to work correctly.
+# Stalwart treats all domains as external and recipient validation fails —
+# all inbound mail is rejected. Essential for is_local_domain() to work.
 print_status "Registering local domain $EMAIL_DOMAIN in Stalwart..."
 
-# Use port-forward to call the API (Stalwart container doesn't have curl)
-# API is on port 8080 (health listener, no TLS required)
+# Use port-forward to call the API (Stalwart container doesn't have curl).
+# API is on port 8080 (health listener, no TLS required).
 LOCAL_PORT=$((RANDOM + 10000))
 kubectl port-forward -n "$NS_MAIL" deployment/stalwart ${LOCAL_PORT}:8080 &>/dev/null &
 PF_PID=$!
@@ -498,21 +353,6 @@ else
     exit 1
 fi
 
-# Wait for TLS certificate
-print_status "Checking TLS certificate status..."
-CERT_TIMEOUT=120
-for i in $(seq 1 $((CERT_TIMEOUT / 5))); do
-    CERT_STATUS=$(kubectl get certificate stalwart-tls -n "$NS_MAIL" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
-    if [ "$CERT_STATUS" = "True" ]; then
-        print_success "TLS certificate is ready"
-        break
-    fi
-    if [ $i -eq $((CERT_TIMEOUT / 5)) ]; then
-        print_warning "TLS certificate may not be ready yet (timeout after ${CERT_TIMEOUT}s)"
-        print_status "Check status with: kubectl get certificate -n $NS_MAIL"
-    fi
-    sleep 5
-done
 
 print_success "Stalwart Mail Server deployed successfully for $MT_ENV environment"
 echo ""

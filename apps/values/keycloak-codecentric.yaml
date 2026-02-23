@@ -44,14 +44,13 @@ proxy:
   http:
     enabled: true  # Enables HTTP
 
-# Resources - optimized for 2-replica HA setup
-# Lower request for scheduling flexibility, higher limit for headroom
+# Resources — CPU limit allows generous startup burst while preventing unbounded consumption
 resources:
   requests:
-    cpu: 10m
+    cpu: 100m
     memory: 512Mi
   limits:
-    cpu: 500m
+    cpu: 2000m
     memory: 2048Mi
 
 # Ingress - DISABLED: We manage ingresses per-tenant to support multi-tenant auth domains

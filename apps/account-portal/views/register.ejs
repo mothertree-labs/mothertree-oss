@@ -3,26 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title><%= title %> - MotherTree</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            sage: { DEFAULT: '#7C9A6C', dark: '#5A7A4C' },
-            cream: '#FAF8F5',
-            'warm-gray': '#6B6B6B',
-          }
-        }
-      }
-    }
-  </script>
+  <title><%= title %></title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/css/tailwind.css">
 </head>
-<body class="bg-cream min-h-screen flex items-center justify-center p-8">
-  <div class="bg-white rounded-xl shadow-lg p-8 max-w-md w-full">
+<body class="bg-white min-h-screen flex items-center justify-center p-8">
+  <div class="bg-cream rounded-xl shadow-lg p-8 max-w-md w-full">
     <div class="text-center mb-6">
-      <h1 class="text-3xl text-sage mb-2">MotherTree</h1>
+      <h1 class="text-3xl text-sage mb-2">Account</h1>
       <p class="text-warm-gray">Guest Registration</p>
     </div>
 
@@ -113,6 +101,19 @@
         </div>
         <% } %>
 
+        <% if (privacyPolicyUrl || termsOfUseUrl || acceptableUsePolicyUrl) { %>
+        <div class="flex items-start gap-2">
+          <input type="checkbox" id="policyConsent" required
+            class="mt-1 w-4 h-4 accent-sage cursor-pointer">
+          <label for="policyConsent" class="text-xs text-warm-gray cursor-pointer">
+            I agree to the
+            <% if (privacyPolicyUrl) { %><a href="<%= privacyPolicyUrl %>" target="_blank" rel="noopener" class="text-sage hover:underline">Privacy Policy</a><% } %><% if (privacyPolicyUrl && (termsOfUseUrl || acceptableUsePolicyUrl)) { %>, <% } %>
+            <% if (termsOfUseUrl) { %><a href="<%= termsOfUseUrl %>" target="_blank" rel="noopener" class="text-sage hover:underline">Terms of Use</a><% } %><% if (termsOfUseUrl && acceptableUsePolicyUrl) { %>, and <% } %>
+            <% if (acceptableUsePolicyUrl) { %><a href="<%= acceptableUsePolicyUrl %>" target="_blank" rel="noopener" class="text-sage hover:underline">Acceptable Use Policy</a><% } %>
+          </label>
+        </div>
+        <% } %>
+
         <button
           type="submit"
           id="submitBtn"
@@ -128,6 +129,8 @@
           Sign in instead
         </a>
       </div>
+
+      <%- include('partials/policy-footer') %>
     </div>
   </div>
 
@@ -174,6 +177,16 @@
       // Client-side domain validation
       if (emailDomain && email.endsWith('@' + emailDomain.toLowerCase())) {
         errorMessage.textContent = 'This email belongs to the organization. Please ask your admin for an invitation instead.';
+        errorAlert.classList.remove('hidden');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Register';
+        return;
+      }
+
+      // Policy consent validation
+      var consentBox = document.getElementById('policyConsent');
+      if (consentBox && !consentBox.checked) {
+        errorMessage.textContent = 'You must agree to the policies before registering.';
         errorAlert.classList.remove('hidden');
         submitBtn.disabled = false;
         submitBtn.textContent = 'Register';

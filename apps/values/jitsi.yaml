@@ -10,8 +10,7 @@ web:
   ingress:
     enabled: true
     className: nginx
-    annotations:
-      cert-manager.io/cluster-issuer: letsencrypt-prod
+    annotations: {}
     # hosts and tls are set in environment-specific files
 
 # Disable JVB initially to avoid service issues

@@ -11,7 +11,6 @@ metadata:
     app.kubernetes.io/name: docs-yprovider
     app.kubernetes.io/part-of: mother-tree
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     # WebSocket support
@@ -26,7 +25,7 @@ spec:
   tls:
   - hosts:
     - ${DOCS_HOST}
-    secretName: docs-tls
+    secretName: wildcard-tls-${TENANT_NAME}
   rules:
   - host: ${DOCS_HOST}
     http:

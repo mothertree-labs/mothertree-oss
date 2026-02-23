@@ -183,7 +183,7 @@ variable "ssh_public_key" {
 }
 
 variable "admin_ssh_cidrs" {
-  description = "List of CIDR blocks allowed SSH access to servers. Set to specific admin IPs (e.g., [\"203.0.113.10/32\"]). Defaults to empty list which blocks all public SSH; VPN network (10.8.0.0/24) is always allowed on the TURN server."
+  description = "List of CIDR blocks allowed SSH access to servers. Set to specific admin IPs (e.g., [\"203.0.113.10/32\"]). Defaults to empty list which blocks all public SSH; VPN network is always allowed on the TURN server."
   type        = list(string)
   default     = []
 }
@@ -209,9 +209,8 @@ variable "openvpn_image" {
 }
 
 variable "vpn_network_cidr" {
-  description = "CIDR block for VPN network"
+  description = "CIDR block for VPN network (prod: 10.8.0.0/24, dev: 10.9.0.0/24)"
   type        = string
-  default     = "10.8.0.0/24"
 }
 
 variable "openvpn_disk_size" {

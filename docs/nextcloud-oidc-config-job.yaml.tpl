@@ -44,6 +44,28 @@ spec:
               value: "${CALENDAR_ENABLED}"
             - name: SMTP_DOMAIN
               value: "${SMTP_DOMAIN}"
+            - name: JITSI_HOST
+              value: "${JITSI_HOST}"
+            - name: OFFICE_ENABLED
+              value: "${OFFICE_ENABLED}"
+            - name: OFFICE_HOST
+              value: "${OFFICE_HOST}"
+            - name: NS_OFFICE
+              value: "${NS_OFFICE}"
+            - name: GOOGLE_IMPORT_ENABLED
+              value: "${GOOGLE_IMPORT_ENABLED}"
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-google
+                  key: google-client-id
+                  optional: true
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-google
+                  key: google-client-secret
+                  optional: true
           command:
             - /bin/bash
             - -c
@@ -134,11 +156,19 @@ spec:
               else
                 echo "Calendar app: skipping (features.calendar_enabled is not true)"
               fi
+
+              # Enable and configure Jitsi Calendar integration (if calendar + jitsi are enabled)
+              if [ "$CALENDAR_ENABLED" = "true" ] && [ -n "$JITSI_HOST" ]; then
+                echo "Enabling Jitsi Calendar integration..."
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable jitsi_calendar" 2>/dev/null || true
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set jitsi_calendar jitsi_host --value='https://$JITSI_HOST'"
+                echo "Jitsi Calendar integration enabled (host: https://$JITSI_HOST)"
+              fi
               
               # Configure email/SMTP for calendar invitations and notifications
               echo "Configuring email settings for calendar invitations..."
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set mail_smtpmode --value='smtp'"
-              kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set mail_smtphost --value='postfix.infra-mail.svc.cluster.local'"
+              kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set mail_smtphost --value='postfix-internal.infra-mail.svc.cluster.local'"
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set mail_smtpport --value='587'"
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set mail_smtpsecure --value=''"
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set mail_smtpauth --value='0'"
@@ -148,11 +178,44 @@ spec:
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set mail_smtpstreamoptions ssl verify_peer --type=boolean --value=false"
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set mail_smtpstreamoptions ssl verify_peer_name --type=boolean --value=false"
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set mail_smtpstreamoptions ssl allow_self_signed --type=boolean --value=true"
-              echo "Email configured: calendar@$SMTP_DOMAIN via postfix.infra-mail.svc.cluster.local:587"
+              echo "Email configured: calendar@$SMTP_DOMAIN via postfix-internal.infra-mail.svc.cluster.local:587"
               
-              # Disable document editing apps (we only want file management)
-              echo "Disabling document editing apps..."
-              kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:disable richdocuments" 2>/dev/null || true
+              # Collabora Online (richdocuments) — enable or disable based on office feature flag
+              if [ "$OFFICE_ENABLED" = "true" ]; then
+                echo "Enabling Collabora Online (richdocuments)..."
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:install richdocuments" 2>/dev/null || true
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable richdocuments"
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set richdocuments wopi_url --value='https://${OFFICE_HOST}'"
+                # Allow both pod IPs (10.x) and node IPs (172.232-239.x) for WOPI callbacks.
+                # When Collabora calls back to Nextcloud via the external URL, the request hairpins
+                # through the LB/ingress and gets SNAT'd to a node IP, not a pod IP.
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set richdocuments wopi_allowlist --value='10.0.0.0/8,172.232.0.0/13'"
+                # Wait for Collabora discovery endpoint to be reachable before activating.
+                # Try internal ClusterIP first (avoids NB hairpin on dev where PROXY protocol
+                # isn't injected for in-cluster traffic). Fall back to external URL for prod
+                # where NetworkPolicies may block cross-namespace port 9980.
+                COLLABORA_INTERNAL="http://collabora-online.${NS_OFFICE}.svc.cluster.local:9980/hosting/discovery"
+                COLLABORA_EXTERNAL="https://${OFFICE_HOST}/hosting/discovery"
+                echo "Waiting for Collabora discovery endpoint..."
+                for i in $(seq 1 30); do
+                  if kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c \
+                    "curl -sf -m 5 ${COLLABORA_INTERNAL} -o /dev/null" 2>/dev/null; then
+                    echo "Collabora discovery endpoint reachable (internal)"
+                    break
+                  elif kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c \
+                    "curl -sf -m 5 ${COLLABORA_EXTERNAL} -o /dev/null" 2>/dev/null; then
+                    echo "Collabora discovery endpoint reachable (external)"
+                    break
+                  fi
+                  echo "  Waiting for Collabora... (attempt $i/30)"
+                  sleep 10
+                done
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ richdocuments:activate-config"
+                echo "Collabora Online enabled (wopi_url: https://${OFFICE_HOST})"
+              else
+                echo "Disabling document editing apps..."
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:disable richdocuments" 2>/dev/null || true
+              fi
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:disable onlyoffice" 2>/dev/null || true
               
               # Enable external links app for linking to La Suite Docs
@@ -171,6 +234,18 @@ spec:
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set external max_site --value='1'"
               echo "External Sites link configured"
               
+              # Google Integration (Drive/Calendar/Contacts import)
+              if [ "${GOOGLE_IMPORT_ENABLED:-false}" = "true" ]; then
+                echo "Installing Google Integration app..."
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:install integration_google" 2>/dev/null || true
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable integration_google"
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set integration_google client_id --value='$GOOGLE_CLIENT_ID'"
+                kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set integration_google client_secret --value='$GOOGLE_CLIENT_SECRET'"
+                echo "Google Integration app enabled"
+              else
+                echo "Google Integration: skipping (features.google_import_enabled is not true)"
+              fi
+
               # Enable custom Link editor app (deployed by deploy-nextcloud.sh to custom_apps/)
               echo "Enabling custom Link editor app..."
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable files_linkeditor" 2>/dev/null || true

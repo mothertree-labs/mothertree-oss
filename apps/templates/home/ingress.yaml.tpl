@@ -2,12 +2,11 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: home-page
-  namespace: ${NS_HOME:-home}
+  namespace: ${NS_HOME}
   labels:
     app.kubernetes.io/name: home
     app.kubernetes.io/part-of: ${TENANT_NAME}
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
@@ -16,7 +15,7 @@ spec:
   tls:
   - hosts:
     - ${HOME_HOST}
-    secretName: home-tls
+    secretName: wildcard-tls-${TENANT_NAME}
   rules:
   - host: ${HOME_HOST}
     http:

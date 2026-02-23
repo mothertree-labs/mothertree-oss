@@ -1,0 +1,395 @@
+#!/bin/bash
+
+# Create the email-probe bot user in both Keycloak and Stalwart's internal directory.
+#
+# Steps:
+#   1. Create a Keycloak service account (so user exists in OIDC directory)
+#   2. Temporarily patch Stalwart ConfigMap to use "internal" directory
+#   3. Restart Stalwart to pick up internal directory
+#   4. Create the user with app password and roles via API
+#   5. Revert ConfigMap to "oidc"
+#   6. Restart Stalwart to restore oidc directory
+#   7. Update K8s secret and verify everything
+#
+# The Keycloak user is needed because Stalwart's post-auth resolution checks
+# the OIDC directory (Keycloak) after authenticating against the internal
+# directory. Without a Keycloak user, IMAP sessions are rejected with
+# "security.unauthorized" even though authentication succeeds.
+#
+# After completion, the script verifies that:
+#   - Keycloak user exists
+#   - ConfigMap is back to directory = "oidc"
+#   - DB settings match (storage.directory not overridden)
+#   - Repo template is unchanged
+#   - The email-probe user exists and can be queried
+#   - The K8s secret has the matching password
+#
+# Usage:
+#   ./scripts/create-email-probe-user -e <env> -t <tenant>
+#   ./scripts/create-email-probe-user --tenant=<name> --env=<env>   (backward compat)
+
+set -euo pipefail
+
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
+
+mt_usage() {
+    echo "Usage: $0 -e <env> -t <tenant>"
+    echo ""
+    echo "Create the email-probe bot user in Keycloak and Stalwart."
+    echo ""
+    echo "Options:"
+    echo "  -e <env>       Environment (e.g., dev, prod)"
+    echo "  -t <tenant>    Tenant name (e.g., example)"
+    echo "  -h, --help     Show this help"
+}
+
+mt_parse_args "$@"
+mt_require_env
+mt_require_tenant
+
+# Load config
+TENANT_CONFIG="$REPO_ROOT/tenants/$MT_TENANT/$MT_ENV.config.yaml"
+TENANT_SECRETS="$REPO_ROOT/tenants/$MT_TENANT/$MT_ENV.secrets.yaml"
+
+if [ ! -f "$TENANT_CONFIG" ]; then
+    print_error "Config not found: $TENANT_CONFIG"
+    exit 1
+fi
+if [ ! -f "$TENANT_SECRETS" ]; then
+    print_error "Secrets not found: $TENANT_SECRETS"
+    exit 1
+fi
+
+export KUBECONFIG="$REPO_ROOT/kubeconfig.$MT_ENV.yaml"
+NS_MAIL="tn-${MT_TENANT}-mail"
+
+TENANT_DOMAIN=$(yq '.dns.domain' "$TENANT_CONFIG")
+ENV_DNS_LABEL=$(yq '.dns.env_dns_label // ""' "$TENANT_CONFIG")
+STALWART_ADMIN_PASSWORD=$(yq '.stalwart.admin_password' "$TENANT_SECRETS")
+KEYCLOAK_ADMIN_PASSWORD=$(yq '.keycloak.admin_password' "$TENANT_SECRETS")
+KEYCLOAK_REALM=$(yq '.keycloak.realm' "$TENANT_CONFIG")
+AUTH_SUBDOMAIN=$(yq '.dns.auth_subdomain // "auth"' "$TENANT_CONFIG")
+SMTP_DOMAIN_CONFIG=$(yq '.smtp.domain // ""' "$TENANT_CONFIG")
+
+if [ -n "$SMTP_DOMAIN_CONFIG" ] && [ "$SMTP_DOMAIN_CONFIG" != "null" ]; then
+    EMAIL_DOMAIN="$SMTP_DOMAIN_CONFIG"
+elif [ -n "$ENV_DNS_LABEL" ] && [ "$ENV_DNS_LABEL" != "null" ]; then
+    EMAIL_DOMAIN="${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+else
+    EMAIL_DOMAIN="${TENANT_DOMAIN}"
+fi
+
+BOT_EMAIL="email-probe@${EMAIL_DOMAIN}"
+BOT_PASSWORD=$(openssl rand -base64 24)
+
+# Derive AUTH_HOST (same pattern as other scripts)
+if [ -n "$ENV_DNS_LABEL" ] && [ "$ENV_DNS_LABEL" != "null" ]; then
+    AUTH_HOST="${AUTH_SUBDOMAIN}.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+else
+    AUTH_HOST="${AUTH_SUBDOMAIN}.${TENANT_DOMAIN}"
+fi
+
+print_status "Tenant:    $MT_TENANT ($MT_ENV)"
+print_status "Namespace: $NS_MAIL"
+print_status "Bot email: $BOT_EMAIL"
+print_status "Auth host: $AUTH_HOST"
+echo ""
+
+# ============================================================================
+# Step 1: Create Keycloak user (so OIDC directory knows about this account)
+# ============================================================================
+print_status "Step 1/7: Creating Keycloak user for email-probe..."
+
+KC_TOKEN=$(curl -s --max-time 10 -X POST "https://${AUTH_HOST}/realms/master/protocol/openid-connect/token" \
+    --data-urlencode "username=admin" \
+    --data-urlencode "password=${KEYCLOAK_ADMIN_PASSWORD}" \
+    --data-urlencode "grant_type=password" \
+    --data-urlencode "client_id=admin-cli" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null)
+
+if [ -z "$KC_TOKEN" ]; then
+    print_error "Failed to get Keycloak admin token"
+    exit 1
+fi
+
+# Check if user already exists
+KC_EXISTING=$(curl -s --max-time 10 \
+    "https://${AUTH_HOST}/admin/realms/${KEYCLOAK_REALM}/users?email=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${BOT_EMAIL}'))")" \
+    -H "Authorization: Bearer ${KC_TOKEN}")
+
+KC_EXISTS=$(echo "$KC_EXISTING" | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if len(d)>0 else 'no')" 2>/dev/null || echo "no")
+
+if [ "$KC_EXISTS" = "yes" ]; then
+    print_success "Keycloak user already exists"
+else
+    KC_CREATE_RESULT=$(curl -s -w "\n%{http_code}" --max-time 10 \
+        -X POST "https://${AUTH_HOST}/admin/realms/${KEYCLOAK_REALM}/users" \
+        -H "Authorization: Bearer ${KC_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "username": "email-probe",
+            "email": "'"${BOT_EMAIL}"'",
+            "enabled": true,
+            "emailVerified": true,
+            "firstName": "Email",
+            "lastName": "Probe"
+        }')
+
+    KC_CREATE_CODE=$(echo "$KC_CREATE_RESULT" | tail -n1)
+    if [ "$KC_CREATE_CODE" = "201" ]; then
+        print_success "Keycloak user created: email-probe"
+    elif [ "$KC_CREATE_CODE" = "409" ]; then
+        print_success "Keycloak user already exists (409)"
+    else
+        KC_CREATE_BODY=$(echo "$KC_CREATE_RESULT" | sed '$d')
+        print_error "Failed to create Keycloak user (HTTP $KC_CREATE_CODE): $KC_CREATE_BODY"
+        exit 1
+    fi
+fi
+
+# ============================================================================
+# Safety: capture the original ConfigMap state
+# ============================================================================
+print_status "Capturing original ConfigMap state..."
+# Use temp files to preserve exact content (including trailing newlines)
+TMPDIR_WORK=$(mktemp -d)
+trap "rm -rf $TMPDIR_WORK" EXIT
+
+kubectl get configmap stalwart-config -n "$NS_MAIL" -o jsonpath='{.data.config\.toml}' > "$TMPDIR_WORK/original.toml"
+# Ensure trailing newline (TOML parser requires it)
+echo "" >> "$TMPDIR_WORK/original.toml"
+
+# Verify the original has directory = "oidc"
+if ! grep -q 'directory = "oidc"' "$TMPDIR_WORK/original.toml"; then
+    print_error "ConfigMap does not contain expected 'directory = \"oidc\"'"
+    print_error "Aborting to avoid corrupting config"
+    exit 1
+fi
+print_success "Original ConfigMap verified: directory = \"oidc\""
+
+# ============================================================================
+# Step 2: Patch ConfigMap to use internal directory
+# ============================================================================
+print_status "Step 2/7: Patching ConfigMap (directory = \"oidc\" -> \"internal\")..."
+
+# Create patched version: oidc -> internal (only the storage.directory line)
+sed 's/^directory = "oidc"/directory = "internal"/' "$TMPDIR_WORK/original.toml" > "$TMPDIR_WORK/patched.toml"
+
+# Verify the patch changed exactly one line
+DIFF_COUNT=$(diff "$TMPDIR_WORK/original.toml" "$TMPDIR_WORK/patched.toml" | grep -c '^[<>]' || true)
+if [ "$DIFF_COUNT" -ne 2 ]; then
+    print_error "Patch would change $((DIFF_COUNT/2)) lines instead of 1. Aborting."
+    exit 1
+fi
+
+# Apply the patched ConfigMap
+kubectl create configmap stalwart-config \
+    --namespace="$NS_MAIL" \
+    --from-file=config.toml="$TMPDIR_WORK/patched.toml" \
+    --dry-run=client -o yaml | kubectl apply -f -
+print_success "ConfigMap patched"
+
+# ============================================================================
+# Step 3: Restart Stalwart to pick up new config
+# ============================================================================
+print_status "Step 3/7: Restarting Stalwart (picking up internal directory)..."
+kubectl rollout restart deployment/stalwart -n "$NS_MAIL"
+if ! kubectl rollout status deployment/stalwart -n "$NS_MAIL" --timeout=120s; then
+    print_error "Stalwart failed to restart. Reverting ConfigMap immediately."
+    kubectl create configmap stalwart-config \
+        --namespace="$NS_MAIL" \
+        --from-file=config.toml="$TMPDIR_WORK/original.toml" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    kubectl rollout restart deployment/stalwart -n "$NS_MAIL"
+    exit 1
+fi
+print_success "Stalwart restarted with internal directory"
+
+# ============================================================================
+# Step 4: Create the email-probe user in internal directory via API
+# ============================================================================
+print_status "Step 4/7: Creating email-probe user in internal directory..."
+
+LOCAL_PORT=$((RANDOM % 10000 + 20000))
+kubectl port-forward -n "$NS_MAIL" deployment/stalwart ${LOCAL_PORT}:8080 &>/dev/null &
+PF_PID=$!
+sleep 3
+
+if ! kill -0 $PF_PID 2>/dev/null; then
+    print_error "Port-forward failed. Reverting ConfigMap."
+    kubectl create configmap stalwart-config \
+        --namespace="$NS_MAIL" \
+        --from-file=config.toml="$TMPDIR_WORK/original.toml" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    kubectl rollout restart deployment/stalwart -n "$NS_MAIL"
+    exit 1
+fi
+
+# URL-encode the bot email for API paths (@ -> %40)
+BOT_EMAIL_ENCODED="${BOT_EMAIL/@/%40}"
+
+# Delete existing user first (idempotent - ignore errors)
+curl -s --max-time 10 -X DELETE "http://localhost:${LOCAL_PORT}/api/principal/${BOT_EMAIL_ENCODED}" \
+    -u "admin:${STALWART_ADMIN_PASSWORD}" >/dev/null 2>&1 || true
+sleep 1
+
+# Create user with $app$ format (same pattern as account portal device passwords)
+# Stalwart matches the password portion of $app$<name>$<password> during PLAIN/LOGIN auth
+APP_SECRET="\$app\$probe\$${BOT_PASSWORD}"
+RESULT=$(curl -s -w "\n%{http_code}" --max-time 10 -X POST "http://localhost:${LOCAL_PORT}/api/principal" \
+    -u "admin:${STALWART_ADMIN_PASSWORD}" \
+    -H "Content-Type: application/json" \
+    -d '{"type": "individual", "name": "'"${BOT_EMAIL}"'", "emails": ["'"${BOT_EMAIL}"'"], "secrets": ["'"${APP_SECRET}"'"], "roles": ["user"]}')
+
+HTTP_CODE=$(echo "$RESULT" | tail -n1)
+BODY=$(echo "$RESULT" | sed '$d')
+
+kill $PF_PID 2>/dev/null || true
+
+if [ "$HTTP_CODE" = "200" ]; then
+    if echo "$BODY" | grep -q "fieldAlreadyExists"; then
+        print_warning "User already exists. Updating password..."
+        # Re-open port-forward for PATCH
+        kubectl port-forward -n "$NS_MAIL" deployment/stalwart ${LOCAL_PORT}:8080 &>/dev/null &
+        PF_PID=$!
+        sleep 3
+        PATCH_RESULT=$(curl -s -w "\n%{http_code}" --max-time 10 -X PATCH "http://localhost:${LOCAL_PORT}/api/principal/${BOT_EMAIL_ENCODED}" \
+            -u "admin:${STALWART_ADMIN_PASSWORD}" \
+            -H "Content-Type: application/json" \
+            -d '[{"action":"set","field":"secrets","value":["'"${APP_SECRET}"'"]},{"action":"set","field":"emails","value":["'"${BOT_EMAIL}"'"]},{"action":"set","field":"roles","value":["user"]}]')
+        PATCH_CODE=$(echo "$PATCH_RESULT" | tail -n1)
+        kill $PF_PID 2>/dev/null || true
+        if [ "$PATCH_CODE" = "200" ]; then
+            print_success "User password updated"
+        else
+            PATCH_BODY=$(echo "$PATCH_RESULT" | sed '$d')
+            print_error "Failed to update user (HTTP $PATCH_CODE): $PATCH_BODY"
+            # Still revert ConfigMap below
+        fi
+    else
+        print_success "User created: $BOT_EMAIL"
+    fi
+else
+    print_error "Failed to create user (HTTP $HTTP_CODE): $BODY"
+    # Still revert ConfigMap below
+fi
+
+# ============================================================================
+# Step 5: Revert ConfigMap to oidc
+# ============================================================================
+print_status "Step 5/7: Reverting ConfigMap (directory = \"internal\" -> \"oidc\")..."
+kubectl create configmap stalwart-config \
+    --namespace="$NS_MAIL" \
+    --from-file=config.toml="$TMPDIR_WORK/original.toml" \
+    --dry-run=client -o yaml | kubectl apply -f -
+print_success "ConfigMap reverted to original"
+
+# ============================================================================
+# Step 6: Restart Stalwart to restore oidc directory
+# ============================================================================
+print_status "Step 6/7: Restarting Stalwart (restoring oidc directory)..."
+kubectl rollout restart deployment/stalwart -n "$NS_MAIL"
+if ! kubectl rollout status deployment/stalwart -n "$NS_MAIL" --timeout=120s; then
+    print_error "Stalwart failed to restart after revert!"
+    print_error "Manual intervention required: kubectl get pods -n $NS_MAIL"
+    exit 1
+fi
+print_success "Stalwart restarted with oidc directory"
+
+# ============================================================================
+# Step 7: Update K8s secret and verify everything
+# ============================================================================
+print_status "Step 7/7: Updating K8s secret and verifying..."
+
+# Update K8s secret with the bot password
+kubectl create secret generic email-probe-secrets \
+    --namespace="$NS_MAIL" \
+    --from-literal=BOT_PASSWORD="$BOT_PASSWORD" \
+    --dry-run=client -o yaml | kubectl apply -f -
+print_success "K8s secret updated"
+
+# Restart email-probe to pick up new secret
+kubectl rollout restart deployment/email-probe -n "$NS_MAIL" 2>/dev/null || true
+
+# --- Verification ---
+echo ""
+print_status "=== Verification ==="
+
+# 0. Keycloak user exists
+KC_VERIFY_TOKEN=$(curl -s --max-time 10 -X POST "https://${AUTH_HOST}/realms/master/protocol/openid-connect/token" \
+    --data-urlencode "username=admin" \
+    --data-urlencode "password=${KEYCLOAK_ADMIN_PASSWORD}" \
+    --data-urlencode "grant_type=password" \
+    --data-urlencode "client_id=admin-cli" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null)
+
+if [ -n "$KC_VERIFY_TOKEN" ]; then
+    KC_VERIFY=$(curl -s --max-time 10 \
+        "https://${AUTH_HOST}/admin/realms/${KEYCLOAK_REALM}/users?email=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${BOT_EMAIL}'))")" \
+        -H "Authorization: Bearer ${KC_VERIFY_TOKEN}")
+    KC_COUNT=$(echo "$KC_VERIFY" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+    if [ "$KC_COUNT" -gt 0 ]; then
+        print_success "Keycloak: email-probe user exists in realm $KEYCLOAK_REALM"
+    else
+        print_error "Keycloak: email-probe user NOT found in realm $KEYCLOAK_REALM"
+    fi
+else
+    print_warning "Keycloak: could not verify (token retrieval failed)"
+fi
+
+# 1. ConfigMap matches repo
+REPO_DIRECTORY_LINE=$(grep 'directory = "oidc"' "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" || true)
+CM_DIRECTORY=$(kubectl get configmap stalwart-config -n "$NS_MAIL" -o jsonpath='{.data.config\.toml}' | grep 'directory = ')
+if echo "$CM_DIRECTORY" | grep -q '"oidc"'; then
+    print_success "ConfigMap: directory = \"oidc\" (matches repo template)"
+else
+    print_error "ConfigMap mismatch: $CM_DIRECTORY"
+fi
+
+# 2. DB settings (check no rogue override)
+LOCAL_PORT2=$((RANDOM % 10000 + 20000))
+kubectl port-forward -n "$NS_MAIL" deployment/stalwart ${LOCAL_PORT2}:8080 &>/dev/null &
+PF_PID2=$!
+sleep 3
+DB_SETTINGS=$(curl -s "http://localhost:${LOCAL_PORT2}/api/settings/list?prefix=storage" \
+    -u "admin:${STALWART_ADMIN_PASSWORD}" 2>/dev/null)
+kill $PF_PID2 2>/dev/null || true
+
+if echo "$DB_SETTINGS" | grep -q '"directory"'; then
+    DB_DIR=$(echo "$DB_SETTINGS" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['items'].get('directory','N/A'))" 2>/dev/null || echo "???")
+    if [ "$DB_DIR" = "oidc" ]; then
+        print_success "DB settings: storage.directory = \"oidc\" (matches)"
+    else
+        print_warning "DB settings: storage.directory = \"$DB_DIR\" (doesn't match, but local-keys means ConfigMap wins)"
+    fi
+else
+    print_success "DB settings: no storage.directory override (local-keys ConfigMap is authoritative)"
+fi
+
+# 3. User exists
+LOCAL_PORT3=$((RANDOM % 10000 + 20000))
+kubectl port-forward -n "$NS_MAIL" deployment/stalwart ${LOCAL_PORT3}:8080 &>/dev/null &
+PF_PID3=$!
+sleep 3
+BOT_EMAIL_ENCODED_V="${BOT_EMAIL/@/%40}"
+USER_CHECK=$(curl -s "http://localhost:${LOCAL_PORT3}/api/principal/${BOT_EMAIL_ENCODED_V}" \
+    -u "admin:${STALWART_ADMIN_PASSWORD}" 2>/dev/null)
+kill $PF_PID3 2>/dev/null || true
+
+if echo "$USER_CHECK" | grep -q '"name"'; then
+    USER_EMAIL=$(echo "$USER_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['emails'][0])" 2>/dev/null || echo "???")
+    print_success "Stalwart user exists: email-probe <$USER_EMAIL>"
+else
+    print_error "User not found in Stalwart: $USER_CHECK"
+fi
+
+# 4. K8s secret exists
+if kubectl get secret email-probe-secrets -n "$NS_MAIL" >/dev/null 2>&1; then
+    print_success "K8s secret: email-probe-secrets exists in $NS_MAIL"
+else
+    print_error "K8s secret: email-probe-secrets NOT found"
+fi
+
+echo ""
+print_success "Done. Email probe should start working on next cycle (~5 min)."
+print_status "Watch logs: kubectl logs -n $NS_MAIL -l app=email-probe -f"

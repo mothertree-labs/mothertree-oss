@@ -15,7 +15,7 @@
         <style>
             /* Override Keycloak background - matching platform cream */
             html.login-pf, html.login-pf body, body, .login-pf-page {
-                background: #f2efe8 !important;
+                background: #F3E8D6 !important;
                 background-image: none !important;
                 min-height: 100vh !important;
             }
@@ -47,12 +47,12 @@
                 background: transparent;
             }
             .platform-title { 
-                font-family: 'Tomorrow', sans-serif;
-                font-size: 2.5rem; font-weight: 400; color: #4a6741; 
+                font-family: 'Figtree', sans-serif;
+                font-size: 2.5rem; font-weight: 600; color: #A7AE8D;
                 margin: 0 0 0.5rem 0; letter-spacing: 0.03em;
             }
-            .platform-welcome { 
-                font-family: 'Instrument Sans', sans-serif;
+            .platform-welcome {
+                font-family: 'Figtree', sans-serif;
                 font-size: 1.1rem; color: #6b6b6b; margin: 0; font-weight: 400; 
             }
             
@@ -71,7 +71,7 @@
                 max-width: 320px;
                 margin: 0 auto 1.5rem;
                 padding: 1rem 2rem !important;
-                background: #4a6741 !important;
+                background: #A7AE8D !important;
                 border: none !important;
                 border-radius: 8px !important;
                 color: #fff !important;
@@ -79,12 +79,12 @@
                 font-weight: 500 !important;
                 cursor: pointer !important;
                 transition: all 0.2s ease !important;
-                box-shadow: 0 4px 12px rgba(74, 103, 65, 0.3) !important;
+                box-shadow: 0 4px 12px rgba(167, 174, 141, 0.3) !important;
             }
             .passkey-login-btn:hover {
-                background: #3d5636 !important;
+                background: #8A9475 !important;
                 transform: translateY(-2px);
-                box-shadow: 0 6px 16px rgba(74, 103, 65, 0.4) !important;
+                box-shadow: 0 6px 16px rgba(167, 174, 141, 0.4) !important;
             }
             
             /* Divider */
@@ -93,7 +93,7 @@
                 align-items: center;
                 margin: 1.5rem 0;
                 color: #6b6b6b;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 0.9rem;
             }
             .login-divider::before,
@@ -117,16 +117,16 @@
             #kc-social-providers a, .kc-social-provider-link {
                 display: flex !important; align-items: center; justify-content: center; gap: 0.75rem;
                 padding: 1rem 2rem !important; background: #fff !important;
-                border: 2px solid #4a6741 !important; border-radius: 8px !important;
-                color: #4a6741 !important; font-size: 1.1rem !important; font-weight: 500 !important;
+                border: 2px solid #A7AE8D !important; border-radius: 8px !important;
+                color: #A7AE8D !important; font-size: 1.1rem !important; font-weight: 500 !important;
                 text-decoration: none !important; transition: all 0.2s ease !important;
-                box-shadow: 0 2px 8px rgba(74, 103, 65, 0.15) !important;
+                box-shadow: 0 2px 8px rgba(167, 174, 141, 0.15) !important;
             }
             #kc-social-providers a:hover { 
-                background: #4a6741 !important; 
+                background: #A7AE8D !important; 
                 color: #fff !important;
                 transform: translateY(-2px); 
-                box-shadow: 0 4px 12px rgba(74, 103, 65, 0.3) !important; 
+                box-shadow: 0 4px 12px rgba(167, 174, 141, 0.3) !important; 
             }
             
             /* Admin login toggle */
@@ -138,12 +138,12 @@
             }
             .admin-login-toggle a {
                 color: #6b6b6b;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 0.9rem;
                 text-decoration: none;
             }
             .admin-login-toggle a:hover {
-                color: #4a6741;
+                color: #A7AE8D;
                 text-decoration: underline;
             }
             
@@ -162,7 +162,7 @@
             }
             .admin-login-form label {
                 display: block !important;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 0.9rem;
                 color: #6b6b6b;
                 margin-bottom: 0.5rem;
@@ -177,18 +177,18 @@
                 border: 1px solid #ddd;
                 border-radius: 8px;
                 font-size: 1rem;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
             }
             .admin-login-form input[type="text"]:focus,
             .admin-login-form input[type="password"]:focus {
                 outline: none;
-                border-color: #4a6741;
-                box-shadow: 0 0 0 3px rgba(74, 103, 65, 0.1);
+                border-color: #A7AE8D;
+                box-shadow: 0 0 0 3px rgba(167, 174, 141, 0.1);
             }
             .admin-login-form button[type="submit"] {
                 width: 100%;
                 padding: 0.75rem 1rem;
-                background: #4a6741;
+                background: #A7AE8D;
                 border: none;
                 border-radius: 8px;
                 color: #fff;
@@ -198,7 +198,7 @@
                 transition: all 0.2s ease;
             }
             .admin-login-form button[type="submit"]:hover {
-                background: #3d5636;
+                background: #8A9475;
             }
             
             /* Style logout and other form buttons */
@@ -206,7 +206,7 @@
             .pf-c-button {
                 display: inline-block !important;
                 padding: 0.75rem 2rem !important;
-                background: #4a6741 !important;
+                background: #A7AE8D !important;
                 border: none !important;
                 border-radius: 8px !important;
                 color: #fff !important;
@@ -217,7 +217,7 @@
             }
             #kc-form-buttons input[type="submit"]:hover,
             .pf-c-button:hover {
-                background: #3d5636 !important;
+                background: #8A9475 !important;
             }
             hr, .kc-divider-text { display: none !important; }
             .pf-c-login__footer, .login-pf-page-footer { background: transparent !important; }
@@ -233,7 +233,7 @@
                 display: flex;
                 align-items: center;
                 gap: 0.5rem;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 0.95rem;
                 color: #6b6b6b;
                 cursor: pointer;
@@ -241,7 +241,7 @@
             .remember-me-label input[type="checkbox"] {
                 width: 18px;
                 height: 18px;
-                accent-color: #4a6741;
+                accent-color: #A7AE8D;
                 cursor: pointer;
             }
             .remember-me-label span {
@@ -255,12 +255,12 @@
             }
             .forgot-password a {
                 color: #6b6b6b;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 0.9rem;
                 text-decoration: none;
             }
             .forgot-password a:hover {
-                color: #4a6741;
+                color: #A7AE8D;
                 text-decoration: underline;
             }
             
@@ -271,7 +271,7 @@
             }
         </style>
         <div class="platform-header">
-            <h1 class="platform-title">${realmDisplayName!"the platform"}</h1>
+            <h1 class="platform-title">${realm.displayName!"the platform"}</h1>
             <p class="platform-welcome">Please login to continue</p>
         </div>
     <#elseif section = "form">
@@ -315,7 +315,15 @@
             <form id="admin-login-form" class="admin-login-form" action="${url.loginAction}" method="post">
                 <div class="form-group">
                     <label for="username">Email</label>
-                    <input tabindex="1" id="username" name="username" value="${(login.username!'')}" type="text" autofocus autocomplete="username" />
+                    <#if login.username?? && login.username?has_content>
+                        <div class="readonly-username" style="display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem; background: #f5f5f5; border: 1px solid #ddd; border-radius: 8px; font-family: 'Figtree', sans-serif; font-size: 1rem; color: #333;">
+                            <span style="flex: 1;">${login.username}</span>
+                            <a href="#" id="not-you-link" style="font-size: 0.85rem; color: #A7AE8D; text-decoration: none; white-space: nowrap;">Not you?</a>
+                        </div>
+                        <input type="hidden" id="username" name="username" value="${login.username}" />
+                    <#else>
+                        <input tabindex="1" id="username" name="username" value="" type="text" autofocus autocomplete="username" />
+                    </#if>
                 </div>
                 <div class="form-group">
                     <label for="password">Password</label>
@@ -329,7 +337,7 @@
             <#if realm.rememberMe>
                 <div class="remember-me-container">
                     <label class="remember-me-label">
-                        <input type="checkbox" id="rememberMe" name="rememberMe" form="admin-login-form" <#if login.rememberMe??>checked</#if>>
+                        <input type="checkbox" id="rememberMe" name="rememberMe" form="admin-login-form" checked>
                         <span>${msg("rememberMe")}</span>
                     </label>
                 </div>
@@ -343,11 +351,33 @@
 
             <#-- Guest registration link -->
             <div class="guest-register" style="text-align: center; margin-top: 0.75rem;">
-                <a href="#" id="guest-register-link" style="color: #4a6741; font-family: 'Instrument Sans', sans-serif; font-size: 0.9rem; text-decoration: none;">Guest? Register here</a>
+                <a href="#" id="guest-register-link" style="color: #A7AE8D; font-family: 'Figtree', sans-serif; font-size: 0.9rem; text-decoration: none;">Guest? Register here</a>
             </div>
+
+            <#-- Policy links -->
+            <#if properties.privacyPolicyUrl?has_content || properties.termsOfUseUrl?has_content || properties.acceptableUsePolicyUrl?has_content>
+            <div class="policy-footer" style="text-align: center; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #eee; font-family: 'Figtree', sans-serif; font-size: 0.75rem; color: #999;">
+                <#if properties.privacyPolicyUrl?has_content><a href="${properties.privacyPolicyUrl}" target="_blank" rel="noopener" style="color: #999; text-decoration: none; margin: 0 0.4rem;">Privacy Policy</a></#if>
+                <#if properties.termsOfUseUrl?has_content><a href="${properties.termsOfUseUrl}" target="_blank" rel="noopener" style="color: #999; text-decoration: none; margin: 0 0.4rem;">Terms of Use</a></#if>
+                <#if properties.acceptableUsePolicyUrl?has_content><a href="${properties.acceptableUsePolicyUrl}" target="_blank" rel="noopener" style="color: #999; text-decoration: none; margin: 0 0.4rem;">Acceptable Use Policy</a></#if>
+            </div>
+            </#if>
         </div>
         
         <script type="text/javascript">
+            // "Not you?" link - clears pre-filled username and redirects to Keycloak logout
+            var notYouLink = document.getElementById('not-you-link');
+            if (notYouLink) {
+                notYouLink.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    // Build Keycloak logout URL to clear SSO session
+                    var currentUrl = window.location.href;
+                    var logoutUrl = currentUrl.replace(/\/realms\/([^/]+)\/.*/, '/realms/$1/protocol/openid-connect/logout')
+                        + '?post_logout_redirect_uri=' + encodeURIComponent(currentUrl);
+                    window.location.href = logoutUrl;
+                });
+            }
+
             // Toggle admin login form visibility
             var showAdminLogin = document.getElementById('show-admin-login');
             if (showAdminLogin) {

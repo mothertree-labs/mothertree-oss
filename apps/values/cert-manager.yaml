@@ -14,10 +14,15 @@ cainjector:
   resources:
     requests:
       cpu: 10m
-      memory: 64Mi
+      memory: 128Mi
     limits:
       cpu: 100m
-      memory: 128Mi
+      memory: 256Mi
+
+# Enable ServiceMonitor for Prometheus metrics (cert expiry alerts)
+prometheus:
+  servicemonitor:
+    enabled: true
 
 # Webhook resources
 webhook:

@@ -3,69 +3,60 @@
 # Complete Home Page Deployment Script
 # This script deploys the home page switcher and applies all necessary configurations
 #
-# Prerequisites:
-#   - Environment variables must be set (by create_env or manually):
-#     HOME_HOST, DOCS_HOST, MATRIX_HOST, TENANT_NAME, TENANT_DISPLAY_NAME
-#   - Kubeconfig must be available
+# Usage:
+#   ./apps/deploy-home-complete.sh -e dev -t example
 
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/workspace}"
-MT_ENV=${MT_ENV:-prod}
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
 
-export KUBECONFIG="${KUBECONFIG:-$REPO_ROOT/kubeconfig.$MT_ENV.yaml}"
+mt_usage() {
+    echo "Usage: $0 -e <env> -t <tenant>"
+    echo ""
+    echo "Complete Home Page deployment for a tenant."
+    echo ""
+    echo "Options:"
+    echo "  -e <env>       Environment (e.g., dev, prod)"
+    echo "  -t <tenant>    Tenant name (e.g., example)"
+    echo "  -h, --help     Show this help"
+}
 
-# Check if kubeconfig exists
-if [ ! -f "$KUBECONFIG" ]; then
-    echo "❌ Error: $KUBECONFIG not found. Please run phase1 deployment first."
-    exit 1
-fi
+mt_parse_args "$@"
+mt_require_env
+mt_require_tenant
 
-# Validate required environment variables
-required_vars=("HOME_HOST" "DOCS_HOST" "MATRIX_HOST" "TENANT_NAME")
-missing_vars=()
-for var in "${required_vars[@]}"; do
-    if [ -z "${!var:-}" ]; then
-        missing_vars+=("$var")
-    fi
-done
+source "${REPO_ROOT}/scripts/lib/config.sh"
+mt_load_tenant_config
 
-if [ ${#missing_vars[@]} -gt 0 ]; then
-    echo "❌ Required environment variables not set: ${missing_vars[*]}"
-    echo "This script should be called from create_env which sets these from tenant config."
-    exit 1
-fi
+mt_require_commands kubectl helm helmfile
 
-# Set defaults
-NS_HOME="${NS_HOME:-home}"
-NS_MATRIX="${NS_MATRIX:-tn-${TENANT_NAME:-example}-matrix}"
-export TENANT_DISPLAY_NAME="${TENANT_DISPLAY_NAME:-$TENANT_NAME}"
-
-echo "🏠 Deploying Complete Home Page Application..."
-echo "Environment: $MT_ENV, Tenant: $TENANT_NAME"
-echo "Home URL: https://$HOME_HOST"
+print_status "Deploying Complete Home Page Application..."
+print_status "Environment: $MT_ENV, Tenant: $TENANT_NAME"
+print_status "Home URL: https://$HOME_HOST"
 
 # 1. Deploy home page application using the updated deploy-home.sh
-echo "📦 Deploying home page application..."
-cd "$REPO_ROOT/apps"
-./deploy-home.sh
+print_status "Deploying home page application..."
+"$REPO_ROOT/apps/deploy-home.sh" -e "$MT_ENV" -t "$MT_TENANT"
 
 # 2. Update element-web Helm release with iframe-friendly headers
-echo "🔧 Configuring matrix ingress for iframe embedding..."
-cd "$REPO_ROOT/apps"
-# Use sync instead of apply to skip slow diff operation
-helmfile -e "$MT_ENV" -l name=element-web sync
+print_status "Configuring matrix ingress for iframe embedding..."
+pushd "$REPO_ROOT/apps" >/dev/null
+  # Use sync instead of apply to skip slow diff operation
+  helmfile -e "$MT_ENV" -l name=element-web sync
+popd >/dev/null
 
 # 3. Wait for deployment to be ready
-echo "⏳ Waiting for deployment to be ready..."
-kubectl wait --for=condition=available --timeout=300s deployment/home-page -n "$NS_HOME" || echo "⚠️ Deployment may not be ready yet"
+print_status "Waiting for deployment to be ready..."
+kubectl wait --for=condition=available --timeout=300s deployment/home-page -n "$NS_HOME" || print_warning "Deployment may not be ready yet"
 
 # 4. Check certificate status
-echo "🔍 Checking SSL certificate status..."
+print_status "Checking SSL certificate status..."
 kubectl get certificates -n "$NS_HOME" 2>/dev/null || echo "No certificates found yet"
 
 # 5. Verify iframe headers
-echo "🔍 Verifying iframe headers..."
+print_status "Verifying iframe headers..."
 echo "Docs headers:"
 curl -I "https://$DOCS_HOST" 2>/dev/null | grep -i "x-frame-options\|content-security-policy" || echo "Headers not yet applied"
 
@@ -73,18 +64,13 @@ echo "Matrix headers:"
 curl -I "https://$MATRIX_HOST" 2>/dev/null | grep -i "x-frame-options\|content-security-policy" || echo "Headers not yet applied"
 
 echo ""
-echo "✅ Complete home page deployment finished!"
+print_success "Complete home page deployment finished!"
 echo ""
-echo "🌐 Access your home page at: https://$HOME_HOST"
-echo "📱 Features:"
-echo "   - Persistent navigation bar with Docs and Matrix buttons"
-echo "   - Lazy loading for better performance"
-echo "   - Mobile-responsive design"
-echo "   - Keyboard shortcuts (Ctrl+1 for Docs, Ctrl+2 for Matrix)"
+echo "Access your home page at: https://$HOME_HOST"
 echo ""
-echo "🔧 To check deployment status:"
+echo "To check deployment status:"
 echo "   kubectl get pods -n $NS_HOME"
 echo "   kubectl get ingress -n $NS_HOME"
 echo ""
-echo "📝 To view logs:"
+echo "To view logs:"
 echo "   kubectl logs -f deployment/home-page -n $NS_HOME"

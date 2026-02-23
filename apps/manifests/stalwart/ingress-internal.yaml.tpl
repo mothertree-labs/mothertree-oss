@@ -17,7 +17,6 @@ metadata:
     component: webadmin
     tenant: ${TENANT_NAME}
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod-dns01
     kubernetes.io/ingress.class: nginx-internal
     nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
     nginx.ingress.kubernetes.io/proxy-body-size: "50m"
@@ -26,7 +25,7 @@ spec:
   tls:
   - hosts:
     - ${WEBADMIN_HOST}
-    secretName: stalwart-webadmin-tls
+    secretName: wildcard-tls-${TENANT_NAME}
   rules:
   - host: ${WEBADMIN_HOST}
     http:

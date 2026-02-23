@@ -1,0 +1,137 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: jitsi-alerts
+  namespace: matrix
+  labels:
+    app: jitsi
+    component: monitoring
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: jitsi-turn
+    interval: 30s
+    rules:
+    # TURN server unreachable via STUN (UDP connectivity lost)
+    - alert: JitsiTurnStunUnreachable
+      expr: jitsi_turn_stun_reachable == 0
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "TURN server not responding to STUN"
+        description: "TURN server has not responded to STUN binding requests for 2+ minutes. Jitsi calls will fail for users behind NAT/firewalls."
+    # TURN allocation auth failing (shared secret mismatch between Prosody and coturn)
+    - alert: JitsiTurnAllocateFailed
+      expr: jitsi_turn_allocate_ok == 0
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "TURN relay authentication failing"
+        description: "TURN allocation with HMAC credentials has been failing for 2+ minutes. This means the shared secret in Prosody does not match coturn - TURN relay is broken and calls will drop for NATted users."
+    # High ICE failure rate (many connections failing to establish media)
+    - alert: JitsiIceFailureRateHigh
+      expr: rate(jitsi_jvb_ice_failed_total[5m]) > 0 and rate(jitsi_jvb_ice_failed_total[5m]) / (rate(jitsi_jvb_ice_failed_total[5m]) + rate(jitsi_jvb_ice_succeeded_total[5m]) + 0.001) > 0.5
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High ICE failure rate on JVB"
+        description: "More than 50% of ICE connections are failing on JVB. Users are likely experiencing dropped calls or inability to connect."
+
+  - name: jitsi-call-flow
+    interval: 30s
+    rules:
+    # 1. BOSH endpoint unreachable — signaling path broken, no calls can be established
+    - alert: JitsiBoshEndpointDown
+      expr: jitsi_bosh_reachable == 0
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Jitsi BOSH/XMPP endpoint unreachable"
+        description: "The BOSH endpoint (jitsi-web → Prosody) has been unreachable for 2+ minutes. Clients cannot establish XMPP sessions — no new calls can be started."
+
+    # 2. JVB reports unhealthy — video bridge cannot process media
+    - alert: JitsiJvbUnhealthy
+      expr: jitsi_jvb_healthy == 0
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "JVB reporting unhealthy"
+        description: "JVB health flag has been false for 2+ minutes. The video bridge cannot process media — active calls may drop and new calls will fail."
+
+    # 3. No operational bridges — Jicofo cannot assign any bridge to conferences
+    - alert: JitsiNoBridgesAvailable
+      expr: jitsi_jicofo_operational_bridge_count == 0
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: "No operational Jitsi video bridges"
+        description: "Jicofo reports zero operational bridges for 1+ minute. No conferences can be created — all calls will fail immediately."
+
+    # 4. JVB XMPP disconnected — JVB lost connection to Prosody MUC
+    - alert: JitsiJvbXmppDisconnected
+      expr: jitsi_jvb_muc_clients_connected < jitsi_jvb_muc_clients_configured
+      for: 2m
+      labels:
+        severity: warning
+      annotations:
+        summary: "JVB XMPP MUC connection lost"
+        description: "JVB has fewer MUC XMPP connections ({{ $value }}) than configured. JVB may not receive conference assignments from Jicofo."
+
+    # 5. ICE restart storm — high rate of ICE restarts indicates network instability
+    - alert: JitsiIceRestartStorm
+      expr: increase(jitsi_jicofo_participant_ice_restart_requests[5m]) > 10
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "ICE restart storm detected"
+        description: "More than 10 ICE restart requests in the last 5 minutes ({{ $value }}). Participants are repeatedly losing and re-establishing media connections — network path may be flapping."
+
+    # 6. DTLS failures increasing — secure media channel setup failing
+    - alert: JitsiDtlsFailuresIncreasing
+      expr: increase(jitsi_jvb_dtls_failed_endpoints[10m]) > 5
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "DTLS handshake failures increasing on JVB"
+        description: "More than 5 DTLS handshake failures in the last 10 minutes ({{ $value }}). Secure media channels are failing to establish — affected participants will have no audio/video."
+
+    # 7. Keycloak adapter down — authentication for Jitsi broken
+    - alert: JitsiKeycloakAdapterDown
+      expr: jitsi_keycloak_adapter_healthy == 0
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Jitsi Keycloak adapter unreachable"
+        description: "The Keycloak adapter health check has been failing for 2+ minutes. Users cannot authenticate to join Jitsi calls — new participants will see an error page."
+
+    # 8. Conferences active but no ICE connections succeeding — JVB media path broken
+    # Catches firewall/network issues where JVB is healthy but external clients can't reach it.
+    # JVB may not count timed-out ICE as "failed", so we detect the absence of success instead.
+    - alert: JitsiJvbMediaUnreachable
+      expr: jitsi_jvb_conferences > 0 and rate(jitsi_jvb_ice_succeeded_total[5m]) == 0
+      for: 3m
+      labels:
+        severity: critical
+      annotations:
+        summary: "JVB has active conferences but no ICE connections succeeding"
+        description: "JVB reports {{ $value }} active conferences but zero ICE connections have succeeded in 5 minutes. External clients likely cannot reach JVB UDP ports — check cloud firewall rules."
+
+    # 9. Jicofo sees ICE failures from participants — participants reporting call drops
+    # This catches cases where JVB doesn't count ICE failures but Jicofo gets notifications.
+    - alert: JitsiParticipantIceFailures
+      expr: increase(jitsi_jicofo_participant_ice_failed[5m]) > 3
+      for: 2m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Participants reporting ICE failures"
+        description: "{{ $value }} participants have reported ICE failures to Jicofo in the last 5 minutes. Media connections are failing to establish — check JVB network path and firewall rules."

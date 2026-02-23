@@ -1,0 +1,25 @@
+replicaCount: 1
+
+autoscaling:
+  enabled: false
+
+collabora:
+  extra_params: --o:ssl.enable=false --o:ssl.termination=true
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+probes:
+  startup:
+    enabled: true
+    failureThreshold: 30
+    periodSeconds: 3
+  readiness:
+    enabled: true
+  liveness:
+    enabled: true

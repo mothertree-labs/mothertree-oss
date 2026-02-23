@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<info>
+	<id>jitsi_calendar</id>
+	<name>Jitsi Calendar Integration</name>
+	<summary>Add Jitsi meeting links to Calendar events</summary>
+	<description>
+		<![CDATA[Adds an "Add Jitsi Meeting" button to the Nextcloud Calendar event editor.
+When clicked, generates a unique Jitsi meeting room URL and sets it as the event location,
+so it is automatically included in calendar invitation emails sent to attendees.]]>
+	</description>
+	<licence>AGPL</licence>
+	<author>Mothertree</author>
+	<version>1.0.0</version>
+	<category>integration</category>
+	<namespace>JitsiCalendar</namespace>
+	<dependencies>
+		<nextcloud min-version="26" max-version="32" />
+	</dependencies>
+</info>

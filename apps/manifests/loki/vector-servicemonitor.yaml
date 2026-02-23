@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vector
+  namespace: infra-monitoring
+  labels:
+    app.kubernetes.io/name: vector
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - infra-monitoring
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: vector
+  endpoints:
+    - port: prom-exporter
+      interval: 30s
+      path: /metrics

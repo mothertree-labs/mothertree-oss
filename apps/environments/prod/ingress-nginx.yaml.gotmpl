@@ -1,0 +1,9 @@
+controller:
+  config:
+    # Prod-only: block HTTP/S requests that didn't come through Cloudflare.
+    # The $deny_non_cloudflare geo variable is defined in the base values http-snippet.
+    # Dev skips this because dev DNS is not Cloudflare-proxied (gray cloud).
+    server-snippet: |
+      if ($deny_non_cloudflare) {
+          return 403;
+      }

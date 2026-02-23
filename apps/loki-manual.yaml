@@ -95,6 +95,10 @@ spec:
     metadata:
       labels:
         app: loki
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3100"
+        prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: loki
       securityContext:

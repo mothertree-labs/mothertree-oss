@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+#
+# backfill-tenant-email — One-time migration to set tenantEmail attribute
+# for existing users who were created before this attribute was made permanent.
+#
+# Usage:
+#   ./scripts/backfill-tenant-email --tenant=<name> --env=<env> [--dry-run]
+#
+# Requirements:
+#   - Tenant config + secrets files
+#   - yq, jq, curl installed
+#   - Network access to Keycloak (AUTH_HOST)
+#
+# What it does:
+#   For each non-guest user without a tenantEmail attribute:
+#   - If user.email != recoveryEmail (normal state): sets tenantEmail = user.email
+#   - If user.email == recoveryEmail (stuck in swapped state): logs warning for manual review
+#
+
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+TENANT=""
+MT_ENV=""
+DRY_RUN=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --tenant=*) TENANT="${1#*=}"; shift ;;
+    --env=*)    MT_ENV="${1#*=}"; shift ;;
+    --dry-run)  DRY_RUN=true; shift ;;
+    --help|-h)
+      echo "Usage: $0 --tenant=<name> --env=<env> [--dry-run]"
+      exit 0
+      ;;
+    *) echo "ERROR: Unknown argument: $1"; exit 1 ;;
+  esac
+done
+
+if [ -z "$TENANT" ] || [ -z "$MT_ENV" ]; then
+  echo "ERROR: Both --tenant and --env are required"
+  echo "Usage: $0 --tenant=<name> --env=<env> [--dry-run]"
+  exit 1
+fi
+
+# Load tenant config
+TENANT_CONFIG="$REPO/tenants/$TENANT/$MT_ENV.config.yaml"
+TENANT_SECRETS="$REPO/tenants/$TENANT/$MT_ENV.secrets.yaml"
+
+if [ ! -f "$TENANT_CONFIG" ]; then
+  echo "ERROR: Tenant config not found: $TENANT_CONFIG"
+  exit 1
+fi
+
+if [ ! -f "$TENANT_SECRETS" ]; then
+  echo "ERROR: Tenant secrets not found: $TENANT_SECRETS"
+  exit 1
+fi
+
+for cmd in yq jq curl; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "ERROR: $cmd is required but not installed"
+    exit 1
+  fi
+done
+
+# Extract configuration
+TENANT_DOMAIN=$(yq '.dns.domain' "$TENANT_CONFIG")
+ENV_DNS_LABEL=$(yq '.dns.env_dns_label // ""' "$TENANT_CONFIG")
+AUTH_SUBDOMAIN=$(yq '.dns.auth_subdomain // "auth"' "$TENANT_CONFIG")
+KEYCLOAK_REALM=$(yq '.keycloak.realm' "$TENANT_CONFIG")
+
+if [ -z "$KEYCLOAK_REALM" ] || [ "$KEYCLOAK_REALM" = "null" ]; then
+  echo "ERROR: keycloak.realm not found in $TENANT_CONFIG"
+  exit 1
+fi
+KEYCLOAK_ADMIN_PASSWORD=$(yq '.keycloak.admin_password' "$TENANT_SECRETS")
+
+if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ] || [ "$KEYCLOAK_ADMIN_PASSWORD" = "null" ]; then
+  echo "ERROR: keycloak.admin_password not found in $TENANT_SECRETS"
+  exit 1
+fi
+
+# Build AUTH_HOST
+if [ -n "$ENV_DNS_LABEL" ] && [ "$ENV_DNS_LABEL" != "null" ]; then
+  AUTH_HOST="${AUTH_SUBDOMAIN}.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+else
+  AUTH_HOST="${AUTH_SUBDOMAIN}.${TENANT_DOMAIN}"
+fi
+
+echo "[INFO] Tenant:  $TENANT ($MT_ENV)"
+echo "[INFO] Auth:    $AUTH_HOST"
+echo "[INFO] Realm:   $KEYCLOAK_REALM"
+if $DRY_RUN; then
+  echo "[INFO] Mode:    DRY RUN (no changes will be made)"
+fi
+echo ""
+
+# Get admin token
+echo "[INFO] Getting Keycloak admin token..."
+KC_TOKEN=$(curl -s --max-time 10 -X POST "https://${AUTH_HOST}/realms/master/protocol/openid-connect/token" \
+  --data-urlencode "username=admin" \
+  --data-urlencode "password=${KEYCLOAK_ADMIN_PASSWORD}" \
+  --data-urlencode "grant_type=password" \
+  --data-urlencode "client_id=admin-cli" | jq -r '.access_token')
+
+if [ -z "$KC_TOKEN" ] || [ "$KC_TOKEN" = "null" ]; then
+  echo "ERROR: Failed to get Keycloak admin token"
+  exit 1
+fi
+
+echo "[INFO] Token acquired."
+echo ""
+
+KC_BASE="https://${AUTH_HOST}/admin/realms/${KEYCLOAK_REALM}"
+
+# Fetch all users
+echo "[INFO] Fetching users from realm $KEYCLOAK_REALM..."
+USERS_JSON=$(curl -s --max-time 30 "${KC_BASE}/users?max=500" \
+  -H "Authorization: Bearer $KC_TOKEN")
+
+USER_COUNT=$(echo "$USERS_JSON" | jq 'length')
+echo "[INFO] Found $USER_COUNT users"
+echo ""
+
+TOTAL_UPDATED=0
+TOTAL_SKIPPED=0
+TOTAL_WARNED=0
+TOTAL_GUESTS=0
+TOTAL_ERRORS=0
+
+for i in $(seq 0 $((USER_COUNT - 1))); do
+  USER_ID=$(echo "$USERS_JSON" | jq -r ".[$i].id")
+  USER_EMAIL=$(echo "$USERS_JSON" | jq -r ".[$i].email // empty")
+  USER_TYPE=$(echo "$USERS_JSON" | jq -r ".[$i].attributes.userType[0] // empty")
+  TENANT_EMAIL_ATTR=$(echo "$USERS_JSON" | jq -r ".[$i].attributes.tenantEmail[0] // empty")
+  RECOVERY_EMAIL=$(echo "$USERS_JSON" | jq -r ".[$i].attributes.recoveryEmail[0] // empty")
+
+  # Skip guests
+  if [ "$USER_TYPE" = "guest" ]; then
+    echo "  SKIP (guest): $USER_EMAIL"
+    TOTAL_GUESTS=$((TOTAL_GUESTS + 1))
+    continue
+  fi
+
+  # Skip users who already have tenantEmail set
+  if [ -n "$TENANT_EMAIL_ATTR" ]; then
+    echo "  SKIP (already set): $USER_EMAIL -> tenantEmail=$TENANT_EMAIL_ATTR"
+    TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1))
+    continue
+  fi
+
+  # Skip service accounts or users without email
+  if [ -z "$USER_EMAIL" ]; then
+    echo "  SKIP (no email): id=$USER_ID"
+    TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1))
+    continue
+  fi
+
+  # Check if user is stuck in swapped state
+  if [ -n "$RECOVERY_EMAIL" ] && [ "$USER_EMAIL" = "$RECOVERY_EMAIL" ]; then
+    echo "  WARNING: $USER_EMAIL appears stuck in swapped state (email == recoveryEmail)"
+    echo "    User ID: $USER_ID"
+    echo "    Current email: $USER_EMAIL"
+    echo "    Recovery email: $RECOVERY_EMAIL"
+    echo "    -> Manual review needed to determine correct tenant email"
+    TOTAL_WARNED=$((TOTAL_WARNED + 1))
+    continue
+  fi
+
+  # Normal state: set tenantEmail = user.email
+  if $DRY_RUN; then
+    echo "  DRY RUN: $USER_EMAIL -> would set tenantEmail=$USER_EMAIL"
+    TOTAL_UPDATED=$((TOTAL_UPDATED + 1))
+    continue
+  fi
+
+  echo "  UPDATE: $USER_EMAIL -> setting tenantEmail=$USER_EMAIL"
+
+  # Build the update payload — merge tenantEmail into existing attributes
+  UPDATE_PAYLOAD=$(echo "$USERS_JSON" | jq --arg te "$USER_EMAIL" ".[$i] | .attributes.tenantEmail = [\$te]")
+
+  HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X PUT \
+    "${KC_BASE}/users/${USER_ID}" \
+    -H "Authorization: Bearer $KC_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(echo "$UPDATE_PAYLOAD" | jq -c .)")
+
+  if [ "$HTTP_CODE" = "204" ]; then
+    echo "    -> Updated successfully"
+    TOTAL_UPDATED=$((TOTAL_UPDATED + 1))
+  else
+    echo "    -> ERROR: HTTP $HTTP_CODE"
+    TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
+  fi
+done
+
+echo ""
+echo "=== Migration Summary ==="
+echo "  Updated:  $TOTAL_UPDATED"
+echo "  Skipped:  $TOTAL_SKIPPED (already had tenantEmail or no email)"
+echo "  Guests:   $TOTAL_GUESTS (skipped)"
+echo "  Warnings: $TOTAL_WARNED (stuck in swapped state — needs manual review)"
+echo "  Errors:   $TOTAL_ERRORS"

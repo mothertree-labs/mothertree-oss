@@ -90,6 +90,8 @@ turn_realm = "matrix"
 openvpn_label = "openvpn-server"
 openvpn_type = "g6-nanode-1"  # 1GB RAM, 1 vCPU - cost effective for VPN
 openvpn_image = "linode/ubuntu22.04"
+# VPN network CIDR — prod: 10.8.0.0/24, dev: 10.9.0.0/24
+# Each env MUST use a distinct subnet to avoid SSH known_hosts conflicts
 vpn_network_cidr = "10.8.0.0/24"
 openvpn_disk_size = 25
 

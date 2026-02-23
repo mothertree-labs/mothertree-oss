@@ -15,7 +15,6 @@ metadata:
     app: roundcube
     tenant: ${TENANT_NAME}
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     kubernetes.io/ingress.class: nginx
     nginx.ingress.kubernetes.io/proxy-body-size: "25m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
@@ -37,8 +36,8 @@ metadata:
       add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
     nginx.ingress.kubernetes.io/affinity: "cookie"
     nginx.ingress.kubernetes.io/session-cookie-name: "ROUNDCUBE_ROUTE"
-    nginx.ingress.kubernetes.io/session-cookie-expires: "3600"
-    nginx.ingress.kubernetes.io/session-cookie-max-age: "3600"
+    nginx.ingress.kubernetes.io/session-cookie-expires: "2592000"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "2592000"
     nginx.ingress.kubernetes.io/session-cookie-change-on-failure: "true"
     nginx.ingress.kubernetes.io/session-cookie-samesite: "Lax"
     nginx.ingress.kubernetes.io/session-cookie-conditional-samesite-none: "true"
@@ -47,7 +46,7 @@ spec:
   tls:
   - hosts:
     - ${WEBMAIL_HOST}
-    secretName: roundcube-tls
+    secretName: wildcard-tls-${TENANT_NAME}
   rules:
   - host: ${WEBMAIL_HOST}
     http:

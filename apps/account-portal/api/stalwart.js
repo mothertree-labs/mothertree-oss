@@ -20,7 +20,7 @@ function getAdminAuth() {
  * Ensure a user principal exists in Stalwart's internal directory.
  * Creates the principal if it doesn't exist (lazy provisioning).
  */
-async function ensureUserExists(email, name) {
+async function ensureUserExists(email, name, quotaBytes) {
   const adminAuth = getAdminAuth();
 
   const checkResponse = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
@@ -32,19 +32,23 @@ async function ensureUserExists(email, name) {
   }
 
   console.log(`Stalwart: creating principal for ${email}`);
+  const body = {
+    type: 'individual',
+    name: email,
+    emails: [email],
+    description: name || '',
+    secrets: [],
+  };
+  if (quotaBytes) {
+    body.quota = quotaBytes;
+  }
   const createResponse = await fetch(`${STALWART_API_URL}/api/principal`, {
     method: 'POST',
     headers: {
       'Authorization': adminAuth,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      type: 'individual',
-      name: email,
-      emails: [email],
-      description: name || '',
-      secrets: [],
-    }),
+    body: JSON.stringify(body),
   });
 
   if (createResponse.status === 409) {

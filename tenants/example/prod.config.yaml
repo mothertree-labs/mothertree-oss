@@ -24,6 +24,7 @@ dns:
   admin_subdomain: admin        # admin.example.com (tenant admin portal)
   account_subdomain: account    # account.example.com (user self-service portal)
   calendar_subdomain: calendar  # calendar.example.com
+  office_subdomain: office      # office.example.com
   # For prod, no env label in DNS (matrix.example.com not matrix.prod.example.com)
   env_dns_label: ""
   # Cookie domain for shared authentication
@@ -37,12 +38,17 @@ keycloak:
 smtp:
   domain: example.com
 
+# Email storage configuration
+email:
+  default_quota_mb: 5120   # Default mailbox quota per user in MB (0 = unlimited)
+
 # Database names (tenant-specific to avoid conflicts in shared PostgreSQL)
 database:
   docs_db: docs_example
   nextcloud_db: nextcloud_example
   stalwart_db: stalwart_example
   roundcube_db: roundcube_example
+  synapse_db: synapse_example
 
 # S3 bucket naming
 s3:
@@ -149,9 +155,9 @@ resources:
   keycloak:
     replicas: 2  # Fixed HA, no HPA
 
-  # Synapse - cannot scale yet (PVC constraint)
+  # Synapse - media on S3, no PVC constraint
   synapse:
-    replicas: 1  # No HPA - PVC with ReadWriteOnce
+    replicas: 1
     memory_request: 1Gi
     memory_limit: 2Gi
     cpu_request: 500m
@@ -170,6 +176,17 @@ resources:
   redis:
     replicas: 1  # 0 = standalone, 1+ = sentinel mode
 
+# Legal / policy document URLs (displayed in portal footers, login page, emails)
+# Leave empty to hide policy links
+policies:
+  privacy_policy_url: ""
+  terms_of_use_url: ""
+  acceptable_use_policy_url: ""
+
+# Alerting configuration (used by deploy_infra for infra tenant only)
+alerting:
+  oncall_email: ""  # REQUIRED for infra tenant: email address for alert notifications
+
 # Feature flags
 features:
   jitsi_enabled: true
@@ -183,3 +200,5 @@ features:
   admin_portal_enabled: true
   account_portal_enabled: true
   calendar_enabled: true
+  office_enabled: true
+  google_import_enabled: false

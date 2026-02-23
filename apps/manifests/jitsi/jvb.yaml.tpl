@@ -160,6 +160,13 @@ spec:
             ice {
               advertise-private-candidates = false
             }
+            health {
+              // Fail health checks if STUN discovery fails at startup.
+              // This makes TURN reachability a prerequisite for JVB to run,
+              // giving us proactive detection of firewall/network issues
+              // blocking the JVB media port — even without active calls.
+              require-stun = true
+            }
           }
 
           ice4j {

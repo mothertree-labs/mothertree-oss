@@ -7,7 +7,7 @@ key server.key
 dh dh.pem
 server ${vpn_network_cidr}
 ifconfig-pool-persist ipp.txt
-push "route 10.8.0.0 255.255.255.0"
+push "route ${vpn_network_address} ${vpn_netmask}"
 push "route ${service_cidr}"
 push "route ${cluster_subnet_cidr}"
 push "route ${vpn_server_subnet_cidr}"

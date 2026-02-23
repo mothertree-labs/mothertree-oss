@@ -8,13 +8,12 @@ web:
   ingress:
     enabled: true
     className: nginx
-    annotations:
-      cert-manager.io/cluster-issuer: letsencrypt-prod
+    annotations: {}
     hosts:
       - host: '{{ env "JITSI_HOST" }}'
         paths: ["/"]
     tls:
-      - secretName: jitsi-tls
+      - secretName: 'wildcard-tls-{{ env "TENANT_NAME" }}'
         hosts:
           - '{{ env "JITSI_HOST" }}'
 

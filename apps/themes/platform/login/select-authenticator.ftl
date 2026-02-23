@@ -10,7 +10,7 @@
         <style>
             /* Override Keycloak background - matching platform cream */
             html.login-pf, html.login-pf body, body, .login-pf-page {
-                background: #f2efe8 !important;
+                background: #F3E8D6 !important;
                 background-image: none !important;
                 min-height: 100vh !important;
             }
@@ -41,12 +41,12 @@
                 background: transparent;
             }
             .platform-title { 
-                font-family: 'Tomorrow', sans-serif;
-                font-size: 2.5rem; font-weight: 400; color: #4a6741; 
+                font-family: 'Figtree', sans-serif;
+                font-size: 2.5rem; font-weight: 600; color: #A7AE8D;
                 margin: 0 0 0.5rem 0; letter-spacing: 0.03em;
             }
-            .platform-welcome { 
-                font-family: 'Instrument Sans', sans-serif;
+            .platform-welcome {
+                font-family: 'Figtree', sans-serif;
                 font-size: 1.1rem; color: #6b6b6b; margin: 0; font-weight: 400; 
             }
             
@@ -82,10 +82,10 @@
             }
             
             .authenticator-link:hover {
-                border-color: #4a6741 !important;
+                border-color: #A7AE8D !important;
                 background: #f8fdf7 !important;
                 transform: translateY(-2px);
-                box-shadow: 0 4px 12px rgba(74, 103, 65, 0.15) !important;
+                box-shadow: 0 4px 12px rgba(167, 174, 141, 0.15) !important;
             }
             
             .authenticator-icon {
@@ -94,7 +94,7 @@
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                background: #f2efe8;
+                background: #F3E8D6;
                 border-radius: 8px;
                 flex-shrink: 0;
             }
@@ -102,7 +102,7 @@
             .authenticator-icon svg {
                 width: 28px;
                 height: 28px;
-                color: #4a6741;
+                color: #A7AE8D;
             }
             
             .authenticator-info {
@@ -110,7 +110,7 @@
             }
             
             .authenticator-name {
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 1.1rem;
                 font-weight: 500;
                 color: #333;
@@ -118,7 +118,7 @@
             }
             
             .authenticator-description {
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 0.9rem;
                 color: #6b6b6b;
                 margin: 0;
@@ -128,7 +128,7 @@
             .back-link {
                 text-align: center;
                 margin-top: 1.5rem;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
             }
             
             .back-link a {
@@ -137,14 +137,14 @@
             }
             
             .back-link a:hover {
-                color: #4a6741;
+                color: #A7AE8D;
                 text-decoration: underline;
             }
             
             /* Recovery link */
             .recover-passkey {
                 margin-top: 1rem;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
             }
             
             .recover-passkey a {
@@ -154,12 +154,12 @@
             }
             
             .recover-passkey a:hover {
-                color: #4a6741;
+                color: #A7AE8D;
                 text-decoration: underline;
             }
         </style>
         <div class="platform-header">
-            <h1 class="platform-title">${realmDisplayName!"the platform"}</h1>
+            <h1 class="platform-title">${realm.displayName!"the platform"}</h1>
             <p class="platform-welcome">Choose how to sign in</p>
         </div>
     <#elseif section = "form">

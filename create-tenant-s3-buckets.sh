@@ -3,7 +3,7 @@
 # Create/verify all S3 buckets for a tenant
 # This script creates four buckets:
 # 1. docs-media-[<env>-]<tenant> - Docs media
-# 2. matrix-media-[<env>-]<tenant> - Matrix media (for future use)
+# 2. matrix-media-[<env>-]<tenant> - Matrix media (Synapse S3 storage provider)
 # 3. files-media-[<env>-]<tenant> - Nextcloud files
 # 4. mail-media-[<env>-]<tenant> - Stalwart mail blob storage
 #
@@ -398,7 +398,7 @@ main() {
     # MATRIX BUCKET
     # ========================================
     echo ""
-    echo "--- Matrix Bucket (for future use) ---"
+    echo "--- Matrix Bucket (Synapse media) ---"
     if is_placeholder "$MATRIX_ACCESS_KEY" || is_placeholder "$MATRIX_SECRET_KEY"; then
         print_warning "Matrix credentials are placeholders - creating new keys..."
         keys=$(create_linode_keys "${TENANT}-${MT_ENV}-matrix")

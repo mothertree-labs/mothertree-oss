@@ -4,135 +4,136 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title><%= title %></title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500&family=Tomorrow:wght@400&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/css/fonts.css">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    
+
     body {
-      font-family: 'Instrument Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      font-family: 'Figtree', system-ui, -apple-system, sans-serif;
+      background: #fff;
+      color: #141511;
       min-height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 2rem;
     }
-    
+
     .bootstrap-container {
       max-width: 420px;
       width: 100%;
-      background: rgba(255, 255, 255, 0.95);
+      background: #F3E8D6;
       border-radius: 16px;
       padding: 2.5rem;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      box-shadow: 0 10px 30px rgba(20, 21, 17, 0.08);
     }
-    
+
     .bootstrap-header {
       text-align: center;
       margin-bottom: 2rem;
     }
-    
+
     .bootstrap-title {
-      font-family: 'Tomorrow', sans-serif;
+      font-family: 'Figtree', sans-serif;
       font-size: 2.25rem;
-      color: #00d4aa;
+      font-weight: 600;
+      color: #141511;
       margin-bottom: 0.5rem;
-      letter-spacing: 1px;
     }
-    
+
     .bootstrap-subtitle {
-      color: #666;
+      color: #6B6B6B;
       font-size: 1rem;
     }
-    
+
     .info-box {
-      background: #e8f5f1;
-      border: 1px solid #00d4aa;
+      background: #f0f2eb;
+      border: 1px solid #A7AE8D;
       border-radius: 8px;
       padding: 1rem;
       margin-bottom: 1.5rem;
       font-size: 0.9rem;
-      color: #1a1a2e;
+      color: #141511;
       line-height: 1.5;
     }
-    
+
     .error-message {
       background: #fee;
       border: 1px solid #fcc;
-      color: #c00;
+      color: #A64330;
       padding: 0.75rem 1rem;
       border-radius: 8px;
       margin-bottom: 1.25rem;
       font-size: 0.9rem;
     }
-    
+
     .form-group {
       margin-bottom: 1.25rem;
     }
-    
+
     .form-group label {
       display: block;
       margin-bottom: 0.5rem;
-      color: #333;
+      color: #141511;
       font-weight: 500;
       font-size: 0.95rem;
     }
-    
+
     .form-group input {
       width: 100%;
       padding: 0.75rem 1rem;
       border: 2px solid #e0e0e0;
       border-radius: 8px;
       font-size: 1rem;
+      font-family: inherit;
       transition: border-color 0.2s;
     }
-    
+
     .form-group input:focus {
       outline: none;
-      border-color: #00d4aa;
+      border-color: #A7AE8D;
     }
-    
+
     .submit-btn {
       width: 100%;
       padding: 1rem;
-      background: linear-gradient(135deg, #00d4aa 0%, #00b894 100%);
-      color: white;
+      background: #A7AE8D;
+      color: #F3E8D6;
       border: none;
       border-radius: 8px;
       font-size: 1rem;
-      font-weight: 500;
+      font-family: inherit;
+      font-weight: 600;
       cursor: pointer;
-      transition: transform 0.2s, box-shadow 0.2s;
+      transition: background 0.2s;
       margin-top: 0.5rem;
     }
-    
+
     .submit-btn:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 6px 20px rgba(0, 212, 170, 0.4);
+      background: #8A9475;
     }
-    
+
     .back-link {
       text-align: center;
       margin-top: 1.5rem;
     }
-    
+
     .back-link a {
-      color: #666;
+      color: #6B6B6B;
       text-decoration: none;
       font-size: 0.9rem;
     }
-    
+
     .back-link a:hover {
-      color: #00d4aa;
+      color: #A7AE8D;
     }
   </style>
 </head>
 <body>
   <div class="bootstrap-container">
     <div class="bootstrap-header">
-      <h1 class="bootstrap-title">MotherTree</h1>
+      <h1 class="bootstrap-title">mothertree</h1>
       <p class="bootstrap-subtitle">First-Time Admin Login</p>
     </div>
     
@@ -164,6 +165,14 @@
     <div class="back-link">
       <a href="/">Back to Home</a>
     </div>
+
+    <% if (privacyPolicyUrl || termsOfUseUrl || acceptableUsePolicyUrl) { %>
+    <div style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #e0e0e0; text-align: center; font-size: 0.75rem; color: #999;">
+      <% if (privacyPolicyUrl) { %><a href="<%= privacyPolicyUrl %>" target="_blank" rel="noopener" style="color: #999; text-decoration: none; margin: 0 0.5rem;">Privacy Policy</a><% } %>
+      <% if (termsOfUseUrl) { %><a href="<%= termsOfUseUrl %>" target="_blank" rel="noopener" style="color: #999; text-decoration: none; margin: 0 0.5rem;">Terms of Use</a><% } %>
+      <% if (acceptableUsePolicyUrl) { %><a href="<%= acceptableUsePolicyUrl %>" target="_blank" rel="noopener" style="color: #999; text-decoration: none; margin: 0 0.5rem;">Acceptable Use Policy</a><% } %>
+    </div>
+    <% } %>
   </div>
 </body>
 </html>

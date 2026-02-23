@@ -1,0 +1,108 @@
+# notify_push (Client Push) for Nextcloud
+# Replaces browser polling with WebSocket push notifications.
+# Deployed to the tenant files namespace (tn-<tenant>-files)
+#
+# Without notify_push, Nextcloud browsers poll every ~30s for:
+#   - Notifications (/ocs/v2.php/apps/notifications/api/v2/notifications)
+#   - Calendar changes (PROPFIND /remote.php/dav/calendars/...)
+#   - User status heartbeat
+# This causes ~3 ops/sec per open tab against PostgreSQL.
+#
+# With notify_push, the Rust binary subscribes to Redis pub/sub events
+# and pushes changes to browsers over WebSocket, eliminating polling.
+#
+# Requires:
+#   - Secret 'notify-push-config' with DATABASE_URL and REDIS_URL
+#     (created by deploy-nextcloud.sh)
+#   - Redis running in the same namespace
+#   - Nextcloud accessible at the internal service URL
+#   - Ingress path /push/ routing to this service (configured in helmfile values)
+#
+# Template variables (substituted by envsubst in deploy-nextcloud.sh):
+#   ${NS_FILES} - tenant files namespace
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notify-push
+  labels:
+    app: notify-push
+    component: nextcloud-push
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notify-push
+  template:
+    metadata:
+      labels:
+        app: notify-push
+        component: nextcloud-push
+    spec:
+      containers:
+        - name: notify-push
+          image: icewind1991/notify_push:1.3.0
+          env:
+            - name: PORT
+              value: "7867"
+            - name: NEXTCLOUD_URL
+              value: "http://nextcloud.${NS_FILES}.svc.cluster.local:8080"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: notify-push-config
+                  key: DATABASE_URL
+            - name: DATABASE_PREFIX
+              value: "oc_"
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: notify-push-config
+                  key: REDIS_URL
+            - name: LOG
+              value: "warn"
+            - name: METRICS_PORT
+              value: "9090"
+          ports:
+            - containerPort: 7867
+              name: http
+            - containerPort: 9090
+              name: metrics
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            tcpSocket:
+              port: 7867
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notify-push
+  labels:
+    app: notify-push
+    component: nextcloud-push
+spec:
+  selector:
+    app: notify-push
+  ports:
+    - port: 7867
+      targetPort: 7867
+      name: http
+    - port: 9090
+      targetPort: 9090
+      name: metrics
+  type: ClusterIP

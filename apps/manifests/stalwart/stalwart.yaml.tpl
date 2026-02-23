@@ -219,9 +219,12 @@ data:
     private-key = "%{file:/opt/stalwart/tls/tls.key}%"
     
     # Spam filtering
+    # - DNSBL is active by default (Spamhaus, SpamCop, etc.) via the downloaded spam-filter resource
+    # - The FTRL-Proximal classifier auto-trains when users move messages to/from Junk folder
+    #   (triggered by Roundcube's markasjunk plugin)
     [spam]
     enabled = true
-    
+
     # Override spam scores for rules that are irrelevant for internal relay traffic
     # Stalwart always receives mail from K8s Postfix on internal IPs, so these checks
     # would always flag legitimate mail incorrectly. Setting score to 0.0 neutralizes them.
@@ -264,7 +267,9 @@ data:
                   "server.*", "authentication.fallback-admin.*",
                   "cluster.*", "config.local-keys.*", "storage.data", "storage.blob",
                   "storage.lookup", "storage.fts", "storage.directory", "certificate.*",
-                  "session.rcpt.*", "queue.strategy.*", "queue.route.*", "oauth.*"]
+                  "session.rcpt.*", "queue.strategy.*", "queue.route.*", "oauth.*",
+                  "spam.*", "spam-filter.list.*",
+                  "auth.iprev.*", "auth.spf.*", "auth.dkim.*", "auth.dmarc.*"]
 
 ---
 apiVersion: apps/v1
@@ -384,7 +389,7 @@ spec:
           name: stalwart-config
       - name: tls
         secret:
-          secretName: stalwart-tls
+          secretName: wildcard-tls-${TENANT_NAME}
       - name: data
         emptyDir: {}
 

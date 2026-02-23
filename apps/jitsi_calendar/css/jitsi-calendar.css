@@ -1,0 +1,31 @@
+.jitsi-meeting-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 12px;
+	margin: 4px 0;
+	border: none;
+	border-radius: 16px;
+	background-color: #0082c9;
+	color: #fff;
+	font-size: 13px;
+	font-weight: 500;
+	cursor: pointer;
+	line-height: 1.5;
+	transition: background-color 0.15s ease;
+	white-space: nowrap;
+}
+
+.jitsi-meeting-btn:hover {
+	background-color: #006aa3;
+}
+
+.jitsi-meeting-btn:active {
+	background-color: #005580;
+}
+
+.jitsi-meeting-btn svg {
+	width: 16px;
+	height: 16px;
+	flex-shrink: 0;
+}

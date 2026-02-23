@@ -17,9 +17,10 @@ metadata:
     app: keycloak
     tenant: ${TENANT}
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
     nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header Cache-Control "no-store" always;
     nginx.ingress.kubernetes.io/server-snippet: |
       # Override Keycloak's minimal CSP with a more complete one
       proxy_hide_header Content-Security-Policy;
@@ -40,4 +41,4 @@ spec:
   tls:
     - hosts:
         - ${AUTH_HOST}
-      secretName: ${AUTH_HOST}-tls
+      secretName: wildcard-tls-${TENANT_NAME}

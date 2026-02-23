@@ -100,7 +100,6 @@ async function swapToTenantEmailIfNeeded(userId) {
         username: tenantEmail,  // Also update username to tenant email
         attributes: {
           ...user.attributes,
-          tenantEmail: [],      // Clear the attribute since it's now applied
           isRecoveryFlow: [],   // Clear recovery flag
         },
       }),
@@ -115,6 +114,53 @@ async function swapToTenantEmailIfNeeded(userId) {
   }
 
   return { swapped: false };
+}
+
+/**
+ * Ensure the passkey credential is ordered before password in Keycloak.
+ *
+ * Keycloak 26.5's AuthenticationSelectionResolver picks the first credential
+ * by priority (creation order). If a password was provisioned before the
+ * passkey (e.g. bootstrap admin), the password form is shown instead of the
+ * WebAuthn prompt. Moving the passkey to first fixes this.
+ */
+async function ensurePasskeyFirst(userId) {
+  const token = await getServiceToken();
+  const credentialsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/credentials`;
+
+  const response = await fetch(credentialsUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  if (!response.ok) {
+    console.error(`ensurePasskeyFirst: failed to fetch credentials for ${userId}: ${response.status}`);
+    return;
+  }
+
+  const credentials = await response.json();
+  const pwIndex = credentials.findIndex(c => c.type === 'password');
+  const passkeyIndex = credentials.findIndex(c => c.type === 'webauthn-passwordless');
+
+  if (pwIndex === -1 || passkeyIndex === -1 || passkeyIndex < pwIndex) {
+    return; // Nothing to fix
+  }
+
+  const passkeyCredId = credentials[passkeyIndex].id;
+  console.log(`ensurePasskeyFirst: reordering credentials for ${userId} — moving passkey ${passkeyCredId} to first`);
+
+  const moveResponse = await fetch(
+    `${credentialsUrl}/${passkeyCredId}/moveToFirst`,
+    {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+    }
+  );
+
+  if (moveResponse.ok || moveResponse.status === 204) {
+    console.log(`ensurePasskeyFirst: passkey moved to first for ${userId}`);
+  } else {
+    console.error(`ensurePasskeyFirst: moveToFirst failed for ${userId}: ${moveResponse.status}`);
+  }
 }
 
 /**
@@ -133,7 +179,21 @@ async function findUserByEmail(email) {
   }
 
   const users = await response.json();
-  return users.length > 0 ? users[0] : null;
+  if (users.length > 0) return users[0];
+
+  // Fallback: search by tenantEmail attribute (user may be in swapped state
+  // with recovery email as primary, so primary email search won't match)
+  const attrUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?q=tenantEmail:${encodeURIComponent(email)}&exact=true`;
+  const attrResponse = await fetch(attrUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  if (!attrResponse.ok) {
+    return null;
+  }
+
+  const attrUsers = await attrResponse.json();
+  return attrUsers.length > 0 ? attrUsers[0] : null;
 }
 
 /**
@@ -146,7 +206,7 @@ async function sendNotificationEmail(toEmail, subject, message) {
   const smtpHost = process.env.SMTP_HOST || 'postfix-internal.infra-mail.svc.cluster.local';
   const smtpPort = process.env.SMTP_PORT || 587;
   const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.TENANT_DOMAIN || 'example.com'}`;
-  const smtpFromName = process.env.SMTP_FROM_NAME || 'MotherTree';
+  const smtpFromName = process.env.SMTP_FROM_NAME || process.env.PLATFORM_NAME || 'Platform';
 
   console.log(`[NOTIFICATION EMAIL] Sending to: ${toEmail}`);
   console.log(`[NOTIFICATION EMAIL] Subject: ${subject}`);
@@ -169,7 +229,7 @@ async function sendNotificationEmail(toEmail, subject, message) {
       text: message,
       html: `
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-          <h1 style="color: #4a6741; font-size: 24px; margin-bottom: 20px;">MotherTree</h1>
+          <h1 style="color: #4a6741; font-size: 24px; margin-bottom: 20px;">${process.env.PLATFORM_NAME || 'Platform'}</h1>
           <div style="background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
             <p style="color: #9a3412; margin: 0; font-size: 14px;">
               <strong>Security Notice</strong>
@@ -203,22 +263,10 @@ async function sendNotificationEmail(toEmail, subject, message) {
 async function initiateAccountRecovery({ tenantEmail, recoveryEmail }) {
   const token = await getServiceToken();
 
-  // 1. Find the user by tenant email
+  // 1. Find the user by tenant email (also searches tenantEmail attribute for swapped users)
   console.log(`Account recovery requested for: ${tenantEmail}`);
 
-  // First check if user exists with tenantEmail as their current email
   let user = await findUserByEmail(tenantEmail);
-
-  // Also check if the tenantEmail is stored in the tenantEmail attribute
-  // (in case user is mid-registration with recovery email as primary)
-  if (!user) {
-    const usersUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?max=500`;
-    const response = await fetch(usersUrl, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
-    const allUsers = await response.json();
-    user = allUsers.find(u => u.attributes?.tenantEmail?.[0] === tenantEmail);
-  }
 
   if (!user) {
     throw new Error('No account found with that email address');
@@ -377,7 +425,6 @@ async function initiateAccountRecovery({ tenantEmail, recoveryEmail }) {
           email: tenantEmail,
           attributes: {
             ...user.attributes,
-            tenantEmail: [],
             isRecoveryFlow: [],
           },
         }),
@@ -401,8 +448,8 @@ async function initiateAccountRecovery({ tenantEmail, recoveryEmail }) {
   // 7. Send notification to tenant email
   await sendNotificationEmail(
     tenantEmail,
-    'MotherTree Account Recovery Initiated',
-    `A passkey recovery was requested for your MotherTree account (${tenantEmail}). ` +
+    `${process.env.PLATFORM_NAME || 'Platform'} Account Recovery Initiated`,
+    `A passkey recovery was requested for your ${process.env.PLATFORM_NAME || 'Platform'} account (${tenantEmail}). ` +
     `A recovery link has been sent to your recovery email address. ` +
     `If you did not request this, please contact support immediately.`
   );
@@ -611,6 +658,7 @@ async function createGuestUser({ email, firstName, lastName, redirectUri }) {
 
 module.exports = {
   swapToTenantEmailIfNeeded,
+  ensurePasskeyFirst,
   initiateAccountRecovery,
   createGuestUser,
   findUserByEmail,

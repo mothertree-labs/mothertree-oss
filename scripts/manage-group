@@ -205,6 +205,66 @@ api_call() {
     RESPONSE_BODY=$(echo "$result" | sed '$d')
 }
 
+# ---- Verify SMTP acceptance and flush Postfix cache ----
+verify_and_flush_cache() {
+    local email="$1"
+    local stalwart_svc="stalwart.${NS_MAIL}.svc.cluster.local"
+
+    # Find the K8s Postfix pod
+    local postfix_pod
+    postfix_pod=$(kubectl get pods -n infra-mail --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+    if [ -z "$postfix_pod" ]; then
+        print_warning "Could not find Postfix pod in infra-mail — skipping cache flush"
+        return
+    fi
+
+    # Poll Stalwart SMTP until it accepts the address (up to 30s)
+    print_status "Verifying Stalwart accepts <$email> via SMTP..."
+    local attempt=0
+    local max_attempts=6
+    while [ $attempt -lt $max_attempts ]; do
+        local result
+        result=$(kubectl exec -n infra-mail "$postfix_pod" -c postfix -- \
+            python3 -c "
+import smtplib, sys
+try:
+    s = smtplib.SMTP('${stalwart_svc}', 25, timeout=10)
+    s.ehlo('verify.local')
+    s.mail('verify@local')
+    code, _ = s.rcpt('${email}')
+    s.quit()
+    print(code)
+except Exception as e:
+    print(f'err: {e}', file=sys.stderr)
+    print(0)
+" 2>/dev/null)
+
+        if [ "$result" = "250" ]; then
+            print_success "Stalwart accepts <$email>"
+            break
+        fi
+
+        attempt=$((attempt + 1))
+        if [ $attempt -lt $max_attempts ]; then
+            sleep 5
+        fi
+    done
+
+    if [ "$result" != "250" ]; then
+        print_warning "Stalwart did not accept <$email> after ${max_attempts} attempts — cache not flushed"
+        return
+    fi
+
+    # Flush the K8s Postfix verify cache entry
+    print_status "Flushing K8s Postfix address verification cache..."
+    kubectl exec -n infra-mail "$postfix_pod" -c postfix -- \
+        sh -c "postmap -d '${email}' btree:/var/lib/postfix/verify 2>/dev/null; postfix reload" \
+        >/dev/null 2>&1
+
+    print_success "Postfix cache flushed for <$email>"
+}
+
 # ---- Action: list all groups ----
 do_list() {
     print_status "Listing groups for $TENANT ($MT_ENV)..."
@@ -334,6 +394,7 @@ do_create_or_add() {
                         echo "    - $member"
                     done
                 fi
+                verify_and_flush_cache "$LIST_EMAIL"
             fi
         else
             print_error "Failed to create group (HTTP $HTTP_CODE)"

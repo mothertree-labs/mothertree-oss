@@ -10,9 +10,9 @@
         <style>
             /* Colors matching platform theme */
             :root {
-                --sage: #4a6741;
-                --sage-dark: #3d5636;
-                --cream: #f2efe8;
+                --sage: #A7AE8D;
+                --sage-dark: #8A9475;
+                --cream: #F3E8D6;
                 --warm-gray: #6b6b6b;
             }
             
@@ -38,16 +38,16 @@
             }
             
             .platform-title {
-                font-family: 'Tomorrow', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 2.5rem;
-                font-weight: 400;
+                font-weight: 600;
                 color: var(--sage);
                 margin: 0 0 0.5rem 0;
                 letter-spacing: 0.03em;
             }
             
             .platform-welcome {
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 1.1rem;
                 color: var(--warm-gray);
                 margin: 0;
@@ -82,7 +82,7 @@
             }
             
             .reset-title {
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 1.5rem;
                 font-weight: 500;
                 color: var(--sage);
@@ -91,7 +91,7 @@
             }
             
             .reset-message {
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 color: var(--warm-gray);
                 text-align: center;
                 margin-bottom: 1.5rem;
@@ -105,7 +105,7 @@
             
             .form-group label {
                 display: block;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 0.9rem;
                 color: var(--warm-gray);
                 margin-bottom: 0.5rem;
@@ -117,14 +117,14 @@
                 border: 1px solid #ddd;
                 border-radius: 8px;
                 font-size: 1rem;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 box-sizing: border-box;
             }
             
             .form-group input:focus {
                 outline: none;
                 border-color: var(--sage);
-                box-shadow: 0 0 0 3px rgba(74, 103, 65, 0.1);
+                box-shadow: 0 0 0 3px rgba(167, 174, 141, 0.1);
             }
             
             .form-group input.error {
@@ -135,7 +135,7 @@
                 color: #dc3545;
                 font-size: 0.85rem;
                 margin-top: 0.5rem;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
             }
             
             .submit-btn {
@@ -148,16 +148,16 @@
                 color: white;
                 font-size: 1rem;
                 font-weight: 500;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 cursor: pointer;
                 transition: all 0.2s ease;
-                box-shadow: 0 4px 12px rgba(74, 103, 65, 0.3);
+                box-shadow: 0 4px 12px rgba(167, 174, 141, 0.3);
             }
             
             .submit-btn:hover {
                 background: var(--sage-dark);
                 transform: translateY(-2px);
-                box-shadow: 0 6px 16px rgba(74, 103, 65, 0.4);
+                box-shadow: 0 6px 16px rgba(167, 174, 141, 0.4);
             }
             
             .back-link {
@@ -167,7 +167,7 @@
             
             .back-link a {
                 color: var(--warm-gray);
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 0.9rem;
                 text-decoration: none;
             }
@@ -183,7 +183,7 @@
             .pf-c-login__footer, .login-pf-page-footer { background: transparent !important; }
         </style>
         <div class="platform-header">
-            <h1 class="platform-title">${realmDisplayName!"the platform"}</h1>
+            <h1 class="platform-title">${realm.displayName!"the platform"}</h1>
             <p class="platform-welcome">Reset your credentials</p>
         </div>
     <#elseif section = "form">
@@ -197,7 +197,7 @@
             <h2 class="reset-title">Recover Access</h2>
             
             <p class="reset-message">
-                Enter your <strong>recovery email address</strong> below. This is the email address associated with your ${realmDisplayName!"the platform"} account.
+                Enter your <strong>recovery email address</strong> below. This is the email address associated with your ${realm.displayName!"the platform"} account.
             </p>
             
             <p class="reset-message" style="font-size: 0.9rem;">

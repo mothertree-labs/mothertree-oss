@@ -3,72 +3,34 @@
 # Deploy Home Page Application
 # This script deploys the home page switcher application to Kubernetes
 #
-# Prerequisites:
-#   - Environment variables must be set (by create_env or manually):
-#     HOME_HOST, DOCS_HOST, MATRIX_HOST, TENANT_NAME, TENANT_DISPLAY_NAME
-#   - Kubeconfig must be available
+# Usage:
+#   ./apps/deploy-home.sh -e dev -t example
 
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
 
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+mt_usage() {
+    echo "Usage: $0 -e <env> -t <tenant>"
+    echo ""
+    echo "Deploy Home Page Application for a tenant."
+    echo ""
+    echo "Options:"
+    echo "  -e <env>       Environment (e.g., dev, prod)"
+    echo "  -t <tenant>    Tenant name (e.g., example)"
+    echo "  -h, --help     Show this help"
 }
 
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
+mt_parse_args "$@"
+mt_require_env
+mt_require_tenant
 
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
+source "${REPO_ROOT}/scripts/lib/config.sh"
+mt_load_tenant_config
 
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-# Configuration
-MT_ENV=${MT_ENV:-prod}
-if [ -z "${TENANT:-}" ]; then
-    print_error "TENANT is not set. Usage: MT_ENV=dev TENANT=example ./apps/deploy-home.sh"
-    exit 1
-fi
-REPO_ROOT="${REPO_ROOT:-/workspace}"
-
-export KUBECONFIG="${KUBECONFIG:-$REPO_ROOT/kubeconfig.$MT_ENV.yaml}"
-
-# Validate kubeconfig exists
-if [ ! -f "$KUBECONFIG" ]; then
-    print_error "Kubeconfig not found: $KUBECONFIG"
-    print_error "Please run phase1 deployment first or set KUBECONFIG."
-    exit 1
-fi
-
-# Validate required environment variables
-required_vars=("HOME_HOST" "DOCS_HOST" "MATRIX_HOST" "TENANT_NAME")
-missing_vars=()
-for var in "${required_vars[@]}"; do
-    if [ -z "${!var:-}" ]; then
-        missing_vars+=("$var")
-    fi
-done
-
-if [ ${#missing_vars[@]} -gt 0 ]; then
-    print_error "Required environment variables not set: ${missing_vars[*]}"
-    print_error "This script should be called from create_env which sets these from tenant config."
-    print_error "Or set them manually: HOME_HOST=home.example.org DOCS_HOST=docs.example.org ..."
-    exit 1
-fi
-
-# Set defaults for optional vars
-export NS_HOME="${NS_HOME:-home}"
-export TENANT_DISPLAY_NAME="${TENANT_DISPLAY_NAME:-$TENANT_NAME}"
+mt_require_commands kubectl envsubst
 
 print_status "Deploying Home Page Application..."
 print_status "Environment: $MT_ENV"
@@ -82,8 +44,8 @@ print_status "Creating namespace..."
 kubectl create namespace "$NS_HOME" --dry-run=client -o yaml | kubectl apply -f -
 
 # Apply non-templated manifests with namespace substitution
+# (namespace.yaml is skipped — line above already creates the namespace)
 print_status "Deploying home page components..."
-cat "$REPO_ROOT/apps/templates/home/namespace.yaml" | sed "s/namespace: home/namespace: $NS_HOME/g" | kubectl apply -f -
 cat "$REPO_ROOT/apps/templates/home/nginx-config.yaml" | sed "s/namespace: home/namespace: $NS_HOME/g" | kubectl apply -f -
 cat "$REPO_ROOT/apps/templates/home/deployment.yaml" | sed "s/namespace: home/namespace: $NS_HOME/g" | kubectl apply -f -
 cat "$REPO_ROOT/apps/templates/home/service.yaml" | sed "s/namespace: home/namespace: $NS_HOME/g" | kubectl apply -f -
@@ -107,7 +69,7 @@ kubectl get ingress home-page -n "$NS_HOME"
 
 # Get the external IP
 print_status "Getting external IP..."
-EXTERNAL_IP=$(kubectl get service -n "${NS_INGRESS:-infra-ingress}" ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "unknown")
+EXTERNAL_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "unknown")
 echo "External IP: $EXTERNAL_IP"
 
 # Check DNS propagation

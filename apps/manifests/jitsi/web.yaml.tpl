@@ -72,9 +72,7 @@ spec:
           value: "1"
         - name: ENABLE_AUTO_LOGIN
           value: "0"
-        # Keycloak adapter URL for OIDC proxy
-        - name: ADAPTER_INTERNAL_URL
-          value: "http://jitsi-keycloak-adapter:9000"
+        # ADAPTER_INTERNAL_URL moved below POD_NAMESPACE (uses FQDN for nginx resolver)
         - name: ENABLE_SCTP
           value: "true"
         - name: ENABLE_COLIBRI_WEBSOCKET
@@ -91,8 +89,19 @@ spec:
           value: "0"
         - name: JICOFO_AUTH_USER
           value: "focus"
+        # Pod namespace via downward API — used to construct FQDNs for nginx resolver
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: XMPP_BOSH_URL_BASE
-          value: "http://jitsi-prosody:5280"
+          value: "http://jitsi-prosody.$(POD_NAMESPACE).svc.cluster.local:5280"
+        # Keycloak adapter URL (FQDN for nginx resolver compatibility)
+        - name: ADAPTER_INTERNAL_URL
+          value: "http://jitsi-keycloak-adapter.$(POD_NAMESPACE).svc.cluster.local:9000"
+        # DNS resolver IP for nginx (kube-dns ClusterIP) — prevents stale DNS on pod restarts
+        - name: NGINX_RESOLVER
+          value: "10.128.0.10"
         volumeMounts:
         - name: web-config
           mountPath: /config

@@ -1,25 +1,54 @@
 controller:
+  replicaCount: 2
+
+  # PDB: at least 1 pod stays up during node drains / LKE node recycling
+  minAvailable: 1
+
+  # Spread pods across nodes when possible; allow colocation on 1-node clusters
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: ingress-nginx
+                app.kubernetes.io/component: controller
+            topologyKey: kubernetes.io/hostname
+
+  # Zero-downtime rolling updates: new pod comes up before old pod is removed
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
   service:
     type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/linode-loadbalancer-default-proxy-protocol: "v2"
   extraArgs:
     # TCP proxy for mail ports: nginx watches this ConfigMap and dynamically proxies
     # TCP connections to per-tenant Stalwart ClusterIP services.
     # The ConfigMap is managed by deploy-stalwart.sh (adds ports per tenant).
-    # Port 25 is NOT included (uses dedicated Postfix to preserve client IPs).
+    # Port 30025 is used for Postfix inbound SMTP via TCP proxy (VPN Postfix -> K8s Postfix).
+    # Per-tenant Stalwart mail ports are added by deploy-stalwart.sh.
     tcp-services-configmap: "infra-ingress/tcp-services"
   resources:
     requests:
-      cpu: 20m
-      memory: 128Mi
+      cpu: 100m
+      memory: 256Mi
     limits:
       cpu: 200m
-      memory: 256Mi
+      memory: 512Mi
   config:
     # Basic nginx configuration
     # Global security headers applied to all ingresses
     add-headers: "infra-ingress/nginx-custom-headers"
     server-tokens: "false"
     hide-headers: "X-Powered-By,Server"
+    # PROXY protocol: decode real upstream IP from NodeBalancer PROXY header
+    use-proxy-protocol: "true"
     # Cloudflare proxy: extract real client IP from CF-Connecting-IP header
     use-forwarded-headers: "true"
     compute-full-forwarded-for: "true"
@@ -27,6 +56,46 @@ controller:
     real-ip-header: "CF-Connecting-IP"
     # Trust Cloudflare proxy IPs and internal pod/service networks
     set-real-ip-from: "173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32,192.168.0.0/16,10.0.0.0/8"
+    # Geo variable: map source IP to allow/deny flag for Cloudflare enforcement
+    # $proxy_protocol_addr = source IP from PROXY protocol header (Cloudflare edge IP)
+    # Note: $realip_remote_addr is the TCP peer (NodeBalancer/kube-proxy IP), NOT
+    # the Cloudflare IP, because ingress-nginx overrides real_ip_header to
+    # "proxy_protocol" when use-proxy-protocol is enabled.
+    # Cloudflare IPs + RFC1918 -> 0 (allow), everything else -> 1 (deny)
+    # Enforcement via server-snippet is prod-only (see environments/prod/)
+    http-snippet: |
+      geo $proxy_protocol_addr $deny_non_cloudflare {
+          default 1;
+          # Cloudflare IPv4 — https://www.cloudflare.com/ips-v4/
+          173.245.48.0/20 0;
+          103.21.244.0/22 0;
+          103.22.200.0/22 0;
+          103.31.4.0/22 0;
+          141.101.64.0/18 0;
+          108.162.192.0/18 0;
+          190.93.240.0/20 0;
+          188.114.96.0/20 0;
+          197.234.240.0/22 0;
+          198.41.128.0/17 0;
+          162.158.0.0/15 0;
+          104.16.0.0/13 0;
+          104.24.0.0/14 0;
+          172.64.0.0/13 0;
+          131.0.72.0/22 0;
+          # Cloudflare IPv6 — https://www.cloudflare.com/ips-v6/
+          2400:cb00::/32 0;
+          2606:4700::/32 0;
+          2803:f800::/32 0;
+          2405:b500::/32 0;
+          2405:8100::/32 0;
+          2a06:98c0::/29 0;
+          2c0f:f248::/32 0;
+          # RFC1918 / internal ranges (health checks, pod traffic, monitoring)
+          10.0.0.0/8 0;
+          172.16.0.0/12 0;
+          192.168.0.0/16 0;
+          127.0.0.0/8 0;
+      }
 
 # Disable admission webhook temporarily to avoid connection issues
 admissionWebhooks:

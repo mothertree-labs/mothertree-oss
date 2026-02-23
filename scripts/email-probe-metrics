@@ -1,0 +1,143 @@
+#!/bin/bash
+
+# Email Probe Metrics
+# Quick view of email probe metrics from Prometheus
+#
+# Usage:
+#   ./scripts/email-probe-metrics [env]
+#
+# Defaults to prod. Assumes VPN is connected.
+
+set -euo pipefail
+
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+MT_ENV="${1:-prod}"
+
+export KUBECONFIG="${KUBECONFIG:-$REPO/kubeconfig.$MT_ENV.yaml}"
+if [ ! -f "$KUBECONFIG" ]; then
+  echo "[ERROR] Kubeconfig not found: $KUBECONFIG" >&2
+  exit 1
+fi
+
+PROM_POD=$(kubectl get pods -n infra-monitoring -l app.kubernetes.io/name=prometheus \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+if [ -z "$PROM_POD" ]; then
+  echo "[ERROR] Cannot find Prometheus pod in infra-monitoring namespace" >&2
+  exit 1
+fi
+
+query_prom() {
+  local query="$1"
+  kubectl exec -n infra-monitoring "$PROM_POD" -c prometheus -- \
+    wget -qO- "http://localhost:9090/api/v1/query?query=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$query'))")" 2>/dev/null
+}
+
+echo "=== Email Probe Metrics (env: $MT_ENV) ==="
+echo ""
+
+# Collect all metrics in one pass
+METRICS_JSON=$(query_prom '{__name__=~"email_probe_.+"}')
+
+if [ -z "$METRICS_JSON" ] || [ "$METRICS_JSON" = "" ]; then
+  echo "[ERROR] Could not query Prometheus" >&2
+  exit 1
+fi
+
+python3 -c "
+import json, sys, time
+
+data = json.loads('''$METRICS_JSON''')
+results = data.get('data', {}).get('result', [])
+
+if not results:
+    print('No email_probe metrics found. Is the probe deployed?')
+    sys.exit(0)
+
+# Group by tenant
+tenants = {}
+for r in results:
+    tenant = r['metric'].get('tenant', 'unknown')
+    name = r['metric']['__name__'].replace('email_probe_', '')
+    value = r['value'][1]
+    tenants.setdefault(tenant, {})[name] = value
+
+for tenant in sorted(tenants):
+    m = tenants[tenant]
+    print(f'--- Tenant: {tenant} ---')
+    print()
+
+    # Health status
+    up = m.get('up', '?')
+    if up != '?':
+        status = 'HEALTHY' if float(up) == 1 else 'DOWN'
+        color = '\033[32m' if float(up) == 1 else '\033[31m'
+        print(f'  Status:                {color}{status}\033[0m')
+
+    # Timing
+    send_s = m.get('send_seconds')
+    if send_s:
+        print(f'  Last send duration:    {float(send_s):.2f}s')
+
+    rt_s = m.get('roundtrip_seconds')
+    if rt_s:
+        val = float(rt_s)
+        color = '\033[32m' if val < 60 else '\033[33m' if val < 180 else '\033[31m'
+        print(f'  Last roundtrip:        {color}{val:.2f}s\033[0m')
+
+    inb_total = m.get('inbound_total_seconds')
+    if inb_total and float(inb_total) > 0:
+        val = float(inb_total)
+        color = '\033[32m' if val < 30 else '\033[33m' if val < 120 else '\033[31m'
+        print(f'  Inbound total:         {color}{val:.2f}s\033[0m')
+
+    inb_infra = m.get('inbound_infra_seconds')
+    if inb_infra and float(inb_infra) > 0:
+        val = float(inb_infra)
+        color = '\033[32m' if val < 10 else '\033[33m' if val < 60 else '\033[31m'
+        print(f'  Inbound MT infra:      {color}{val:.2f}s\033[0m')
+
+    # Failures
+    consec = m.get('consecutive_failures')
+    if consec:
+        val = int(float(consec))
+        color = '\033[32m' if val == 0 else '\033[33m' if val < 5 else '\033[31m'
+        print(f'  Consecutive failures:  {color}{val}\033[0m')
+
+    # Last success
+    last_ts = m.get('last_success_timestamp')
+    if last_ts and float(last_ts) > 0:
+        ago = time.time() - float(last_ts)
+        if ago < 60:
+            ago_str = f'{ago:.0f}s ago'
+        elif ago < 3600:
+            ago_str = f'{ago/60:.1f}m ago'
+        else:
+            ago_str = f'{ago/3600:.1f}h ago'
+        color = '\033[32m' if ago < 600 else '\033[33m' if ago < 1800 else '\033[31m'
+        print(f'  Last success:          {color}{ago_str}\033[0m')
+
+    # Counters
+    sends = m.get('send_total')
+    send_errs = m.get('send_errors_total')
+    rts = m.get('roundtrip_total')
+    rt_errs = m.get('roundtrip_errors_total')
+
+    if sends or rts:
+        print()
+        print('  Totals:')
+    if sends:
+        err_str = f' (errors: {int(float(send_errs))})' if send_errs and float(send_errs) > 0 else ''
+        print(f'    Sends:               {int(float(sends))}{err_str}')
+    if rts:
+        err_str = f' (errors: {int(float(rt_errs))})' if rt_errs and float(rt_errs) > 0 else ''
+        print(f'    Roundtrips:          {int(float(rts))}{err_str}')
+
+    # Success rate
+    if sends and rts and float(sends) > 0:
+        rate = float(rts) / float(sends) * 100
+        color = '\033[32m' if rate > 95 else '\033[33m' if rate > 80 else '\033[31m'
+        print(f'    Success rate:        {color}{rate:.1f}%\033[0m')
+
+    print()
+"

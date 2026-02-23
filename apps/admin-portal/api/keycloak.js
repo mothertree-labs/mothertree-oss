@@ -90,6 +90,7 @@ async function createUser({ firstName, lastName, email, recoveryEmail }) {
       emailVerified: true,
       attributes: {
         recoveryEmail: [recoveryEmail],
+        tenantEmail: [email],
       },
       requiredActions: ['webauthn-register-passwordless'],
     }),
@@ -137,10 +138,11 @@ async function createUser({ firstName, lastName, email, recoveryEmail }) {
   const fullUser = await getUserResponse.json();
   console.log('Current user attributes:', JSON.stringify(fullUser.attributes));
 
-  // Merge in the recoveryEmail attribute
+  // Merge in the recoveryEmail and tenantEmail attributes
   fullUser.attributes = {
     ...(fullUser.attributes || {}),
     recoveryEmail: [recoveryEmail],
+    tenantEmail: [email],
   };
 
   console.log('Setting user attributes to:', JSON.stringify(fullUser.attributes));
@@ -169,12 +171,18 @@ async function createUser({ firstName, lastName, email, recoveryEmail }) {
     throw new Error('recoveryEmail attribute was not stored by Keycloak - attribute missing after update');
   }
 
+  if (!verifiedUser.attributes?.tenantEmail?.[0]) {
+    throw new Error('tenantEmail attribute was not stored by Keycloak - attribute missing after update');
+  }
+
   console.log('User attributes verified:', JSON.stringify(verifiedUser.attributes));
 
   // Provision user in Stalwart mail server (non-fatal)
   try {
     const stalwartApi = require('./stalwart');
-    await stalwartApi.ensureUserExists(email, `${firstName} ${lastName}`);
+    const defaultQuotaMb = parseInt(process.env.DEFAULT_EMAIL_QUOTA_MB || '5120', 10);
+    const defaultQuotaBytes = defaultQuotaMb * 1024 * 1024;
+    await stalwartApi.ensureUserExists(email, `${firstName} ${lastName}`, defaultQuotaBytes);
   } catch (err) {
     console.error('Stalwart provisioning failed (non-fatal):', err.message);
   }
@@ -210,7 +218,7 @@ async function sendInvitationEmail(userId) {
   }
 
   const user = await userResponse.json();
-  const tenantEmail = user.email;
+  const tenantEmail = user.attributes?.tenantEmail?.[0] || user.email;
   const recoveryEmail = user.attributes?.recoveryEmail?.[0];
 
   if (!recoveryEmail) {
@@ -237,6 +245,7 @@ async function sendInvitationEmail(userId) {
         ...user.attributes,
         tenantEmail: [tenantEmail],  // Store tenant email for later
         beginSetupToken: [beginSetupToken],  // HMAC token for secure beginSetup access
+        setupUserId: [userId],  // Store userId for email template (ProfileBean doesn't expose id)
       },
     }),
   });
@@ -329,6 +338,53 @@ async function checkUserHasPasskey(userId) {
 }
 
 /**
+ * Ensure the passkey credential is ordered before password in Keycloak.
+ *
+ * Keycloak 26.5's AuthenticationSelectionResolver picks the first credential
+ * by priority (creation order). If a password was provisioned before the
+ * passkey (e.g. bootstrap admin), the password form is shown instead of the
+ * WebAuthn prompt. Moving the passkey to first fixes this.
+ */
+async function ensurePasskeyFirst(userId) {
+  const token = await getServiceToken();
+  const credentialsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/credentials`;
+
+  const response = await fetch(credentialsUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  if (!response.ok) {
+    console.error(`ensurePasskeyFirst: failed to fetch credentials for ${userId}: ${response.status}`);
+    return;
+  }
+
+  const credentials = await response.json();
+  const pwIndex = credentials.findIndex(c => c.type === 'password');
+  const passkeyIndex = credentials.findIndex(c => c.type === 'webauthn-passwordless');
+
+  if (pwIndex === -1 || passkeyIndex === -1 || passkeyIndex < pwIndex) {
+    return; // Nothing to fix
+  }
+
+  const passkeyCredId = credentials[passkeyIndex].id;
+  console.log(`ensurePasskeyFirst: reordering credentials for ${userId} — moving passkey ${passkeyCredId} to first`);
+
+  const moveResponse = await fetch(
+    `${credentialsUrl}/${passkeyCredId}/moveToFirst`,
+    {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+    }
+  );
+
+  if (moveResponse.ok || moveResponse.status === 204) {
+    console.log(`ensurePasskeyFirst: passkey moved to first for ${userId}`);
+  } else {
+    console.error(`ensurePasskeyFirst: moveToFirst failed for ${userId}: ${moveResponse.status}`);
+  }
+}
+
+/**
  * Delete a user
  */
 async function deleteUser(userId) {
@@ -382,7 +438,6 @@ async function swapToTenantEmailIfNeeded(userId) {
         username: tenantEmail,  // Also update username to tenant email
         attributes: {
           ...user.attributes,
-          tenantEmail: [],      // Clear the attribute since it's now applied
           isRecoveryFlow: [],   // Clear recovery flag
         },
       }),
@@ -408,7 +463,7 @@ async function sendNotificationEmail(toEmail, subject, message) {
   const smtpHost = process.env.SMTP_HOST || 'postfix-internal.infra-mail.svc.cluster.local';
   const smtpPort = process.env.SMTP_PORT || 587;
   const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.TENANT_DOMAIN || 'example.com'}`;
-  const smtpFromName = process.env.SMTP_FROM_NAME || 'MotherTree';
+  const smtpFromName = process.env.SMTP_FROM_NAME || process.env.PLATFORM_NAME || 'Platform';
 
   try {
     const transporter = nodemailer.createTransport({
@@ -438,6 +493,7 @@ module.exports = {
   listUsers,
   deleteUser,
   checkUserHasPasskey,
+  ensurePasskeyFirst,
   swapToTenantEmailIfNeeded,
   sendNotificationEmail,
 };

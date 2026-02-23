@@ -22,6 +22,7 @@ prometheus:
           - 'prometheus.internal.{{ env "INFRA_ENV_DNS_LABEL" }}.{{ env "INFRA_DOMAIN" }}'
 
 grafana:
+  adminPassword: '{{ env "TF_VAR_grafana_admin_password" | default "changeme" }}'
   # Dev-only resource reductions.
   resources:
     requests:
@@ -64,25 +65,41 @@ alertmanager:
       group_interval: 5m
       repeat_interval: 4h
       routes:
-        # Critical alerts: notify immediately and more frequently
+        # Drop noisy internal alerts
+        - match:
+            alertname: InfoInhibitor
+          receiver: 'null'
+        # Critical alerts: email + Matrix, notify immediately and more frequently
         - match:
             severity: critical
           receiver: 'critical-alerts'
           repeat_interval: 1h
+        # Non-critical alerts go to Matrix only
+        - match_re:
+            severity: warning|info
+          receiver: 'matrix-alerts'
     receivers:
+      - name: 'null'
       - name: 'default'
         email_configs:
-          - to: 'oncall@example.com'
+          - to: '{{ requiredEnv "ALERTMANAGER_EMAIL_TO" }}'
             send_resolved: true
             headers:
               # Note: These are AlertManager Go templates, escaped with raw string blocks
-              Subject: '{{ "{{" }} printf "[%s DEV] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+              Subject: '{{ "{{" }} printf "[%s DEV] %s: %s" "{{ env "INFRA_NAME" | default "Platform" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
       - name: 'critical-alerts'
         email_configs:
-          - to: 'oncall@example.com'
+          - to: '{{ requiredEnv "ALERTMANAGER_EMAIL_TO" }}'
             send_resolved: true
             headers:
-              Subject: '{{ "{{" }} printf "[%s DEV CRITICAL] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+              Subject: '{{ "{{" }} printf "[%s DEV CRITICAL] %s: %s" "{{ env "INFRA_NAME" | default "Platform" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+        webhook_configs:
+          - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ env "ALERTMANAGER_MATRIX_ROOM_ID" | default "!room:matrix.example.org" }}'
+            send_resolved: true
+      - name: 'matrix-alerts'
+        webhook_configs:
+          - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ env "ALERTMANAGER_MATRIX_ROOM_ID" | default "!room:matrix.example.org" }}'
+            send_resolved: true
     inhibit_rules:
       # Don't send warning alerts if critical alert is already firing
       - source_match:

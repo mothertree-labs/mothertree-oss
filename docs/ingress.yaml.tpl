@@ -7,10 +7,11 @@ metadata:
     app.kubernetes.io/name: docs
     app.kubernetes.io/part-of: mother-tree
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header Cache-Control "no-store" always;
     # Allow iframe embedding from ${HOME_HOST}
     nginx.ingress.kubernetes.io/server-snippet: |
       more_clear_headers "X-Frame-Options";
@@ -21,7 +22,7 @@ spec:
   tls:
   - hosts:
     - ${DOCS_HOST}
-    secretName: docs-tls
+    secretName: wildcard-tls-${TENANT_NAME}
   rules:
   - host: ${DOCS_HOST}
     http:

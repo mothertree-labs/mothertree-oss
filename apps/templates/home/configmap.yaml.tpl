@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: home-page-content
-  namespace: ${NS_HOME:-home}
+  namespace: ${NS_HOME}
   labels:
     app.kubernetes.io/name: home
     app.kubernetes.io/part-of: ${TENANT_NAME}

@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # Sync tracked files from this repo's main branch to the open-source repo,
-# excluding paths listed in oss-omit.
+# excluding paths listed in oss-omit. Creates a PR for review instead of
+# pushing directly to main.
 #
 # Usage:
-#   scripts/sync-to-oss                        # sync, commit, and push
+#   scripts/sync-to-oss                        # sync, commit, and open PR
 #   scripts/sync-to-oss --dry-run              # preview changes only
 #   scripts/sync-to-oss --no-push              # sync but leave checkout for manual review
 #   scripts/sync-to-oss --message "Release v2" # non-interactive commit message
@@ -28,21 +29,25 @@ print_error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 DRY_RUN=false
 NO_PUSH=false
 COMMIT_MSG=""
+BRANCH_NAME=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)   DRY_RUN=true; shift ;;
     --no-push)   NO_PUSH=true; shift ;;
     --message)   COMMIT_MSG="$2"; shift 2 ;;
+    --branch)    BRANCH_NAME="$2"; shift 2 ;;
     -h|--help)
       echo "Usage: $(basename "$0") [--dry-run] [--no-push] [--message \"...\"]"
       echo ""
       echo "Sync main branch to the open-source repo, excluding paths in oss-omit."
+      echo "Creates a PR for review instead of pushing directly to main."
       echo ""
       echo "Flags:"
       echo "  --dry-run   Preview changes without modifying the OSS repo"
       echo "  --no-push   Sync files but leave the OSS checkout for manual review"
       echo "  --message   Commit message (prompted interactively if omitted)"
+      echo "  --branch    Branch name (default: oss-sync/<timestamp>)"
       exit 0
       ;;
     *) print_error "Unknown flag: $1"; exit 1 ;;
@@ -167,14 +172,16 @@ if $NO_PUSH; then
   print_success "OSS checkout ready for manual review at:"
   echo "  $OSS_DIR"
   echo ""
-  echo "When done, commit and push manually:"
+  echo "When done, create a branch, commit, and open a PR manually:"
   echo "  cd $OSS_DIR"
+  echo "  git checkout -b oss-sync/my-branch"
   echo "  git commit -m \"your message\""
-  echo "  git push origin main"
+  echo "  git push -u origin oss-sync/my-branch"
+  echo "  gh pr create --base main --title \"your message\""
   exit 0
 fi
 
-# --- Step 5: Commit and push ---
+# --- Step 5: Commit, push branch, and open PR ---
 if [[ -z "$COMMIT_MSG" ]]; then
   echo ""
   read -rp "Commit message: " COMMIT_MSG
@@ -184,7 +191,26 @@ if [[ -z "$COMMIT_MSG" ]]; then
   fi
 fi
 
+# Generate branch name if not provided
+if [[ -z "$BRANCH_NAME" ]]; then
+  BRANCH_NAME="oss-sync/$(date +%Y%m%d-%H%M%S)"
+fi
+
+git -C "$OSS_DIR" checkout -b "$BRANCH_NAME"
 git -C "$OSS_DIR" commit -m "$COMMIT_MSG"
-print_status "Pushing to $OSS_REPO..."
-git -C "$OSS_DIR" push origin main
-print_success "Synced and pushed to OSS repo."
+print_status "Pushing branch '$BRANCH_NAME' to $OSS_REPO..."
+git -C "$OSS_DIR" push -u origin "$BRANCH_NAME"
+
+print_status "Creating pull request..."
+PR_URL=$(gh pr create \
+  --repo "$OSS_REPO" \
+  --base main \
+  --head "$BRANCH_NAME" \
+  --title "$COMMIT_MSG" \
+  --body "Automated OSS sync from private repo.
+
+**Changes:** $CHANGE_COUNT files changed
+
+$(git -C "$OSS_DIR" diff main --stat | tail -20)")
+
+print_success "Pull request created: $PR_URL"

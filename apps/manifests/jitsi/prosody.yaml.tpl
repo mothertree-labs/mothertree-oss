@@ -120,7 +120,7 @@ spec:
               name: jitsi-secrets
               key: JIBRI_RECORDER_PASSWORD
         - name: TURN_CREDENTIALS
-          value: "matrix:${TURN_SHARED_SECRET}"
+          value: "${TURN_SHARED_SECRET}"
         - name: TURN_HOST
           value: "${TURN_SERVER_IP}"
         - name: TURN_PORT
@@ -135,21 +135,31 @@ spec:
         - name: prosody-data
           mountPath: /config/data
         livenessProbe:
-          httpGet:
-            path: /http-bind
-            port: 5280
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - "echo > /dev/tcp/127.0.0.1/5222 && echo > /dev/tcp/127.0.0.1/5280"
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /http-bind
             port: 5280
-        # Memory tuned based on actual usage (~33Mi observed)
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        # Memory raised from 256Mi after Feb 2026 incident: XML stream corruption at ~342Mi usage
         resources:
           requests:
             cpu: 10m
             memory: 64Mi
           limits:
             cpu: 300m
-            memory: 256Mi
+            memory: 512Mi
       volumes:
       - name: prosody-config
         emptyDir: {}

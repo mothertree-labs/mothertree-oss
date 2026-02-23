@@ -14,37 +14,35 @@ config:
 
 synapse:
   serve_server_wellknown: true
-  # Must use Recreate with ReadWriteOnce PVC and 1 replica — RollingUpdate deadlocks
-  # because the new pod can't mount the volume until the old pod is terminated.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+  extraCommands:
+    - 'pip install --no-cache-dir synapse-s3-storage-provider==1.6.0'
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
 
 # Enable signing key job to generate the secret
 signingkey:
   job:
     enabled: true
 
-database:
-  type: postgresql
-  # Use short service name - resolves within the same namespace as Synapse
-  host: matrix-synapse-postgresql
-  port: 5432
-  database: synapse
-  username: synapse
-  # Password is injected via environment-specific gotmpl files
-  # Source: tenants/<name>/<env>.secrets.yaml -> matrix.synapse_password
-  password: "INJECTED_VIA_SECRET"
-
-# PostgreSQL subchart configuration
+# DISABLE bundled PostgreSQL subchart — use shared PostgreSQL in infra-db
 postgresql:
-  primary:
-    resources:
-      requests:
-        cpu: 20m
-        memory: 256Mi
-      limits:
-        memory: 512Mi
-        # No CPU limit - databases should be able to burst
+  enabled: false
+
+# External PostgreSQL (shared instance in infra-db namespace)
+# Host, username, password, and database are injected via environment-specific gotmpl files
+externalPostgresql:
+  host: "INJECTED_VIA_GOTMPL"
+  port: 5432
+  username: "INJECTED_VIA_GOTMPL"
+  password: "INJECTED_VIA_GOTMPL"
+  database: "INJECTED_VIA_GOTMPL"
 
 redis:
   enabled: true
@@ -71,18 +69,10 @@ redis:
       limits:
         memory: 128Mi
 
+# Media stored in S3 via synapse-s3-storage-provider — local filesystem is
+# just a cache (emptyDir). No PVC needed; S3 is the source of truth.
 persistence:
-  enabled: true
-  size: 10Gi
-  storageClass: linode-block-storage-retain
-
-resources:
-  requests:
-    cpu: 10m
-    memory: 1Gi
-  limits:
-    cpu: 1000m
-    memory: 2Gi
+  enabled: false
 
 ingress:
   enabled: true
@@ -90,6 +80,9 @@ ingress:
   annotations:
     kubernetes.io/ingress.class: nginx
     nginx.ingress.kubernetes.io/priority: "100"  # Higher priority for API paths
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header Cache-Control "no-store" always;
   # host and tls are set in environment-specific files
   # NOTE: No cert-manager annotation — an explicit Certificate resource (synapse-tls)
   # is created in create_env before helmfile sync, shared by both Synapse and Element.

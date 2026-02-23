@@ -2,12 +2,15 @@ prometheus:
   ingress:
     hosts:
       - 'prometheus.internal.{{ env "INFRA_DOMAIN" }}'
+      - 'prometheus.prod.{{ env "INFRA_DOMAIN" }}'
     tls:
       - secretName: prometheus-tls
         hosts:
           - 'prometheus.internal.{{ env "INFRA_DOMAIN" }}'
+          - 'prometheus.prod.{{ env "INFRA_DOMAIN" }}'
 
 grafana:
+  adminPassword: '{{ env "TF_VAR_grafana_admin_password" | default "changeme" }}'
   ingress:
     hosts:
       - 'grafana.internal.{{ env "INFRA_DOMAIN" }}'
@@ -22,10 +25,12 @@ alertmanager:
   ingress:
     hosts:
       - 'alertmanager.internal.{{ env "INFRA_DOMAIN" }}'
+      - 'alertmanager.prod.{{ env "INFRA_DOMAIN" }}'
     tls:
       - secretName: alertmanager-tls
         hosts:
           - 'alertmanager.internal.{{ env "INFRA_DOMAIN" }}'
+          - 'alertmanager.prod.{{ env "INFRA_DOMAIN" }}'
   # AlertManager configuration for production alerting
   config:
     global:
@@ -39,34 +44,49 @@ alertmanager:
       group_interval: 5m
       repeat_interval: 4h
       routes:
-        # Critical alerts: notify immediately and more frequently
+        # Drop noisy internal alerts
+        - match:
+            alertname: InfoInhibitor
+          receiver: 'null'
+        # Dead man's switch: Watchdog always fires; Healthchecks.io alerts if pings stop
+        - match:
+            alertname: Watchdog
+          receiver: 'deadman'
+          group_interval: 1m
+          repeat_interval: 1m
+        # Critical alerts: email + Matrix, notify immediately and more frequently
         - match:
             severity: critical
           receiver: 'critical-alerts'
           repeat_interval: 1h
-          continue: true
-        # All alerts also go to Matrix for visibility
-        - receiver: 'matrix-alerts'
-          continue: false
+        # Non-critical alerts go to Matrix only (criticals already sent above)
+        - match_re:
+            severity: warning|info
+          receiver: 'matrix-alerts'
     receivers:
+      - name: 'null'
       - name: 'default'
         email_configs:
-          - to: 'oncall@example.com'
+          - to: '{{ requiredEnv "ALERTMANAGER_EMAIL_TO" }}'
             send_resolved: true
             headers:
               # Note: These are AlertManager Go templates, escaped with raw string blocks
-              Subject: '{{ "{{" }} printf "[%s] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+              Subject: '{{ "{{" }} printf "[%s] %s: %s" "{{ env "INFRA_NAME" | default "Platform" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
       - name: 'critical-alerts'
         email_configs:
-          - to: 'oncall@example.com'
+          - to: '{{ requiredEnv "ALERTMANAGER_EMAIL_TO" }}'
             send_resolved: true
             headers:
-              Subject: '{{ "{{" }} printf "[%s CRITICAL] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
+              Subject: '{{ "{{" }} printf "[%s CRITICAL] %s: %s" "{{ env "INFRA_NAME" | default "Platform" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
         webhook_configs:
           # TODO: Matrix room ID should come from tenant config
           # Room ID: #alerts on Matrix server
           - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ env "ALERTMANAGER_MATRIX_ROOM_ID" | default "!room:matrix.example.org" }}'
             send_resolved: true
+      - name: 'deadman'
+        webhook_configs:
+          - url: '{{ env "HEALTHCHECKS_DEADMAN_URL" | default "https://hc-ping.com/REPLACE_WITH_YOUR_UUID" }}'
+            send_resolved: false
       - name: 'matrix-alerts'
         webhook_configs:
           # TODO: Matrix room ID should come from tenant config

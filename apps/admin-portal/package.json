@@ -4,7 +4,11 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "build:css": "tailwindcss -i src/tailwind.css -o public/css/tailwind.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.0"
   },
   "dependencies": {
     "express": "4.21.2",
