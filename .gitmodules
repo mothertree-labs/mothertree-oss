@@ -3,10 +3,10 @@
 	url = https://github.com/matrix-org/synapse.git
 [submodule "submodules/files_linkeditor"]
 	path = submodules/files_linkeditor
-	url = https://github.com/YOUR_ORG/files_linkeditor.git
+	url = git@github.com:weksler/files_linkeditor.git
 [submodule "submodules/roundcubemail-plugins-kolab"]
 	path = submodules/roundcubemail-plugins-kolab
-	url = https://github.com/YOUR_ORG/roundcubemail-plugins-kolab.git
+	url = git@github.com:weksler/roundcubemail-plugins-kolab.git
 [submodule "submodules/mailvelope_client"]
 	path = submodules/mailvelope_client
 	url = https://github.com/posteo/mailvelope_client.git

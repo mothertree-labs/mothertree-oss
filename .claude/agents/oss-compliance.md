@@ -75,6 +75,7 @@ Search for personal identifiable information:
 - Inside `config/` directory (private submodule content)
 - Inside git commit metadata (author fields — separate from file content)
 - Inside `.claude/agents/oss-compliance.md` (this file)
+- `.gitmodules` submodule URLs (GitHub org names in URLs are not sensitive — the repos are private)
 
 ### CHECK 3: Hardcoded Credentials (CRITICAL)
 
