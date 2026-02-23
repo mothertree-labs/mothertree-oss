@@ -30,6 +30,7 @@ spec:
           # See: https://hub.docker.com/r/metio/matrix-alertmanager-receiver
           image: metio/matrix-alertmanager-receiver:2025.12.24
           securityContext:
+            runAsUser: 65532
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]

@@ -21,8 +21,12 @@ data:
     {{ $XMPP_DOMAIN := .Env.XMPP_DOMAIN | default "meet.jitsi" -}}
     {{ $XMPP_BOSH_URL_BASE := .Env.XMPP_BOSH_URL_BASE | default "http://xmpp.meet.jitsi:5280" -}}
     {{ $CORS_HEADER_ACCESS_CONTROL_ALLOW_ORIGIN := .Env.CORS_HEADER_ACCESS_CONTROL_ALLOW_ORIGIN | default "" }}
+    {{ $NGINX_RESOLVER := .Env.NGINX_RESOLVER | default "10.128.0.10" -}}
 
     server_name _;
+
+    # DNS resolver for variable-based proxy_pass (re-resolves on each request)
+    resolver {{ $NGINX_RESOLVER }} valid=10s;
 
     charset utf8;
 
@@ -56,7 +60,8 @@ data:
     {{ if .Env.ADAPTER_INTERNAL_URL }}
     # /oidc/redirect - OIDC adapter redirect
     location = /oidc/redirect {
-        proxy_pass {{ .Env.ADAPTER_INTERNAL_URL }};
+        set $adapter_upstream "{{ .Env.ADAPTER_INTERNAL_URL }}";
+        proxy_pass $adapter_upstream;
         proxy_http_version 1.1;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header Host $http_host;
@@ -64,7 +69,8 @@ data:
 
     # /oidc/tokenize - Token exchange endpoint
     location = /oidc/tokenize {
-        proxy_pass {{ .Env.ADAPTER_INTERNAL_URL }};
+        set $adapter_upstream "{{ .Env.ADAPTER_INTERNAL_URL }}";
+        proxy_pass $adapter_upstream;
         proxy_http_version 1.1;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header Host $http_host;
@@ -72,7 +78,8 @@ data:
 
     # /oidc/auth - OIDC auth initiation
     location = /oidc/auth {
-        proxy_pass {{ .Env.ADAPTER_INTERNAL_URL }};
+        set $adapter_upstream "{{ .Env.ADAPTER_INTERNAL_URL }}";
+        proxy_pass $adapter_upstream;
         proxy_http_version 1.1;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header Host $http_host;
@@ -93,7 +100,8 @@ data:
 
     {{ if $ENABLE_JAAS_COMPONENTS }}
     location = /_api/room-info {
-        proxy_pass {{ $XMPP_BOSH_URL_BASE }}/room-info?prefix=$prefix&$args;
+        set $prosody_api "{{ $XMPP_BOSH_URL_BASE }}";
+        proxy_pass $prosody_api/room-info?prefix=$prefix&$args;
         proxy_http_version 1.1;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header Host $http_host;
@@ -137,15 +145,17 @@ data:
 
     # BOSH
     location = /http-bind {
+        set $prosody_bosh "{{ $XMPP_BOSH_URL_BASE }}";
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header Host {{ $XMPP_DOMAIN }};
 
-        proxy_pass {{ $XMPP_BOSH_URL_BASE }}/http-bind?prefix=$prefix&$args;
+        proxy_pass $prosody_bosh/http-bind?prefix=$prefix&$args;
     }
 
     {{ if $ENABLE_XMPP_WEBSOCKET }}
     # xmpp websockets
     location = /xmpp-websocket {
+        set $prosody_ws "{{ $XMPP_BOSH_URL_BASE }}";
         tcp_nodelay on;
 
         proxy_http_version 1.1;
@@ -153,7 +163,7 @@ data:
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Host {{ $XMPP_DOMAIN }};
         proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_pass {{ $XMPP_BOSH_URL_BASE }}/xmpp-websocket?prefix=$prefix&$args;
+        proxy_pass $prosody_ws/xmpp-websocket?prefix=$prefix&$args;
     }
     {{ end }}
 

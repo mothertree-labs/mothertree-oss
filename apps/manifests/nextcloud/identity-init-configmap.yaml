@@ -1,0 +1,217 @@
+# ConfigMap containing the init container script that seeds Nextcloud identity
+# on every pod start. This enables emptyDir-based deploys (no PVC needed).
+#
+# Two modes:
+#   1. First install (NC_INSTANCE_ID not set): exits, lets Nextcloud entrypoint handle install
+#   2. Subsequent boots: rsyncs PHP files, writes version.php + config.php with identity values
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nextcloud-identity-init
+data:
+  identity-init.sh: |
+    #!/bin/sh
+    set -e
+
+    echo "=== Nextcloud identity init container ==="
+
+    # --- Custom apps: extract from ConfigMap tar.gz (always, on every boot) ---
+    if [ -f /custom-apps-archive/custom-apps.tar.gz ]; then
+        echo "Extracting custom apps from ConfigMap archive..."
+        tar xzf /custom-apps-archive/custom-apps.tar.gz --exclude='._*' -C /mnt/custom_apps/
+        # Remove any macOS resource fork files that slipped through (Nextcloud tries to autoload them)
+        find /mnt/custom_apps/ -name '._*' -delete 2>/dev/null || true
+        echo "Custom apps extracted successfully"
+        ls -la /mnt/custom_apps/
+    else
+        echo "No custom-apps archive found (optional), skipping"
+    fi
+
+    # --- MIME type mapping ---
+    echo "Writing mimetypemapping.json..."
+    cat > /mnt/config/mimetypemapping.json << 'MIME_EOF'
+    {
+        "mtd": ["application/x-mothertree-document"]
+    }
+    MIME_EOF
+    echo "mimetypemapping.json written"
+
+    # --- App store apps: download from Nextcloud app store (on subsequent boots) ---
+    # Apps like user_oidc, calendar, richdocuments, external, notify_push are installed
+    # from the app store by the OIDC config job during deploy. They live on emptyDir and
+    # are lost on pod restart. The deploy script stores their download URLs in a ConfigMap
+    # (nextcloud-appstore-urls). We download and extract them here on every boot.
+    if [ -f /appstore-urls/app-urls ]; then
+        echo "Downloading app store apps..."
+        while IFS='|' read -r APP_ID APP_URL || [ -n "$APP_ID" ]; do
+            [ -z "$APP_ID" ] && continue
+            if [ -d "/mnt/custom_apps/$APP_ID" ]; then
+                echo "  $APP_ID: already extracted from ConfigMap, skipping"
+                continue
+            fi
+            echo "  $APP_ID: downloading from $APP_URL"
+            if curl -sfL "$APP_URL" | tar xzf - -C /mnt/custom_apps/ 2>/dev/null; then
+                echo "  $APP_ID: OK"
+            else
+                echo "  $APP_ID: FAILED (non-critical, app may be installed later by OIDC job)"
+            fi
+        done < /appstore-urls/app-urls
+        echo "App store downloads complete"
+        ls -la /mnt/custom_apps/
+    else
+        echo "No app store URLs ConfigMap found (first install or not yet created), skipping"
+    fi
+
+    # Fix ownership on files written so far (custom apps + mimetypemapping)
+    chown -R 33:33 /mnt/custom_apps /mnt/config
+
+    # --- Identity seeding ---
+    if [ -z "${NC_INSTANCE_ID:-}" ]; then
+        echo "NC_INSTANCE_ID not set — first install, letting entrypoint handle it"
+        exit 0
+    fi
+
+    echo "Identity secret found, seeding Nextcloud files..."
+
+    # Rsync Nextcloud source files into the emptyDir
+    # The Nextcloud image ships source in /usr/src/nextcloud/
+    echo "Rsyncing /usr/src/nextcloud/ -> /mnt/html/ ..."
+    rsync -a --delete /usr/src/nextcloud/ /mnt/html/
+
+    # Replace status.php with a deeper health check
+    # The default status.php loads the framework but doesn't trigger app/route loading,
+    # so broken custom apps (e.g. macOS ._ files) slip past the probe undetected.
+    # This version adds OC_App::loadApps() which forces all enabled app classes to load,
+    # catching autoloader errors before users hit them.
+    cat > /mnt/html/status.php << 'HEALTH_EOF'
+    <?php
+    declare(strict_types=1);
+    require_once __DIR__ . '/lib/versioncheck.php';
+    use OC\SystemConfig;
+    use OCP\Defaults;
+    use OCP\Server;
+    use OCP\ServerVersion;
+    use OCP\Util;
+    use Psr\Log\LoggerInterface;
+    try {
+        require_once __DIR__ . '/lib/base.php';
+        $systemConfig = Server::get(SystemConfig::class);
+        $installed = (bool)$systemConfig->getValue('installed', false);
+        $maintenance = (bool)$systemConfig->getValue('maintenance', false);
+        $defaults = new Defaults();
+        $serverVersion = Server::get(ServerVersion::class);
+        // Deep health: load all enabled apps to verify class autoloading
+        // Catches broken custom apps (e.g. macOS ._ resource fork files)
+        if ($installed && !$maintenance) {
+            \OC_App::loadApps();
+        }
+        $values = [
+            'installed' => $installed,
+            'maintenance' => $maintenance,
+            'needsDbUpgrade' => Util::needUpgrade(),
+            'version' => implode('.', $serverVersion->getVersion()),
+            'versionstring' => $serverVersion->getVersionString(),
+            'edition' => '',
+            'productname' => $defaults->getProductName(),
+            'extendedSupport' => Util::hasExtendedSupport()
+        ];
+        if (OC::$CLI) {
+            print_r($values);
+        } else {
+            header('Access-Control-Allow-Origin: *');
+            header('Content-Type: application/json');
+            echo json_encode($values);
+        }
+    } catch (Exception $ex) {
+        http_response_code(500);
+        Server::get(LoggerInterface::class)->error($ex->getMessage(), ['app' => 'remote','exception' => $ex]);
+    }
+    HEALTH_EOF
+    echo "Wrote deep health check status.php"
+
+    # Ensure custom_apps, config, themes dirs exist in html (they are separate subPath mounts)
+    # The rsync above populates /mnt/html but config/custom_apps/themes are separate subPaths
+    # so they won't be populated by the rsync. That's fine — config.php goes to /mnt/config/.
+
+    # Write version.php with the stored version (for upgrade detection by entrypoint)
+    # If NC_VERSION matches the image version, entrypoint skips rsync+install (fast boot).
+    # If NC_VERSION is older, entrypoint detects upgrade and runs occ upgrade.
+    if [ -n "${NC_VERSION:-}" ]; then
+        IMAGE_VERSION=$(php -r 'require "/usr/src/nextcloud/version.php"; echo implode(".", $OC_Version);')
+        echo "Stored version: $NC_VERSION, Image version: $IMAGE_VERSION"
+
+        if [ "$NC_VERSION" = "$IMAGE_VERSION" ]; then
+            # Same version — copy version.php as-is from source
+            cp /usr/src/nextcloud/version.php /mnt/html/version.php
+        else
+            # Version mismatch — write the OLD version so entrypoint detects upgrade
+            echo "Version mismatch — writing stored version to trigger upgrade path"
+            # Read the version.php template from the image, replace version numbers
+            # We write the stored (old) version so the entrypoint's comparison triggers rsync + occ upgrade
+            IFS='.' read -r V_MAJOR V_MINOR V_PATCH V_BUILD <<EOF_VER
+    $NC_VERSION
+    EOF_VER
+            # Fall back to 0 for any missing components
+            V_MAJOR=${V_MAJOR:-0}
+            V_MINOR=${V_MINOR:-0}
+            V_PATCH=${V_PATCH:-0}
+            V_BUILD=${V_BUILD:-0}
+            cat > /mnt/html/version.php << VERSION_EOF
+    <?php
+    \$OC_Version = array(${V_MAJOR},${V_MINOR},${V_PATCH},${V_BUILD});
+    \$OC_VersionString = '${NC_VERSION}';
+    \$OC_Edition = '';
+    \$OC_Channel = 'stable';
+    \$OC_VersionCanBeUpgradedFrom = array();
+    \$OC_Build = '';
+    \$vendor = 'nextcloud';
+    VERSION_EOF
+        fi
+    else
+        # No version stored yet — use image version as-is
+        cp /usr/src/nextcloud/version.php /mnt/html/version.php
+    fi
+
+    # Write config.php with identity + database connection + installed flag
+    # The Nextcloud entrypoint only writes DB settings during initial install,
+    # so we must include them here for subsequent boots to work.
+    # Build trusted_domains PHP array from space-separated env var
+    TRUSTED_DOMAINS_PHP=""
+    TD_INDEX=0
+    for DOMAIN in ${NC_TRUSTED_DOMAINS:-localhost}; do
+        TRUSTED_DOMAINS_PHP="${TRUSTED_DOMAINS_PHP}    ${TD_INDEX} => '${DOMAIN}',
+    "
+        TD_INDEX=$((TD_INDEX + 1))
+    done
+
+    echo "Writing config.php with identity and database settings..."
+    cat > /mnt/config/config.php << CONFIG_EOF
+    <?php
+    \$CONFIG = array (
+      'instanceid' => '${NC_INSTANCE_ID}',
+      'passwordsalt' => '${NC_PASSWORD_SALT}',
+      'secret' => '${NC_SECRET}',
+      'dbtype' => 'pgsql',
+      'dbname' => '${NC_DB_NAME}',
+      'dbhost' => '${NC_DB_HOST}',
+      'dbuser' => '${NC_DB_USER}',
+      'dbpassword' => '${NC_DB_PASSWORD}',
+      'datadirectory' => '/var/www/html/data',
+      'version' => '${NC_VERSION}',
+      'trusted_domains' =>
+      array (
+    ${TRUSTED_DOMAINS_PHP}),
+      'installed' => true,
+    );
+    CONFIG_EOF
+
+    # Create .ncdata sentinel file (Nextcloud refuses to start without it)
+    echo "# Nextcloud data directory" > /mnt/data/.ncdata
+
+    # Fix ownership — Nextcloud runs as www-data (uid 33) and needs write access
+    echo "Fixing ownership and permissions for www-data..."
+    chown -R 33:33 /mnt/html /mnt/config /mnt/custom_apps /mnt/data
+    # Data directory must be 0770 (Nextcloud rejects world-readable data dirs)
+    chmod 0770 /mnt/data
+
+    echo "Identity seeding complete"

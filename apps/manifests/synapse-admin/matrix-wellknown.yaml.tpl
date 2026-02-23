@@ -8,14 +8,13 @@ metadata:
   name: matrix-wellknown
   namespace: ${NS_MATRIX}
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     kubernetes.io/ingress.class: nginx
 spec:
   ingressClassName: nginx
   tls:
     - hosts:
         - ${TENANT_DOMAIN}
-      secretName: matrix-wellknown-tls
+      secretName: wildcard-tls-${TENANT_NAME}
   rules:
     - host: ${TENANT_DOMAIN}
       http:

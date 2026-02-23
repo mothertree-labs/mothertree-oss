@@ -44,7 +44,7 @@ data:
     <?php
     // OAuth/OIDC Configuration for Keycloak
     $config['oauth_provider'] = 'custom';
-    $config['oauth_provider_name'] = 'Keycloak';
+    $config['oauth_provider_name'] = 'passkey';
     $config['oauth_client_id'] = 'roundcube';
     $config['oauth_client_secret'] = getenv('ROUNDCUBE_OIDC_SECRET');
     $config['oauth_auth_uri'] = 'https://${AUTH_HOST}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth';
@@ -81,17 +81,31 @@ data:
     
     // Session and encryption
     $config['des_key'] = '${ROUNDCUBE_DES_KEY}';
-    $config['session_lifetime'] = 60;       // 60 minutes
+    $config['session_lifetime'] = 43200;    // 30 days (matches offline token lifespan)
     $config['cookie_secure'] = true;        // Only send cookies over HTTPS
     $config['cookie_samesite'] = 'Lax';     // Allow cookies on OAuth redirects from Keycloak
+
+    // Make PHP session cookie persistent (survives browser close)
+    // Without this, session cookie is transient and OAuth state is lost on browser restart,
+    // causing "authentication expired" errors on the OAuth callback
+    ini_set('session.cookie_lifetime', 2592000);  // 30 days in seconds
 
     // UI Configuration
     $config['product_name'] = '${TENANT_DISPLAY_NAME} Webmail';
     $config['support_url'] = '';
-    $config['skin'] = 'elastic';
+    $config['skin'] = 'mothertree';
+    $config['skin_logo'] = [
+        '[dark]' => 'skins/mothertree/images/logo_dark.svg',
+        '*' => 'skins/mothertree/images/logo.svg',
+    ];
     $config['language'] = 'en_US';
-    $config['date_format'] = 'Y-m-d';
-    $config['time_format'] = 'H:i';
+    $config['date_format'] = 'm/d/Y';
+    $config['time_format'] = 'g:i a';
+    $config['htmleditor'] = 4;  // Always HTML, except when replying to plain text
+    $config['reply_mode'] = 1;  // Top-posting
+    $config['reply_all_mode'] = 1;  // Reply-all as default action
+    $config['show_images'] = 1;  // Show images from known senders (in address book)
+    $config['refresh_interval'] = 30;  // Check for new mail every 30 seconds
     
     // Security
     $config['ip_check'] = false;
@@ -110,11 +124,17 @@ data:
         'archive',
         'zipdownload',
         'managesieve',
+        'markasjunk',
         'calendar',
         'libcalendaring',
         'libkolab',
         'mailvelope_client'
     ];
+
+    // markasjunk plugin - adds "Junk" / "Not Junk" toolbar buttons
+    // Moving messages to/from Junk folder triggers Stalwart's FTRL-Proximal
+    // spam classifier auto-training (no additional server config needed)
+    $config['markasjunk_toolbar'] = true;
     
     // ManageSieve configuration (server-side mail filter rules via Stalwart)
     // Auth inherits imap_auth_type (XOAUTH2) - no explicit auth_type needed
@@ -180,7 +200,7 @@ spec:
       - name: roundcube
         # TODO: Pin to a specific version tag or sha256 digest
         image: ${CONTAINER_REGISTRY}/mothertree-roundcube:latest
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -227,13 +247,13 @@ spec:
             cpu: "${ROUNDCUBE_CPU_LIMIT}"
         livenessProbe:
           httpGet:
-            path: /skins/elastic/images/logo.svg
+            path: /skins/mothertree/images/logo.svg
             port: 80
           initialDelaySeconds: 30
           periodSeconds: 30
         readinessProbe:
           httpGet:
-            path: /skins/elastic/images/logo.svg
+            path: /skins/mothertree/images/logo.svg
             port: 80
           initialDelaySeconds: 10
           periodSeconds: 10

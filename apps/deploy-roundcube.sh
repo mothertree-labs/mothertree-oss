@@ -9,80 +9,44 @@
 # Prerequisites:
 #   - Stalwart Mail Server deployed and accessible
 #   - Keycloak OIDC client configured for Roundcube
+#
+# Usage:
+#   ./apps/deploy-roundcube.sh -e dev -t example
 
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-# Require MT_ENV and TENANT
-MT_ENV=${MT_ENV:-prod}
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
 
-# Parse nesting level for deploy notifications
-NESTING_LEVEL=0
-for arg in "$@"; do
-  case "$arg" in
-    --nesting-level=*) NESTING_LEVEL="${arg#*=}" ;;
-  esac
-done
-_MT_NOTIFY_NESTING_LEVEL=$NESTING_LEVEL
+mt_usage() {
+    echo "Usage: $0 -e <env> -t <tenant>"
+    echo ""
+    echo "Deploy Roundcube Webmail for a tenant."
+    echo ""
+    echo "Options:"
+    echo "  -e <env>       Environment (e.g., dev, prod)"
+    echo "  -t <tenant>    Tenant name (e.g., example)"
+    echo "  -h, --help     Show this help"
+}
+
+mt_parse_args "$@"
+mt_require_env
+mt_require_tenant
+
+source "${REPO_ROOT}/scripts/lib/config.sh"
+mt_load_tenant_config
+
+[[ -f "$REPO_ROOT/project.conf" ]] && source "$REPO_ROOT/project.conf"
 
 source "${REPO_ROOT}/scripts/lib/notify.sh"
-[[ -f "$REPO_ROOT/project.conf" ]] && source "$REPO_ROOT/project.conf"
 mt_deploy_start "deploy-roundcube"
 
-if [ -z "${MT_ENV:-}" ]; then
-    print_error "MT_ENV is not set. Usage: MT_ENV=dev TENANT=example ./apps/deploy-roundcube.sh"
-    exit 1
-fi
+mt_require_commands kubectl envsubst
 
-if [ -z "${TENANT:-}" ]; then
-    print_error "TENANT is not set. Usage: MT_ENV=dev TENANT=example ./apps/deploy-roundcube.sh"
-    exit 1
-fi
-
-export KUBECONFIG="${KUBECONFIG:-$REPO_ROOT/kubeconfig.$MT_ENV.yaml}"
-
-# Namespace configuration
-export NS_WEBMAIL="${NS_WEBMAIL:-tn-${TENANT}-webmail}"
-# Always derive from TENANT to avoid conflicts with inherited environment
-export NS_MAIL="tn-${TENANT}-mail"
-
-# Tenant configuration
-TENANT_DIR="$REPO_ROOT/tenants/$TENANT"
-TENANT_CONFIG="$TENANT_DIR/$MT_ENV.config.yaml"
-TENANT_SECRETS="$TENANT_DIR/$MT_ENV.secrets.yaml"
-
-if [ ! -f "$TENANT_CONFIG" ]; then
-    print_error "Tenant config not found: $TENANT_CONFIG"
-    exit 1
-fi
-
-if [ ! -f "$TENANT_SECRETS" ]; then
-    print_error "Tenant secrets not found: $TENANT_SECRETS"
-    exit 1
-fi
+# Override NS_MAIL for envsubst templates that use ${NS_MAIL} to mean
+# the tenant mail namespace (roundcube templates reference stalwart service there)
+export NS_MAIL="$NS_STALWART"
 
 print_status "Deploying Roundcube Webmail for environment: $MT_ENV"
 print_status "Tenant: $TENANT"
@@ -90,7 +54,6 @@ print_status "Webmail namespace: $NS_WEBMAIL"
 print_status "Mail namespace: $NS_MAIL"
 
 # Check if webmail_enabled feature flag is set
-WEBMAIL_ENABLED=$(yq '.features.webmail_enabled // false' "$TENANT_CONFIG")
 if [ "$WEBMAIL_ENABLED" != "true" ]; then
     print_warning "Webmail not enabled for tenant $TENANT (features.webmail_enabled is not true)"
     print_warning "Skipping Roundcube deployment"
@@ -98,85 +61,29 @@ if [ "$WEBMAIL_ENABLED" != "true" ]; then
 fi
 
 # Check if mail is enabled (required for webmail)
-MAIL_ENABLED=$(yq '.features.mail_enabled // false' "$TENANT_CONFIG")
 if [ "$MAIL_ENABLED" != "true" ]; then
     print_error "Mail is not enabled for tenant $TENANT but webmail is."
     print_error "Enable 'features.mail_enabled' in tenant config first."
     exit 1
 fi
 
-# Load configuration from tenant config
-export TENANT_NAME="$TENANT"
-export TENANT_DOMAIN=$(yq '.dns.domain' "$TENANT_CONFIG")
-export TENANT_DISPLAY_NAME=$(yq '.tenant.display_name' "$TENANT_CONFIG")
-export WEBMAIL_SUBDOMAIN=$(yq '.dns.webmail_subdomain' "$TENANT_CONFIG")
-export MAIL_SUBDOMAIN=$(yq '.dns.mail_subdomain' "$TENANT_CONFIG")
-export FILES_SUBDOMAIN=$(yq '.dns.files_subdomain' "$TENANT_CONFIG")
-export ENV_DNS_LABEL=$(yq '.dns.env_dns_label // ""' "$TENANT_CONFIG")
-export KEYCLOAK_REALM=$(yq '.keycloak.realm' "$TENANT_CONFIG")
-
-# Database configuration
-export ROUNDCUBE_DB_NAME=$(yq '.database.roundcube_db' "$TENANT_CONFIG")
-export ROUNDCUBE_DB_USER="roundcube_${TENANT}"
-
 # Validate database config
 if [ -z "$ROUNDCUBE_DB_NAME" ] || [ "$ROUNDCUBE_DB_NAME" = "null" ]; then
-    print_error "ROUNDCUBE_DB_NAME not set. Add 'database.roundcube_db' to $TENANT_CONFIG"
+    print_error "ROUNDCUBE_DB_NAME not set. Add 'database.roundcube_db' to tenant config"
     exit 1
 fi
 print_status "Database: $ROUNDCUBE_DB_NAME (user: $ROUNDCUBE_DB_USER)"
 
-# Derive PG_HOST if not passed in from the environment
-NS_DB="${NS_DB:-infra-db}"
+# Validate PG_HOST
 if [ -z "${PG_HOST:-}" ]; then
-    if kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
-        export PG_HOST="docs-postgresql-primary.${NS_DB}.svc.cluster.local"
-        print_status "PostgreSQL: detected replication mode (docs-postgresql-primary)"
-    elif kubectl get service docs-postgresql -n "$NS_DB" >/dev/null 2>&1; then
-        export PG_HOST="docs-postgresql.${NS_DB}.svc.cluster.local"
-        print_status "PostgreSQL: detected standalone mode (docs-postgresql)"
-    else
-        print_error "PostgreSQL not found in $NS_DB namespace and PG_HOST not set."
-        print_error "Either set PG_HOST or run 'deploy_infra $MT_ENV' first."
-        exit 1
-    fi
-else
-    print_status "Using PG_HOST from environment: $PG_HOST"
-fi
-
-# Resource configuration
-export ROUNDCUBE_MEMORY_REQUEST=$(yq '.resources.roundcube.memory_request // "128Mi"' "$TENANT_CONFIG")
-export ROUNDCUBE_MEMORY_LIMIT=$(yq '.resources.roundcube.memory_limit // "256Mi"' "$TENANT_CONFIG")
-export ROUNDCUBE_CPU_REQUEST=$(yq '.resources.roundcube.cpu_request // "50m"' "$TENANT_CONFIG")
-export ROUNDCUBE_CPU_LIMIT=$(yq '.resources.roundcube.cpu_limit // "200m"' "$TENANT_CONFIG")
-export ROUNDCUBE_MIN_REPLICAS=$(yq '.resources.roundcube.min_replicas // 1' "$TENANT_CONFIG")
-export ROUNDCUBE_MAX_REPLICAS=$(yq '.resources.roundcube.max_replicas // 3' "$TENANT_CONFIG")
-
-# Build full hostnames
-if [ -n "$ENV_DNS_LABEL" ] && [ "$ENV_DNS_LABEL" != "null" ]; then
-    export WEBMAIL_HOST="${WEBMAIL_SUBDOMAIN}.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
-    export MAIL_HOST="${MAIL_SUBDOMAIN}.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
-    export FILES_HOST="${FILES_SUBDOMAIN}.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
-    export AUTH_HOST="auth.${ENV_DNS_LABEL}.${TENANT_DOMAIN}"
-else
-    export WEBMAIL_HOST="${WEBMAIL_SUBDOMAIN}.${TENANT_DOMAIN}"
-    export MAIL_HOST="${MAIL_SUBDOMAIN}.${TENANT_DOMAIN}"
-    export FILES_HOST="${FILES_SUBDOMAIN}.${TENANT_DOMAIN}"
-    export AUTH_HOST="auth.${TENANT_DOMAIN}"
+    print_error "PostgreSQL not found. Run 'deploy_infra $MT_ENV' first."
+    exit 1
 fi
 
 print_status "Webmail host: $WEBMAIL_HOST"
 print_status "Mail host: $MAIL_HOST"
 print_status "Files host (CalDAV): $FILES_HOST"
 print_status "Auth host: $AUTH_HOST"
-
-# Load secrets from tenant secrets file
-export ROUNDCUBE_OIDC_SECRET=$(yq '.oidc.roundcube_client_secret' "$TENANT_SECRETS")
-export ROUNDCUBE_DB_PASSWORD=$(yq '.database.roundcube_password' "$TENANT_SECRETS")
-
-# Generate DES key for session encryption (24 characters from random data)
-# This is deterministic based on tenant+env to avoid regenerating on each deploy
-export ROUNDCUBE_DES_KEY=$(echo -n "${TENANT}${MT_ENV}roundcube" | sha256sum | cut -c1-24)
 
 # Validate required secrets
 required_secrets=("ROUNDCUBE_OIDC_SECRET" "ROUNDCUBE_DB_PASSWORD")
@@ -190,12 +97,13 @@ done
 
 if [ ${#missing_secrets[@]} -gt 0 ]; then
     print_error "Required secrets not set or are placeholders: ${missing_secrets[*]}"
-    print_error "Update $TENANT_SECRETS with actual values"
+    print_error "Update tenant secrets file with actual values"
     exit 1
 fi
 
-# Generate config checksum for pod annotations
-# Include both secrets AND the rendered config template to trigger restarts on any config change
+# Generate config checksum for pod annotations.
+# Includes both secrets AND the rendered config template to trigger pod restarts
+# on any config change (not just secret rotation).
 RENDERED_CONFIG=$(envsubst < "$REPO_ROOT/apps/manifests/roundcube/roundcube.yaml.tpl" 2>/dev/null || echo "")
 export CONFIG_CHECKSUM=$(echo -n "$ROUNDCUBE_OIDC_SECRET$ROUNDCUBE_DES_KEY$RENDERED_CONFIG" | sha256sum | cut -d' ' -f1 | head -c 12)
 print_status "Config checksum: $CONFIG_CHECKSUM"
@@ -293,24 +201,103 @@ else
     cat "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/libkolab/SQL/postgres.initial.sql" | \
         kubectl exec -i -n infra-db "$PG_POD_NAME" -- bash -c "PGPASSWORD='$PG_ADMIN_PASS' psql -U postgres -d $ROUNDCUBE_DB_NAME" >/dev/null
     print_success "libkolab schema applied"
-    
+
     print_status "Applying caldav/calendar schema..."
     cat "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/calendar/drivers/caldav/SQL/postgres.initial.sql" | \
         kubectl exec -i -n infra-db "$PG_POD_NAME" -- bash -c "PGPASSWORD='$PG_ADMIN_PASS' psql -U postgres -d $ROUNDCUBE_DB_NAME" >/dev/null
     print_success "caldav schema applied"
-    
+
     # Grant permissions on new tables to the Roundcube user
     print_status "Granting permissions to $ROUNDCUBE_DB_USER..."
     kubectl exec -n infra-db "$PG_POD_NAME" -- bash -c "PGPASSWORD='$PG_ADMIN_PASS' psql -U postgres -d $ROUNDCUBE_DB_NAME -c \"GRANT ALL ON ALL TABLES IN SCHEMA public TO $ROUNDCUBE_DB_USER; GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO $ROUNDCUBE_DB_USER;\"" >/dev/null
     print_success "Permissions granted"
 fi
 
+# =============================================================================
+# Build and push Roundcube custom image (smart build - only if source changed)
+# =============================================================================
+export CONTAINER_REGISTRY="${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}"
+ROUNDCUBE_IMAGE_TAG="${CONTAINER_REGISTRY}/mothertree-roundcube:latest"
+ROUNDCUBE_DOCKER_DIR="$REPO_ROOT/apps/docker/roundcube"
+
+if [ -f "$ROUNDCUBE_DOCKER_DIR/Dockerfile" ] && [ -d "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins" ]; then
+    print_status "Computing Roundcube image source hash..."
+    SOURCE_HASH=$(find \
+        "$ROUNDCUBE_DOCKER_DIR" \
+        "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/calendar" \
+        "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/libcalendaring" \
+        "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/libkolab" \
+        "$REPO_ROOT/submodules/mailvelope_client" \
+        -type f -not -path "*/.git/*" 2>/dev/null | \
+        xargs sha256sum 2>/dev/null | sort | sha256sum | cut -c1-12)
+    FONT_HASH=$(sha256sum "$REPO_ROOT"/apps/admin-portal/public/fonts/figtree-*.woff2 2>/dev/null | sort | sha256sum | cut -c1-12)
+    SOURCE_HASH="${SOURCE_HASH}-${FONT_HASH}"
+
+    HASH_FILE="$ROUNDCUBE_DOCKER_DIR/.source-hash.${MT_ENV}"
+    PREVIOUS_HASH=""
+    if [ -f "$HASH_FILE" ]; then
+        PREVIOUS_HASH=$(cat "$HASH_FILE")
+    fi
+
+    print_status "Roundcube image: $ROUNDCUBE_IMAGE_TAG"
+    print_status "Source hash: $SOURCE_HASH (previous: ${PREVIOUS_HASH:-none})"
+
+    NEEDS_BUILD=false
+
+    if [ "$SOURCE_HASH" != "$PREVIOUS_HASH" ]; then
+        print_status "Source files have changed, rebuild needed"
+        NEEDS_BUILD=true
+    elif ! docker image inspect "$ROUNDCUBE_IMAGE_TAG" >/dev/null 2>&1; then
+        print_status "Image not found locally, attempting to pull..."
+        if ! docker pull "$ROUNDCUBE_IMAGE_TAG" 2>/dev/null; then
+            print_status "Image not in registry, rebuild needed"
+            NEEDS_BUILD=true
+        else
+            print_status "Image pulled from registry"
+        fi
+    else
+        print_status "Image exists locally and source unchanged, skipping build"
+    fi
+
+    if [ "$NEEDS_BUILD" = "true" ]; then
+        print_status "Building Roundcube image..."
+
+        docker buildx build \
+            --platform linux/amd64 \
+            -f "$ROUNDCUBE_DOCKER_DIR/Dockerfile" \
+            -t "$ROUNDCUBE_IMAGE_TAG" \
+            --load \
+            "$REPO_ROOT"
+
+        if [ $? -ne 0 ]; then
+            print_error "Failed to build Roundcube image"
+            exit 1
+        fi
+
+        print_success "Roundcube image built successfully"
+
+        print_status "Pushing image to registry..."
+        if docker push "$ROUNDCUBE_IMAGE_TAG"; then
+            print_success "Roundcube image pushed to registry"
+            echo "$SOURCE_HASH" > "$HASH_FILE"
+        else
+            print_error "Could not push to registry - image not updated in cluster!"
+            print_error "Fix registry credentials and re-run deploy"
+            rm -f "$HASH_FILE"
+            exit 1
+        fi
+    fi
+else
+    print_warning "Roundcube Dockerfile or submodules not found, skipping image build"
+    print_warning "Using existing image from registry"
+fi
+
 # Apply Roundcube manifests
 print_status "Applying Roundcube manifests..."
 
-# Apply main Roundcube manifest (Secret, ConfigMap, Deployment, Service)
-# Use explicit variable list to preserve PHP $config variables in the ConfigMap
-export CONTAINER_REGISTRY="${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}"
+# Apply main Roundcube manifest (Secret, ConfigMap, Deployment, Service).
+# Use explicit variable list to preserve PHP $config variables in the ConfigMap —
+# without it, envsubst would substitute $config with empty strings, breaking Roundcube.
 envsubst '${NS_WEBMAIL} ${NS_MAIL} ${AUTH_HOST} ${KEYCLOAK_REALM} ${ROUNDCUBE_DES_KEY} ${TENANT_DISPLAY_NAME} ${ROUNDCUBE_DB_USER} ${ROUNDCUBE_DB_NAME} ${TENANT_NAME} ${ROUNDCUBE_OIDC_SECRET} ${ROUNDCUBE_DB_PASSWORD} ${ROUNDCUBE_MEMORY_REQUEST} ${ROUNDCUBE_MEMORY_LIMIT} ${ROUNDCUBE_CPU_REQUEST} ${ROUNDCUBE_CPU_LIMIT} ${CONFIG_CHECKSUM} ${FILES_HOST} ${ROUNDCUBE_MIN_REPLICAS} ${PG_HOST} ${CONTAINER_REGISTRY}' \
     < "$REPO_ROOT/apps/manifests/roundcube/roundcube.yaml.tpl" | kubectl apply -f -
 print_success "Roundcube Deployment and Service applied"
@@ -319,10 +306,6 @@ print_success "Roundcube Deployment and Service applied"
 print_status "Deploying HPA for Roundcube..."
 envsubst < "$REPO_ROOT/apps/manifests/roundcube/roundcube-hpa.yaml.tpl" | kubectl apply -f -
 print_success "Roundcube HPA deployed (CPU 80% threshold)"
-
-# Apply Certificate for TLS
-envsubst < "$REPO_ROOT/apps/manifests/roundcube/certificate.yaml.tpl" | kubectl apply -f -
-print_success "TLS Certificate requested"
 
 # Apply ingress for webmail
 envsubst < "$REPO_ROOT/apps/manifests/roundcube/ingress.yaml.tpl" | kubectl apply -f -
@@ -341,21 +324,6 @@ else
     print_status "Check logs with: kubectl logs -n $NS_WEBMAIL -l app=roundcube"
 fi
 
-# Wait for TLS certificate
-print_status "Checking TLS certificate status..."
-CERT_TIMEOUT=120
-for i in $(seq 1 $((CERT_TIMEOUT / 5))); do
-    CERT_STATUS=$(kubectl get certificate roundcube-tls -n "$NS_WEBMAIL" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
-    if [ "$CERT_STATUS" = "True" ]; then
-        print_success "TLS certificate is ready"
-        break
-    fi
-    if [ $i -eq $((CERT_TIMEOUT / 5)) ]; then
-        print_warning "TLS certificate may not be ready yet (timeout after ${CERT_TIMEOUT}s)"
-        print_status "Check status with: kubectl get certificate -n $NS_WEBMAIL"
-    fi
-    sleep 5
-done
 
 print_success "Roundcube Webmail deployed successfully for $MT_ENV environment"
 echo ""

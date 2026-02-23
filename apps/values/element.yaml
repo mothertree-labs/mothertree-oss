@@ -1,12 +1,8 @@
-# configjson is set in environment-specific files (apps/environments/<env>/element.yaml.gotmpl)
+# defaultServer and config are set in environment-specific files
+# (apps/environments/<env>/element.yaml.gotmpl)
 # to include the correct Matrix server and Jitsi URLs for each tenant
 
 # replicaCount is set in environment-specific files from tenant config
-
-persistence:
-  enabled: true
-  existingClaim: element-web
-  size: 1Gi
 
 resources:
   requests:
@@ -19,10 +15,87 @@ resources:
 ingress:
   enabled: true
   className: nginx
-  ingressClassName: nginx
   annotations:
-    kubernetes.io/ingress.class: nginx
     nginx.ingress.kubernetes.io/priority: "10"  # Lower priority than API paths
   # hosts, tls, and iframe annotations are set in environment-specific files
   # NOTE: No cert-manager annotation here — Element shares MATRIX_HOST with Synapse,
   # so Synapse's Ingress handles certificate provisioning (synapse-tls secret).
+
+# Branding and theming (shared across all environments)
+# Helm deep-merges this with env-specific config (jitsi, sso, etc.)
+config:
+  brand: "mothertree"
+  default_theme: "custom-mothertree"
+  branding:
+    auth_header_logo_url: "/logo.svg"
+  setting_defaults:
+    custom_themes:
+      - name: "mothertree"
+        is_dark: false
+        fonts:
+          faces:
+            - font-family: "Figtree"
+              src:
+                - url: "/fonts/figtree-latin.woff2"
+                  format: "woff2"
+          general: "'Figtree', sans-serif"
+        colors:
+          accent-color: "#8A9475"
+          primary-color: "#A7AE8D"
+          sidebar-color: "#141511"
+          roomlist-background-color: "#C5CAB2"
+          roomlist-text-color: "#141511"
+          roomlist-text-secondary-color: "#3A3C31"
+          roomlist-highlights-color: "#B8BDA3"
+          roomlist-separator-color: "#8A9475"
+          timeline-background-color: "#E8EBDF"
+          timeline-text-color: "#141511"
+          timeline-text-secondary-color: "#4A4D3E"
+          timeline-highlights-color: "#D5D9C8"
+      - name: "mothertree dark"
+        is_dark: true
+        fonts:
+          faces:
+            - font-family: "Figtree"
+              src:
+                - url: "/fonts/figtree-latin.woff2"
+                  format: "woff2"
+          general: "'Figtree', sans-serif"
+        colors:
+          accent-color: "#A7AE8D"
+          primary-color: "#A7AE8D"
+          sidebar-color: "#0D0E0B"
+          roomlist-background-color: "#141511"
+          roomlist-text-color: "#F3E8D6"
+          roomlist-text-secondary-color: "#C8BEAE"
+          roomlist-highlights-color: "#1E2019"
+          roomlist-separator-color: "#2A2C24"
+          timeline-background-color: "#1A1C17"
+          timeline-text-color: "#F3E8D6"
+          timeline-text-secondary-color: "#C8BEAE"
+          timeline-highlights-color: "#222420"
+
+# Mount branding assets from ConfigMap (created by create_env before helmfile sync)
+extraVolumes:
+  - name: branding
+    configMap:
+      name: element-branding
+extraVolumeMounts:
+  - name: branding
+    mountPath: /app/favicon.svg
+    subPath: favicon.svg
+  - name: branding
+    mountPath: /app/logo.svg
+    subPath: logo.svg
+  - name: branding
+    mountPath: /app/fonts/figtree-latin.woff2
+    subPath: figtree-latin.woff2
+  - name: branding
+    mountPath: /app/fonts/figtree-latin-ext.woff2
+    subPath: figtree-latin-ext.woff2
+  - name: branding
+    mountPath: /app/fonts/figtree-italic-latin.woff2
+    subPath: figtree-italic-latin.woff2
+  - name: branding
+    mountPath: /app/fonts/figtree-italic-latin-ext.woff2
+    subPath: figtree-italic-latin-ext.woff2

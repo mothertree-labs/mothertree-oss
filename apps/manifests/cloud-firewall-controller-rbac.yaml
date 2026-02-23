@@ -1,0 +1,97 @@
+# Persistent RBAC for cloud-firewall-controller
+#
+# The Helm chart (v0.2.0) creates its RBAC resources as pre-install/pre-upgrade
+# hooks, which Helm may garbage-collect between upgrades. When the namespaced
+# Role disappears, the controller loses permission to renew its leader election
+# lease and crashes.
+#
+# These persistent resources use different names but bind to the same
+# ServiceAccount, providing a stable permission floor. Kubernetes RBAC is
+# additive, so overlap with the Helm-managed resources is harmless.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloud-firewall-controller-persistent
+  labels:
+    app.kubernetes.io/name: cloud-firewall-controller
+    app.kubernetes.io/managed-by: mothertree
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["list", "watch"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.linode.com"]
+  resources: ["cloudfirewalls"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+- apiGroups: ["networking.linode.com"]
+  resources: ["cloudfirewalls/finalizers"]
+  verbs: ["update"]
+- apiGroups: ["networking.linode.com"]
+  resources: ["cloudfirewalls/status"]
+  verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloud-firewall-controller-persistent
+  labels:
+    app.kubernetes.io/name: cloud-firewall-controller
+    app.kubernetes.io/managed-by: mothertree
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cloud-firewall-controller-persistent
+subjects:
+- kind: ServiceAccount
+  name: cloud-firewall-controller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cloud-firewall-controller-persistent
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: cloud-firewall-controller
+    app.kubernetes.io/managed-by: mothertree
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceNames: ["cloud-firewall-controller"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["linode"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cloud-firewall-controller-persistent
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: cloud-firewall-controller
+    app.kubernetes.io/managed-by: mothertree
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cloud-firewall-controller-persistent
+subjects:
+- kind: ServiceAccount
+  name: cloud-firewall-controller
+  namespace: kube-system

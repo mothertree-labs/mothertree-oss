@@ -97,6 +97,16 @@ resource "linode_firewall" "openvpn_firewall" {
     ipv4     = ["0.0.0.0/0"]
     ipv6     = ["::/0"]
   }
+
+  # microsocks SOCKS5 proxy - Blackbox Exporter probes external endpoints
+  # via the VPN server to bypass kube-proxy NAT hairpin issues
+  inbound {
+    label    = "SOCKS5-Proxy"
+    action   = "ACCEPT"
+    protocol = "TCP"
+    ports    = "1080"
+    ipv4     = [var.cluster_node_cidr]
+  }
 }
 
 # Persistent volume for PKI certificates
@@ -159,6 +169,12 @@ resource "linode_instance" "openvpn_server" {
       cluster_subnet_cidr    = var.cluster_subnet_cidr
       vpn_server_subnet_cidr = var.vpn_server_subnet_cidr
       cluster_node_ip        = var.cluster_node_ip
+      vpn_server_ip          = cidrhost(var.vpn_network_cidr, 1)
+      vpn_peer_ip            = cidrhost(var.vpn_network_cidr, 2)
+      vpn_pool_start         = cidrhost(var.vpn_network_cidr, 4)
+      vpn_pool_end           = cidrhost(var.vpn_network_cidr, 254)
+      vpn_netmask            = cidrnetmask(var.vpn_network_cidr)
+      vpn_network_address    = cidrhost(var.vpn_network_cidr, 0)
     }))
   }
 
@@ -213,6 +229,8 @@ resource "local_file" "openvpn_server_config" {
     service_cidr           = var.service_cidr
     cluster_subnet_cidr    = var.cluster_subnet_cidr
     vpn_server_subnet_cidr = var.vpn_server_subnet_cidr
+    vpn_network_address    = cidrhost(var.vpn_network_cidr, 0)
+    vpn_netmask            = cidrnetmask(var.vpn_network_cidr)
   })
 
   filename = "${path.root}/openvpn-server.${var.env}.conf"

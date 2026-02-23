@@ -10,7 +10,7 @@
         <style>
             /* Override Keycloak background - matching platform cream */
             html.login-pf, html.login-pf body, body, .login-pf-page {
-                background: #f2efe8 !important;
+                background: #F3E8D6 !important;
                 background-image: none !important;
                 min-height: 100vh !important;
             }
@@ -41,12 +41,12 @@
                 background: transparent;
             }
             .platform-title { 
-                font-family: 'Tomorrow', sans-serif;
-                font-size: 2.5rem; font-weight: 400; color: #4a6741; 
+                font-family: 'Figtree', sans-serif;
+                font-size: 2.5rem; font-weight: 600; color: #A7AE8D;
                 margin: 0 0 0.5rem 0; letter-spacing: 0.03em;
             }
-            .platform-welcome { 
-                font-family: 'Instrument Sans', sans-serif;
+            .platform-welcome {
+                font-family: 'Figtree', sans-serif;
                 font-size: 1.1rem; color: #6b6b6b; margin: 0; font-weight: 400; 
             }
             
@@ -57,11 +57,11 @@
             }
             
             .user-email-display {
-                background: #f5f0e8;
+                background: #F3E8D6;
                 border-radius: 8px;
                 padding: 1rem;
                 margin-bottom: 1.5rem;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
             }
             
             .user-email-label {
@@ -82,7 +82,7 @@
             }
             
             .passkey-instructions {
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 1rem;
                 color: #6b6b6b;
                 margin-bottom: 1.5rem;
@@ -96,7 +96,7 @@
                 justify-content: center;
                 gap: 0.75rem;
                 padding: 1rem 2rem !important;
-                background: #4a6741 !important;
+                background: #A7AE8D !important;
                 border: none !important;
                 border-radius: 8px !important;
                 color: #fff !important;
@@ -104,15 +104,15 @@
                 font-weight: 500 !important;
                 cursor: pointer !important;
                 transition: all 0.2s ease !important;
-                box-shadow: 0 4px 12px rgba(74, 103, 65, 0.3) !important;
+                box-shadow: 0 4px 12px rgba(167, 174, 141, 0.3) !important;
                 width: 100%;
                 max-width: 320px;
             }
             
             #registerWebAuthn:hover, .webauthn-register-btn:hover {
-                background: #3d5636 !important;
+                background: #8A9475 !important;
                 transform: translateY(-2px);
-                box-shadow: 0 6px 16px rgba(74, 103, 65, 0.4) !important;
+                box-shadow: 0 6px 16px rgba(167, 174, 141, 0.4) !important;
             }
             
             /* Error messages */
@@ -123,7 +123,7 @@
                 padding: 1rem;
                 margin-bottom: 1.5rem;
                 color: #991b1b;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
             }
             
             /* Hide default form elements that we don't need */
@@ -132,7 +132,7 @@
             }
         </style>
         <div class="platform-header">
-            <h1 class="platform-title">${realmDisplayName!"the platform"}</h1>
+            <h1 class="platform-title">${realm.displayName!"the platform"}</h1>
             <p class="platform-welcome">Set up your passkey</p>
         </div>
     <#elseif section = "form">

@@ -3,38 +3,26 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title><%= title %> - MotherTree Admin</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            sage: { DEFAULT: '#7C9A6C', dark: '#5A7A4C' },
-            cream: '#FAF8F5',
-            'warm-gray': '#6B6B6B',
-          }
-        }
-      }
-    }
-  </script>
+  <title><%= title %></title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/css/tailwind.css">
 </head>
-<body class="bg-cream min-h-screen p-8">
+<body class="bg-white min-h-screen p-8">
   <div class="max-w-6xl mx-auto">
     <!-- Header -->
     <header class="flex items-center justify-between mb-8">
       <div>
-        <h1 class="text-3xl text-sage">MotherTree Admin</h1>
+        <h1 class="text-3xl font-semibold text-coal">mothertree admin</h1>
         <p class="text-warm-gray mt-1">Welcome, <%= user.name || user.email %></p>
       </div>
-      <a href="/auth/logout" class="text-warm-gray hover:text-sage-dark transition-colors">
+      <a href="/auth/logout" class="text-warm-gray hover:text-coal-dark transition-colors">
         Sign Out
       </a>
     </header>
 
     <!-- Invite User Form -->
-    <div class="bg-white rounded-xl shadow-lg p-8 mb-8">
-      <h2 class="text-2xl text-sage mb-6">Invite New User</h2>
+    <div class="bg-cream rounded-xl shadow-lg p-8 mb-8">
+      <h2 class="text-2xl text-coal mb-6">Invite New User</h2>
       
       <form id="inviteForm" class="space-y-4">
         <div class="grid grid-cols-2 gap-4">
@@ -77,23 +65,49 @@
     </div>
 
     <!-- Members List -->
-    <div class="bg-white rounded-xl shadow-lg p-8 mb-8">
-      <h2 class="text-2xl text-sage mb-6">Members</h2>
+    <div class="bg-cream rounded-xl shadow-lg p-8 mb-8">
+      <div class="flex items-center justify-between mb-6">
+        <h2 class="text-2xl text-coal">Members</h2>
+        <button id="backfillBtn" class="text-sm px-4 py-2 border border-sage text-coal rounded-lg hover:bg-sage hover:text-white transition-colors">
+          Apply Default Quotas
+        </button>
+      </div>
 
       <div id="membersList" class="space-y-4">
         <p class="text-warm-gray">Loading members...</p>
       </div>
     </div>
 
+    <!-- Quota Edit Modal -->
+    <div id="quotaModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div class="bg-cream rounded-xl shadow-lg p-6 w-96">
+        <h3 class="text-lg text-coal mb-4">Edit Email Quota</h3>
+        <p class="text-sm text-warm-gray mb-4" id="quotaModalEmail"></p>
+        <div class="mb-4">
+          <label class="block text-warm-gray mb-2">Quota (MB)</label>
+          <input type="number" id="quotaInput" min="0" step="1"
+            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sage"
+            placeholder="0 = unlimited">
+          <p class="text-xs text-warm-gray mt-1">Set to 0 for unlimited storage</p>
+        </div>
+        <div class="flex gap-3 justify-end">
+          <button id="quotaCancelBtn" class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">Cancel</button>
+          <button id="quotaSaveBtn" class="px-4 py-2 bg-sage text-white rounded-lg hover:bg-sage-dark transition-colors">Save</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Guests List -->
-    <div class="bg-white rounded-xl shadow-lg p-8">
-      <h2 class="text-2xl text-sage mb-6">Guests</h2>
-      <p class="text-warm-gray text-sm mb-4">External collaborators with access to shared documents only. Guests can self-register at <a href="#" id="guestRegisterLink" class="text-sage hover:text-sage-dark underline">account portal</a>.</p>
+    <div class="bg-cream rounded-xl shadow-lg p-8">
+      <h2 class="text-2xl text-coal mb-6">Guests</h2>
+      <p class="text-warm-gray text-sm mb-4">External collaborators with access to shared documents only. Guests can self-register at <a href="#" id="guestRegisterLink" class="text-coal hover:text-coal-dark underline">account portal</a>.</p>
 
       <div id="guestsList" class="space-y-4">
         <p class="text-warm-gray">Loading guests...</p>
       </div>
     </div>
+
+    <%- include('partials/policy-footer') %>
   </div>
 
   <script>
@@ -132,22 +146,35 @@
       }
 
       container.innerHTML = users.map(user => `
-        <div class="flex items-center justify-between p-4 bg-cream rounded-lg">
+        <div class="flex items-center justify-between p-4 bg-white rounded-lg">
           <div>
             <p class="font-medium">${escapeHtml(user.firstName)} ${escapeHtml(user.lastName)}</p>
             <p class="text-sm text-warm-gray">${escapeHtml(user.email)}</p>
             ${type === 'member' && user.recoveryEmail ? `<p class="text-xs text-warm-gray">Recovery: ${escapeHtml(user.recoveryEmail)}</p>` : ''}
           </div>
           <div class="flex items-center gap-4">
+            ${type === 'member' ? `
+            <button data-action="edit-quota" data-email="${escapeHtml(user.email)}" data-quota="${user.quotaMb || 0}"
+              class="px-3 py-1 rounded-full text-sm bg-blue-50 text-blue-700 hover:bg-blue-100 cursor-pointer transition-colors" title="Click to edit email quota">
+              ${user.quotaMb ? user.quotaMb + ' MB' : 'Unlimited'}
+            </button>` : ''}
             <span class="px-3 py-1 rounded-full text-sm ${user.hasPasskey ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}">
               ${user.hasPasskey ? 'Active' : 'Pending Passkey'}
             </span>
-            <button onclick="deleteUser('${escapeHtml(user.id)}')" class="text-red-500 hover:text-red-700" title="Removes user from authentication only. Does not delete data from Matrix, Docs, or other apps.">
+            <button data-action="delete-user" data-user-id="${escapeHtml(user.id)}" class="text-red-500 hover:text-red-700" title="Removes user from authentication only. Does not delete data from Matrix, Docs, or other apps.">
               Remove Access
             </button>
           </div>
         </div>
       `).join('');
+
+      // Bind click handlers via event delegation
+      container.querySelectorAll('[data-action="edit-quota"]').forEach(function(btn) {
+        btn.addEventListener('click', function() { editQuota(this.dataset.email, parseInt(this.dataset.quota, 10)); });
+      });
+      container.querySelectorAll('[data-action="delete-user"]').forEach(function(btn) {
+        btn.addEventListener('click', function() { deleteUser(this.dataset.userId); });
+      });
     }
     
     // Handle invite form
@@ -209,6 +236,60 @@
       }
     }
     
+    // Quota management
+    let quotaEditEmail = '';
+
+    function editQuota(email, currentMb) {
+      quotaEditEmail = email;
+      document.getElementById('quotaModalEmail').textContent = email;
+      document.getElementById('quotaInput').value = currentMb;
+      document.getElementById('quotaModal').classList.remove('hidden');
+    }
+
+    function closeQuotaModal() {
+      document.getElementById('quotaModal').classList.add('hidden');
+      quotaEditEmail = '';
+    }
+
+    async function saveQuota() {
+      const quotaMb = parseInt(document.getElementById('quotaInput').value, 10);
+      if (isNaN(quotaMb) || quotaMb < 0) {
+        alert('Please enter a valid quota (0 or greater)');
+        return;
+      }
+      try {
+        const response = await fetch(`/api/users/${encodeURIComponent(quotaEditEmail)}/quota`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ quotaMb }),
+        });
+        if (!response.ok) {
+          const result = await response.json();
+          throw new Error(result.error || 'Failed to update quota');
+        }
+        closeQuotaModal();
+        loadUsers();
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    async function backfillQuotas() {
+      if (!confirm('Apply the default quota to all existing users who currently have no quota set?')) return;
+      try {
+        const response = await fetch('/api/quota/backfill', { method: 'POST' });
+        const result = await response.json();
+        if (response.ok) {
+          alert(`Backfill complete: ${result.updated} updated, ${result.skipped} skipped`);
+          loadUsers();
+        } else {
+          throw new Error(result.error || 'Backfill failed');
+        }
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
     // Set guest registration link to account portal
     (function() {
       var currentHost = window.location.hostname;
@@ -218,6 +299,11 @@
         link.href = 'https://' + accountHost + '/register';
       }
     })();
+
+    // Bind static button handlers
+    document.getElementById('backfillBtn').addEventListener('click', backfillQuotas);
+    document.getElementById('quotaCancelBtn').addEventListener('click', closeQuotaModal);
+    document.getElementById('quotaSaveBtn').addEventListener('click', saveQuota);
 
     // Initial load
     loadUsers();

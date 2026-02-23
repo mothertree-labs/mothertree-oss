@@ -1,0 +1,7 @@
+{
+  "name": "mothertree",
+  "extends": "elastic",
+  "config": {
+    "dark_mode_support": true
+  }
+}

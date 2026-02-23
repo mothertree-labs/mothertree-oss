@@ -1,0 +1,285 @@
+#!/bin/bash
+
+# Endpoint Verification Script
+# Purpose: Post-deploy smoke test that checks external DNS resolution and HTTP reachability
+#          for all tenant services + VPN-only internal services
+#
+# Usage:
+#   ./scripts/verify-endpoints -e <env> -t <tenant>
+#   ./scripts/verify-endpoints --tenant=<name> <env>   (backward compat)
+#
+# Checks:
+#   - DNS resolution for each endpoint (dig +short)
+#   - HTTP status code for each endpoint (curl)
+#   - VPN-only endpoints (skipped if VPN not connected)
+#   - Retries DNS failures up to 3 times with 10s delay
+#
+# Exit codes:
+#   0 - All checks passed (SKIP does not count as fail)
+#   1 - One or more checks failed
+
+set -euo pipefail
+
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
+
+mt_usage() {
+  echo "Usage: $0 -e <env> -t <tenant>"
+  echo ""
+  echo "Verify external endpoint reachability after deployment."
+  echo ""
+  echo "Options:"
+  echo "  -e <env>       Environment (e.g., dev, prod)"
+  echo "  -t <tenant>    Tenant to check (required)"
+  echo "  -h, --help     Show this help"
+  echo ""
+  echo "Examples:"
+  echo "  $0 -e prod -t example"
+  echo "  $0 -e dev -t example"
+}
+
+mt_parse_args "$@"
+mt_require_env
+mt_require_tenant
+
+# Load tenant config
+TENANT_CONFIG="$REPO_ROOT/tenants/$MT_TENANT/${MT_ENV}.config.yaml"
+if [ ! -f "$TENANT_CONFIG" ]; then
+  print_error "Tenant config not found: $TENANT_CONFIG"
+  exit 1
+fi
+
+TENANT_DOMAIN=$(yq '.dns.domain' "$TENANT_CONFIG")
+TENANT_ENV_DNS_LABEL=$(yq '.dns.env_dns_label // ""' "$TENANT_CONFIG")
+TENANT_KEYCLOAK_REALM=$(yq '.keycloak.realm' "$TENANT_CONFIG")
+INFRA_DOMAIN=$(yq '.infra.domain // .dns.domain' "$TENANT_CONFIG")
+
+# Feature flags
+JITSI_ENABLED=$(yq '.features.jitsi_enabled // false' "$TENANT_CONFIG")
+MAIL_ENABLED=$(yq '.features.mail_enabled // false' "$TENANT_CONFIG")
+WEBMAIL_ENABLED=$(yq '.features.webmail_enabled // false' "$TENANT_CONFIG")
+ADMIN_PORTAL_ENABLED=$(yq '.features.admin_portal_enabled // false' "$TENANT_CONFIG")
+ACCOUNT_PORTAL_ENABLED=$(yq '.features.account_portal_enabled // false' "$TENANT_CONFIG")
+CALENDAR_ENABLED=$(yq '.features.calendar_enabled // false' "$TENANT_CONFIG")
+OFFICE_ENABLED=$(yq '.features.office_enabled // false' "$TENANT_CONFIG")
+
+# Compute hostnames (same logic as config.sh)
+if [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
+  MATRIX_HOST="matrix.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  DOCS_HOST="docs.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  FILES_HOST="files.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  JITSI_HOST="jitsi.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  AUTH_HOST="auth.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  WEBMAIL_HOST="webmail.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  ADMIN_HOST="admin.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  ACCOUNT_HOST="account.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  CALENDAR_HOST="calendar.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  OFFICE_HOST="office.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
+  INFRA_SUBDOMAIN="${TENANT_ENV_DNS_LABEL}."
+else
+  MATRIX_HOST="matrix.${TENANT_DOMAIN}"
+  DOCS_HOST="docs.${TENANT_DOMAIN}"
+  FILES_HOST="files.${TENANT_DOMAIN}"
+  JITSI_HOST="jitsi.${TENANT_DOMAIN}"
+  AUTH_HOST="auth.${TENANT_DOMAIN}"
+  WEBMAIL_HOST="webmail.${TENANT_DOMAIN}"
+  ADMIN_HOST="admin.${TENANT_DOMAIN}"
+  ACCOUNT_HOST="account.${TENANT_DOMAIN}"
+  CALENDAR_HOST="calendar.${TENANT_DOMAIN}"
+  OFFICE_HOST="office.${TENANT_DOMAIN}"
+  INFRA_SUBDOMAIN=""
+fi
+
+# Infrastructure hosts (monitoring, VPN-only)
+# Prod VPN endpoints: grafana.prod.<domain> (no "internal" prefix)
+# Dev VPN endpoints:  grafana.internal.dev.<domain> ("internal" prefix only for dev)
+if [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
+  VPN_SUBDOMAIN="internal.${TENANT_ENV_DNS_LABEL}."
+else
+  VPN_SUBDOMAIN="prod."
+fi
+GRAFANA_HOST="grafana.${VPN_SUBDOMAIN}${INFRA_DOMAIN}"
+PROMETHEUS_HOST="prometheus.${VPN_SUBDOMAIN}${INFRA_DOMAIN}"
+ALERTMANAGER_HOST="alertmanager.${VPN_SUBDOMAIN}${INFRA_DOMAIN}"
+
+# Build endpoint lists
+# Format: "NAME|URL|TYPE" where TYPE is "external" or "vpn"
+ENDPOINTS=()
+
+# External endpoints (always enabled)
+ENDPOINTS+=("Matrix/Element|https://${MATRIX_HOST}/|external")
+ENDPOINTS+=("Synapse API|https://${MATRIX_HOST}/_matrix/client/versions|external")
+ENDPOINTS+=("Docs|https://${DOCS_HOST}/|external")
+ENDPOINTS+=("Files|https://${FILES_HOST}/status.php|external")
+ENDPOINTS+=("Auth|https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}|external")
+
+# Conditional external endpoints
+if [ "$JITSI_ENABLED" = "true" ]; then
+  ENDPOINTS+=("Jitsi|https://${JITSI_HOST}/|external")
+fi
+if [ "$WEBMAIL_ENABLED" = "true" ]; then
+  ENDPOINTS+=("Webmail|https://${WEBMAIL_HOST}/|external")
+fi
+if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
+  ENDPOINTS+=("Admin Portal|https://${ADMIN_HOST}/|external")
+fi
+if [ "$ACCOUNT_PORTAL_ENABLED" = "true" ]; then
+  ENDPOINTS+=("Account Portal|https://${ACCOUNT_HOST}/|external")
+fi
+if [ "$CALENDAR_ENABLED" = "true" ]; then
+  ENDPOINTS+=("Calendar|https://${CALENDAR_HOST}/status.php|external")
+fi
+if [ "$OFFICE_ENABLED" = "true" ]; then
+  ENDPOINTS+=("Office|https://${OFFICE_HOST}/|external")
+fi
+
+# VPN-only endpoints (Grafana is the primary VPN connectivity indicator)
+# Internal ingress listens on port 30443
+ENDPOINTS+=("Grafana|https://${GRAFANA_HOST}:30443/|vpn")
+ENDPOINTS+=("Prometheus|https://${PROMETHEUS_HOST}:30443/|vpn")
+ENDPOINTS+=("AlertManager|https://${ALERTMANAGER_HOST}:30443/|vpn")
+
+# VPN connectivity check — ping the VPN gateway directly
+# This tests tunnel connectivity without depending on any application being healthy
+VPN_CONNECTED=false
+if [ "$MT_ENV" = "prod" ]; then
+  VPN_GATEWAY="10.8.0.1"
+else
+  VPN_GATEWAY="10.9.0.1"
+fi
+if ping -c 1 -t 2 "$VPN_GATEWAY" >/dev/null 2>&1; then
+  VPN_CONNECTED=true
+fi
+
+echo "=== Endpoint Verification: tenant=$MT_TENANT env=$MT_ENV ==="
+echo ""
+
+# Results tracking
+TOTAL=0
+PASSED=0
+FAILED=0
+SKIPPED=0
+DNS_FAILURES=()
+
+check_endpoint() {
+  local name="$1"
+  local url="$2"
+  local type="$3"
+
+  TOTAL=$((TOTAL + 1))
+
+  # Skip VPN endpoints if not connected
+  if [ "$type" = "vpn" ] && [ "$VPN_CONNECTED" = "false" ]; then
+    printf "  %-18s ${YELLOW}SKIP${NC}  %s (VPN not connected)\n" "$name" "$url"
+    SKIPPED=$((SKIPPED + 1))
+    return
+  fi
+
+  # Extract hostname from URL
+  local host
+  host=$(echo "$url" | sed -E 's|https?://([^/:]+).*|\1|')
+
+  # DNS resolution check
+  local dns_result
+  dns_result=$(dig +short "$host" 2>/dev/null | head -1)
+  if [ -z "$dns_result" ]; then
+    printf "  %-18s ${RED}DNS_FAIL${NC}  %s (no DNS record)\n" "$name" "$url"
+    FAILED=$((FAILED + 1))
+    DNS_FAILURES+=("$name|$url|$type")
+    return
+  fi
+
+  # HTTP check
+  local http_code
+  http_code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -k "$url" 2>/dev/null) || http_code="000"
+
+  if [[ "$http_code" =~ ^(200|301|302|303|307|308)$ ]]; then
+    printf "  %-18s ${GREEN}OK${NC}    %s (HTTP %s)\n" "$name" "$url" "$http_code"
+    PASSED=$((PASSED + 1))
+  else
+    printf "  %-18s ${RED}FAIL${NC}  %s (HTTP %s)\n" "$name" "$url" "$http_code"
+    FAILED=$((FAILED + 1))
+  fi
+}
+
+# Run checks
+echo "--- External Endpoints ---"
+for entry in "${ENDPOINTS[@]}"; do
+  IFS='|' read -r name url type <<< "$entry"
+  if [ "$type" = "external" ]; then
+    check_endpoint "$name" "$url" "$type"
+  fi
+done
+
+echo ""
+if [ "$VPN_CONNECTED" = "true" ]; then
+  echo "--- VPN-Only Endpoints ---"
+else
+  echo "--- VPN-Only Endpoints (VPN not connected — skipping) ---"
+fi
+for entry in "${ENDPOINTS[@]}"; do
+  IFS='|' read -r name url type <<< "$entry"
+  if [ "$type" = "vpn" ]; then
+    check_endpoint "$name" "$url" "$type"
+  fi
+done
+
+# Retry DNS failures
+if [ ${#DNS_FAILURES[@]} -gt 0 ]; then
+  echo ""
+  print_status "${#DNS_FAILURES[@]} DNS failure(s) detected — retrying (up to 3 attempts with 10s delay)..."
+
+  for attempt in 1 2 3; do
+    sleep 10
+    STILL_FAILING=()
+    for entry in "${DNS_FAILURES[@]}"; do
+      IFS='|' read -r name url type <<< "$entry"
+      local_host=$(echo "$url" | sed -E 's|https?://([^/]+).*|\1|')
+      dns_result=$(dig +short "$local_host" 2>/dev/null | head -1)
+      if [ -z "$dns_result" ]; then
+        STILL_FAILING+=("$entry")
+        printf "  [retry %d/3] %-18s ${RED}DNS_FAIL${NC}  %s\n" "$attempt" "$name" "$url"
+      else
+        # DNS resolved — try HTTP
+        http_code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -k "$url" 2>/dev/null) || http_code="000"
+        if [[ "$http_code" =~ ^(200|301|302|303|307|308)$ ]]; then
+          printf "  [retry %d/3] %-18s ${GREEN}OK${NC}    %s (HTTP %s)\n" "$attempt" "$name" "$url" "$http_code"
+          FAILED=$((FAILED - 1))
+          PASSED=$((PASSED + 1))
+        else
+          printf "  [retry %d/3] %-18s ${RED}FAIL${NC}  %s (HTTP %s)\n" "$attempt" "$name" "$url" "$http_code"
+        fi
+      fi
+    done
+    DNS_FAILURES=("${STILL_FAILING[@]+"${STILL_FAILING[@]}"}")
+    if [ ${#DNS_FAILURES[@]} -eq 0 ]; then
+      print_status "All DNS failures resolved on retry $attempt"
+      break
+    fi
+  done
+
+  # Print DNS flush instructions if failures remain
+  if [ ${#DNS_FAILURES[@]} -gt 0 ]; then
+    echo ""
+    print_status "DNS failures persisted after retries. Try flushing your DNS cache:"
+    echo "  macOS:   sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder"
+    echo "  Linux:   sudo systemd-resolve --flush-caches  (or: sudo resolvectl flush-caches)"
+    echo "  Chrome:  chrome://net-internals/#dns -> Clear host cache"
+  fi
+fi
+
+# Summary
+echo ""
+echo "--- Summary ---"
+printf "  Total: %d  |  ${GREEN}Passed: %d${NC}  |  ${RED}Failed: %d${NC}  |  ${YELLOW}Skipped: %d${NC}\n" "$TOTAL" "$PASSED" "$FAILED" "$SKIPPED"
+
+if [ $FAILED -gt 0 ]; then
+  echo ""
+  echo "=== RESULT: $FAILED endpoint(s) unreachable ==="
+  exit 1
+else
+  echo ""
+  echo "=== RESULT: All endpoints reachable ==="
+  exit 0
+fi

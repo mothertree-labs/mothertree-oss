@@ -1,0 +1,7 @@
+<% if ((typeof privacyPolicyUrl !== 'undefined' && privacyPolicyUrl) || (typeof termsOfUseUrl !== 'undefined' && termsOfUseUrl) || (typeof acceptableUsePolicyUrl !== 'undefined' && acceptableUsePolicyUrl)) { %>
+<div class="mt-8 pt-4 border-t border-gray-200 text-center text-xs text-warm-gray space-x-3">
+  <% if (typeof privacyPolicyUrl !== 'undefined' && privacyPolicyUrl) { %><a href="<%= privacyPolicyUrl %>" target="_blank" rel="noopener" class="hover:text-sage">Privacy Policy</a><% } %>
+  <% if (typeof termsOfUseUrl !== 'undefined' && termsOfUseUrl) { %><a href="<%= termsOfUseUrl %>" target="_blank" rel="noopener" class="hover:text-sage">Terms of Use</a><% } %>
+  <% if (typeof acceptableUsePolicyUrl !== 'undefined' && acceptableUsePolicyUrl) { %><a href="<%= acceptableUsePolicyUrl %>" target="_blank" rel="noopener" class="hover:text-sage">Acceptable Use Policy</a><% } %>
+</div>
+<% } %>

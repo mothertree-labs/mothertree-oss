@@ -1,6 +1,13 @@
 # PostgreSQL Configuration for LaSuite Docs
 # Conservative resource allocation for 2-node cluster
 
+# Pin image versions to prevent surprise upgrades on pod reschedule
+# Bitnami no longer publishes human-readable version tags — use digest pinning
+# To update: get new digest from registry-1.docker.io/bitnami/postgresql:latest
+image:
+  digest: "sha256:6bb3cb8210a89f19f5d037638901049d7d7c598fbec644455a4dc82fd1c59350"
+  pullPolicy: IfNotPresent
+
 # Database configuration
 postgresqlDatabase: docs
 postgresqlUsername: docs
@@ -20,14 +27,14 @@ auth:
   # existingSecret would be cleaner but requires pre-creating the secret
   # For now, we rely on the db-init-job and post-sync to keep things consistent
 
-# Resource configuration - tuned based on actual usage (~48Mi observed)
+# Resource configuration — no memory limits so PG can use available node memory
+# These are dev defaults; prod overrides in environments/prod/docs-postgresql.yaml
 resources:
   requests:
-    cpu: 30m
-    memory: 128Mi
+    cpu: 250m
+    memory: 512Mi
   limits:
-    memory: 256Mi
-    # No CPU limit - databases should be able to burst
+    cpu: 1000m
 
 # Persistence
 persistence:
@@ -47,15 +54,16 @@ primary:
     size: 5Gi
     storageClass: linode-block-storage-retain
   
-  # Memory tuned based on actual usage (~48Mi observed)
+  # Prefer spreading primary and read replicas across different nodes
+  podAntiAffinityPreset: soft
+
   resources:
     requests:
-      cpu: 30m
-      memory: 128Mi
+      cpu: 250m
+      memory: 512Mi
     limits:
-      memory: 256Mi
-      # No CPU limit - databases should be able to burst
-  
+      cpu: 1000m
+
   # Create dedicated Keycloak database and user so Keycloak can authenticate
   # NOTE: The keycloak role password here is only used on initial DB creation.
   # After first install, change it with:
@@ -87,9 +95,24 @@ primary:
         REVOKE CONNECT ON DATABASE keycloak FROM PUBLIC;
         GRANT CONNECT ON DATABASE keycloak TO keycloak;
 
-# Disable metrics and monitoring to save resources
+# PostgreSQL metrics exporter (postgres_exporter sidecar)
 metrics:
-  enabled: false
+  enabled: true
+  image:
+    digest: "sha256:a69c97df78ea2854c792628fa0c804c976f51fc6ff4cc0d48c3cd3feaacf8af6"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  serviceMonitor:
+    enabled: true
+    namespace: infra-db
+    labels:
+      release: kube-prometheus-stack
 
 # Security context
 securityContext:
@@ -113,9 +136,12 @@ readReplicas:
     enabled: true
     size: 5Gi
     storageClass: linode-block-storage-retain
+  # Prefer spreading primary and read replicas across different nodes
+  podAntiAffinityPreset: soft
+
   resources:
     requests:
-      cpu: 30m
-      memory: 128Mi
-    limits:
+      cpu: 100m
       memory: 256Mi
+    limits:
+      cpu: 500m

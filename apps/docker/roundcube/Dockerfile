@@ -40,4 +40,8 @@ RUN rm -rf /usr/src/roundcubemail/program/js/tinymce \
 COPY apps/docker/roundcube/editor.js /usr/src/roundcubemail/program/js/editor.js
 COPY apps/docker/roundcube/editor.js /usr/src/roundcubemail/program/js/editor.min.js
 
+# mothertree custom skin (child of elastic)
+COPY apps/docker/roundcube/skins/mothertree /usr/src/roundcubemail/skins/mothertree
+COPY apps/admin-portal/public/fonts/figtree-*.woff2 /usr/src/roundcubemail/skins/mothertree/fonts/
+
 WORKDIR /var/www/html

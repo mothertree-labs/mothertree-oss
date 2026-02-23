@@ -20,7 +20,7 @@ function getAdminAuth() {
  * Ensure a user principal exists in Stalwart's internal directory.
  * Creates the principal if it doesn't exist (lazy provisioning).
  */
-async function ensureUserExists(email, name) {
+async function ensureUserExists(email, name, quotaBytes) {
   const adminAuth = getAdminAuth();
 
   const checkResponse = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
@@ -32,19 +32,23 @@ async function ensureUserExists(email, name) {
   }
 
   console.log(`Stalwart: creating principal for ${email}`);
+  const body = {
+    type: 'individual',
+    name: email,
+    emails: [email],
+    description: name || '',
+    secrets: [],
+  };
+  if (quotaBytes) {
+    body.quota = quotaBytes;
+  }
   const createResponse = await fetch(`${STALWART_API_URL}/api/principal`, {
     method: 'POST',
     headers: {
       'Authorization': adminAuth,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      type: 'individual',
-      name: email,
-      emails: [email],
-      description: name || '',
-      secrets: [],
-    }),
+    body: JSON.stringify(body),
   });
 
   if (createResponse.status === 409) {
@@ -58,6 +62,131 @@ async function ensureUserExists(email, name) {
 
   console.log(`Stalwart: principal ${email} created`);
   return { created: true };
+}
+
+/**
+ * Get the quota for a user principal.
+ * Returns quota in bytes (0 = unlimited).
+ */
+async function getUserQuota(email) {
+  const adminAuth = getAdminAuth();
+
+  const response = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+    headers: { 'Authorization': adminAuth },
+  });
+
+  if (!response.ok) {
+    if (response.status === 404) return { quota: 0 };
+    const error = await response.text();
+    throw new Error(`Failed to get principal: ${response.status} ${error}`);
+  }
+
+  const data = await response.json();
+  return { quota: data.data?.quota || 0 };
+}
+
+/**
+ * Set the quota for a user principal.
+ * quotaBytes = 0 means unlimited.
+ */
+async function setUserQuota(email, quotaBytes) {
+  const adminAuth = getAdminAuth();
+
+  const response = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': adminAuth,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify([{
+      action: 'set',
+      field: 'quota',
+      value: quotaBytes,
+    }]),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to set quota: ${response.status} ${error}`);
+  }
+
+  return { success: true };
+}
+
+/**
+ * Backfill quotas for all existing users that have no quota set (quota === 0).
+ * Skips the admin principal.
+ */
+async function backfillQuotas(defaultQuotaBytes) {
+  const adminAuth = getAdminAuth();
+
+  const listResponse = await fetch(`${STALWART_API_URL}/api/principal?types=individual&limit=0`, {
+    headers: { 'Authorization': adminAuth },
+  });
+
+  if (!listResponse.ok) {
+    const error = await listResponse.text();
+    throw new Error(`Failed to list principals: ${listResponse.status} ${error}`);
+  }
+
+  const listData = await listResponse.json();
+  const items = listData.data?.items || [];
+
+  let updated = 0;
+  let skipped = 0;
+  for (const item of items) {
+    const principalName = typeof item === 'string' ? item : item.name;
+    if (!principalName || principalName === 'admin') {
+      skipped++;
+      continue;
+    }
+
+    // If the list response includes quota info, use it directly
+    if (typeof item === 'object' && item.quota && item.quota > 0) {
+      skipped++;
+      continue;
+    }
+
+    // Otherwise fetch the full principal to check
+    if (typeof item === 'string') {
+      const principal = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(principalName)}`, {
+        headers: { 'Authorization': adminAuth },
+      });
+
+      if (!principal.ok) {
+        skipped++;
+        continue;
+      }
+
+      const data = await principal.json();
+      if (data.data?.quota && data.data.quota > 0) {
+        skipped++;
+        continue;
+      }
+    }
+
+    const patchResponse = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(principalName)}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': adminAuth,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify([{
+        action: 'set',
+        field: 'quota',
+        value: defaultQuotaBytes,
+      }]),
+    });
+
+    if (patchResponse.ok) {
+      updated++;
+    } else {
+      skipped++;
+    }
+  }
+
+  console.log(`Stalwart: backfilled quotas for ${updated} users (${skipped} skipped)`);
+  return { updated, skipped };
 }
 
 /**
@@ -169,4 +298,7 @@ module.exports = {
   listAppPasswords,
   createAppPassword,
   revokeAppPassword,
+  getUserQuota,
+  setUserQuota,
+  backfillQuotas,
 };

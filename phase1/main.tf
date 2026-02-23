@@ -261,7 +261,7 @@ module "openvpn_server" {
   ssh_public_key   = var.ssh_public_key
   vpn_network_cidr = var.vpn_network_cidr
   cluster_ip       = module.lke_cluster.cluster_ip_address
-  dns_server_ip    = "10.8.0.1" # VPN server's VPN interface IP for Unbound DNS
+  dns_server_ip    = cidrhost(var.vpn_network_cidr, 1) # VPN server's VPN interface IP for Unbound DNS
   domain           = "${var.env_dns_label != "" ? "${var.env_dns_label}" : "prod"}.${var.domain}"
   disk_size        = var.openvpn_disk_size
   tags             = sort(concat(var.common_tags, [var.env]))

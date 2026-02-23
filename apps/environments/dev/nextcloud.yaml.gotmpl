@@ -35,7 +35,6 @@ ingress:
   enabled: true
   className: nginx
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/proxy-body-size: 4G
     nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
     nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
@@ -45,7 +44,7 @@ ingress:
         - path: /
           pathType: Prefix
   tls:
-    - secretName: files-tls
+    - secretName: 'wildcard-tls-{{ env "TENANT_NAME" }}'
       hosts:
         - '{{ env "FILES_HOST" }}'
 
@@ -56,7 +55,6 @@ extraManifests:
     metadata:
       name: nextcloud-calendar
       annotations:
-        cert-manager.io/cluster-issuer: letsencrypt-prod
         nginx.ingress.kubernetes.io/proxy-body-size: 4G
         nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
         nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
@@ -73,7 +71,7 @@ extraManifests:
       tls:
         - hosts:
             - '{{ env "CALENDAR_HOST" }}'
-          secretName: calendar-tls
+          secretName: 'wildcard-tls-{{ env "TENANT_NAME" }}'
       rules:
         - host: '{{ env "CALENDAR_HOST" }}'
           http:
@@ -85,3 +83,31 @@ extraManifests:
                     name: nextcloud
                     port:
                       number: 8080
+  # notify_push WebSocket proxy — routes /push/ to the Rust binary
+  # Long timeouts keep WebSocket connections alive (default 60s would kill them)
+  - apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: nextcloud-push
+      annotations:
+        nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+        nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+        nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+        nginx.ingress.kubernetes.io/upstream-hash-by: "$remote_addr"
+    spec:
+      ingressClassName: nginx
+      tls:
+        - hosts:
+            - '{{ env "FILES_HOST" }}'
+          secretName: 'wildcard-tls-{{ env "TENANT_NAME" }}'
+      rules:
+        - host: '{{ env "FILES_HOST" }}'
+          http:
+            paths:
+              - path: /push/
+                pathType: Prefix
+                backend:
+                  service:
+                    name: notify-push
+                    port:
+                      number: 7867

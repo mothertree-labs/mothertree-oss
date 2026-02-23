@@ -7,7 +7,6 @@ metadata:
     app: jitsi-web
     component: web
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     kubernetes.io/ingress.class: nginx
     nginx.ingress.kubernetes.io/priority: "50"
     # Allow iframe embedding for Matrix integration
@@ -19,7 +18,7 @@ spec:
   tls:
   - hosts:
     - ${JITSI_HOST}
-    secretName: jitsi-tls
+    secretName: wildcard-tls-${TENANT_NAME}
   rules:
   - host: ${JITSI_HOST}
     http:

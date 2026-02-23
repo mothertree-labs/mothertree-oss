@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build tracking
+.source-hash
+.source-hash.*
+
+# Tailwind build output
+public/css/tailwind.css
+
+# Production build
+build/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+npm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store

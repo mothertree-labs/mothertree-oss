@@ -106,71 +106,6 @@ provider "linode" {
   token = var.linode_token
 }
 
-# =============================================================================
-# Cloudflare IP ranges (read from reference files — single source of truth)
-# Used by linode_firewall to restrict HTTP/S to Cloudflare + VPN
-# =============================================================================
-locals {
-  cloudflare_ipv4 = [for line in split("\n", trimspace(file("${path.module}/../scripts/cloudflare-ips-v4.txt"))) : line if line != "" && !startswith(line, "#")]
-  cloudflare_ipv6 = [for line in split("\n", trimspace(file("${path.module}/../scripts/cloudflare-ips-v6.txt"))) : line if line != "" && !startswith(line, "#")]
-}
-
-# =============================================================================
-# Cloud Firewall for NodeBalancer
-# Restricts HTTP/S to Cloudflare + VPN IPs; allows all other TCP (mail ports)
-# =============================================================================
-resource "linode_firewall" "nodebalancer" {
-  label = "mothertree-${var.env_dns_label != "" ? var.env_dns_label : "prod"}-nb"
-
-  # Rule 1: Allow HTTP/S from Cloudflare proxy IPs
-  inbound {
-    label    = "cloudflare-https"
-    action   = "ACCEPT"
-    protocol = "TCP"
-    ports    = "80,443"
-    ipv4     = local.cloudflare_ipv4
-    ipv6     = local.cloudflare_ipv6
-  }
-
-  # Rule 2: Allow HTTP/S from VPN server (for internal/debug access)
-  # VPN clients are NAT'd through the VPN server's public IP
-  inbound {
-    label    = "vpn-https"
-    action   = "ACCEPT"
-    protocol = "TCP"
-    ports    = "80,443"
-    ipv4     = ["${data.terraform_remote_state.phase1.outputs.openvpn_server_ip}/32"]
-  }
-
-  # Rule 3: Drop HTTP/S from all other sources
-  inbound {
-    label    = "drop-direct-https"
-    action   = "DROP"
-    protocol = "TCP"
-    ports    = "80,443"
-    ipv4     = ["0.0.0.0/0"]
-    ipv6     = ["::/0"]
-  }
-
-  # Rule 4: Allow all other TCP (mail ports 465xx, 587xx, 993x, etc.)
-  # Excludes 80 and 443 which are handled by rules above
-  inbound {
-    label    = "allow-other-tcp"
-    action   = "ACCEPT"
-    protocol = "TCP"
-    ports    = "1-79,81-442,444-65535"
-    ipv4     = ["0.0.0.0/0"]
-    ipv6     = ["::/0"]
-  }
-
-  inbound_policy  = "DROP"
-  outbound_policy = "ACCEPT"
-}
-
-output "nodebalancer_firewall_id" {
-  value = linode_firewall.nodebalancer.id
-}
-
 # Local variables
 locals {
   # TURN server configuration
@@ -383,7 +318,7 @@ resource "null_resource" "update_vpn_unbound" {
     domain               = var.env_dns_label != "" ? "${var.env_dns_label}.${var.domain}" : "prod.${var.domain}"
     vpn_server_ready     = null_resource.wait_for_vpn_server.id
     is_dev_env           = var.env_dns_label != "" ? "true" : "false"
-    internal_dns_version = "2" # Bump to force re-run when adding web subdomain entries
+    internal_dns_version = "3" # Bump to force re-run (3: fix local-zone static→transparent)
   }
 
   # Use remote-exec to update Unbound config on VPN server
@@ -460,7 +395,7 @@ resource "null_resource" "update_vpn_unbound" {
         # restart happens after all other work is complete.
 
         # Refresh NAT rule for VPN->node-subnet so nodes can reply to VPN clients
-        VPN_NET="10.8.0.0/24"
+        VPN_NET="${data.terraform_remote_state.phase1.outputs.vpn_network_cidr}"
         # Delete any existing MASQUERADE to a 192.168.*.0/24 that we may have previously added
         iptables -t nat -S POSTROUTING | grep -E "\\-s $VPN_NET .*\\-d 192\\.168\\.[0-9]+\\.[0-9]+\\.0/24 .*\\-j MASQUERADE" | while read -r rule; do
           iptables -t nat $(echo "$rule" | sed 's/^-A/-D/') || true
@@ -470,7 +405,11 @@ resource "null_resource" "update_vpn_unbound" {
 
         # Backup current config
         cp /opt/unbound/unbound.conf /opt/unbound/unbound.conf.backup
-        
+
+        # Ensure local-zone uses "transparent" (not "static") so queries without
+        # explicit local-data entries are forwarded upstream instead of NXDOMAIN
+        sed -i 's/local-zone:.*static/local-zone: "'"$DOMAIN"'." transparent/' /opt/unbound/unbound.conf
+
         # Remove any existing records for monitoring services (match any line starting with local-data: containing the service name)
         # This ensures we remove ALL instances, even if there are duplicates
         # Note: Use [[:space:]]* to match optional leading whitespace in the config
@@ -1303,10 +1242,10 @@ resource "kubernetes_network_policy" "postfix_ingress" {
   }
 }
 
-# NOTE: LoadBalancer for Postfix removed due to open relay vulnerability
-# Linode's NodeBalancer does SNAT, so externalTrafficPolicy: Local doesn't preserve client IPs
-# K8s Postfix is now internal-only (ClusterIP), accessible only from within the cluster
-# Inbound mail architecture needs to be redesigned to properly restrict external access
+# NOTE: Inbound SMTP now routes through the ingress-nginx NodeBalancer TCP proxy (port 30025).
+# VPN Postfix connects to lb1.<env>.<domain>:30025, which proxies to infra-mail/postfix:25.
+# The NodePort service above is kept as a fallback path but is no longer the primary route.
+# This avoids reliance on hardcoded K8s node VPC IPs and custom LKE firewall rules.
 
 # =============================================================================
 # DNS Management Module

@@ -16,18 +16,19 @@ metadata:
     component: webmail
     tenant: ${TENANT_NAME}
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     kubernetes.io/ingress.class: nginx
     nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
     nginx.ingress.kubernetes.io/proxy-body-size: "50m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header Cache-Control "no-store" always;
 spec:
   ingressClassName: nginx
   tls:
   - hosts:
     - ${MAIL_HOST}
-    secretName: stalwart-tls
+    secretName: wildcard-tls-${TENANT_NAME}
   rules:
   - host: ${MAIL_HOST}
     http:

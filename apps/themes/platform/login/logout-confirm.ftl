@@ -5,7 +5,7 @@
         <link rel="stylesheet" href="${url.resourcesPath}/css/fonts.css" />
         <style>
             html.login-pf, html.login-pf body, body, .login-pf-page {
-                background: #f2efe8 !important;
+                background: #F3E8D6 !important;
                 background-image: none !important;
                 min-height: 100vh !important;
             }
@@ -30,12 +30,12 @@
                 margin-bottom: 1.5rem;
             }
             .platform-title { 
-                font-family: 'Tomorrow', sans-serif;
-                font-size: 2rem; font-weight: 400; color: #4a6741; 
+                font-family: 'Figtree', sans-serif;
+                font-size: 2rem; font-weight: 600; color: #A7AE8D; 
                 margin: 0 0 0.5rem 0; letter-spacing: 0.03em;
             }
             .logout-message {
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 1.1rem; color: #6b6b6b; 
                 text-align: center;
                 margin-bottom: 1.5rem;
@@ -44,25 +44,25 @@
                 display: block !important;
                 width: 100%;
                 padding: 0.875rem 2rem !important;
-                background: #4a6741 !important;
+                background: #A7AE8D !important;
                 border: none !important;
                 border-radius: 8px !important;
                 color: #fff !important;
-                font-family: 'Instrument Sans', sans-serif;
+                font-family: 'Figtree', sans-serif;
                 font-size: 1.1rem !important;
                 font-weight: 500 !important;
                 cursor: pointer !important;
                 transition: all 0.2s ease !important;
-                box-shadow: 0 4px 12px rgba(74, 103, 65, 0.3) !important;
+                box-shadow: 0 4px 12px rgba(167, 174, 141, 0.3) !important;
             }
             #kc-logout:hover {
-                background: #3d5636 !important;
+                background: #8A9475 !important;
                 transform: translateY(-1px);
             }
             .pf-c-login__footer, .login-pf-page-footer { background: transparent !important; }
         </style>
         <div class="platform-header">
-            <h1 class="platform-title">${realmDisplayName!"the platform"}</h1>
+            <h1 class="platform-title">${realm.displayName!"the platform"}</h1>
         </div>
     <#elseif section = "form">
         <div id="kc-logout">

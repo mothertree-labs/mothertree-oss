@@ -30,9 +30,9 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://cdn.tailwindcss.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      fontSrc: ["'self'"],
       imgSrc: ["'self'", "data:"],
       connectSrc: ["'self'"],
       frameSrc: ["'none'"],
@@ -45,6 +45,11 @@ app.use(helmet({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Policy URLs (configurable via environment variables)
+app.locals.privacyPolicyUrl = process.env.PRIVACY_POLICY_URL || '';
+app.locals.termsOfUseUrl = process.env.TERMS_OF_USE_URL || '';
+app.locals.acceptableUsePolicyUrl = process.env.ACCEPTABLE_USE_POLICY_URL || '';
 
 // View engine
 app.set('view engine', 'ejs');
@@ -118,13 +123,14 @@ app.use(session({
     secure: true,
     httpOnly: true,
     sameSite: 'lax',        // Permits cross-origin GET (OIDC redirects) but blocks cross-origin POST
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days (matches Remember Me / offline token lifespan)
   }
 }));
 
 // Passport
 app.use(passport.initialize());
 app.use(passport.session());
+app.use(tokenRefreshMiddleware);
 
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((user, done) => done(null, user));
@@ -217,6 +223,8 @@ async function initializeOIDC() {
         name: userinfo.name || userinfo.preferred_username,
         roles: tokenSet.claims().realm_access?.roles || [],
         accessToken: tokenSet.access_token,
+        refreshToken: tokenSet.refresh_token,
+        tokenExpiresAt: tokenSet.expires_at,
       };
       return done(null, user);
     }
@@ -241,12 +249,50 @@ async function initializeOIDC() {
         name: userinfo.name || userinfo.preferred_username,
         roles: tokenSet.claims().realm_access?.roles || [],
         accessToken: tokenSet.access_token,
+        refreshToken: tokenSet.refresh_token,
+        tokenExpiresAt: tokenSet.expires_at,
       };
       return done(null, user);
     }
   ));
 
+  // Store client reference for token refresh middleware
+  app.locals.oidcClient = client;
+
   return client;
+}
+
+// Token refresh middleware — transparently refreshes expired access tokens
+// using the stored refresh token (5-minute window before expiry)
+function tokenRefreshMiddleware(req, res, next) {
+  if (!req.isAuthenticated() || !req.user.refreshToken || !req.user.tokenExpiresAt) {
+    return next();
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = req.user.tokenExpiresAt;
+  const REFRESH_WINDOW = 5 * 60; // 5 minutes before expiry
+
+  if (now < expiresAt - REFRESH_WINDOW) {
+    return next(); // Token still fresh
+  }
+
+  const client = req.app.locals.oidcClient;
+  if (!client) {
+    return next();
+  }
+
+  client.refresh(req.user.refreshToken)
+    .then((tokenSet) => {
+      req.user.accessToken = tokenSet.access_token;
+      req.user.refreshToken = tokenSet.refresh_token || req.user.refreshToken;
+      req.user.tokenExpiresAt = tokenSet.expires_at;
+      next();
+    })
+    .catch((err) => {
+      console.error('Token refresh failed:', err.message);
+      next();
+    });
 }
 
 // Auth middleware
@@ -262,10 +308,16 @@ app.get('/', (req, res) => {
   if (req.isAuthenticated()) {
     return res.redirect('/app-passwords');
   }
-  res.render('home', { title: 'MotherTree Account' });
+  res.render('home', { title: `${process.env.PLATFORM_NAME || 'Platform'} Account` });
 });
 
-app.get('/auth/login', passport.authenticate('oidc', { scope: 'openid email profile' }));
+app.get('/auth/login', (req, res, next) => {
+  // Ensure session is saved before OIDC redirect so state/nonce survive the round-trip
+  req.session.save((err) => {
+    if (err) console.error('Session save error:', err);
+    passport.authenticate('oidc', { scope: 'openid email profile' })(req, res, next);
+  });
+});
 
 app.get('/auth/callback',
   passport.authenticate('oidc', { failureRedirect: '/auth/error' }),
@@ -286,6 +338,16 @@ app.get('/auth/callback',
       }
     } catch (err) {
       console.error('Email swap check failed (non-fatal):', err.message);
+    }
+
+    // Ensure passkey is ordered before password (non-blocking)
+    try {
+      const keycloakApi = require('./api/keycloak');
+      keycloakApi.ensurePasskeyFirst(req.user.id).catch(err =>
+        console.error('ensurePasskeyFirst failed on login:', err.message)
+      );
+    } catch (err) {
+      console.error('ensurePasskeyFirst setup failed:', err.message);
     }
 
     // If this is registration completion, redirect to webmail (regular users, not admins)
@@ -369,7 +431,9 @@ app.post('/api/app-passwords', verifyOrigin, requireAuth, async (req, res) => {
     }
 
     // Lazy provisioning: ensure user exists in Stalwart before creating app password
-    await stalwartApi.ensureUserExists(req.user.email, req.user.name);
+    const defaultQuotaMb = parseInt(process.env.DEFAULT_EMAIL_QUOTA_MB || '5120', 10);
+    const defaultQuotaBytes = defaultQuotaMb * 1024 * 1024;
+    await stalwartApi.ensureUserExists(req.user.email, req.user.name, defaultQuotaBytes);
 
     // Generate a cryptographically random password
     const password = crypto.randomBytes(16).toString('base64url');
@@ -414,6 +478,16 @@ app.get('/registration-callback',
       console.error('Email swap failed:', err.message);
     }
 
+    // Ensure passkey is ordered before password (non-blocking)
+    try {
+      const keycloakApi = require('./api/keycloak');
+      keycloakApi.ensurePasskeyFirst(req.user.id).catch(err =>
+        console.error('ensurePasskeyFirst failed on registration:', err.message)
+      );
+    } catch (err) {
+      console.error('ensurePasskeyFirst setup failed:', err.message);
+    }
+
     // Always redirect to webmail
     res.redirect(webmailUrl);
   }
@@ -424,9 +498,11 @@ app.get('/registration-callback',
 // Registration completion - uses dedicated callback URL (no session state needed)
 app.get('/complete-registration', (req, res, next) => {
   console.log('Complete registration: initiating OIDC with /registration-callback');
-  // Use a dedicated callback URL - the URL itself indicates this is a registration flow
-  // No session state needed!
-  passport.authenticate('oidc-registration', { scope: 'openid email profile' })(req, res, next);
+  // Ensure session is saved before OIDC redirect so state/nonce survive the round-trip
+  req.session.save((err) => {
+    if (err) console.error('Session save error:', err);
+    passport.authenticate('oidc-registration', { scope: 'openid email profile' })(req, res, next);
+  });
 });
 
 // Dedicated callback for registration completion - doesn't require tenant-admin
@@ -446,6 +522,16 @@ app.get('/registration/callback',
       }
     } catch (err) {
       console.error('Email swap failed:', err.message);
+    }
+
+    // Ensure passkey is ordered before password (non-blocking)
+    try {
+      const keycloakApi = require('./api/keycloak');
+      keycloakApi.ensurePasskeyFirst(req.user.id).catch(err =>
+        console.error('ensurePasskeyFirst failed on registration:', err.message)
+      );
+    } catch (err) {
+      console.error('ensurePasskeyFirst setup failed:', err.message);
     }
 
     // Always redirect to webmail - regular users don't need admin access
@@ -488,24 +574,11 @@ app.get('/beginSetup', async (req, res) => {
     return res.status(403).send('Invalid or expired setup link');
   }
 
-  console.log(`beginSetup: swapping email for user ${userId} before redirecting to Keycloak`);
-
-  try {
-    const keycloakApi = require('./api/keycloak');
-    const swapResult = await keycloakApi.swapToTenantEmailIfNeeded(userId);
-
-    if (swapResult.swapped) {
-      console.log(`beginSetup: email swapped to ${swapResult.newEmail}`);
-    } else {
-      console.log('beginSetup: no swap needed (already correct or no tenantEmail attribute)');
-    }
-  } catch (err) {
-    // Log but don't fail - let user continue to Keycloak
-    console.error('beginSetup: swap failed (continuing anyway):', err.message);
-  }
-
-  // Redirect to the original Keycloak action link
-  console.log(`beginSetup: redirecting to Keycloak`);
+  // Do NOT swap email here — the action token's `eml` claim contains the recovery
+  // email (set when the token was created). Keycloak validates that `eml` matches
+  // the user's current email. The swap happens later in /complete-registration
+  // after Keycloak has processed the action token.
+  console.log(`beginSetup: validated token for user ${userId}, redirecting to Keycloak`);
   res.redirect(302, next);
 });
 
@@ -689,6 +762,46 @@ app.post('/api/register-guest', verifyOrigin, async (req, res) => {
     console.error('Guest registration error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// Ensure passkey credential priority — called from login-username.ftl via
+// sendBeacon before form submission so Keycloak's AuthenticationSelectionResolver
+// picks the WebAuthn authenticator instead of the password form.
+// Unauthenticated by design (user hasn't logged in yet). Rate-limited per IP.
+// Response is always 200 to avoid leaking user existence.
+// The beacon uses application/x-www-form-urlencoded (CORS simple request),
+// so no preflight is needed and no CORS response headers are required
+// (sendBeacon ignores responses).
+const ensurePasskeyAttempts = new Map();
+app.post('/api/ensure-passkey-priority', async (req, res) => {
+  // Rate limit: 30 requests per IP per 15 minutes
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const maxAttempts = 30;
+  const ip = req.ip;
+  const attempts = (ensurePasskeyAttempts.get(ip) || []).filter(t => t > now - windowMs);
+  if (attempts.length >= maxAttempts) {
+    return res.json({ ok: true }); // Silent rate limit
+  }
+  attempts.push(now);
+  ensurePasskeyAttempts.set(ip, attempts);
+
+  const { email } = req.body;
+  if (!email || typeof email !== 'string') {
+    return res.json({ ok: true });
+  }
+
+  try {
+    const keycloakApi = require('./api/keycloak');
+    const user = await keycloakApi.findUserByEmail(email);
+    if (user) {
+      await keycloakApi.ensurePasskeyFirst(user.id);
+    }
+  } catch (err) {
+    console.error('ensure-passkey-priority error (non-fatal):', err.message);
+  }
+
+  res.json({ ok: true });
 });
 
 // Health check

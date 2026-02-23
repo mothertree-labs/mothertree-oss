@@ -55,9 +55,9 @@ data:
   SESSION_COOKIE_SECURE: "True"
   SESSION_COOKIE_SAMESITE: "None"
   SESSION_COOKIE_DOMAIN: "${COOKIE_DOMAIN}"
-  # Session duration - 10 hours browser session boundary
+  # Session duration - 30 days to match offline token and Remember Me lifespan
   # Offline tokens (30-day lifetime) keep OIDC refresh working beyond SSO session expiry
-  SESSION_COOKIE_AGE: "36000"
+  SESSION_COOKIE_AGE: "2592000"
   CSRF_COOKIE_SECURE: "True"
   CSRF_TRUSTED_ORIGINS: "https://${DOCS_HOST},https://${AUTH_HOST}"
   
@@ -68,14 +68,14 @@ data:
   EMAIL_PORT: "587"
   EMAIL_USE_TLS: "False"
   EMAIL_USE_SSL: "False"
-  DEFAULT_FROM_EMAIL: "MotherTree Docs <noreply@${SMTP_DOMAIN}>"
+  DEFAULT_FROM_EMAIL: "${TENANT_DISPLAY_NAME:-Platform} Docs <noreply@${SMTP_DOMAIN}>"
 
   # Impress/LaSuite Docs specific email settings
   DJANGO_EMAIL_HOST: "postfix-internal.infra-mail.svc.cluster.local"
   DJANGO_EMAIL_PORT: "587"
   DJANGO_EMAIL_USE_TLS: "False"
-  DJANGO_EMAIL_FROM: "MotherTree Docs <noreply@${SMTP_DOMAIN}>"
-  DJANGO_EMAIL_BRAND_NAME: "Mother Tree Docs"
+  DJANGO_EMAIL_FROM: "${TENANT_DISPLAY_NAME:-Platform} Docs <noreply@${SMTP_DOMAIN}>"
+  DJANGO_EMAIL_BRAND_NAME: "${TENANT_DISPLAY_NAME:-Platform} Docs"
   
   # Logging
   LOG_LEVEL: "INFO"
@@ -104,3 +104,5 @@ data:
   COLLABORATION_WS_URL: "wss://${DOCS_HOST}/collaboration/ws/"  # Frontend customization
   # Custom JavaScript for save status indicator (served from ConfigMap mount)
   FRONTEND_JS_URL: "https://${DOCS_HOST}/static/save-status.js"
+  # Skip the "Start Writing" splash page — go straight to Keycloak login
+  FRONTEND_HOMEPAGE_FEATURE_ENABLED: "false"

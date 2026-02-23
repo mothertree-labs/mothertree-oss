@@ -1,27 +1,25 @@
-/* Platform Custom Theme - Warm, relaxing colors */
+/* Platform Custom Theme - mothertree brand */
 
 /* === COLOR PALETTE === */
 :root {
-    --mt-bg-primary: #f5f0e8;      /* Warm cream background */
-    --mt-bg-secondary: #e8e0d4;    /* Slightly darker cream */
-    --mt-accent: #6b8e6b;          /* Sage green - nature/tree inspired */
-    --mt-accent-hover: #5a7a5a;    /* Darker sage for hover */
-    --mt-text-primary: #3d3d3d;    /* Warm dark gray */
-    --mt-text-secondary: #6b6b6b;  /* Medium gray */
+    --mt-bg-primary: #F3E8D6;      /* Ash */
+    --mt-bg-secondary: #ede0cc;    /* Slightly darker Ash */
+    --mt-accent: #A7AE8D;          /* Ghost Fern */
+    --mt-accent-hover: #8A9475;    /* Ghost Fern dark */
+    --mt-text-primary: #141511;    /* Coal */
+    --mt-text-secondary: #6B6B6B;  /* Warm gray */
     --mt-white: #fefefe;           /* Off-white */
-    --mt-shadow: rgba(107, 142, 107, 0.15);
+    --mt-shadow: rgba(20, 21, 17, 0.08);
 }
 
 /* === GLOBAL OVERRIDES - Target specific Keycloak/PatternFly classes === */
-/* The login-pf class is on the HTML element, not body */
-/* Background color matches platform theme: #f2efe8 */
 html.login-pf,
 html.login-pf body,
 body,
 .login-pf-page {
-    background: #f2efe8 !important;
+    background: #F3E8D6 !important;
     background-image: none !important;
-    background-color: #f2efe8 !important;
+    background-color: #F3E8D6 !important;
     min-height: 100vh !important;
 }
 
@@ -72,18 +70,18 @@ header {
 }
 
 .platform-title {
-    font-family: 'Tomorrow', sans-serif;
+    font-family: 'Figtree', sans-serif;
     font-size: 2.5rem;
-    font-weight: 400;
-    color: #4a6741;
+    font-weight: 600;
+    color: #141511;
     margin: 0 0 0.5rem 0;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.01em;
 }
 
 .platform-welcome {
-    font-family: 'Instrument Sans', sans-serif;
+    font-family: 'Figtree', sans-serif;
     font-size: 1.1rem;
-    color: #6b6b6b;
+    color: #6B6B6B;
     margin: 0;
     font-weight: 400;
 }
@@ -131,7 +129,7 @@ header {
 #kc-social-providers a:hover,
 .kc-social-provider-link:hover {
     background: var(--mt-accent) !important;
-    color: var(--mt-white) !important;
+    color: var(--mt-text-primary) !important;
     transform: translateY(-2px);
     box-shadow: 0 4px 12px var(--mt-shadow) !important;
 }

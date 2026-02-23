@@ -1,0 +1,40 @@
+# Production PostgreSQL resource overrides
+# PostgreSQL is the most critical shared service — all tenants depend on it.
+# No memory limit: allow PG to use available node memory rather than get OOM-killed.
+# system-cluster-critical priority: PG is the last thing evicted, can crowd out anything.
+
+resources:
+  requests:
+    cpu: 1000m
+    memory: 2Gi
+  limits:
+    cpu: 1900m
+
+primary:
+  priorityClassName: system-cluster-critical
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+    limits:
+      cpu: 1900m
+  # PostgreSQL memory tuning — caps total memory to ~6.9GB worst case (all 200 connections active)
+  # Normal load (~50 active): ~4.1GB. Leaves room for OS + other pods on 8GB node.
+  extendedConfiguration: |
+    shared_buffers = 3GB
+    work_mem = 4MB
+    max_connections = 200
+    maintenance_work_mem = 512MB
+    effective_cache_size = 6GB
+
+readReplicas:
+  priorityClassName: system-cluster-critical
+  # Replication requires replica settings >= primary for max_connections, etc.
+  extendedConfiguration: |
+    max_connections = 200
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m

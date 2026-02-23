@@ -163,6 +163,45 @@
         comment: 'SMTP inbound mail from internet'
       when: tenant_domains is defined and tenant_domains | length > 0
 
+    # microsocks SOCKS5 proxy — allows in-cluster Blackbox Exporter to probe
+    # external FQDNs via the VPN server, bypassing kube-proxy short-circuit
+    # that skips the NodeBalancer PROXY protocol header injection.
+    - name: Install Docker for microsocks container
+      apt:
+        name: docker.io
+        state: present
+      when: vpn_private_ip is defined and vpn_private_ip | length > 0
+
+    - name: Ensure Docker is enabled and started
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+      when: vpn_private_ip is defined and vpn_private_ip | length > 0
+
+    - name: Run microsocks SOCKS5 proxy container
+      community.docker.docker_container:
+        name: microsocks
+        image: chrll/microsocks:1.0.4
+        state: started
+        restart_policy: always
+        network_mode: host
+        command: >-
+          -i {{ vpn_private_ip }} -p 1080
+          {% if microsocks_password is defined and microsocks_password | length > 0 %}
+          -u blackbox -P {{ microsocks_password }}
+          {% endif %}
+      when: vpn_private_ip is defined and vpn_private_ip | length > 0
+
+    - name: Allow SOCKS5 proxy from Linode private network
+      ufw:
+        rule: allow
+        port: '1080'
+        proto: tcp
+        from_ip: 192.168.0.0/16
+        comment: 'microsocks SOCKS5 for Blackbox Exporter probes'
+      when: vpn_private_ip is defined and vpn_private_ip | length > 0
+
   handlers:
     - name: rebuild postfix maps
       shell: |

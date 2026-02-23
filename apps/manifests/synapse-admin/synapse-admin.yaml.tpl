@@ -92,14 +92,13 @@ metadata:
   name: synapse-admin
   namespace: ${NS_MATRIX}
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod-dns01
     kubernetes.io/ingress.class: nginx-internal
 spec:
   ingressClassName: nginx-internal
   tls:
     - hosts:
         - ${SYNAPSE_ADMIN_HOST}
-      secretName: synapse-admin-tls
+      secretName: wildcard-tls-${TENANT_NAME}
   rules:
     - host: ${SYNAPSE_ADMIN_HOST}
       http:

@@ -25,14 +25,13 @@ extraEnv: |
   - name: KC_LOG_LEVEL
     value: INFO
 
-# Dev-only: reduce Keycloak requests (scheduling) while keeping a reasonable limit.
 resources:
   requests:
-    cpu: 10m
+    cpu: 100m
     memory: 512Mi
   limits:
-    cpu: 500m
-    memory: 1Gi
+    cpu: 1000m
+    memory: 1536Mi
 
 # Ingress is managed separately per-tenant via apps/manifests/keycloak/tenant-auth-ingress.yaml.tpl
 # This allows multiple tenants to share a single Keycloak instance with different auth domains

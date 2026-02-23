@@ -3,12 +3,18 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install dependencies
+# Install all dependencies (including devDeps for Tailwind build)
 COPY package.json ./
-RUN npm install --production
+RUN npm install
 
-# Copy app
+# Copy app source
 COPY . .
+
+# Build Tailwind CSS
+RUN npm run build:css
+
+# Remove devDependencies for smaller production image
+RUN npm prune --production
 
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs && \

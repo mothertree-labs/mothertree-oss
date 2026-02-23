@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KUBECONFIG_FILE="${KUBECONFIG:-${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}/kubeconfig.yaml}"
 LOKI_MANIFEST="${SCRIPT_DIR}/loki-manual.yaml"
-NAMESPACE="monitoring"
+NAMESPACE="${NS_MONITORING:-infra-monitoring}"
 
 # Functions
 log_info() {

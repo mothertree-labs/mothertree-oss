@@ -14,81 +14,51 @@
 #
 # Cross-namespace (namespace-specific):
 #   6. allow-webmail-to-mail-egress — Roundcube → Stalwart (webmail namespace only)
-#   7. allow-mail-ingress    — Postfix + Roundcube → Stalwart (mail namespace only)
+#   7. allow-admin-to-mail-egress   — Admin/Account Portal → Stalwart API (admin namespace only)
+#   8. allow-mail-ingress    — Postfix + Roundcube + Admin → Stalwart (mail namespace only)
 #
 # Targeted ingress restrictions:
-#   8. protect-redis         — Restrict Redis to admin/account portal pods (admin namespace only)
-#   9. protect-infra-db      — Restrict PostgreSQL to known client namespaces (infra-db)
+#   9. protect-redis         — Restrict Redis to admin/account portal pods (admin namespace only)
+#  10. protect-infra-db      — Restrict PostgreSQL to known client namespaces (infra-db)
 #
 # Note: No default-deny-ingress. Cross-tenant isolation is enforced via egress policies.
 # Blanket ingress deny breaks kubelet health probes (which originate from node IPs,
 # not pods) and has no clean solution in standard K8s NetworkPolicies.
 #
 # Usage:
-#   MT_ENV=dev TENANT=example ./apps/deploy-network-policies.sh
+#   ./apps/deploy-network-policies.sh -e dev -t example
 #
 # Called from create_env after namespaces are created. All tenant namespaces
 # (matrix, docs, files, jitsi, mail, webmail, admin) get the base policies.
-#
-# Prerequisites:
-#   - TENANT must be set (tenant name, e.g., example)
-#   - MT_ENV must be set (environment, e.g., dev or prod)
-#   - KUBECONFIG must be set or kubeconfig.<env>.yaml must exist at repo root
 
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
 
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+mt_usage() {
+    echo "Usage: $0 -e <env> -t <tenant>"
+    echo ""
+    echo "Deploy NetworkPolicies for tenant isolation."
+    echo ""
+    echo "Options:"
+    echo "  -e <env>       Environment (e.g., dev, prod)"
+    echo "  -t <tenant>    Tenant name (e.g., example)"
+    echo "  -h, --help     Show this help"
 }
 
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
+mt_parse_args "$@"
+mt_require_env
+mt_require_tenant
 
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
+source "${REPO_ROOT}/scripts/lib/config.sh"
+mt_load_tenant_config
 
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
+source "${REPO_ROOT}/scripts/lib/notify.sh"
+mt_deploy_start "deploy-network-policies"
 
-# Require MT_ENV and TENANT
-MT_ENV=${MT_ENV:-}
-REPO_ROOT="${REPO_ROOT:-/workspace}"
-
-# Parse nesting level for deploy notifications
-NESTING_LEVEL=0
-for arg in "$@"; do
-  case "$arg" in
-    --nesting-level=*) NESTING_LEVEL="${arg#*=}" ;;
-  esac
-done
-_MT_NOTIFY_NESTING_LEVEL=$NESTING_LEVEL
-
-if [ -f "${REPO_ROOT}/scripts/lib/notify.sh" ]; then
-    source "${REPO_ROOT}/scripts/lib/notify.sh"
-    mt_deploy_start "deploy-network-policies"
-fi
-
-if [ -z "${MT_ENV:-}" ]; then
-    print_error "MT_ENV is not set. Usage: MT_ENV=dev TENANT=example ./apps/deploy-network-policies.sh"
-    exit 1
-fi
-
-if [ -z "${TENANT:-}" ]; then
-    print_error "TENANT is not set. Usage: MT_ENV=dev TENANT=example ./apps/deploy-network-policies.sh"
-    exit 1
-fi
-
-export KUBECONFIG="${KUBECONFIG:-$REPO_ROOT/kubeconfig.$MT_ENV.yaml}"
+mt_require_commands kubectl
 
 # Manifest directory
 MANIFEST_DIR="$REPO_ROOT/apps/manifests/network-policies"
@@ -98,19 +68,16 @@ if [ ! -d "$MANIFEST_DIR" ]; then
     exit 1
 fi
 
-# Tenant namespace prefix
-TENANT_NS_PREFIX="tn-${TENANT}"
-export TENANT_NAME="${TENANT}"
-
 # All tenant namespaces that get the base policies (default-deny + allow-ingress + egress)
 TENANT_NAMESPACES=(
-    "${TENANT_NS_PREFIX}-matrix"
-    "${TENANT_NS_PREFIX}-docs"
-    "${TENANT_NS_PREFIX}-files"
-    "${TENANT_NS_PREFIX}-jitsi"
-    "${TENANT_NS_PREFIX}-mail"
-    "${TENANT_NS_PREFIX}-webmail"
-    "${TENANT_NS_PREFIX}-admin"
+    "$NS_MATRIX"
+    "$NS_DOCS"
+    "$NS_FILES"
+    "$NS_JITSI"
+    "$NS_STALWART"
+    "$NS_WEBMAIL"
+    "$NS_ADMIN"
+    "$NS_OFFICE"
 )
 
 print_status "Deploying NetworkPolicies for tenant: $TENANT (env: $MT_ENV)"
@@ -138,13 +105,6 @@ for NS in "${TENANT_NAMESPACES[@]}"; do
             print_status "[$NS] Removed legacy policy: $legacy_policy" || true
     done
 
-    # Note: No default-deny-ingress. Cross-tenant isolation is enforced by egress
-    # policies (pods can only send to allowed destinations). Blanket ingress deny
-    # breaks kubelet health probes (which come from node IPs, not pods) and has no
-    # clean solution in standard Kubernetes NetworkPolicies without hardcoding IPs.
-    # Targeted ingress restrictions (protect-redis, protect-infra-db) are applied
-    # separately for sensitive services.
-
     # 1. Allow egress to shared infrastructure
     print_status "[$NS] Applying allow-egress-to-infra..."
     envsubst '${NAMESPACE}' < "$MANIFEST_DIR/allow-infra-egress.yaml.tpl" | kubectl apply -f -
@@ -170,39 +130,72 @@ for NS in "${TENANT_NAMESPACES[@]}"; do
 done
 
 # =============================================================================
-# Apply mail-specific cross-namespace policies
+# Apply Jitsi-specific media egress (UDP for ICE/media + TURN TCP)
 # =============================================================================
-MAIL_NS="${TENANT_NS_PREFIX}-mail"
-if kubectl get namespace "$MAIL_NS" &>/dev/null; then
-    export NAMESPACE="$MAIL_NS"
-    print_status "[$MAIL_NS] Applying allow-mail-ingress (Postfix + Roundcube → Stalwart)..."
-    envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-mail-ingress.yaml.tpl" | kubectl apply -f -
-    print_success "[$MAIL_NS] Mail ingress policy applied"
+if kubectl get namespace "$NS_JITSI" &>/dev/null; then
+    export NAMESPACE="$NS_JITSI"
+    print_status "[$NS_JITSI] Applying allow-jitsi-media-egress (UDP for ICE/media + TURN)..."
+    envsubst '${NAMESPACE}' < "$MANIFEST_DIR/allow-jitsi-media-egress.yaml.tpl" | kubectl apply -f -
+    print_success "[$NS_JITSI] Jitsi media egress policy applied"
 else
-    print_warning "Mail namespace $MAIL_NS does not exist, skipping mail ingress policy"
+    print_warning "Jitsi namespace $NS_JITSI does not exist, skipping Jitsi media egress policy"
 fi
 
-WEBMAIL_NS="${TENANT_NS_PREFIX}-webmail"
-if kubectl get namespace "$WEBMAIL_NS" &>/dev/null; then
-    export NAMESPACE="$WEBMAIL_NS"
-    print_status "[$WEBMAIL_NS] Applying allow-webmail-to-mail-egress (Roundcube → Stalwart)..."
-    envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-webmail-to-mail-egress.yaml.tpl" | kubectl apply -f -
-    print_success "[$WEBMAIL_NS] Webmail-to-mail egress policy applied"
+# =============================================================================
+# Apply mail-specific cross-namespace policies
+# =============================================================================
+if kubectl get namespace "$NS_STALWART" &>/dev/null; then
+    export NAMESPACE="$NS_STALWART"
+    print_status "[$NS_STALWART] Applying allow-mail-ingress (Postfix + Roundcube → Stalwart)..."
+    envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-mail-ingress.yaml.tpl" | kubectl apply -f -
+    print_success "[$NS_STALWART] Mail ingress policy applied"
 else
-    print_warning "Webmail namespace $WEBMAIL_NS does not exist, skipping webmail-to-mail policy"
+    print_warning "Mail namespace $NS_STALWART does not exist, skipping mail ingress policy"
+fi
+
+if kubectl get namespace "$NS_WEBMAIL" &>/dev/null; then
+    export NAMESPACE="$NS_WEBMAIL"
+    print_status "[$NS_WEBMAIL] Applying allow-webmail-to-mail-egress (Roundcube → Stalwart)..."
+    envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-webmail-to-mail-egress.yaml.tpl" | kubectl apply -f -
+    print_success "[$NS_WEBMAIL] Webmail-to-mail egress policy applied"
+else
+    print_warning "Webmail namespace $NS_WEBMAIL does not exist, skipping webmail-to-mail policy"
+fi
+
+# =============================================================================
+# Apply admin-to-mail egress (admin portal → Stalwart HTTP API for provisioning/quotas)
+# =============================================================================
+if kubectl get namespace "$NS_ADMIN" &>/dev/null && kubectl get namespace "$NS_STALWART" &>/dev/null; then
+    export NAMESPACE="$NS_ADMIN"
+    print_status "[$NS_ADMIN] Applying allow-admin-to-mail-egress (Admin Portal → Stalwart API)..."
+    envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-admin-to-mail-egress.yaml.tpl" | kubectl apply -f -
+    print_success "[$NS_ADMIN] Admin-to-mail egress policy applied"
+else
+    print_warning "Admin or mail namespace does not exist, skipping admin-to-mail egress policy"
+fi
+
+# =============================================================================
+# Apply files-to-office egress (Nextcloud → Collabora internal on port 9980)
+# =============================================================================
+if kubectl get namespace "$NS_FILES" &>/dev/null && kubectl get namespace "$NS_OFFICE" &>/dev/null; then
+    export NAMESPACE="$NS_FILES"
+    print_status "[$NS_FILES] Applying allow-files-to-office-egress (Nextcloud → Collabora port 9980)..."
+    envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-files-to-office-egress.yaml.tpl" | kubectl apply -f -
+    print_success "[$NS_FILES] Files-to-office egress policy applied"
+else
+    print_warning "Files or office namespace does not exist, skipping files-to-office egress policy"
 fi
 
 # =============================================================================
 # Apply Redis protection to admin namespace
 # =============================================================================
-ADMIN_NS="${TENANT_NS_PREFIX}-admin"
-if kubectl get namespace "$ADMIN_NS" &>/dev/null; then
-    export NAMESPACE="$ADMIN_NS"
-    print_status "[$ADMIN_NS] Applying protect-redis policy..."
+if kubectl get namespace "$NS_ADMIN" &>/dev/null; then
+    export NAMESPACE="$NS_ADMIN"
+    print_status "[$NS_ADMIN] Applying protect-redis policy..."
     envsubst '${NAMESPACE}' < "$MANIFEST_DIR/protect-redis.yaml.tpl" | kubectl apply -f -
-    print_success "[$ADMIN_NS] Redis protection applied (only admin-portal and account-portal can connect)"
+    print_success "[$NS_ADMIN] Redis protection applied (only admin-portal and account-portal can connect)"
 else
-    print_warning "Admin namespace $ADMIN_NS does not exist, skipping Redis protection"
+    print_warning "Admin namespace $NS_ADMIN does not exist, skipping Redis protection"
 fi
 
 # =============================================================================
@@ -232,9 +225,13 @@ print_status "  - allow-dns-egress           (allow DNS resolution)"
 print_status "  - allow-internet-egress      (allow HTTPS to external services)"
 print_status "  - allow-intra-namespace      (allow pod-to-pod within namespace)"
 print_status "  - allow-kube-api-egress      (allow K8s API server for kubectl jobs)"
+print_status "Service-specific egress:"
+print_status "  - allow-jitsi-media-egress    (jitsi: UDP for ICE/media + TURN TCP)"
 print_status "Cross-namespace policies:"
-print_status "  - allow-webmail-to-mail-egress (webmail → mail: IMAP/SMTP/Sieve)"
-print_status "  - allow-mail-ingress         (mail: accept from Postfix + Roundcube)"
+print_status "  - allow-webmail-to-mail-egress  (webmail → mail: IMAP/SMTP/Sieve)"
+print_status "  - allow-admin-to-mail-egress    (admin → mail: Stalwart HTTP API)"
+print_status "  - allow-files-to-office-egress  (files → office: Collabora port 9980)"
+print_status "  - allow-mail-ingress            (mail: accept from Postfix + Roundcube + Admin)"
 print_status "Targeted ingress restrictions:"
 print_status "  - protect-redis              (admin namespace: only portal pods)"
 print_status "  - allow-db-from-${TENANT}    (infra-db: tenant namespace access)"

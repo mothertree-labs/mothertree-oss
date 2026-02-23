@@ -6,8 +6,8 @@
 # internal ports on its Stalwart ClusterIP service. deploy-stalwart.sh
 # patches this ConfigMap to add/update entries per tenant.
 #
-# Port 25 (SMTP inbound) is NOT included here - it uses dedicated Postfix
-# with externalTrafficPolicy: Local to preserve real client IPs.
+# Port 30025 (SMTP inbound) is also added to this ConfigMap by deploy_infra,
+# mapping to infra-mail/postfix:25 for VPN Postfix inbound mail routing.
 #
 # Required environment variables:
 #   NS_MAIL - Tenant mail namespace (e.g., tn-example-mail)
@@ -25,12 +25,12 @@ metadata:
   namespace: ${NS_INGRESS}
 data:
   # SMTPS - SMTP with implicit TLS (OAUTHBEARER)
-  "${STALWART_SMTPS_PORT}": "${NS_MAIL}/stalwart:465"
+  "${STALWART_SMTPS_PORT}": "${NS_MAIL}/stalwart:465:PROXY:"
   # Submission - SMTP with STARTTLS (OAUTHBEARER)
-  "${STALWART_SUBMISSION_PORT}": "${NS_MAIL}/stalwart:587"
+  "${STALWART_SUBMISSION_PORT}": "${NS_MAIL}/stalwart:587:PROXY:"
   # IMAPS - IMAP with implicit TLS (OAUTHBEARER, used by Roundcube)
-  "${STALWART_IMAPS_PORT}": "${NS_MAIL}/stalwart:993"
+  "${STALWART_IMAPS_PORT}": "${NS_MAIL}/stalwart:993:PROXY:"
   # IMAPS App - IMAP with implicit TLS (PLAIN/LOGIN via app passwords)
-  "${STALWART_IMAPS_APP_PORT}": "${NS_MAIL}/stalwart:994"
+  "${STALWART_IMAPS_APP_PORT}": "${NS_MAIL}/stalwart:994:PROXY:"
   # Submission App - SMTP with STARTTLS (PLAIN/LOGIN via app passwords)
-  "${STALWART_SUBMISSION_APP_PORT}": "${NS_MAIL}/stalwart:588"
+  "${STALWART_SUBMISSION_APP_PORT}": "${NS_MAIL}/stalwart:588:PROXY:"

@@ -23,23 +23,12 @@ data:
       tokenAuthUrlAutoRedirect: false,
       // Enable moderator role detection from JWT token
       enableUserRolesBasedOnToken: true,
-      // Use our TURN server for NAT traversal
+      // NAT traversal: STUN for P2P direct connections; TURN relay credentials
+      // are provided by Prosody via external_services (time-limited HMAC auth)
       p2p: {
         enabled: true,
         stunServers: [
           { urls: 'stun:${TURN_SERVER_IP}:3478' }
-        ],
-        iceServers: [
-          {
-            urls: [
-              'turn:${TURN_SERVER_IP}:3478?transport=udp',
-              'turn:${TURN_SERVER_IP}:3478?transport=tcp',
-              'turn:${TURN_SERVER_IP}:3479?transport=udp',
-              'turn:${TURN_SERVER_IP}:3479?transport=tcp'
-            ],
-            username: 'matrix',
-            credential: '${TF_VAR_turn_shared_secret}'
-          }
         ]
       },
       // BOSH configuration
@@ -47,6 +36,6 @@ data:
       // Disable some features for better performance
       enableWelcomePage: false,
       enableInsecureRoomNameWarning: false,
-      // Allow iframe embedding for Matrix integration
-      disableThirdPartyRequests: false
+      // Prevent Gravatar and CallStats.io requests (GDPR - no third-party IP leaks)
+      disableThirdPartyRequests: true
     };

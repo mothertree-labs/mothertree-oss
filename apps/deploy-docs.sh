@@ -6,190 +6,38 @@
 # Namespace structure:
 #   - PostgreSQL goes to NS_DB (shared 'db' namespace)
 #   - Docs apps go to NS_DOCS (tenant-prefixed namespace, e.g., 'tn-example-docs')
+#
+# Usage:
+#   ./apps/deploy-docs.sh -e dev -t example
 
-set -e
+set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
 
-# Function to print colored output
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+mt_usage() {
+    echo "Usage: $0 -e <env> -t <tenant>"
+    echo ""
+    echo "Deploy LaSuite Docs for a tenant."
+    echo ""
+    echo "Options:"
+    echo "  -e <env>       Environment (e.g., dev, prod)"
+    echo "  -t <tenant>    Tenant name (e.g., example)"
+    echo "  -h, --help     Show this help"
 }
 
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
+mt_parse_args "$@"
+mt_require_env
+mt_require_tenant
 
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Poll for job completion with failure detection
-# Note: Respects backoffLimit - only reports failure when Job status is "Failed" (all retries exhausted),
-# not when individual pods fail (Kubernetes may still retry them)
-poll_job_complete() {
-    local namespace="$1"
-    local job_name="$2"
-    local timeout="${3:-180}"
-    local interval="${4:-5}"
-    
-    local elapsed=0
-    while [ $elapsed -lt $timeout ]; do
-        local job_status
-        job_status=$(kubectl get job "$job_name" -n "$namespace" -o jsonpath='{.status.conditions[*].type}' 2>&1) || true
-        
-        if echo "$job_status" | grep -q "Complete"; then
-            return 0
-        fi
-        
-        # Only fail when the Job itself is marked Failed (all retries exhausted per backoffLimit)
-        if echo "$job_status" | grep -q "Failed"; then
-            print_error "Job $job_name failed (all retries exhausted)"
-            kubectl logs -n "$namespace" "job/$job_name" --tail=50 || true
-            return 1
-        fi
-        
-        # Get pod info for status display only (don't fail on individual pod failures - let K8s retry)
-        local pod_phase
-        pod_phase=$(kubectl get pods -n "$namespace" -l "job-name=$job_name" -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null) || true
-        local failed_count
-        failed_count=$(kubectl get job "$job_name" -n "$namespace" -o jsonpath='{.status.failed}' 2>/dev/null) || true
-        local backoff_limit
-        backoff_limit=$(kubectl get job "$job_name" -n "$namespace" -o jsonpath='{.spec.backoffLimit}' 2>/dev/null) || true
-        
-        # Show current status in wait message (include retry info if pods have failed)
-        local display_status="${pod_phase:-pending}"
-        [ -n "$job_status" ] && display_status="$job_status"
-        if [ -n "$failed_count" ] && [ "$failed_count" != "0" ]; then
-            display_status="$display_status (retries: $failed_count/${backoff_limit:-0})"
-        fi
-        echo "  Waiting for job $job_name... status=$display_status (${elapsed}s/${timeout}s)"
-        sleep "$interval"
-        elapsed=$((elapsed + interval))
-    done
-    
-    print_error "Timeout waiting for job $job_name after ${timeout}s"
-    kubectl logs -n "$namespace" "job/$job_name" --tail=50 || true
-    return 1
-}
-
-# Wait for DNS resolution across namespaces (avoids transient failures on new namespaces)
-wait_for_dns() {
-    local namespace="$1"
-    local hostname="$2"
-    local timeout="${3:-60}"
-    local interval="${4:-5}"
-    
-    local elapsed=0
-    while [ $elapsed -lt $timeout ]; do
-        # Unique pod name per attempt so we never hit "AlreadyExists" on retries
-        local pod_name="dns-check-$$-${elapsed}"
-        # --attach waits for the one-shot pod and returns the container exit code (nslookup 0 = success)
-        if kubectl run "$pod_name" --image=busybox --rm --attach --restart=Never -n "$namespace" \
-            --command -- nslookup "$hostname" >/dev/null 2>&1; then
-            return 0
-        fi
-        echo "  Waiting for DNS ($hostname)... (${elapsed}s/${timeout}s)"
-        sleep "$interval"
-        elapsed=$((elapsed + interval))
-    done
-    return 1
-}
-
-# Poll for pod ready with failure detection
-poll_pod_ready() {
-    local namespace="$1"
-    local selector="$2"
-    local timeout="${3:-300}"
-    local interval="${4:-5}"
-    
-    local elapsed=0
-    while [ $elapsed -lt $timeout ]; do
-        # Check if pod is ready using simple JSONPath (nested filters don't work in kubectl)
-        local ready_status
-        ready_status=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || true
-        
-        if [ "$ready_status" = "True" ]; then
-            local pod_name
-            pod_name=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-            print_success "Pod ready: $pod_name"
-            return 0
-        fi
-        
-        # Get current pod phase and any waiting reason for status display
-        local pod_phase
-        pod_phase=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].status.phase}' 2>/dev/null) || true
-        local waiting_reason
-        waiting_reason=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].status.containerStatuses[0].state.waiting.reason}' 2>/dev/null) || true
-        
-        # Check for failure conditions
-        if echo "$waiting_reason" | grep -qE "CrashLoopBackOff|ImagePullBackOff|ErrImagePull"; then
-            print_error "Pod failed with: $waiting_reason"
-            kubectl logs -n "$namespace" -l "$selector" --tail=30 || true
-            return 1
-        fi
-        
-        # Build status display
-        local display_status="${pod_phase:-no-pod}"
-        [ -n "$waiting_reason" ] && display_status="$pod_phase/$waiting_reason"
-        
-        echo "  Waiting for pod ($selector)... status=$display_status (${elapsed}s/${timeout}s)"
-        sleep "$interval"
-        elapsed=$((elapsed + interval))
-    done
-    
-    print_error "Timeout waiting for pod ($selector) after ${timeout}s"
-    kubectl get pods -n "$namespace" -l "$selector"
-    return 1
-}
-
-# Check if kubectl is available
-if ! command -v kubectl &> /dev/null; then
-    print_error "kubectl is not installed or not in PATH"
-    exit 1
-fi
-
-# Check if helm is available
-if ! command -v helm &> /dev/null; then
-    print_error "helm is not installed or not in PATH"
-    exit 1
-fi
-
-# Require MT_ENV and set kubeconfig statelessly
-REPO_ROOT="${REPO_ROOT:-/workspace}"
-
-# Parse nesting level for deploy notifications
-NESTING_LEVEL=0
-for arg in "$@"; do
-  case "$arg" in
-    --nesting-level=*) NESTING_LEVEL="${arg#*=}" ;;
-  esac
-done
-_MT_NOTIFY_NESTING_LEVEL=$NESTING_LEVEL
+source "${REPO_ROOT}/scripts/lib/config.sh"
+mt_load_tenant_config
 
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy-docs"
 
-if [ -z "${MT_ENV:-}" ]; then
-  print_error "MT_ENV is not set. Usage: MT_ENV=dev ./apps/deploy-docs.sh"
-  exit 1
-fi
-export KUBECONFIG="$REPO_ROOT/kubeconfig.$MT_ENV.yaml"
-
-# Namespace configuration
-# NS_DB: Shared database namespace (PostgreSQL) - infra-db
-# NS_DOCS: Tenant-specific docs namespace (backend, frontend, y-provider) - tn-<tenant>-docs
-NS_DB="${NS_DB:-infra-db}"
-NS_DOCS="${NS_DOCS:-tn-${TENANT_NAME:-example}-docs}"  # Fallback for non-tenant mode
+mt_require_commands kubectl helm envsubst openssl
 
 print_status "Starting LaSuite Docs deployment..."
 print_status "Database namespace: $NS_DB"
@@ -202,21 +50,12 @@ kubectl create namespace "$NS_DOCS" 2>/dev/null || true
 # Step 1: Create S3 bucket (skipped)
 print_status "Skipping S3 bucket creation (managed externally)"
 
-# Step 2: Detect PostgreSQL (deployed by deploy_infra)
-# PostgreSQL is shared infrastructure and must be deployed via deploy_infra, not per-tenant
-print_status "Detecting PostgreSQL service in $NS_DB namespace..."
-if kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
-  export PG_SERVICE_NAME="docs-postgresql-primary"
-  print_status "PostgreSQL: using replication mode (docs-postgresql-primary)"
-elif kubectl get service docs-postgresql -n "$NS_DB" >/dev/null 2>&1; then
-  export PG_SERVICE_NAME="docs-postgresql"
-  print_status "PostgreSQL: using standalone mode (docs-postgresql)"
-else
+# Step 2: Verify PostgreSQL (detected by config.sh)
+if [ -z "${PG_HOST:-}" ]; then
   print_error "PostgreSQL not found in $NS_DB namespace."
   print_error "Please run 'deploy_infra $MT_ENV' first to deploy shared infrastructure."
   exit 1
 fi
-export PG_HOST="${PG_SERVICE_NAME}.${NS_DB}.svc.cluster.local"
 print_status "PostgreSQL service: ${PG_HOST}"
 
 # Verify PostgreSQL is ready
@@ -298,38 +137,6 @@ print_success "Redis service deployed to namespace $NS_DOCS"
 
 # Step 6: Apply Docs manifests (backend, frontend, ingress) to tenant namespace
 print_status "Applying Docs manifests to namespace $NS_DOCS..."
-
-# Validate required environment variables (set by create_env from tenant config)
-required_vars=("DOCS_HOST" "AUTH_HOST" "TENANT_DOMAIN" "DOCS_DB_NAME" "TENANT_KEYCLOAK_REALM" "TENANT_NAME")
-missing_vars=()
-for var in "${required_vars[@]}"; do
-    if [ -z "${!var:-}" ]; then
-        missing_vars+=("$var")
-    fi
-done
-
-if [ ${#missing_vars[@]} -gt 0 ]; then
-    print_error "Required environment variables not set: ${missing_vars[*]}"
-    print_error "This script should be called from create_env which sets these from tenant config."
-    exit 1
-fi
-
-# Load replica counts from tenant config (needed for Deployment replicas and HPAs)
-TENANT_CONFIG="$REPO_ROOT/tenants/${TENANT_NAME}/$MT_ENV.config.yaml"
-if [ -f "$TENANT_CONFIG" ]; then
-    export DOCS_BACKEND_MIN_REPLICAS=$(yq '.resources.docs.backend.min_replicas // 1' "$TENANT_CONFIG")
-    export DOCS_BACKEND_MAX_REPLICAS=$(yq '.resources.docs.backend.max_replicas // 3' "$TENANT_CONFIG")
-    export DOCS_FRONTEND_MIN_REPLICAS=$(yq '.resources.docs.frontend.min_replicas // 1' "$TENANT_CONFIG")
-    export DOCS_FRONTEND_MAX_REPLICAS=$(yq '.resources.docs.frontend.max_replicas // 3' "$TENANT_CONFIG")
-    export YPROVIDER_MIN_REPLICAS=$(yq '.resources.docs.y_provider.min_replicas // 1' "$TENANT_CONFIG")
-    export YPROVIDER_MAX_REPLICAS=$(yq '.resources.docs.y_provider.max_replicas // 3' "$TENANT_CONFIG")
-fi
-
-# Set additional vars that may be expected by templates
-export BASE_DOMAIN="${TENANT_DOMAIN}"
-export COOKIE_DOMAIN="${TENANT_COOKIE_DOMAIN:-.$TENANT_DOMAIN}"
-# Derive per-tenant database user from tenant name (e.g., docs_example)
-export TENANT_DB_USER="${TENANT_DB_USER:-docs_${TENANT_NAME}}"
 print_status "Using environment: DOCS_HOST=$DOCS_HOST, AUTH_HOST=$AUTH_HOST"
 print_status "Database user: $TENANT_DB_USER, Database: $DOCS_DB_NAME"
 
@@ -356,9 +163,11 @@ cat "$REPO_ROOT/docs/backend-service.yaml" | sed "s/namespace: docs/namespace: $
 envsubst < "$REPO_ROOT/docs/frontend-deployment.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
 cat "$REPO_ROOT/docs/frontend-service.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
 envsubst < "$REPO_ROOT/docs/ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
+# Static asset cache ingress (/_next/static/ with immutable cache headers)
+envsubst < "$REPO_ROOT/docs/static-cache-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
 # Y-Provider ingress with document ID-based consistent hashing for WebSocket scaling
 # Use explicit variable list to preserve nginx $request_uri variable
-envsubst '${DOCS_HOST}' < "$REPO_ROOT/docs/yprovider-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
+envsubst '${DOCS_HOST} ${TENANT_NAME}' < "$REPO_ROOT/docs/yprovider-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
 print_success "Docs manifests applied successfully to namespace $NS_DOCS"
 
 # Step 7: Restart deployments to pick up ConfigMap changes, then wait for ready (PARALLEL)
@@ -403,7 +212,6 @@ print_success "Docs HPAs deployed (CPU 80% threshold)"
 
 # Step 8b: Deploy Grafana dashboard for Docs monitoring
 print_status "Deploying Docs Grafana dashboard..."
-NS_MONITORING="${NS_MONITORING:-infra-monitoring}"
 cat "$REPO_ROOT/apps/manifests/docs/docs-dashboard-configmap.yaml" | sed "s/namespace: monitoring/namespace: $NS_MONITORING/g" | kubectl apply -f -
 print_success "Docs Grafana dashboard deployed"
 
@@ -479,7 +287,7 @@ if [ -n "$BACKEND_POD" ]; then
 from django.contrib.sites.models import Site
 site = Site.objects.get(pk=1)
 site.domain = 'https://${DOCS_HOST}'
-site.name = '${TENANT_DISPLAY_NAME:-MotherTree} Docs'
+site.name = '${TENANT_DISPLAY_NAME:-Platform} Docs'
 site.save()
 print(f'Site domain set to: {site.domain}')
 " 2>/dev/null && print_success "Django Site domain configured" || print_warning "Failed to set Site domain (non-critical)"

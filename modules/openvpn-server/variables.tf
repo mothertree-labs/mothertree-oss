@@ -28,9 +28,8 @@ variable "ssh_public_key" {
 }
 
 variable "vpn_network_cidr" {
-  description = "CIDR block for VPN network"
+  description = "CIDR block for VPN network (prod: 10.8.0.0/24, dev: 10.9.0.0/24)"
   type        = string
-  default     = "10.8.0.0/24"
 }
 
 variable "cluster_ip" {

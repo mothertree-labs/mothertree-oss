@@ -32,6 +32,10 @@ repositories:
     url: https://kubernetes-sigs.github.io/metrics-server/
   - name: linode-cfw
     url: https://linode.github.io/cloud-firewall-controller
+  - name: emberstack
+    url: https://emberstack.github.io/helm-charts
+  - name: collabora
+    url: https://collaboraonline.github.io/online/
 
 releases:
   # =============================================================================
@@ -49,6 +53,7 @@ releases:
       tier: system
     values:
       - values/ingress-nginx.yaml
+      - environments/{{ .Environment.Name }}/ingress-nginx.yaml.gotmpl
     createNamespace: false  # Created by create_env
 
   # Cert Manager
@@ -109,6 +114,20 @@ releases:
       - values/vector.yaml
     createNamespace: false  # Created by create_env
 
+  # Blackbox Exporter (endpoint probing for external + internal services)
+  - name: prometheus-blackbox-exporter
+    namespace: {{ requiredEnv "NS_MONITORING" }}
+    chart: prometheus-community/prometheus-blackbox-exporter
+    version: 9.1.0
+    labels:
+      tier: system
+    needs:
+      - {{ requiredEnv "NS_MONITORING" }}/kube-prometheus-stack
+    values:
+      - values/blackbox-exporter.yaml
+      - environments/{{ .Environment.Name }}/blackbox-exporter.yaml.gotmpl
+    createNamespace: false
+
   # Internal Ingress Controller
   - name: ingress-nginx-internal
     namespace: {{ requiredEnv "NS_INGRESS_INTERNAL" }}
@@ -148,7 +167,18 @@ releases:
     labels:
       tier: system
     values:
-      - values/cloud-firewall-controller.yaml
+      - values/cloud-firewall-controller.yaml.gotmpl
+    createNamespace: false
+
+  # Reflector — mirrors secrets (e.g. wildcard TLS certs) across namespaces
+  - name: reflector
+    namespace: infra-cert-manager
+    chart: emberstack/reflector
+    version: 7.1.288
+    wait: true
+    timeout: 300
+    labels:
+      tier: system
     createNamespace: false
 
   # =============================================================================
@@ -175,6 +205,21 @@ releases:
       - environments/{{ .Environment.Name }}/keycloak.yaml.gotmpl
     createNamespace: false  # Created by create_env
 
+  # Collabora Online (per-tenant document editing server)
+  # Stateless — processes documents in-memory via WOPI protocol with Nextcloud
+  # Deployed per-tenant by create_env only when office_enabled=true
+  - name: collabora-online
+    namespace: {{ requiredEnv "NS_OFFICE" }}
+    chart: collabora/collabora-online
+    version: 1.1.56
+    labels:
+      tier: apps
+      name: collabora-online
+    values:
+      - values/collabora.yaml
+      - environments/{{ .Environment.Name }}/collabora.yaml.gotmpl
+    createNamespace: false  # Created by create_env
+
   # =============================================================================
   # TENANT-SPECIFIC APPS (tn-<tenant>-* namespaces)
   # Namespaces are set via environment variables:
@@ -198,8 +243,8 @@ releases:
   # Element Web
   - name: element-web
     namespace: {{ requiredEnv "NS_MATRIX" }}
-    chart: halkeye/element-web
-    version: 1.30.0
+    chart: ananace/element-web
+    version: 1.4.29
     needs:
       - {{ requiredEnv "NS_INGRESS" }}/ingress-nginx
     labels:
@@ -209,12 +254,13 @@ releases:
       - environments/{{ .Environment.Name }}/element.yaml.gotmpl
     createNamespace: false  # Created by create_env
 
-  # NOTE: Redis for Docs is deployed via deploy-docs.sh (simple single-replica deployment)
+  # NOTE: Redis instances are deployed per-namespace by deploy scripts (simple single-replica deployments):
+  #   - Docs Redis: deploy-docs.sh -> tn-<tenant>-docs
+  #   - Nextcloud Redis: deploy-nextcloud.sh -> tn-<tenant>-files (caching + file locking)
   # The bitnami/redis helm chart was removed as it was unused and had image pull issues.
-  # For HA Redis needs, deploy a dedicated Redis to the relevant namespace.
 
   # Nextcloud for file management
-  # Note: Depends on PostgreSQL in NS_DB namespace
+  # Note: Depends on PostgreSQL in NS_DB namespace and Redis in NS_FILES namespace
   # Nextcloud will use shared PostgreSQL with separate database
   - name: nextcloud
     namespace: {{ requiredEnv "NS_FILES" }}

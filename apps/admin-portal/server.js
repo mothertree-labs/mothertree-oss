@@ -29,9 +29,9 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://cdn.tailwindcss.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      fontSrc: ["'self'"],
       imgSrc: ["'self'", "data:"],
       connectSrc: ["'self'"],
       frameSrc: ["'none'"],
@@ -44,6 +44,11 @@ app.use(helmet({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Policy URLs (configurable via environment variables)
+app.locals.privacyPolicyUrl = process.env.PRIVACY_POLICY_URL || '';
+app.locals.termsOfUseUrl = process.env.TERMS_OF_USE_URL || '';
+app.locals.acceptableUsePolicyUrl = process.env.ACCEPTABLE_USE_POLICY_URL || '';
 
 // View engine
 app.set('view engine', 'ejs');
@@ -117,13 +122,14 @@ app.use(session({
     secure: true,
     httpOnly: true,
     sameSite: 'lax',        // Permits cross-origin GET (OIDC redirects) but blocks cross-origin POST
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days (matches Remember Me / offline token lifespan)
   }
 }));
 
 // Passport
 app.use(passport.initialize());
 app.use(passport.session());
+app.use(tokenRefreshMiddleware);
 
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((user, done) => done(null, user));
@@ -176,6 +182,8 @@ async function initializeOIDC() {
         name: userinfo.name || userinfo.preferred_username,
         roles: tokenSet.claims().realm_access?.roles || [],
         accessToken: tokenSet.access_token,
+        refreshToken: tokenSet.refresh_token,
+        tokenExpiresAt: tokenSet.expires_at, // Unix timestamp (seconds)
       };
       return done(null, user);
     }
@@ -201,12 +209,52 @@ async function initializeOIDC() {
         name: userinfo.name || userinfo.preferred_username,
         roles: tokenSet.claims().realm_access?.roles || [],
         accessToken: tokenSet.access_token,
+        refreshToken: tokenSet.refresh_token,
+        tokenExpiresAt: tokenSet.expires_at,
       };
       return done(null, user);
     }
   ));
 
+  // Store client reference for token refresh middleware
+  app.locals.oidcClient = client;
+
   return client;
+}
+
+// Token refresh middleware — transparently refreshes expired access tokens
+// using the stored refresh token (5-minute window before expiry)
+function tokenRefreshMiddleware(req, res, next) {
+  if (!req.isAuthenticated() || !req.user.refreshToken || !req.user.tokenExpiresAt) {
+    return next();
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = req.user.tokenExpiresAt;
+  const REFRESH_WINDOW = 5 * 60; // 5 minutes before expiry
+
+  if (now < expiresAt - REFRESH_WINDOW) {
+    return next(); // Token still fresh
+  }
+
+  const client = req.app.locals.oidcClient;
+  if (!client) {
+    return next();
+  }
+
+  client.refresh(req.user.refreshToken)
+    .then((tokenSet) => {
+      req.user.accessToken = tokenSet.access_token;
+      req.user.refreshToken = tokenSet.refresh_token || req.user.refreshToken;
+      req.user.tokenExpiresAt = tokenSet.expires_at;
+      next();
+    })
+    .catch((err) => {
+      console.error('Token refresh failed:', err.message);
+      // Don't block the request — let it proceed with the old token
+      // The next auth-required request will redirect to login if truly expired
+      next();
+    });
 }
 
 // Auth middleware
@@ -232,14 +280,26 @@ app.get('/', (req, res) => {
   if (req.isAuthenticated()) {
     return res.redirect('/dashboard');
   }
-  res.render('home', { title: 'MotherTree Admin Portal' });
+  res.render('home', { title: `${process.env.PLATFORM_NAME || 'Platform'} Admin Portal` });
 });
 
-app.get('/auth/login', passport.authenticate('oidc', { scope: 'openid email profile' }));
+app.get('/auth/login', (req, res, next) => {
+  // Ensure session is saved before OIDC redirect so state/nonce survive the round-trip
+  req.session.save((err) => {
+    if (err) console.error('Session save error:', err);
+    passport.authenticate('oidc', { scope: 'openid email profile' })(req, res, next);
+  });
+});
 
 app.get('/auth/callback',
   passport.authenticate('oidc', { failureRedirect: '/auth/error' }),
   (req, res) => {
+    // Ensure passkey is ordered before password (non-blocking)
+    if (req.user?.id) {
+      keycloakApi.ensurePasskeyFirst(req.user.id).catch(err =>
+        console.error('ensurePasskeyFirst failed on login:', err.message)
+      );
+    }
     res.redirect('/dashboard');
   }
 );
@@ -277,6 +337,7 @@ app.get('/dashboard', requireAuth, requireTenantAdmin, (req, res) => {
 
 // API Routes
 const keycloakApi = require('./api/keycloak');
+const stalwartApi = require('./api/stalwart');
 
 app.post('/api/invite', verifyOrigin, requireAuth, requireTenantAdmin, async (req, res) => {
   try {
@@ -307,7 +368,17 @@ app.post('/api/invite', verifyOrigin, requireAuth, requireTenantAdmin, async (re
 app.get('/api/users', requireAuth, requireTenantAdmin, async (req, res) => {
   try {
     const users = await keycloakApi.listUsers();
-    res.json(users);
+    // Enrich with email quota from Stalwart
+    const enriched = await Promise.all(users.map(async (user) => {
+      try {
+        const { quota } = await stalwartApi.getUserQuota(user.email);
+        user.quotaMb = quota > 0 ? Math.round(quota / (1024 * 1024)) : 0;
+      } catch {
+        user.quotaMb = 0;
+      }
+      return user;
+    }));
+    res.json(enriched);
   } catch (error) {
     console.error('List users error:', error);
     res.status(500).json({ error: error.message });
@@ -320,6 +391,33 @@ app.delete('/api/users/:id', verifyOrigin, requireAuth, requireTenantAdmin, asyn
     res.json({ success: true });
   } catch (error) {
     console.error('Delete user error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/users/:email/quota', verifyOrigin, requireAuth, requireTenantAdmin, async (req, res) => {
+  try {
+    const { quotaMb } = req.body;
+    if (quotaMb === undefined || quotaMb === null || quotaMb < 0) {
+      return res.status(400).json({ error: 'quotaMb is required and must be >= 0' });
+    }
+    const quotaBytes = Math.round(quotaMb) * 1024 * 1024;
+    await stalwartApi.setUserQuota(req.params.email, quotaBytes);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Set quota error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/quota/backfill', verifyOrigin, requireAuth, requireTenantAdmin, async (req, res) => {
+  try {
+    const defaultQuotaMb = parseInt(process.env.DEFAULT_EMAIL_QUOTA_MB || '5120', 10);
+    const defaultQuotaBytes = defaultQuotaMb * 1024 * 1024;
+    const result = await stalwartApi.backfillQuotas(defaultQuotaBytes);
+    res.json(result);
+  } catch (error) {
+    console.error('Backfill quotas error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -340,6 +438,13 @@ app.get('/bootstrap', (req, res, next) => {
 app.get('/bootstrap/callback',
   passport.authenticate('oidc-bootstrap', { failureRedirect: '/auth/error' }),
   (req, res) => {
+    // Bootstrap admins get a password first, then register a passkey.
+    // Reorder so the passkey takes priority on next login (non-blocking).
+    if (req.user?.id) {
+      keycloakApi.ensurePasskeyFirst(req.user.id).catch(err =>
+        console.error('ensurePasskeyFirst failed on bootstrap:', err.message)
+      );
+    }
     res.redirect('/dashboard');
   }
 );

@@ -1,3 +1,12 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jitsi-metrics-exporter
+  namespace: matrix
+  labels:
+    app: jitsi-metrics-exporter
+    component: monitoring
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,6 +31,7 @@ spec:
         app: jitsi-metrics-exporter
         component: monitoring
     spec:
+      serviceAccountName: jitsi-metrics-exporter
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -52,8 +62,22 @@ spec:
           value: "http://jitsi-jvb:8080"
         - name: JICOFO_URL
           value: "http://jitsi-jicofo:8888"
+        - name: PROSODY_HOST
+          value: "jitsi-prosody"
+        - name: PROSODY_XMPP_PORT
+          value: "5222"
         - name: EXPORTER_PORT
           value: "9090"
+        # TURN probe configuration (TURN_SERVER_IP substituted by envsubst)
+        - name: TURN_HOST
+          value: "${TURN_SERVER_IP}"
+        - name: TURN_PORT
+          value: "3478"
+        - name: TURN_SHARED_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: jitsi-secrets
+              key: TURN_SHARED_SECRET
         resources:
           requests:
             cpu: 10m
@@ -76,15 +100,21 @@ data:
     #!/usr/bin/env python3
     """
     Jitsi Metrics Exporter
-    Converts Jitsi REST API JSON responses to Prometheus metrics
+    Converts Jitsi REST API JSON responses to Prometheus metrics.
+    Includes active TURN server health probes.
     """
     import os
     import time
     import json
+    import socket
+    import struct
+    import hashlib
+    import hmac as hmac_mod
+    import base64
     import requests
     from http.server import HTTPServer, BaseHTTPRequestHandler
     from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
-    
+
     # Prometheus metrics
     jvb_conferences = Gauge('jitsi_jvb_conferences', 'Number of active conferences on JVB')
     jvb_participants = Gauge('jitsi_jvb_participants', 'Total number of participants on JVB')
@@ -99,17 +129,191 @@ data:
     jvb_conference_participants = Gauge('jitsi_jvb_conference_participants', 'Number of participants per conference', ['conference_id'])
     jvb_conference_packets_received = Counter('jitsi_jvb_conference_packets_received_total', 'Packets received per conference', ['conference_id'])
     jvb_conference_packets_sent = Counter('jitsi_jvb_conference_packets_sent_total', 'Packets sent per conference', ['conference_id'])
-    
+    # JVB ICE connection metrics
+    jvb_ice_failed = Gauge('jitsi_jvb_ice_failed_total', 'Total ICE failed connections on JVB')
+    jvb_ice_succeeded = Gauge('jitsi_jvb_ice_succeeded_total', 'Total ICE succeeded connections on JVB')
+    jvb_ice_succeeded_relayed = Gauge('jitsi_jvb_ice_succeeded_relayed_total', 'Total ICE succeeded via relay on JVB')
+    # JVB health and connectivity metrics
+    jvb_healthy = Gauge('jitsi_jvb_healthy', 'JVB health status (1=healthy, 0=unhealthy)')
+    jvb_dtls_failed = Gauge('jitsi_jvb_dtls_failed_endpoints', 'Total DTLS handshake failures on JVB')
+    jvb_muc_clients_connected = Gauge('jitsi_jvb_muc_clients_connected', 'JVB MUC XMPP clients currently connected')
+    jvb_muc_clients_configured = Gauge('jitsi_jvb_muc_clients_configured', 'JVB MUC XMPP clients configured')
+
     jicofo_conferences = Gauge('jitsi_jicofo_conferences', 'Number of active conferences on Jicofo')
     jicofo_participants = Gauge('jitsi_jicofo_participants', 'Total number of participants on Jicofo')
     jicofo_total_conferences = Counter('jitsi_jicofo_total_conferences_created', 'Total conferences created on Jicofo')
-    
+    jicofo_bridge_count = Gauge('jitsi_jicofo_bridge_count', 'Number of bridges known to Jicofo')
+    jicofo_operational_bridge_count = Gauge('jitsi_jicofo_operational_bridge_count', 'Number of operational bridges known to Jicofo')
+    jicofo_lost_bridges = Gauge('jitsi_jicofo_lost_bridges', 'Total bridges lost by Jicofo')
+    jicofo_ice_restart_requests = Gauge('jitsi_jicofo_participant_ice_restart_requests', 'Total ICE restart requests from participants')
+    jicofo_ice_failed_notifications = Gauge('jitsi_jicofo_participant_ice_failed', 'Total ICE failed notifications from participants')
+
+    prosody_xmpp_c2s_up = Gauge('jitsi_prosody_xmpp_c2s_up', 'Prosody XMPP C2S port reachable (1=up, 0=down)')
+
+    # BOSH and Keycloak adapter health probes
+    bosh_reachable = Gauge('jitsi_bosh_reachable', 'BOSH/XMPP endpoint reachable (1=ok, 0=fail)')
+    keycloak_adapter_healthy = Gauge('jitsi_keycloak_adapter_healthy', 'Keycloak adapter health check (1=ok, 0=fail)')
+
+    # TURN server health probe metrics
+    turn_stun_reachable = Gauge('jitsi_turn_stun_reachable', 'TURN server responds to STUN binding request (1=ok, 0=fail)')
+    turn_allocate_ok = Gauge('jitsi_turn_allocate_ok', 'TURN allocation with HMAC credentials succeeds (1=ok, 0=fail)')
+
     exporter_errors = Counter('jitsi_exporter_errors_total', 'Total errors encountered by exporter', ['component'])
     exporter_scrape_duration = Histogram('jitsi_exporter_scrape_duration_seconds', 'Time spent scraping Jitsi APIs', ['component'])
-    
+
     JVB_URL = os.getenv('JVB_URL', 'http://jitsi-jvb:8080')
     JICOFO_URL = os.getenv('JICOFO_URL', 'http://jitsi-jicofo:8888')
-    
+    PROSODY_HOST = os.getenv('PROSODY_HOST', 'jitsi-prosody')
+    PROSODY_XMPP_PORT = int(os.getenv('PROSODY_XMPP_PORT', '5222'))
+    TURN_HOST = os.getenv('TURN_HOST', '')
+    TURN_PORT = int(os.getenv('TURN_PORT', '3478'))
+    TURN_SHARED_SECRET = os.getenv('TURN_SHARED_SECRET', '')
+
+    # ---- TURN health probes ----
+
+    def stun_binding_test(host, port, timeout=3):
+        """Send STUN Binding Request via UDP, return True if valid response received."""
+        txn_id = os.urandom(12)
+        # STUN Binding Request: type=0x0001, length=0, magic cookie=0x2112A442
+        msg = struct.pack('!HHI', 0x0001, 0, 0x2112A442) + txn_id
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        try:
+            sock.sendto(msg, (host, port))
+            data, _ = sock.recvfrom(1024)
+            return struct.unpack('!H', data[:2])[0] == 0x0101  # Binding Success
+        except (socket.timeout, OSError):
+            return False
+        finally:
+            sock.close()
+
+    def turn_allocate_test(host, port, shared_secret, timeout=3):
+        """
+        Test TURN allocation using time-limited HMAC credentials.
+        Generates credentials the same way Prosody mod_external_services does,
+        so a shared-secret mismatch between Prosody and coturn will fail this probe.
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        try:
+            # Step 1: Send unauthenticated Allocate to get nonce + realm
+            txn_id = os.urandom(12)
+            # REQUESTED-TRANSPORT attr: type=0x0019, len=4, UDP protocol=17
+            req_transport = struct.pack('!HHI', 0x0019, 4, 17 << 24)
+            msg = struct.pack('!HHI', 0x0003, len(req_transport), 0x2112A442) + txn_id + req_transport
+            sock.sendto(msg, (host, port))
+            data, _ = sock.recvfrom(4096)
+
+            # Expect 401 Unauthorized (Allocate Error Response = 0x0113)
+            if struct.unpack('!H', data[:2])[0] != 0x0113:
+                return False
+
+            # Parse NONCE (0x0015) and REALM (0x0014) from response attributes
+            msg_len = struct.unpack('!H', data[2:4])[0]
+            attrs = data[20:20 + msg_len]
+            nonce = realm = None
+            i = 0
+            while i + 4 <= len(attrs):
+                attr_type, attr_len = struct.unpack('!HH', attrs[i:i + 4])
+                if i + 4 + attr_len > len(attrs):
+                    break
+                val = attrs[i + 4:i + 4 + attr_len]
+                if attr_type == 0x0015:
+                    nonce = val
+                elif attr_type == 0x0014:
+                    realm = val
+                i += 4 + attr_len + (4 - attr_len % 4) % 4
+
+            if not nonce or not realm:
+                print("TURN probe: no nonce/realm in 401 response")
+                return False
+
+            # Step 2: Generate time-limited HMAC credentials (matches Prosody + coturn use-auth-secret)
+            expiry = int(time.time()) + 86400
+            username = f"{expiry}:jitsi-probe"
+            password = base64.b64encode(
+                hmac_mod.new(shared_secret.encode(), username.encode(), hashlib.sha1).digest()
+            ).decode()
+
+            # Long-term credential key per RFC 5389: MD5(username:realm:password)
+            realm_str = realm.decode('utf-8')
+            key = hashlib.md5(f"{username}:{realm_str}:{password}".encode()).digest()
+
+            # Step 3: Build authenticated Allocate Request
+            txn_id2 = os.urandom(12)
+
+            def stun_attr(atype, value):
+                raw = value if isinstance(value, bytes) else value.encode()
+                pad = (4 - len(raw) % 4) % 4
+                return struct.pack('!HH', atype, len(raw)) + raw + b'\x00' * pad
+
+            body = struct.pack('!HHI', 0x0019, 4, 17 << 24)   # REQUESTED-TRANSPORT
+            body += stun_attr(0x0006, username)                  # USERNAME
+            body += stun_attr(0x0014, realm)                     # REALM
+            body += stun_attr(0x0015, nonce)                     # NONCE
+
+            # MESSAGE-INTEGRITY: HMAC-SHA1 over message with length adjusted to include MI
+            hmac_input = struct.pack('!HHI', 0x0003, len(body) + 24, 0x2112A442) + txn_id2 + body
+            integrity = hmac_mod.new(key, hmac_input, hashlib.sha1).digest()
+            body += struct.pack('!HH', 0x0008, 20) + integrity  # MESSAGE-INTEGRITY
+
+            msg2 = struct.pack('!HHI', 0x0003, len(body), 0x2112A442) + txn_id2 + body
+            sock.sendto(msg2, (host, port))
+            data2, _ = sock.recvfrom(4096)
+
+            resp_type = struct.unpack('!H', data2[:2])[0]
+            if resp_type == 0x0103:  # Allocate Success
+                return True
+            # Log failure details
+            if resp_type == 0x0113:
+                print("TURN probe: auth rejected (401) - shared secret mismatch?")
+            else:
+                print(f"TURN probe: unexpected response type 0x{resp_type:04x}")
+            return False
+        except (socket.timeout, OSError) as e:
+            print(f"TURN allocate test error: {e}")
+            return False
+        finally:
+            sock.close()
+
+    def scrape_turn():
+        """Probe TURN server: STUN connectivity + TURN credential auth."""
+        if not TURN_HOST:
+            return
+        try:
+            start_time = time.time()
+            stun_ok = stun_binding_test(TURN_HOST, TURN_PORT)
+            turn_stun_reachable.set(1 if stun_ok else 0)
+
+            if TURN_SHARED_SECRET:
+                alloc_ok = turn_allocate_test(TURN_HOST, TURN_PORT, TURN_SHARED_SECRET)
+                turn_allocate_ok.set(1 if alloc_ok else 0)
+                if not alloc_ok:
+                    print(f"TURN allocate probe FAILED (host={TURN_HOST}:{TURN_PORT})")
+
+            duration = time.time() - start_time
+            exporter_scrape_duration.labels(component='turn').observe(duration)
+        except Exception as e:
+            exporter_errors.labels(component='turn').inc()
+            turn_stun_reachable.set(0)
+            turn_allocate_ok.set(0)
+            print(f"Error probing TURN: {e}")
+
+    # ---- Component scrapers ----
+
+    def scrape_prosody_xmpp():
+        """Check if Prosody XMPP C2S port is reachable via TCP connect"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((PROSODY_HOST, PROSODY_XMPP_PORT))
+            sock.close()
+            prosody_xmpp_c2s_up.set(1 if result == 0 else 0)
+        except Exception as e:
+            prosody_xmpp_c2s_up.set(0)
+            exporter_errors.labels(component='prosody_xmpp').inc()
+            print(f"Error checking Prosody XMPP: {e}")
+
     def scrape_jvb():
         """Scrape JVB stats and update metrics"""
         try:
@@ -117,21 +321,32 @@ data:
             response = requests.get(f'{JVB_URL}/colibri/stats', timeout=5)
             response.raise_for_status()
             data = response.json()
-            
+
             # Update global stats
             jvb_conferences.set(data.get('conferences', 0))
             jvb_participants.set(data.get('participants', 0))
-            
+
             # Export global bitrate directly from Colibri stats (already bps)
             jvb_bit_rate_download.set(data.get('bit_rate_download', 0))
             jvb_bit_rate_upload.set(data.get('bit_rate_upload', 0))
-            
+
+            # ICE connection stats
+            jvb_ice_failed.set(data.get('total_ice_failed', 0))
+            jvb_ice_succeeded.set(data.get('total_ice_succeeded', 0))
+            jvb_ice_succeeded_relayed.set(data.get('total_ice_succeeded_relayed', 0))
+
+            # JVB health and XMPP connectivity
+            jvb_healthy.set(1 if data.get('healthy', False) else 0)
+            jvb_dtls_failed.set(data.get('dtls_failed_endpoints', 0))
+            jvb_muc_clients_connected.set(data.get('muc_clients_connected', 0))
+            jvb_muc_clients_configured.set(data.get('muc_clients_configured', 0))
+
             # Update counters (only increment if value increased)
             total_conf = data.get('total_conferences_created', 0)
             total_part = data.get('total_participants', 0)
             # Note: Counters should be incremented, but we'll set them as gauges for now
             # In production, you'd track previous values and increment
-            
+
             # Scrape per-conference stats (if conference_sizes is available)
             conference_sizes = data.get('conference_sizes')
             conference_ids = conference_sizes.keys() if conference_sizes else []
@@ -150,13 +365,13 @@ data:
                         jvb_conference_bitrate_upload.labels(conference_id=conf_id).set(total_upload)
                 except Exception as e:
                     exporter_errors.labels(component='jvb_conference').inc()
-            
+
             duration = time.time() - start_time
             exporter_scrape_duration.labels(component='jvb').observe(duration)
         except Exception as e:
             exporter_errors.labels(component='jvb').inc()
             print(f"Error scraping JVB: {e}")
-    
+
     def scrape_jicofo():
         """Scrape Jicofo stats and update metrics"""
         try:
@@ -164,23 +379,68 @@ data:
             response = requests.get(f'{JICOFO_URL}/stats', timeout=5)
             response.raise_for_status()
             data = response.json()
-            
+
             jicofo_conferences.set(data.get('conferences', 0))
             jicofo_participants.set(data.get('participants', 0))
-            
+
+            # Bridge selector metrics
+            bridge_selector = data.get('bridge_selector', {})
+            jicofo_bridge_count.set(bridge_selector.get('bridge_count', 0))
+            jicofo_operational_bridge_count.set(bridge_selector.get('operational_bridge_count', 0))
+            jicofo_lost_bridges.set(bridge_selector.get('lost_bridges', 0))
+
+            # Participant notification metrics (ICE restart storms, ICE failures)
+            participant_notifications = data.get('participant_notifications', {})
+            jicofo_ice_restart_requests.set(participant_notifications.get('request_restart', 0))
+            jicofo_ice_failed_notifications.set(participant_notifications.get('ice_failed', 0))
+
             duration = time.time() - start_time
             exporter_scrape_duration.labels(component='jicofo').observe(duration)
         except Exception as e:
             exporter_errors.labels(component='jicofo').inc()
             print(f"Error scraping Jicofo: {e}")
-    
+
+    # ---- BOSH and Keycloak adapter probes ----
+
+    BOSH_URL = os.getenv('BOSH_URL', 'http://jitsi-prosody:5280/http-bind')
+    KEYCLOAK_ADAPTER_URL = os.getenv('KEYCLOAK_ADAPTER_URL', 'http://jitsi-keycloak-adapter:9000/health')
+
+    def scrape_bosh():
+        """Probe BOSH/XMPP endpoint via internal service URL."""
+        try:
+            start_time = time.time()
+            resp = requests.get(BOSH_URL, timeout=5)
+            bosh_reachable.set(1 if resp.status_code == 200 else 0)
+            duration = time.time() - start_time
+            exporter_scrape_duration.labels(component='bosh').observe(duration)
+        except Exception as e:
+            bosh_reachable.set(0)
+            exporter_errors.labels(component='bosh').inc()
+            print(f"Error probing BOSH: {e}")
+
+    def scrape_keycloak_adapter():
+        """Probe Keycloak adapter health endpoint."""
+        try:
+            start_time = time.time()
+            resp = requests.get(KEYCLOAK_ADAPTER_URL, timeout=5)
+            keycloak_adapter_healthy.set(1 if resp.status_code == 200 else 0)
+            duration = time.time() - start_time
+            exporter_scrape_duration.labels(component='keycloak_adapter').observe(duration)
+        except Exception as e:
+            keycloak_adapter_healthy.set(0)
+            exporter_errors.labels(component='keycloak_adapter').inc()
+            print(f"Error probing Keycloak adapter: {e}")
+
     class MetricsHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == '/metrics':
-                # Scrape metrics before serving
+                scrape_prosody_xmpp()
                 scrape_jvb()
                 scrape_jicofo()
-                
+                scrape_turn()
+                scrape_bosh()
+                scrape_keycloak_adapter()
+
                 self.send_response(200)
                 self.send_header('Content-Type', CONTENT_TYPE_LATEST)
                 self.end_headers()
@@ -193,15 +453,19 @@ data:
             else:
                 self.send_response(404)
                 self.end_headers()
-        
+
         def log_message(self, format, *args):
             # Suppress default logging
             pass
-    
+
     if __name__ == '__main__':
         port = int(os.getenv('EXPORTER_PORT', '9090'))
         server = HTTPServer(('0.0.0.0', port), MetricsHandler)
         print(f'Starting Jitsi metrics exporter on port {port}')
+        if TURN_HOST:
+            print(f'TURN probe enabled: {TURN_HOST}:{TURN_PORT}')
+        else:
+            print('TURN probe disabled: TURN_HOST not set')
         server.serve_forever()
 ---
 apiVersion: v1
@@ -220,4 +484,3 @@ spec:
     targetPort: 9090
   selector:
     app: jitsi-metrics-exporter
-

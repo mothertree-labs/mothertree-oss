@@ -1,11 +1,16 @@
 # Replica count from tenant config (HPA will manage scaling)
 replicaCount: {{ env "ELEMENT_MIN_REPLICAS" }}
 
-configjson:
-  default_server_config:
-    m.homeserver:
-      base_url: 'https://{{ env "MATRIX_HOST" }}'
-      server_name: '{{ env "MATRIX_HOST" }}'
+defaultServer:
+  url: 'https://{{ env "MATRIX_HOST" }}'
+  name: '{{ env "MATRIX_HOST" }}'
+
+config:
+  # Suppress default vector.im identity server — not needed since user
+  # discovery is handled by Synapse's user directory
+  default_identity_server_url: ""
+  setting_defaults:
+    useAuthenticatedMedia: true
   jitsi:
     preferredDomain: '{{ env "JITSI_HOST" }}'
   sso_redirect_options:
@@ -13,10 +18,9 @@ configjson:
 
 ingress:
   hosts:
-    - host: '{{ env "MATRIX_HOST" }}'
-      paths: ["/"]
+    - '{{ env "MATRIX_HOST" }}'
   tls:
-    - secretName: synapse-tls
+    - secretName: 'wildcard-tls-{{ env "TENANT_NAME" }}'
       hosts:
         - '{{ env "MATRIX_HOST" }}'
   annotations:

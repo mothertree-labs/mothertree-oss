@@ -1,0 +1,219 @@
+#!/bin/bash
+
+# Cluster Health Check
+# Purpose: Quick on-demand health check for infra and tenant namespaces
+#
+# Usage:
+#   ./scripts/check-health -e <env> [-t <tenant>]
+#   ./scripts/check-health [--tenant=<name>] <env>   (backward compat)
+#
+# Checks:
+#   - Pods not in Running/Completed/Succeeded state
+#   - Deployments with unavailable replicas
+#   - Pods with high restart counts (>5)
+#   - Unbound PVCs
+#   - Certificates not ready
+#   - Currently firing Prometheus alerts
+#
+# Exit codes:
+#   0 - All checks passed
+#   1 - Issues found
+
+set -euo pipefail
+
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
+
+mt_usage() {
+  echo "Usage: $0 -e <env> [-t <tenant>]"
+  echo ""
+  echo "Quick health check for infra and tenant namespaces."
+  echo ""
+  echo "Options:"
+  echo "  -e <env>       Environment (e.g., dev, prod)"
+  echo "  -t <tenant>    Check only this tenant's namespaces (default: all)"
+  echo "  -h, --help     Show this help"
+  echo ""
+  echo "Examples:"
+  echo "  $0 -e dev                  # Check all infra + tenant namespaces"
+  echo "  $0 -e dev -t example       # Check only example tenant namespaces"
+}
+
+mt_parse_args "$@"
+mt_require_env
+
+TENANT="${MT_TENANT:-}"
+ISSUES=0
+
+export KUBECONFIG="${KUBECONFIG:-$REPO_ROOT/kubeconfig.$MT_ENV.yaml}"
+if [ ! -f "$KUBECONFIG" ]; then
+  print_error "Kubeconfig not found: $KUBECONFIG"
+  exit 1
+fi
+
+# Build namespace filter
+if [ -n "$TENANT" ]; then
+  NS_FILTER="tn-${TENANT}-"
+  echo "=== Health Check: tenant=$TENANT env=$MT_ENV ==="
+else
+  NS_FILTER=""
+  echo "=== Health Check: env=$MT_ENV ==="
+fi
+
+# Get relevant namespaces
+NAMESPACES=$(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -E "^(infra-|tn-)" | sort)
+if [ -n "$NS_FILTER" ]; then
+  NAMESPACES=$(echo "$NAMESPACES" | grep -E "^($NS_FILTER|infra-)")
+fi
+
+if [ -z "$NAMESPACES" ]; then
+  print_warning "No matching namespaces found"
+  exit 0
+fi
+
+# --- Check 1: Pods not Running/Completed ---
+echo ""
+echo "--- Pods not Running/Completed ---"
+BAD_PODS=""
+for ns in $NAMESPACES; do
+  RESULT=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -v -E '\s+Running\s+|Completed|Succeeded' || true)
+  if [ -n "$RESULT" ]; then
+    BAD_PODS="${BAD_PODS}${RESULT}\n"
+  fi
+done
+
+if [ -n "$BAD_PODS" ]; then
+  echo -e "$BAD_PODS" | sed '/^$/d'
+  ISSUES=$((ISSUES + 1))
+else
+  echo "OK - All pods healthy"
+fi
+
+# --- Check 2: Deployments with unavailable replicas ---
+echo ""
+echo "--- Deployments with unavailable replicas ---"
+UNAVAIL=""
+for ns in $NAMESPACES; do
+  RESULT=$(kubectl get deployments -n "$ns" --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1] < a[2]) print $0}' || true)
+  if [ -n "$RESULT" ]; then
+    UNAVAIL="${UNAVAIL}[${ns}] ${RESULT}\n"
+  fi
+done
+
+if [ -n "$UNAVAIL" ]; then
+  echo -e "$UNAVAIL" | sed '/^$/d'
+  ISSUES=$((ISSUES + 1))
+else
+  echo "OK - All deployments at desired replica count"
+fi
+
+# --- Check 3: High restart counts ---
+echo ""
+echo "--- Pods with high restart counts (>5) ---"
+HIGH_RESTARTS=""
+for ns in $NAMESPACES; do
+  RESULT=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | awk '{if ($4+0 > 5) print $0}' || true)
+  if [ -n "$RESULT" ]; then
+    HIGH_RESTARTS="${HIGH_RESTARTS}[${ns}] ${RESULT}\n"
+  fi
+done
+
+if [ -n "$HIGH_RESTARTS" ]; then
+  echo -e "$HIGH_RESTARTS" | sed '/^$/d'
+  ISSUES=$((ISSUES + 1))
+else
+  echo "OK - No pods with excessive restarts"
+fi
+
+# --- Check 4: Unbound PVCs ---
+echo ""
+echo "--- Unbound PVCs ---"
+UNBOUND=""
+for ns in $NAMESPACES; do
+  RESULT=$(kubectl get pvc -n "$ns" --no-headers 2>/dev/null | grep -v Bound || true)
+  if [ -n "$RESULT" ]; then
+    UNBOUND="${UNBOUND}[${ns}] ${RESULT}\n"
+  fi
+done
+
+if [ -n "$UNBOUND" ]; then
+  echo -e "$UNBOUND" | sed '/^$/d'
+  ISSUES=$((ISSUES + 1))
+else
+  echo "OK - All PVCs bound"
+fi
+
+# --- Check 5: Certificates not ready ---
+echo ""
+echo "--- Certificates not ready ---"
+NOT_READY_CERTS=""
+for ns in $NAMESPACES; do
+  RESULT=$(kubectl get certificates -n "$ns" --no-headers 2>/dev/null | grep -v "True" || true)
+  if [ -n "$RESULT" ]; then
+    NOT_READY_CERTS="${NOT_READY_CERTS}[${ns}] ${RESULT}\n"
+  fi
+done
+# Also check tenant namespaces without infra- prefix for certs
+if [ -z "$TENANT" ]; then
+  for ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -E "^tn-" | sort); do
+    RESULT=$(kubectl get certificates -n "$ns" --no-headers 2>/dev/null | grep -v "True" || true)
+    if [ -n "$RESULT" ] && ! echo "$NOT_READY_CERTS" | grep -q "$RESULT"; then
+      NOT_READY_CERTS="${NOT_READY_CERTS}[${ns}] ${RESULT}\n"
+    fi
+  done
+fi
+
+if [ -n "$NOT_READY_CERTS" ]; then
+  echo -e "$NOT_READY_CERTS" | sed '/^$/d'
+  ISSUES=$((ISSUES + 1))
+else
+  echo "OK - All certificates ready"
+fi
+
+# --- Check 6: Firing Prometheus alerts ---
+echo ""
+echo "--- Firing Prometheus alerts ---"
+PROM_POD=$(kubectl get pods -n infra-monitoring -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+if [ -n "$PROM_POD" ]; then
+  FIRING=$(kubectl exec -n infra-monitoring "$PROM_POD" -c prometheus -- \
+    wget -qO- 'http://localhost:9090/api/v1/alerts' 2>/dev/null || echo "")
+  if [ -n "$FIRING" ]; then
+    ALERT_COUNT=$(echo "$FIRING" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    alerts = [a for a in data.get('data', {}).get('alerts', []) if a.get('state') == 'firing']
+    for a in alerts:
+        name = a.get('labels', {}).get('alertname', 'unknown')
+        ns = a.get('labels', {}).get('namespace', '')
+        sev = a.get('labels', {}).get('severity', '')
+        loc = f' ({ns})' if ns else ''
+        print(f'  [{sev}] {name}{loc}')
+    print(f'TOTAL:{len(alerts)}')
+except:
+    print('TOTAL:0')
+" 2>/dev/null || echo "TOTAL:0")
+    TOTAL=$(echo "$ALERT_COUNT" | grep "^TOTAL:" | cut -d: -f2)
+    if [ "${TOTAL:-0}" -gt 0 ]; then
+      echo "$ALERT_COUNT" | grep -v "^TOTAL:"
+      ISSUES=$((ISSUES + 1))
+    else
+      echo "OK - No alerts firing"
+    fi
+  else
+    echo "SKIP - Could not query Prometheus API"
+  fi
+else
+  echo "SKIP - Prometheus pod not found"
+fi
+
+# --- Summary ---
+echo ""
+if [ $ISSUES -gt 0 ]; then
+  echo "=== RESULT: $ISSUES issue(s) found ==="
+  exit 1
+else
+  echo "=== RESULT: All checks passed ==="
+  exit 0
+fi

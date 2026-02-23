@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: loki
+  namespace: infra-monitoring
+  labels:
+    app: loki
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - infra-monitoring
+  selector:
+    matchLabels:
+      app: loki
+  endpoints:
+    - port: http-metrics
+      interval: 30s
+      path: /metrics

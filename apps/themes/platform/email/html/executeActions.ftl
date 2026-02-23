@@ -1,4 +1,12 @@
 <#outputformat "HTML">
+<#-- Safe attribute access: handles both string (multivalued=false) and list (multivalued=true) -->
+<#function attrVal attr>
+    <#if attr?is_sequence>
+        <#return attr?first!"">
+    <#else>
+        <#return attr>
+    </#if>
+</#function>
 <#-- Determine the type of email based on required actions and user attributes -->
 <#assign isPasswordReset = false>
 <#assign isPasskeySetup = false>
@@ -15,21 +23,25 @@
     </#list>
 </#if>
 <#-- Check if this is a recovery flow (set by admin portal during account recovery) -->
-<#if user.attributes?? && user.attributes.isRecoveryFlow?? && user.attributes.isRecoveryFlow?first?? && user.attributes.isRecoveryFlow?first == "true">
+<#if user.attributes?? && user.attributes.isRecoveryFlow?? && attrVal(user.attributes.isRecoveryFlow) == "true">
     <#assign isRecoveryFlow = true>
 </#if>
-<#-- Check if user has tenantEmail attribute (needs email swap before Keycloak action) -->
-<#if user.attributes?? && user.attributes.tenantEmail?? && user.attributes.tenantEmail?first?? && user.attributes.tenantEmail?first != "">
+<#-- Check if user has tenantEmail attribute AND is in swapped state (needs email swap before Keycloak action) -->
+<#if user.attributes?? && user.attributes.tenantEmail?? && attrVal(user.attributes.tenantEmail) != "" && user.email != attrVal(user.attributes.tenantEmail)>
     <#assign needsEmailSwap = true>
     <#-- Route through account portal to swap email before Keycloak processes the action -->
     <#-- Transform auth.X.org to account.X.org to find the account portal -->
     <#assign linkDomain = link?keep_after("://")?keep_before("/")>
     <#assign adminDomain = linkDomain?replace("auth.", "account.")>
     <#assign beginSetupToken = "">
-    <#if user.attributes.beginSetupToken?? && user.attributes.beginSetupToken?first??>
-        <#assign beginSetupToken = user.attributes.beginSetupToken?first>
+    <#if user.attributes.beginSetupToken??>
+        <#assign beginSetupToken = attrVal(user.attributes.beginSetupToken)>
     </#if>
-    <#assign setupLink = "https://" + adminDomain + "/beginSetup?userId=" + user.id + "&token=" + beginSetupToken?url + "&next=" + link?url>
+    <#assign userId = "">
+    <#if user.attributes.setupUserId??>
+        <#assign userId = attrVal(user.attributes.setupUserId)>
+    </#if>
+    <#assign setupLink = "https://" + adminDomain + "/beginSetup?userId=" + userId + "&token=" + beginSetupToken?url('UTF-8') + "&next=" + link?url('UTF-8')>
 <#else>
     <#assign setupLink = link>
 </#if>
@@ -44,7 +56,7 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
             color: #3d3d3d;
-            background-color: #f2efe8;
+            background-color: #F3E8D6;
             margin: 0;
             padding: 0;
         }
@@ -64,14 +76,14 @@
             margin-bottom: 30px;
         }
         .logo h1 {
-            color: #4a6741;
+            color: #A7AE8D;
             font-size: 2rem;
-            font-weight: 400;
+            font-weight: 600;
             margin: 0;
             letter-spacing: 0.03em;
         }
         h2 {
-            color: #4a6741;
+            color: #A7AE8D;
             font-size: 1.5rem;
             font-weight: 500;
             margin-top: 0;
@@ -81,7 +93,7 @@
             margin: 16px 0;
         }
         .email-display {
-            background: #f5f0e8;
+            background: #F3E8D6;
             border-radius: 8px;
             padding: 16px;
             margin: 24px 0;
@@ -99,7 +111,7 @@
         }
         .button {
             display: inline-block;
-            background: #4a6741;
+            background: #A7AE8D;
             color: #ffffff !important;
             text-decoration: none;
             padding: 14px 32px;
@@ -107,10 +119,10 @@
             font-size: 1.1rem;
             font-weight: 500;
             margin: 24px 0;
-            box-shadow: 0 4px 12px rgba(74, 103, 65, 0.3);
+            box-shadow: 0 4px 12px rgba(167, 174, 141, 0.3);
         }
         .button:hover {
-            background: #3d5636;
+            background: #8A9475;
         }
         .button-container {
             text-align: center;
@@ -124,7 +136,7 @@
             text-align: center;
         }
         .footer a {
-            color: #4a6741;
+            color: #A7AE8D;
             text-decoration: none;
         }
         .expiry-notice {
@@ -142,12 +154,12 @@
             padding: 16px;
             margin: 16px 0;
             font-size: 0.95rem;
-            color: #3d5636;
+            color: #8A9475;
         }
         .info-box strong {
             display: block;
             margin-bottom: 4px;
-            color: #4a6741;
+            color: #A7AE8D;
         }
     </style>
 </head>
@@ -166,10 +178,10 @@
                 
                 <p>You requested to recover access to your ${realmDisplayName!"the platform"} account. This email was sent to your recovery email address because you indicated you've lost your passkey.</p>
                 
-                <#if user.attributes?? && user.attributes.tenantEmail?? && user.attributes.tenantEmail?first??>
+                <#if user.attributes?? && user.attributes.tenantEmail?? && attrVal(user.attributes.tenantEmail) != "">
                 <div class="email-display">
                     <div class="label">Account being recovered</div>
-                    <div class="email">${user.attributes.tenantEmail?first}</div>
+                    <div class="email">${attrVal(user.attributes.tenantEmail)}</div>
                 </div>
                 </#if>
                 
@@ -189,6 +201,13 @@
                 <div class="footer">
                     <p>If you didn't request this account recovery, please contact support immediately as someone may be trying to access your account.</p>
                     <p>Need help? Contact your administrator</p>
+                    <#if properties.privacyPolicyUrl?has_content || properties.termsOfUseUrl?has_content || properties.acceptableUsePolicyUrl?has_content>
+                    <p style="margin-top: 12px;">
+                        <#if properties.privacyPolicyUrl?has_content><a href="${properties.privacyPolicyUrl}" style="color: #A7AE8D; text-decoration: none; margin: 0 0.3rem;">Privacy Policy</a></#if>
+                        <#if properties.termsOfUseUrl?has_content><a href="${properties.termsOfUseUrl}" style="color: #A7AE8D; text-decoration: none; margin: 0 0.3rem;">Terms of Use</a></#if>
+                        <#if properties.acceptableUsePolicyUrl?has_content><a href="${properties.acceptableUsePolicyUrl}" style="color: #A7AE8D; text-decoration: none; margin: 0 0.3rem;">Acceptable Use Policy</a></#if>
+                    </p>
+                    </#if>
                 </div>
             <#elseif isPasswordReset>
                 <h2>Reset Your Password</h2>
@@ -224,6 +243,13 @@
                 <div class="footer">
                     <p>If you didn't request this password reset, you can safely ignore this email. Your password will remain unchanged.</p>
                     <p>Need help? Contact your administrator</p>
+                    <#if properties.privacyPolicyUrl?has_content || properties.termsOfUseUrl?has_content || properties.acceptableUsePolicyUrl?has_content>
+                    <p style="margin-top: 12px;">
+                        <#if properties.privacyPolicyUrl?has_content><a href="${properties.privacyPolicyUrl}" style="color: #A7AE8D; text-decoration: none; margin: 0 0.3rem;">Privacy Policy</a></#if>
+                        <#if properties.termsOfUseUrl?has_content><a href="${properties.termsOfUseUrl}" style="color: #A7AE8D; text-decoration: none; margin: 0 0.3rem;">Terms of Use</a></#if>
+                        <#if properties.acceptableUsePolicyUrl?has_content><a href="${properties.acceptableUsePolicyUrl}" style="color: #A7AE8D; text-decoration: none; margin: 0 0.3rem;">Acceptable Use Policy</a></#if>
+                    </p>
+                    </#if>
                 </div>
             <#else>
                 <#-- New User Signup/Invitation -->
@@ -233,10 +259,10 @@
                 
                 <p>You've been invited to join ${realmDisplayName!"the platform"}. To complete your account setup, you'll need to register a passkey - a secure way to sign in using your device's biometrics or a security key.</p>
                 
-                <#if user.attributes?? && user.attributes.tenantEmail?? && user.attributes.tenantEmail?first??>
+                <#if user.attributes?? && user.attributes.tenantEmail?? && attrVal(user.attributes.tenantEmail) != "">
                 <div class="email-display">
                     <div class="label">Your ${realmDisplayName!"the platform"} email will be</div>
-                    <div class="email">${user.attributes.tenantEmail?first}</div>
+                    <div class="email">${attrVal(user.attributes.tenantEmail)}</div>
                 </div>
                 </#if>
                 
@@ -253,6 +279,13 @@
                 <div class="footer">
                     <p>If you didn't expect this email, you can safely ignore it.</p>
                     <p>Need help? Contact your administrator</p>
+                    <#if properties.privacyPolicyUrl?has_content || properties.termsOfUseUrl?has_content || properties.acceptableUsePolicyUrl?has_content>
+                    <p style="margin-top: 12px;">
+                        <#if properties.privacyPolicyUrl?has_content><a href="${properties.privacyPolicyUrl}" style="color: #A7AE8D; text-decoration: none; margin: 0 0.3rem;">Privacy Policy</a></#if>
+                        <#if properties.termsOfUseUrl?has_content><a href="${properties.termsOfUseUrl}" style="color: #A7AE8D; text-decoration: none; margin: 0 0.3rem;">Terms of Use</a></#if>
+                        <#if properties.acceptableUsePolicyUrl?has_content><a href="${properties.acceptableUsePolicyUrl}" style="color: #A7AE8D; text-decoration: none; margin: 0 0.3rem;">Acceptable Use Policy</a></#if>
+                    </p>
+                    </#if>
                 </div>
             </#if>
         </div>

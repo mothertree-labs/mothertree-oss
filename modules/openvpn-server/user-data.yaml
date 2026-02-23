@@ -24,10 +24,10 @@ write_files:
       dh dh.pem
       mode server
       tls-server
-      ifconfig 10.8.0.1 10.8.0.2
-      ifconfig-pool 10.8.0.4 10.8.0.254
+      ifconfig ${vpn_server_ip} ${vpn_peer_ip}
+      ifconfig-pool ${vpn_pool_start} ${vpn_pool_end}
       ifconfig-pool-persist ipp.txt
-      push "route 10.8.0.0 255.255.255.0"
+      push "route ${vpn_network_address} ${vpn_netmask}"
 %{ if service_cidr != "" }
       push "route ${service_cidr}"
 %{ endif }
@@ -142,11 +142,11 @@ write_files:
         do-ip6: no
         do-udp: yes
         do-tcp: yes
-        access-control: 10.8.0.0/24 allow
+        access-control: ${vpn_network_cidr} allow
         access-control: 127.0.0.0/8 allow
         access-control: 0.0.0.0/0 refuse
         access-control: ::/0 refuse
-        local-zone: "${domain}." static
+        local-zone: "${domain}." transparent
 
       stub-zone:
         name: "cluster.local."
@@ -357,7 +357,7 @@ runcmd:
   - iptables -I FORWARD -o tun0 -j ACCEPT
   - iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
   # NAT rules - NAT VPN client traffic to cluster nodes so they can route back
-  # Cluster nodes don't have routes for VPN network (10.8.0.0/24), so we must NAT
+  # Cluster nodes don't have routes for the VPN network, so we must NAT
   - |
     SERVICE_NET=$(echo "${service_cidr}" | awk '{print $1}' | cut -d. -f1-2)
     NODE_SUBNET=$(echo "${vpn_server_subnet_cidr}" | awk '{print $1}')

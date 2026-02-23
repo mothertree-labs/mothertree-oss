@@ -64,6 +64,15 @@ prometheus:
             interval: 30s
         namespaceSelector:
           matchNames: [matrix]
+      - name: notify-push
+        selector:
+          matchLabels:
+            app: notify-push
+        endpoints:
+          - port: metrics
+            interval: 30s
+        namespaceSelector:
+          any: true
     # Additional PrometheusRule configurations
     additionalPrometheusRules:
       - name: matrix-alerts
@@ -135,8 +144,9 @@ grafana:
   additionalDataSources:
     - name: Loki
       type: loki
+      uid: loki
       access: proxy
-      url: http://loki.monitoring.svc.cluster.local:3100
+      url: http://loki.infra-monitoring.svc.cluster.local:3100
       isDefault: false
       editable: true
       jsonData:
@@ -173,7 +183,6 @@ nodeExporter:
       cpu: 20m
       memory: 32Mi
     limits:
-      cpu: 100m
       memory: 64Mi
 
 kubeStateMetrics:
@@ -203,6 +212,9 @@ kube-state-metrics:
 defaultRules:
   disabled:
     CPUThrottlingHigh: true
+    TargetDown: true
+    KubePodNotReady: true
+    KubeContainerWaiting: true
 
 # Custom replacement for CPUThrottlingHigh with 50% threshold (default is 25%)
 additionalPrometheusRulesMap:
@@ -234,6 +246,443 @@ additionalPrometheusRulesMap:
             for: 15m
             labels:
               severity: info
+  kubernetes-custom:
+    groups:
+      - name: kubernetes-custom.rules
+        rules:
+          - alert: TargetDown
+            annotations:
+              summary: '{{ printf "%.4g" $value }}% of {{ $labels.job }}/{{ $labels.service }} targets in {{ $labels.namespace }} are down.'
+              description: '{{ printf "%.4g" $value }}% of the {{ $labels.job }}/{{ $labels.service }} targets in {{ $labels.namespace }} namespace are down.'
+            expr: |-
+              100 * (count(up == 0) BY (job, namespace, service, cluster) / count(up) BY (job, namespace, service, cluster)) > 10
+            for: 3m
+            labels:
+              severity: warning
+          - alert: KubePodNotReady
+            annotations:
+              summary: 'Pod {{ $labels.namespace }}/{{ $labels.pod }} has been in a non-ready state for more than 5 minutes.'
+              description: 'Pod {{ $labels.namespace }}/{{ $labels.pod }} has been in a non-ready state for longer than 5 minutes.'
+            expr: |-
+              sum by (namespace, pod, cluster) (
+                max by(namespace, pod, cluster) (
+                  kube_pod_status_phase{job="kube-state-metrics", phase=~"Pending|Unknown|Failed"}
+                ) * on(namespace, pod, cluster) group_left(owner_kind) topk by(namespace, pod, cluster) (
+                  1, max by(namespace, pod, owner_kind, cluster) (kube_pod_owner{owner_kind!="Job"})
+                )
+              ) > 0
+            for: 5m
+            labels:
+              severity: warning
+          - alert: KubeContainerWaiting
+            annotations:
+              summary: 'Pod container {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }} waiting longer than 15 minutes'
+              description: 'Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }} has been in waiting state for longer than 15 minutes.'
+            expr: |-
+              sum by (namespace, pod, container, cluster) (kube_pod_container_status_waiting_reason{job="kube-state-metrics", reason!="ContainerCreating"}) > 0
+            for: 15m
+            labels:
+              severity: warning
+          - alert: KubeContainerOOMKilled
+            annotations:
+              summary: 'Container {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }} was OOM killed'
+              description: 'Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }} was OOM killed.'
+            expr: |-
+              kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+            labels:
+              severity: warning
+          - alert: KubeContainerHighRestartRate
+            annotations:
+              summary: 'Container {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }} restarting frequently'
+              description: 'Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }} has restarted {{ $value | humanize }} times in the last hour.'
+            expr: |-
+              increase(kube_pod_container_status_restarts_total[1h]) > 5
+            for: 10m
+            labels:
+              severity: warning
+          - alert: KubePodStuckTerminating
+            annotations:
+              summary: 'Pod {{ $labels.namespace }}/{{ $labels.pod }} stuck terminating'
+              description: 'Pod {{ $labels.namespace }}/{{ $labels.pod }} has been in Terminating state for more than 15 minutes.'
+            expr: |-
+              kube_pod_deletion_timestamp > 0
+              and kube_pod_status_phase{phase="Running"} == 1
+              and (time() - kube_pod_deletion_timestamp) > 0
+            for: 15m
+            labels:
+              severity: warning
+  infra-alerts:
+    groups:
+      - name: infra.rules
+        rules:
+          - alert: KeycloakDown
+            annotations:
+              summary: Keycloak is down - SSO broken
+              description: 'All Keycloak replicas are down in infra-auth. Single sign-on is unavailable.'
+            expr: |-
+              kube_statefulset_status_replicas_ready{statefulset=~"keycloak.*", namespace="infra-auth"} == 0
+            for: 2m
+            labels:
+              severity: critical
+          - alert: IngressControllerDown
+            annotations:
+              summary: Ingress controller is down
+              description: 'The nginx ingress controller has no available replicas. All external traffic is blocked.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="ingress-nginx-controller", namespace="infra-ingress"} == 0
+            for: 1m
+            labels:
+              severity: critical
+          - alert: PostfixDown
+            annotations:
+              summary: Postfix SMTP server is down
+              description: 'Postfix deployment in infra-mail has no available replicas. Email delivery is broken.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="postfix", namespace="infra-mail"} == 0
+            for: 2m
+            labels:
+              severity: critical
+          - alert: AlertManagerDown
+            annotations:
+              summary: AlertManager is down
+              description: 'AlertManager has no ready replicas. Alert notifications will not be delivered.'
+            expr: |-
+              kube_statefulset_status_replicas_ready{statefulset=~"alertmanager.*", namespace="infra-monitoring"} == 0
+            for: 2m
+            labels:
+              severity: critical
+          - alert: IngressHighErrorRate
+            annotations:
+              summary: 'High 5xx error rate on ingress {{ $labels.exported_namespace }}/{{ $labels.ingress }}'
+              description: 'Ingress {{ $labels.ingress }} in namespace {{ $labels.exported_namespace }} has a {{ $value | humanizePercentage }} 5xx error rate.'
+            expr: |-
+              (
+                sum by (ingress, exported_namespace) (rate(nginx_ingress_controller_requests{status=~"5.."}[5m]))
+                /
+                sum by (ingress, exported_namespace) (rate(nginx_ingress_controller_requests[5m]))
+              ) > 0.1
+            for: 5m
+            labels:
+              severity: warning
+          - alert: CertManagerDown
+            annotations:
+              summary: cert-manager is down
+              description: 'cert-manager deployment has no available replicas. Certificate renewal will fail.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="cert-manager", namespace="infra-cert-manager"} == 0
+            for: 5m
+            labels:
+              severity: warning
+          - alert: PostgreSQLDown
+            annotations:
+              summary: Shared PostgreSQL is down
+              description: 'PostgreSQL primary has 0 ready replicas in infra-db. All tenant databases are unavailable.'
+            expr: |-
+              kube_statefulset_status_replicas_ready{statefulset="docs-postgresql-primary", namespace="infra-db"} == 0
+            for: 1m
+            labels:
+              severity: critical
+          - alert: PostgreSQLReadReplicaDown
+            annotations:
+              summary: PostgreSQL read replica is down
+              description: 'PostgreSQL read replica has 0 ready replicas in infra-db. Read queries may fail.'
+            expr: |-
+              kube_statefulset_status_replicas_ready{statefulset="docs-postgresql-read", namespace="infra-db"} == 0
+            for: 2m
+            labels:
+              severity: warning
+          - alert: CertificateExpiringSoon
+            annotations:
+              summary: 'Certificate {{ $labels.namespace }}/{{ $labels.name }} expiring soon'
+              description: 'Certificate {{ $labels.name }} in namespace {{ $labels.namespace }} expires in less than 7 days.'
+            expr: |-
+              certmanager_certificate_expiration_timestamp_seconds - time() < 7 * 24 * 3600
+            for: 1h
+            labels:
+              severity: warning
+          - alert: CertificateNotReady
+            annotations:
+              summary: 'Certificate {{ $labels.namespace }}/{{ $labels.name }} not ready'
+              description: 'Certificate {{ $labels.name }} in namespace {{ $labels.namespace }} has been in a not-ready state for 30 minutes.'
+            expr: |-
+              certmanager_certificate_ready_status{condition="True"} == 0
+            for: 30m
+            labels:
+              severity: warning
+  tenant-app-alerts:
+    groups:
+      - name: tenant-apps.rules
+        rules:
+          - alert: SynapseDown
+            annotations:
+              summary: 'Matrix Synapse is down in {{ $labels.namespace }}'
+              description: 'Matrix Synapse deployment has no available replicas in {{ $labels.namespace }}. Chat is unavailable.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="matrix-synapse", namespace=~"tn-.*-matrix"} == 0
+            for: 2m
+            labels:
+              severity: critical
+          - alert: DocsBackendDown
+            annotations:
+              summary: 'Docs backend is down in {{ $labels.namespace }}'
+              description: 'Docs backend deployment has no available replicas in {{ $labels.namespace }}.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="backend", namespace=~"tn-.*-docs"} == 0
+            for: 3m
+            labels:
+              severity: critical
+          - alert: DocsYProviderDown
+            annotations:
+              summary: 'Docs Y-Provider is down in {{ $labels.namespace }}'
+              description: 'Docs Y-Provider (collaborative editing) has no available replicas in {{ $labels.namespace }}.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="docs-y-provider", namespace=~"tn-.*-docs"} == 0
+            for: 3m
+            labels:
+              severity: critical
+          - alert: NextcloudDown
+            annotations:
+              summary: 'Nextcloud is down in {{ $labels.namespace }}'
+              description: 'Nextcloud deployment has no available replicas in {{ $labels.namespace }}. File storage is unavailable.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="nextcloud", namespace=~"tn-.*-files"} == 0
+            for: 3m
+            labels:
+              severity: critical
+          - alert: JitsiProsodyDown
+            annotations:
+              summary: 'Jitsi Prosody is down in {{ $labels.namespace }}'
+              description: 'Jitsi Prosody (XMPP server) has no ready replicas in {{ $labels.namespace }}. Video conferencing signaling is broken.'
+            expr: |-
+              kube_statefulset_status_replicas_ready{statefulset="jitsi-prosody", namespace=~"tn-.*-jitsi"} == 0
+            for: 2m
+            labels:
+              severity: critical
+          - alert: JitsiJVBDown
+            annotations:
+              summary: 'Jitsi JVB is down in {{ $labels.namespace }}'
+              description: 'Jitsi JVB (video bridge) has no available replicas in {{ $labels.namespace }}. Video conferencing media is broken.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="jitsi-jvb", namespace=~"tn-.*-jitsi"} == 0
+            for: 2m
+            labels:
+              severity: critical
+          - alert: StalwartDown
+            annotations:
+              summary: 'Stalwart mail server is down in {{ $labels.namespace }}'
+              description: 'Stalwart deployment has no available replicas in {{ $labels.namespace }}. Email is unavailable for this tenant.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="stalwart", namespace=~"tn-.*-mail"} == 0
+            for: 3m
+            labels:
+              severity: critical
+          - alert: RoundcubeDown
+            annotations:
+              summary: 'Roundcube webmail is down in {{ $labels.namespace }}'
+              description: 'Roundcube deployment has no available replicas in {{ $labels.namespace }}.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="roundcube", namespace=~"tn-.*-webmail"} == 0
+            for: 5m
+            labels:
+              severity: warning
+          - alert: NotifyPushDown
+            annotations:
+              summary: 'Nextcloud notify_push is down in {{ $labels.namespace }}'
+              description: 'notify_push deployment has no available replicas in {{ $labels.namespace }}. Browser clients will fall back to polling.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="notify-push", namespace=~"tn-.*-files"} == 0
+            for: 5m
+            labels:
+              severity: warning
+          - alert: AdminPortalDown
+            annotations:
+              summary: 'Admin portal is down in {{ $labels.namespace }}'
+              description: 'Admin portal deployment has no available replicas in {{ $labels.namespace }}.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="admin-portal", namespace=~"tn-.*-admin"} == 0
+            for: 5m
+            labels:
+              severity: warning
+  loki-alerts:
+    groups:
+      - name: loki.rules
+        rules:
+          - alert: LokiDown
+            annotations:
+              summary: Loki is down - no log aggregation
+              description: 'Loki StatefulSet has 0 ready replicas. Centralized logging is unavailable.'
+            expr: |-
+              kube_statefulset_status_replicas_ready{statefulset="loki", namespace="infra-monitoring"} == 0
+            for: 2m
+            labels:
+              severity: critical
+          - alert: LokiRequestErrors
+            annotations:
+              summary: 'Loki API error rate >10%'
+              description: 'More than 10% of Loki API requests are returning 5xx errors for 10 minutes.'
+            expr: |-
+              (
+                sum(rate(loki_request_duration_seconds_count{status_code=~"5.."}[5m]))
+                /
+                sum(rate(loki_request_duration_seconds_count[5m]))
+              ) > 0.1
+            for: 10m
+            labels:
+              severity: warning
+          - alert: LokiStorageHigh
+            annotations:
+              summary: 'Loki PVC usage >80%'
+              description: 'Loki persistent volume usage is above 80%. Consider increasing storage or reducing retention.'
+            expr: |-
+              (
+                kubelet_volume_stats_used_bytes{persistentvolumeclaim=~"storage-loki-.*", namespace="infra-monitoring"}
+                /
+                kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~"storage-loki-.*", namespace="infra-monitoring"}
+              ) > 0.8
+            for: 15m
+            labels:
+              severity: warning
+  vector-alerts:
+    groups:
+      - name: vector.rules
+        rules:
+          - alert: VectorDown
+            annotations:
+              summary: Vector DaemonSet not fully running
+              description: 'Vector DaemonSet has fewer ready pods than desired. Some nodes are not collecting logs.'
+            expr: |-
+              kube_daemonset_status_number_ready{daemonset=~"vector.*", namespace="infra-monitoring"}
+              <
+              kube_daemonset_status_desired_number_scheduled{daemonset=~"vector.*", namespace="infra-monitoring"}
+            for: 5m
+            labels:
+              severity: warning
+          - alert: VectorSinkErrors
+            annotations:
+              summary: Vector Loki sink has errors
+              description: 'Vector is experiencing errors sending logs to Loki. Check Loki availability and Vector configuration.'
+            expr: |-
+              increase(vector_component_errors_total{component_type="loki"}[5m]) > 10
+            for: 0m
+            labels:
+              severity: critical
+          - alert: VectorNoLogsIngested
+            annotations:
+              summary: Vector is not processing any logs
+              description: 'Vector has not processed any log events in the last 10 minutes. Log collection may be broken.'
+            expr: |-
+              sum(increase(vector_component_received_events_total{component_type="kubernetes_logs"}[10m])) == 0
+            for: 10m
+            labels:
+              severity: critical
+  jitsi-signaling-alerts:
+    groups:
+      - name: jitsi-signaling.rules
+        rules:
+          - alert: JitsiProsodyXmppDown
+            annotations:
+              summary: 'Prosody XMPP C2S port is unreachable'
+              description: 'Prosody XMPP C2S port (5222) has been unreachable for 2 minutes. Jitsi conference creation is broken even though the pod appears healthy.'
+            expr: |-
+              jitsi_prosody_xmpp_c2s_up == 0
+            for: 2m
+            labels:
+              severity: critical
+          - alert: JitsiNoBridgesAvailable
+            annotations:
+              summary: 'No operational Jitsi video bridges'
+              description: 'Jicofo reports zero operational video bridges for 2 minutes. No conferences can carry media.'
+            expr: |-
+              jitsi_jicofo_operational_bridge_count == 0
+            for: 2m
+            labels:
+              severity: critical
+          - alert: JitsiProsodyXmppFlapping
+            annotations:
+              summary: 'Prosody XMPP C2S port is flapping'
+              description: 'Prosody XMPP C2S reachability has changed more than 3 times in 10 minutes. The XMPP service is unstable.'
+            expr: |-
+              changes(jitsi_prosody_xmpp_c2s_up[10m]) > 3
+            for: 5m
+            labels:
+              severity: warning
+  endpoint-alerts:
+    groups:
+      - name: endpoint-probes.rules
+        rules:
+          - alert: EndpointDown
+            annotations:
+              summary: '{{ $labels.instance }} is unreachable'
+              description: 'Endpoint {{ $labels.instance }} has been failing probe checks for 5 minutes.'
+            expr: probe_success == 0
+            for: 5m
+            labels:
+              severity: critical
+          - alert: EndpointSlowResponse
+            annotations:
+              summary: '{{ $labels.instance }} responding slowly ({{ $value }}s)'
+              description: 'Endpoint {{ $labels.instance }} response time is above 5 seconds.'
+            expr: probe_duration_seconds > 5
+            for: 10m
+            labels:
+              severity: warning
+          - alert: EndpointSSLCertExpiringSoon
+            annotations:
+              summary: 'SSL cert for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}'
+              description: 'SSL certificate for {{ $labels.instance }} expires in less than 7 days.'
+            expr: probe_ssl_earliest_cert_expiry - time() < 7 * 24 * 3600
+            for: 1h
+            labels:
+              severity: warning
+  email-probe-alerts:
+    groups:
+      - name: email-probe.rules
+        rules:
+          - alert: EmailProbeConsecutiveFailures
+            annotations:
+              summary: 'Email probe has {{ $value }} consecutive failures (tenant={{ $labels.tenant }})'
+              description: 'Email probe for tenant {{ $labels.tenant }} has failed {{ $value }} consecutive times. End-to-end email delivery may be broken.'
+            expr: |-
+              email_probe_consecutive_failures >= 5
+            for: 1m
+            labels:
+              severity: critical
+          - alert: EmailProbeHighRoundtrip
+            annotations:
+              summary: 'Email probe roundtrip >3min (tenant={{ $labels.tenant }})'
+              description: 'Email probe roundtrip for tenant {{ $labels.tenant }} has been above 180s for 10 minutes.'
+            expr: |-
+              email_probe_roundtrip_seconds > 240
+            for: 16m
+            labels:
+              severity: warning
+          - alert: EmailProbeDown
+            annotations:
+              summary: 'Email probe pod is down in {{ $labels.namespace }}'
+              description: 'Email probe deployment has no available replicas in {{ $labels.namespace }}. Email monitoring is offline.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="email-probe", namespace=~"tn-.*-mail"} == 0
+            for: 10m
+            labels:
+              severity: warning
+          - alert: EmailProbeNoRecentSuccess
+            annotations:
+              summary: 'No successful email probe in 30min (tenant={{ $labels.tenant }})'
+              description: 'Email probe for tenant {{ $labels.tenant }} has not had a successful roundtrip in over 30 minutes.'
+            expr: |-
+              (time() - email_probe_last_success_timestamp) > 1800
+            for: 5m
+            labels:
+              severity: critical
+
+# Node exporter subchart resources — kube-prometheus-stack passes these via the subchart key
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
 
 # Disable scraping of control plane components managed by LKE
 # These are inaccessible on managed Kubernetes and cause false alerts
