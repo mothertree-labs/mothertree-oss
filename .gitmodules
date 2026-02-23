@@ -12,7 +12,7 @@
 	url = https://github.com/posteo/mailvelope_client.git
 [submodule "mt-config-platform"]
 	path = config/platform
-	url = git@github.com:YOUR_ORG/mt-config-platform.git
+	url = git@github.com:weksler/mt-config-platform.git
 [submodule "mt-config-tenants"]
 	path = config/tenants
-	url = git@github.com:YOUR_ORG/mt-config-tenants.git
+	url = git@github.com:weksler/mt-config-tenants.git
