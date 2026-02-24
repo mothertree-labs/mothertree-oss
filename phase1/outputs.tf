@@ -157,6 +157,12 @@ output "vpn_server_vpc_cidr" {
   value       = linode_vpc_subnet.support_subnet.ipv4
 }
 
+# Support subnet ID (for CI server terraform)
+output "support_subnet_id" {
+  description = "ID of the VPC support subnet (for CI server)"
+  value       = linode_vpc_subnet.support_subnet.id
+}
+
 # Jitsi Tester Outputs
 output "jitsi_tester_enabled" {
   description = "Whether Jitsi tester instance is enabled"

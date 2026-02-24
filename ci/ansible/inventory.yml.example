@@ -1,0 +1,14 @@
+# CI Server Ansible Inventory
+# Copy to inventory.yml with real values
+#
+# SSH access: ProxyJump through VPN server (requires VPN connection)
+# Uses CI server's public IP via ProxyJump (Linode Cloud Firewalls filter VPC traffic).
+
+all:
+  children:
+    ci_servers:
+      hosts:
+        ci:
+          ansible_host: <ci-server-public-ip>
+          ansible_user: root
+          ansible_ssh_common_args: "-o ProxyJump=root@<vpn-tunnel-ip> -o StrictHostKeyChecking=accept-new"

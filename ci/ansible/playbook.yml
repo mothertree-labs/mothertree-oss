@@ -1,0 +1,197 @@
+---
+# Configure Buildkite CI Server
+# Run: ansible-playbook -i inventory.yml playbook.yml
+#
+# Requires vars from ansible-vars.yml (private):
+#   buildkite_agent_token, ghcr_username, ghcr_pat
+
+- name: Configure Buildkite CI Server
+  hosts: ci_servers
+  become: true
+  vars_files:
+    - "{{ vars_file | default('ansible-vars.yml') }}"
+
+  tasks:
+    # ── Buildkite Agent ──────────────────────────────────────────────
+    - name: Add Buildkite apt key
+      ansible.builtin.shell: |
+        curl -fsSL https://keys.openpgp.org/vks/v1/by-fingerprint/32A37959C2FA5C3C99EFBC32A79206696452D198 \
+          | gpg --dearmor -o /usr/share/keyrings/buildkite-agent-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/buildkite-agent-archive-keyring.gpg
+
+    - name: Add Buildkite apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main"
+        filename: buildkite-agent
+
+    - name: Install Buildkite agent
+      ansible.builtin.apt:
+        name: buildkite-agent
+        state: present
+        update_cache: true
+
+    - name: Configure Buildkite agent
+      ansible.builtin.template:
+        src: templates/buildkite-agent.cfg.j2
+        dest: /etc/buildkite-agent/buildkite-agent.cfg
+        owner: buildkite-agent
+        group: buildkite-agent
+        mode: "0600"
+      no_log: true
+
+    - name: Add buildkite-agent to docker group
+      ansible.builtin.user:
+        name: buildkite-agent
+        groups: docker
+        append: true
+
+    # ── 3 Agent Instances ────────────────────────────────────────────
+    - name: Enable and start Buildkite agent instances
+      ansible.builtin.systemd:
+        name: "buildkite-agent@{{ item }}"
+        enabled: true
+        state: started
+      loop: [1, 2, 3]
+
+    # ── Docker Configuration ─────────────────────────────────────────
+    - name: Configure Docker daemon
+      ansible.builtin.template:
+        src: templates/docker-daemon.json.j2
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+      notify: Restart Docker
+
+    - name: Create buildkite-agent .docker directory
+      ansible.builtin.file:
+        path: /home/buildkite-agent/.docker
+        state: directory
+        owner: buildkite-agent
+        group: buildkite-agent
+        mode: "0700"
+
+    - name: Configure GHCR docker login
+      ansible.builtin.copy:
+        content: |
+          {
+            "auths": {
+              "ghcr.io": {
+                "auth": "{{ (ghcr_username + ':' + ghcr_pat) | b64encode }}"
+              }
+            }
+          }
+        dest: /home/buildkite-agent/.docker/config.json
+        owner: buildkite-agent
+        group: buildkite-agent
+        mode: "0600"
+      no_log: true
+
+    # ── Tools ────────────────────────────────────────────────────────
+    - name: Install ShellCheck
+      ansible.builtin.apt:
+        name: shellcheck
+        state: present
+
+    - name: Install Node.js 20 apt key
+      ansible.builtin.shell: |
+        curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+          | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg
+      args:
+        creates: /usr/share/keyrings/nodesource.gpg
+
+    - name: Add Node.js 20 apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main"
+        filename: nodesource
+
+    - name: Install Node.js
+      ansible.builtin.apt:
+        name: nodejs
+        state: present
+        update_cache: true
+
+    - name: Install Terraform
+      ansible.builtin.unarchive:
+        src: https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip
+        dest: /usr/local/bin
+        remote_src: true
+        mode: "0755"
+
+    - name: Install Helm
+      ansible.builtin.shell: |
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Install helmfile
+      ansible.builtin.get_url:
+        url: https://github.com/helmfile/helmfile/releases/download/v0.169.2/helmfile_0.169.2_linux_amd64.tar.gz
+        dest: /tmp/helmfile.tar.gz
+        mode: "0644"
+
+    - name: Extract helmfile
+      ansible.builtin.unarchive:
+        src: /tmp/helmfile.tar.gz
+        dest: /usr/local/bin
+        remote_src: true
+        include: [helmfile]
+        mode: "0755"
+
+    - name: Install yq
+      ansible.builtin.get_url:
+        url: https://github.com/mikefarah/yq/releases/download/v4.44.6/yq_linux_amd64
+        dest: /usr/local/bin/yq
+        mode: "0755"
+
+    # ── SSH Deploy Keys ──────────────────────────────────────────────
+    - name: Create buildkite-agent .ssh directory
+      ansible.builtin.file:
+        path: /home/buildkite-agent/.ssh
+        state: directory
+        owner: buildkite-agent
+        group: buildkite-agent
+        mode: "0700"
+
+    - name: Install SSH deploy keys
+      ansible.builtin.copy:
+        content: "{{ item.key }}"
+        dest: "/home/buildkite-agent/.ssh/{{ item.name }}"
+        owner: buildkite-agent
+        group: buildkite-agent
+        mode: "0600"
+      loop: "{{ ssh_deploy_keys | default([]) }}"
+      no_log: true
+
+    - name: Configure SSH host aliases for private repos
+      ansible.builtin.copy:
+        content: |
+          # Deploy key aliases for private submodules and config repos
+          {% for key in ssh_deploy_keys | default([]) %}
+          Host {{ key.host_alias }}
+            HostName github.com
+            User git
+            IdentityFile /home/buildkite-agent/.ssh/{{ key.name }}
+            IdentitiesOnly yes
+          {% endfor %}
+
+          Host github.com
+            StrictHostKeyChecking accept-new
+        dest: /home/buildkite-agent/.ssh/config
+        owner: buildkite-agent
+        group: buildkite-agent
+        mode: "0600"
+
+    # ── Docker Buildx ────────────────────────────────────────────────
+    - name: Set up default buildx builder
+      ansible.builtin.shell: |
+        docker buildx create --name mt-builder --driver docker-container --bootstrap --use
+      become: true
+      become_user: buildkite-agent
+      args:
+        creates: /home/buildkite-agent/.docker/buildx
+
+  handlers:
+    - name: Restart Docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted

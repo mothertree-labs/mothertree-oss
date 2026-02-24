@@ -1,0 +1,10 @@
+# Buildkite Agent Configuration
+# Managed by Ansible — do not edit manually
+
+token="{{ buildkite_agent_token }}"
+name="mothertree-ci-%spawn"
+tags="queue=default,os=linux,arch=amd64"
+build-path="/home/buildkite-agent/builds"
+hooks-path="/etc/buildkite-agent/hooks"
+plugins-path="/etc/buildkite-agent/plugins"
+git-clean-flags="-ffxdq"

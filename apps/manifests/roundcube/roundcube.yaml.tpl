@@ -198,9 +198,8 @@ spec:
           type: RuntimeDefault
       containers:
       - name: roundcube
-        # TODO: Pin to a specific version tag or sha256 digest
-        image: ${CONTAINER_REGISTRY}/mothertree-roundcube:latest
-        imagePullPolicy: Always
+        image: ${ROUNDCUBE_IMAGE}
+        imagePullPolicy: IfNotPresent
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
