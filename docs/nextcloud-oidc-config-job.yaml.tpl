@@ -256,11 +256,16 @@ spec:
               # Enable custom Link editor app (deployed by deploy-nextcloud.sh to custom_apps/)
               echo "Enabling custom Link editor app..."
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable files_linkeditor" 2>/dev/null || true
-              
+
               # Configure La Suite Docs URL for the "New Document" menu entry
               echo "Configuring La Suite Docs URL..."
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set files_linkeditor docs_url --value='https://$DOCS_HOST'"
               echo "Link editor app enabled and configured"
+
+              # Enable guest_bridge app (provisions guest users when sharing with external emails)
+              echo "Enabling guest_bridge app..."
+              kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable guest_bridge" 2>/dev/null || true
+              echo "Guest bridge app enabled (API config set by deploy-nextcloud.sh)"
               
               # Set default app to Files (skip dashboard splash screen)
               echo "Setting default app to Files..."

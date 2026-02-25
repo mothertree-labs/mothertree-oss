@@ -114,6 +114,13 @@ spec:
                 secretKeyRef:
                   name: admin-portal-secrets
                   key: beginsetup-secret
+            # API key for guest provisioning endpoint (called by Nextcloud guest_bridge)
+            - name: GUEST_PROVISIONING_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: account-portal-secrets
+                  key: guest-provisioning-api-key
+                  optional: true
           resources:
             requests:
               memory: "64Mi"
