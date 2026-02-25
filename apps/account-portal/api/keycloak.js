@@ -17,6 +17,13 @@ const KEYCLOAK_REALM = process.env.KEYCLOAK_REALM;
 const CLIENT_ID = process.env.KEYCLOAK_CLIENT_ID;
 const CLIENT_SECRET = process.env.KEYCLOAK_CLIENT_SECRET;
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function validateUserId(userId) {
+  if (!userId || !UUID_REGEX.test(userId)) {
+    throw new Error('Invalid user ID format');
+  }
+}
+
 let cachedToken = null;
 let tokenExpiry = 0;
 
@@ -70,6 +77,7 @@ async function getServiceToken() {
  * Called after user completes passkey registration and logs in
  */
 async function swapToTenantEmailIfNeeded(userId) {
+  validateUserId(userId);
   const token = await getServiceToken();
   const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
 
@@ -125,6 +133,7 @@ async function swapToTenantEmailIfNeeded(userId) {
  * WebAuthn prompt. Moving the passkey to first fixes this.
  */
 async function ensurePasskeyFirst(userId) {
+  validateUserId(userId);
   const token = await getServiceToken();
   const credentialsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/credentials`;
 
@@ -212,6 +221,14 @@ async function sendNotificationEmail(toEmail, subject, message) {
   console.log(`[NOTIFICATION EMAIL] Subject: ${subject}`);
   console.log(`[NOTIFICATION EMAIL] SMTP: ${smtpHost}:${smtpPort}`);
 
+  // HTML-escape message to prevent XSS in email clients
+  const escapedMessage = message
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
   try {
     const transporter = nodemailer.createTransport({
       host: smtpHost,
@@ -235,7 +252,7 @@ async function sendNotificationEmail(toEmail, subject, message) {
               <strong>Security Notice</strong>
             </p>
           </div>
-          <p style="color: #3d3d3d; line-height: 1.6;">${message}</p>
+          <p style="color: #3d3d3d; line-height: 1.6;">${escapedMessage}</p>
           <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
           <p style="color: #999; font-size: 12px;">
             If you did not request this, please contact support immediately.
@@ -465,6 +482,7 @@ async function initiateAccountRecovery({ tenantEmail, recoveryEmail }) {
  * Assign a realm role to a user
  */
 async function assignRealmRole(userId, roleName) {
+  validateUserId(userId);
   const token = await getServiceToken();
 
   // Get the role object first
@@ -500,6 +518,7 @@ async function assignRealmRole(userId, roleName) {
  * Remove a realm role from a user
  */
 async function removeRealmRole(userId, roleName) {
+  validateUserId(userId);
   const token = await getServiceToken();
 
   // Get the role object first

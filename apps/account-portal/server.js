@@ -2,6 +2,7 @@ const express = require('express');
 const session = require('express-session');
 const passport = require('passport');
 const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const path = require('path');
 const crypto = require('crypto');
 const { Issuer, Strategy } = require('openid-client');
@@ -45,6 +46,15 @@ app.use(helmet({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Rate limiting - 100 requests per 15 minutes per IP
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === '/health',
+}));
 
 // Policy URLs (configurable via environment variables)
 app.locals.privacyPolicyUrl = process.env.PRIVACY_POLICY_URL || '';
@@ -140,15 +150,17 @@ function verifyOrigin(req, res, next) {
   const origin = req.get('Origin');
   const referer = req.get('Referer');
   const source = origin || referer;
-  if (source) {
-    try {
-      const url = new URL(source);
-      if (!url.hostname.endsWith(process.env.TENANT_DOMAIN)) {
-        return res.status(403).json({ error: 'Forbidden' });
-      }
-    } catch {
+  if (!source) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  try {
+    const url = new URL(source);
+    const domain = process.env.TENANT_DOMAIN;
+    if (url.hostname !== domain && !url.hostname.endsWith('.' + domain)) {
       return res.status(403).json({ error: 'Forbidden' });
     }
+  } catch {
+    return res.status(403).json({ error: 'Forbidden' });
   }
   next();
 }
@@ -418,7 +430,7 @@ app.get('/api/app-passwords', requireAuth, async (req, res) => {
     const passwords = await stalwartApi.listAppPasswords(req.user.email);
     res.json(passwords);
   } catch (error) {
-    console.error('List app passwords error:', error);
+    console.error('List app passwords error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -442,7 +454,7 @@ app.post('/api/app-passwords', verifyOrigin, requireAuth, async (req, res) => {
 
     res.json({ success: true, password });
   } catch (error) {
-    console.error('Create app password error:', error);
+    console.error('Create app password error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -452,8 +464,8 @@ app.delete('/api/app-passwords/:name', verifyOrigin, requireAuth, async (req, re
     await stalwartApi.revokeAppPassword(req.user.email, req.params.name);
     res.json({ success: true });
   } catch (error) {
-    console.error('Revoke app password error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Revoke app password error');
+    res.status(500).json({ error: 'Failed to revoke app password' });
   }
 });
 
@@ -619,7 +631,7 @@ app.post('/recover', verifyOrigin, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Recovery error:', error);
+    console.error('Recovery error:', error.message);
     res.render('recover', {
       title: 'Account Recovery',
       error: error.message,
@@ -759,7 +771,7 @@ app.post('/api/register-guest', verifyOrigin, async (req, res) => {
 
     res.json({ success: true, userId: result.userId });
   } catch (error) {
-    console.error('Guest registration error:', error);
+    console.error('Guest registration error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

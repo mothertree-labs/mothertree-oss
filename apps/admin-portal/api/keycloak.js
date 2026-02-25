@@ -18,6 +18,13 @@ const KEYCLOAK_REALM = process.env.KEYCLOAK_REALM;
 const CLIENT_ID = process.env.KEYCLOAK_CLIENT_ID;
 const CLIENT_SECRET = process.env.KEYCLOAK_CLIENT_SECRET;
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function validateUserId(userId) {
+  if (!userId || !UUID_REGEX.test(userId)) {
+    throw new Error('Invalid user ID format');
+  }
+}
+
 let cachedToken = null;
 let tokenExpiry = 0;
 
@@ -205,6 +212,7 @@ async function createUser({ firstName, lastName, email, recoveryEmail }) {
  * 5. Account portal swaps email back to tenant email on first login
  */
 async function sendInvitationEmail(userId) {
+  validateUserId(userId);
   const token = await getServiceToken();
   const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
 
@@ -320,6 +328,7 @@ async function listUsers() {
  * Check if user has registered a passkey
  */
 async function checkUserHasPasskey(userId) {
+  validateUserId(userId);
   const token = await getServiceToken();
   const credentialsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/credentials`;
 
@@ -346,6 +355,7 @@ async function checkUserHasPasskey(userId) {
  * WebAuthn prompt. Moving the passkey to first fixes this.
  */
 async function ensurePasskeyFirst(userId) {
+  validateUserId(userId);
   const token = await getServiceToken();
   const credentialsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/credentials`;
 
@@ -388,6 +398,7 @@ async function ensurePasskeyFirst(userId) {
  * Delete a user
  */
 async function deleteUser(userId) {
+  validateUserId(userId);
   const token = await getServiceToken();
   const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
 
@@ -408,6 +419,7 @@ async function deleteUser(userId) {
  * Called after user completes passkey registration and logs in
  */
 async function swapToTenantEmailIfNeeded(userId) {
+  validateUserId(userId);
   const token = await getServiceToken();
   const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
 
