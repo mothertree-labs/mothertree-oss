@@ -836,6 +836,80 @@ app.post('/api/ensure-passkey-priority', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Guest Provisioning API — called by Nextcloud guest_bridge app
+// Authenticates via API key (not user session) to create guest users programmatically
+const GUEST_PROVISIONING_API_KEY = process.env.GUEST_PROVISIONING_API_KEY;
+
+// Rate limiter for guest provisioning API (max 30 per IP per hour)
+const guestProvisioningAttempts = new Map();
+function checkGuestProvisioningRateLimit(ip) {
+  const now = Date.now();
+  const hourAgo = now - 60 * 60 * 1000;
+  const attempts = (guestProvisioningAttempts.get(ip) || []).filter(t => t > hourAgo);
+  guestProvisioningAttempts.set(ip, attempts);
+  if (attempts.length >= 30) return false;
+  attempts.push(now);
+  guestProvisioningAttempts.set(ip, attempts);
+  return true;
+}
+
+app.post('/api/provision-guest', async (req, res) => {
+  // Authenticate via API key
+  const apiKey = req.get('X-API-Key');
+  if (!GUEST_PROVISIONING_API_KEY || !apiKey || apiKey !== GUEST_PROVISIONING_API_KEY) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+
+  // Rate limit
+  if (!checkGuestProvisioningRateLimit(req.ip)) {
+    return res.status(429).json({ success: false, error: 'Too many requests' });
+  }
+
+  try {
+    const { email, firstName, lastName, redirectUri } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email is required' });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ success: false, error: 'Invalid email format' });
+    }
+
+    // Reject tenant domain emails — guests must use external emails
+    const tenantDomain = process.env.EMAIL_DOMAIN || process.env.TENANT_DOMAIN || '';
+    if (tenantDomain && email.toLowerCase().endsWith('@' + tenantDomain.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot create guest for tenant domain email'
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await keycloakApi.findUserByEmail(email.toLowerCase());
+    if (existingUser) {
+      // User already exists — return success with their ID (idempotent)
+      return res.json({ success: true, userId: existingUser.id, existing: true });
+    }
+
+    // Create the guest user
+    const result = await keycloakApi.createGuestUser({
+      email: email.toLowerCase(),
+      firstName: (firstName || '').trim() || undefined,
+      lastName: (lastName || '').trim() || undefined,
+      redirectUri: redirectUri || undefined,
+    });
+
+    console.log(`[PROVISION-GUEST] Created guest user: ${email} (${result.userId})`);
+    res.json({ success: true, userId: result.userId });
+  } catch (error) {
+    console.error('[PROVISION-GUEST] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });

@@ -1057,8 +1057,20 @@ if [ "$ACCOUNT_PORTAL_ENABLED" = "true" ]; then
     fi
   fi
 
+  # Guest provisioning API key (used by Nextcloud guest_bridge to create guest users)
+  if [ -z "${GUEST_PROVISIONING_API_KEY:-}" ] || [ "$GUEST_PROVISIONING_API_KEY" = "null" ] || [[ "${GUEST_PROVISIONING_API_KEY:-}" == *"PLACEHOLDER"* ]]; then
+    GUEST_PROVISIONING_API_KEY=$(read_k8s_secret "$NS_ADMIN" "account-portal-secrets" "guest-provisioning-api-key")
+    if [ -z "$GUEST_PROVISIONING_API_KEY" ]; then
+      print_warning "Guest provisioning API key not configured, generating one..."
+      GUEST_PROVISIONING_API_KEY=$(openssl rand -base64 32)
+    else
+      print_status "Guest provisioning API key: reusing existing value from cluster"
+    fi
+  fi
+
   export ACCOUNT_PORTAL_OIDC_SECRET
   export ACCOUNT_PORTAL_NEXTAUTH_SECRET
+  export GUEST_PROVISIONING_API_KEY
 
   # NS_MAIL must point to the tenant mail namespace for the deployment template
   export NS_MAIL="$NS_STALWART"

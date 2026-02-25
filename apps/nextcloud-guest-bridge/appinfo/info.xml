@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
+	<id>guest_bridge</id>
+	<name>Guest Bridge</name>
+	<summary>Creates guest users in Keycloak when sharing with external emails</summary>
+	<description><![CDATA[When a Nextcloud user shares a file or folder with an external email
+address, this app automatically provisions a guest user account via the
+account portal API. The guest receives an email with a passkey setup link.
+After completing setup, they can log in via OIDC and access the shared
+resources.
+
+Handles both regular file/folder shares and Collabora (richdocuments) shares.
+Public link sharing remains unaffected.]]></description>
+	<licence>AGPL</licence>
+	<author>Mothertree</author>
+	<version>0.1.0</version>
+	<category>integration</category>
+	<namespace>GuestBridge</namespace>
+	<dependencies>
+		<nextcloud min-version="28" max-version="32" />
+	</dependencies>
+</info>

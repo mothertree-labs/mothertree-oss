@@ -7,3 +7,4 @@ type: Opaque
 stringData:
   nextauth-secret: "${ACCOUNT_PORTAL_NEXTAUTH_SECRET}"
   keycloak-client-secret: "${ACCOUNT_PORTAL_OIDC_SECRET}"
+  guest-provisioning-api-key: "${GUEST_PROVISIONING_API_KEY}"
