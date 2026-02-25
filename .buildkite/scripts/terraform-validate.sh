@@ -14,7 +14,13 @@ for dir in phase1 infra ci/terraform; do
   echo "--- Validating $dir"
   pushd "$dir" > /dev/null
 
-  terraform init -backend=false -input=false > /dev/null 2>&1
+  if ! terraform init -backend=false -input=false; then
+    echo "^^^ +++"
+    echo "Terraform init failed in $dir"
+    FAIL=1
+    popd > /dev/null
+    continue
+  fi
   if ! terraform validate; then
     echo "^^^ +++"
     echo "Terraform validate failed in $dir"

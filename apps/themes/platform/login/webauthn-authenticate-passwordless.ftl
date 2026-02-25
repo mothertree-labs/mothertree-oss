@@ -58,7 +58,21 @@
                 </form>
             </#if>
 
+            <#-- "Try another way" link — shown when alternative authenticators exist (e.g. password in dev) -->
+            <#if auth?has_content && auth.showTryAnotherWayLink()>
             <div style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #eee; font-family: 'Figtree', sans-serif;">
+                <form id="kc-select-try-another-way-form" action="${url.loginAction}" method="post">
+                    <input type="hidden" name="tryAnotherWay" value="on"/>
+                    <a href="#" id="try-another-way"
+                       onclick="document.getElementById('kc-select-try-another-way-form').submit();return false;"
+                       style="color: #A7AE8D; text-decoration: none; font-size: 0.95rem; font-weight: 500;">
+                        ${msg("doTryAnotherWay","Try another way")}
+                    </a>
+                </form>
+            </div>
+            </#if>
+
+            <div style="margin-top: <#if auth?has_content && auth.showTryAnotherWayLink()>0.5rem<#else>1.5rem</#if>; <#if !(auth?has_content && auth.showTryAnotherWayLink())>padding-top: 1rem; border-top: 1px solid #eee; </#if>font-family: 'Figtree', sans-serif;">
                 <a href="#" id="recover-link" style="color: #6b6b6b; text-decoration: none; font-size: 0.9rem;">Lost your passkey?</a>
             </div>
 
