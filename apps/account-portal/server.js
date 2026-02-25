@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const { Issuer, Strategy } = require('openid-client');
 
 // Redis session store for HA deployments (multiple replicas)
-const RedisStore = require('connect-redis').default;
+const { RedisStore } = require('connect-redis');
 const { createClient } = require('redis');
 
 // Fail fast if required environment variables are not set
