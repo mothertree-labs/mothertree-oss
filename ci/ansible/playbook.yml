@@ -63,6 +63,8 @@
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0="url.https://github.com/.insteadOf"
           export GIT_CONFIG_VALUE_0="git@github.com:"
+          # Skip private submodules — pipeline steps init what they need
+          export BUILDKITE_GIT_SUBMODULES="false"
         dest: /etc/buildkite-agent/hooks/environment
         owner: buildkite-agent
         group: buildkite-agent
