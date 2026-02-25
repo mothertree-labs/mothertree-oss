@@ -18,6 +18,9 @@ steps:
       - label: ":npm: npm build check"
         command: ".buildkite/scripts/npm-check.sh"
 
+      - label: ":jest: Account Portal Tests"
+        command: "cd apps/account-portal && npm ci --ignore-scripts && npm test"
+
       - label: ":label: Version bump check"
         command: ".buildkite/scripts/version-check.sh"
 
