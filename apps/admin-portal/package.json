@@ -17,7 +17,7 @@
     "redis": "4.6.13",
     "passport": "0.7.0",
     "openid-client": "5.7.1",
-    "ejs": "3.1.10",
+    "ejs": "4.0.1",
     "helmet": "8.0.0",
     "nodemailer": "6.9.16"
   }
