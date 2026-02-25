@@ -216,83 +216,12 @@ else
 fi
 
 # =============================================================================
-# Build and push Roundcube custom image (smart build - only if source changed)
+# Load Roundcube image tag from CI-built tags (or fall back to :latest)
 # =============================================================================
 export CONTAINER_REGISTRY="${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}"
-ROUNDCUBE_IMAGE_TAG="${CONTAINER_REGISTRY}/mothertree-roundcube:latest"
-ROUNDCUBE_DOCKER_DIR="$REPO_ROOT/apps/docker/roundcube"
-
-if [ -f "$ROUNDCUBE_DOCKER_DIR/Dockerfile" ] && [ -d "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins" ]; then
-    print_status "Computing Roundcube image source hash..."
-    SOURCE_HASH=$(find \
-        "$ROUNDCUBE_DOCKER_DIR" \
-        "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/calendar" \
-        "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/libcalendaring" \
-        "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/libkolab" \
-        "$REPO_ROOT/submodules/mailvelope_client" \
-        -type f -not -path "*/.git/*" 2>/dev/null | \
-        xargs sha256sum 2>/dev/null | sort | sha256sum | cut -c1-12)
-    FONT_HASH=$(sha256sum "$REPO_ROOT"/apps/admin-portal/public/fonts/figtree-*.woff2 2>/dev/null | sort | sha256sum | cut -c1-12)
-    SOURCE_HASH="${SOURCE_HASH}-${FONT_HASH}"
-
-    HASH_FILE="$ROUNDCUBE_DOCKER_DIR/.source-hash.${MT_ENV}"
-    PREVIOUS_HASH=""
-    if [ -f "$HASH_FILE" ]; then
-        PREVIOUS_HASH=$(cat "$HASH_FILE")
-    fi
-
-    print_status "Roundcube image: $ROUNDCUBE_IMAGE_TAG"
-    print_status "Source hash: $SOURCE_HASH (previous: ${PREVIOUS_HASH:-none})"
-
-    NEEDS_BUILD=false
-
-    if [ "$SOURCE_HASH" != "$PREVIOUS_HASH" ]; then
-        print_status "Source files have changed, rebuild needed"
-        NEEDS_BUILD=true
-    elif ! docker image inspect "$ROUNDCUBE_IMAGE_TAG" >/dev/null 2>&1; then
-        print_status "Image not found locally, attempting to pull..."
-        if ! docker pull "$ROUNDCUBE_IMAGE_TAG" 2>/dev/null; then
-            print_status "Image not in registry, rebuild needed"
-            NEEDS_BUILD=true
-        else
-            print_status "Image pulled from registry"
-        fi
-    else
-        print_status "Image exists locally and source unchanged, skipping build"
-    fi
-
-    if [ "$NEEDS_BUILD" = "true" ]; then
-        print_status "Building Roundcube image..."
-
-        docker buildx build \
-            --platform linux/amd64 \
-            -f "$ROUNDCUBE_DOCKER_DIR/Dockerfile" \
-            -t "$ROUNDCUBE_IMAGE_TAG" \
-            --load \
-            "$REPO_ROOT"
-
-        if [ $? -ne 0 ]; then
-            print_error "Failed to build Roundcube image"
-            exit 1
-        fi
-
-        print_success "Roundcube image built successfully"
-
-        print_status "Pushing image to registry..."
-        if docker push "$ROUNDCUBE_IMAGE_TAG"; then
-            print_success "Roundcube image pushed to registry"
-            echo "$SOURCE_HASH" > "$HASH_FILE"
-        else
-            print_error "Could not push to registry - image not updated in cluster!"
-            print_error "Fix registry credentials and re-run deploy"
-            rm -f "$HASH_FILE"
-            exit 1
-        fi
-    fi
-else
-    print_warning "Roundcube Dockerfile or submodules not found, skipping image build"
-    print_warning "Using existing image from registry"
-fi
+source "${REPO_ROOT}/scripts/lib/image-tags.sh"
+_mt_load_image_tags
+print_status "Roundcube image: $ROUNDCUBE_IMAGE"
 
 # Apply Roundcube manifests
 print_status "Applying Roundcube manifests..."
@@ -300,7 +229,7 @@ print_status "Applying Roundcube manifests..."
 # Apply main Roundcube manifest (Secret, ConfigMap, Deployment, Service).
 # Use explicit variable list to preserve PHP $config variables in the ConfigMap —
 # without it, envsubst would substitute $config with empty strings, breaking Roundcube.
-envsubst '${NS_WEBMAIL} ${NS_MAIL} ${AUTH_HOST} ${KEYCLOAK_REALM} ${ROUNDCUBE_DES_KEY} ${TENANT_DISPLAY_NAME} ${ROUNDCUBE_DB_USER} ${ROUNDCUBE_DB_NAME} ${TENANT_NAME} ${ROUNDCUBE_OIDC_SECRET} ${ROUNDCUBE_DB_PASSWORD} ${ROUNDCUBE_MEMORY_REQUEST} ${ROUNDCUBE_MEMORY_LIMIT} ${ROUNDCUBE_CPU_REQUEST} ${ROUNDCUBE_CPU_LIMIT} ${CONFIG_CHECKSUM} ${FILES_HOST} ${ROUNDCUBE_MIN_REPLICAS} ${PG_HOST} ${CONTAINER_REGISTRY}' \
+envsubst '${NS_WEBMAIL} ${NS_MAIL} ${AUTH_HOST} ${KEYCLOAK_REALM} ${ROUNDCUBE_DES_KEY} ${TENANT_DISPLAY_NAME} ${ROUNDCUBE_DB_USER} ${ROUNDCUBE_DB_NAME} ${TENANT_NAME} ${ROUNDCUBE_OIDC_SECRET} ${ROUNDCUBE_DB_PASSWORD} ${ROUNDCUBE_MEMORY_REQUEST} ${ROUNDCUBE_MEMORY_LIMIT} ${ROUNDCUBE_CPU_REQUEST} ${ROUNDCUBE_CPU_LIMIT} ${CONFIG_CHECKSUM} ${FILES_HOST} ${ROUNDCUBE_MIN_REPLICAS} ${PG_HOST} ${ROUNDCUBE_IMAGE}' \
     < "$REPO_ROOT/apps/manifests/roundcube/roundcube.yaml.tpl" | kubectl apply -f -
 print_success "Roundcube Deployment and Service applied"
 

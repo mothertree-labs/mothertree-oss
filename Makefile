@@ -1,4 +1,4 @@
-.PHONY: setup pull lint
+.PHONY: setup pull lint ci-validate ci-build
 
 # Initialize/update all submodules (requires access to private config repos)
 setup:
@@ -12,3 +12,17 @@ pull:
 # Lint Helm values (requires helmfile, helm)
 lint:
 	cd apps && helmfile -e dev lint
+
+# Run all CI validation checks locally
+ci-validate:
+	.buildkite/scripts/shellcheck.sh
+	.buildkite/scripts/terraform-validate.sh
+	.buildkite/scripts/helmfile-lint.sh
+	.buildkite/scripts/npm-check.sh
+
+# Build all images locally (no push)
+ci-build:
+	ci/scripts/build-admin-portal.sh
+	ci/scripts/build-account-portal.sh
+	apps/scripts/build-roundcube-image.sh
+	cd apps && apps/scripts/perf/build-k6-image.sh

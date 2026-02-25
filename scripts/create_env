@@ -978,85 +978,14 @@ if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
     fi
   fi
 
-  # Build admin portal image (smart build - only if source changed)
-  ADMIN_PORTAL_SRC="$REPO_ROOT/apps/admin-portal"
-  ADMIN_PORTAL_IMAGE_TAG="${ADMIN_PORTAL_IMAGE_TAG:-${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-admin-portal:${MT_ENV}}"
-
-  # Compute hash of source files for smart rebuilding
-  print_status "Computing admin portal source hash..."
-  SOURCE_HASH=$(find "$ADMIN_PORTAL_SRC" -type f \( -name "*.js" -o -name "*.ejs" -o -name "*.css" -o -name "*.woff2" -o -name "package.json" -o -name "Dockerfile" \) -not -path "*/node_modules/*" -not -name "tailwind.css" 2>/dev/null | xargs sha256sum 2>/dev/null | sort | sha256sum | cut -c1-12)
-
-  HASH_FILE="$ADMIN_PORTAL_SRC/.source-hash.${MT_ENV}"
-  PREVIOUS_HASH=""
-  if [ -f "$HASH_FILE" ]; then
-    PREVIOUS_HASH=$(cat "$HASH_FILE")
+  # Load image tag from CI-built tags (or fall back to env-based tag)
+  source "${REPO_ROOT}/scripts/lib/image-tags.sh"
+  _mt_load_image_tags
+  # Allow env-based override for backward compat (pre-CI deployments)
+  if [ -z "${ADMIN_PORTAL_IMAGE_TAG:-}" ] && [ "${ADMIN_PORTAL_IMAGE}" = "${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-admin-portal:latest" ]; then
+    export ADMIN_PORTAL_IMAGE="${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-admin-portal:${MT_ENV}"
   fi
-
-  print_status "Admin Portal image: $ADMIN_PORTAL_IMAGE_TAG"
-  print_status "Source hash: $SOURCE_HASH (previous: ${PREVIOUS_HASH:-none})"
-
-  # Check if we need to rebuild
-  NEEDS_BUILD=false
-
-  if [ "$SOURCE_HASH" != "$PREVIOUS_HASH" ]; then
-    print_status "Source files have changed, rebuild needed"
-    NEEDS_BUILD=true
-  elif ! docker image inspect "$ADMIN_PORTAL_IMAGE_TAG" >/dev/null 2>&1; then
-    print_status "Image not found locally, attempting to pull..."
-    if ! docker pull "$ADMIN_PORTAL_IMAGE_TAG" 2>/dev/null; then
-      print_status "Image not in registry, rebuild needed"
-      NEEDS_BUILD=true
-    else
-      print_status "Image pulled from registry"
-    fi
-  else
-    print_status "Image exists locally and source unchanged"
-  fi
-
-  if [ "$NEEDS_BUILD" = "true" ]; then
-    print_status "Building Admin Portal image..."
-
-    pushd "$ADMIN_PORTAL_SRC" >/dev/null
-
-    # Install npm dependencies if needed
-    if [ ! -d "node_modules" ]; then
-      print_status "Installing npm dependencies..."
-      npm install
-    fi
-
-    # Build with buildx (linux/amd64 for Linode nodes)
-    docker buildx build \
-      --platform linux/amd64 \
-      -t "$ADMIN_PORTAL_IMAGE_TAG" \
-      --load \
-      .
-
-    if [ $? -ne 0 ]; then
-      print_error "Failed to build Admin Portal image"
-      popd >/dev/null
-      exit 1
-    fi
-
-    popd >/dev/null
-
-    print_status "Admin Portal image built successfully"
-
-    # Push to registry - REQUIRED for k8s to get the new image
-    print_status "Pushing image to registry..."
-    if docker push "$ADMIN_PORTAL_IMAGE_TAG"; then
-      print_status "Admin Portal image pushed to registry"
-      echo "$SOURCE_HASH" > "$HASH_FILE"
-      ADMIN_PORTAL_IMAGE_UPDATED=true
-    else
-      print_error "Could not push to registry - image not updated in cluster!"
-      print_error "Fix registry credentials and re-run deploy"
-      rm -f "$HASH_FILE"
-      exit 1
-    fi
-  fi
-
-  # Export for deployment template
-  export ADMIN_PORTAL_IMAGE="$ADMIN_PORTAL_IMAGE_TAG"
+  print_status "Admin Portal image: $ADMIN_PORTAL_IMAGE"
 
   # Apply admin portal manifests
   print_status "Deploying admin portal manifests..."
@@ -1138,85 +1067,12 @@ if [ "$ACCOUNT_PORTAL_ENABLED" = "true" ]; then
   # NS_MAIL must point to the tenant mail namespace for the deployment template
   export NS_MAIL="$NS_STALWART"
 
-  # Build account portal image (smart build - only if source changed)
-  ACCOUNT_PORTAL_SRC="$REPO_ROOT/apps/account-portal"
-  ACCOUNT_PORTAL_IMAGE_TAG="${ACCOUNT_PORTAL_IMAGE_TAG:-${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-account-portal:${MT_ENV}}"
-
-  # Compute hash of source files for smart rebuilding
-  print_status "Computing account portal source hash..."
-  ACCOUNT_SOURCE_HASH=$(find "$ACCOUNT_PORTAL_SRC" -type f \( -name "*.js" -o -name "*.ejs" -o -name "*.css" -o -name "*.woff2" -o -name "package.json" -o -name "Dockerfile" \) -not -path "*/node_modules/*" -not -name "tailwind.css" 2>/dev/null | xargs sha256sum 2>/dev/null | sort | sha256sum | cut -c1-12)
-
-  ACCOUNT_HASH_FILE="$ACCOUNT_PORTAL_SRC/.source-hash.${MT_ENV}"
-  ACCOUNT_PREVIOUS_HASH=""
-  if [ -f "$ACCOUNT_HASH_FILE" ]; then
-    ACCOUNT_PREVIOUS_HASH=$(cat "$ACCOUNT_HASH_FILE")
+  # Load image tag from CI-built tags (image-tags.sh already sourced above)
+  # Allow env-based override for backward compat (pre-CI deployments)
+  if [ -z "${ACCOUNT_PORTAL_IMAGE_TAG:-}" ] && [ "${ACCOUNT_PORTAL_IMAGE}" = "${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-account-portal:latest" ]; then
+    export ACCOUNT_PORTAL_IMAGE="${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-account-portal:${MT_ENV}"
   fi
-
-  print_status "Account Portal image: $ACCOUNT_PORTAL_IMAGE_TAG"
-  print_status "Source hash: $ACCOUNT_SOURCE_HASH (previous: ${ACCOUNT_PREVIOUS_HASH:-none})"
-
-  # Check if we need to rebuild
-  ACCOUNT_NEEDS_BUILD=false
-
-  if [ "$ACCOUNT_SOURCE_HASH" != "$ACCOUNT_PREVIOUS_HASH" ]; then
-    print_status "Source files have changed, rebuild needed"
-    ACCOUNT_NEEDS_BUILD=true
-  elif ! docker image inspect "$ACCOUNT_PORTAL_IMAGE_TAG" >/dev/null 2>&1; then
-    print_status "Image not found locally, attempting to pull..."
-    if ! docker pull "$ACCOUNT_PORTAL_IMAGE_TAG" 2>/dev/null; then
-      print_status "Image not in registry, rebuild needed"
-      ACCOUNT_NEEDS_BUILD=true
-    else
-      print_status "Image pulled from registry"
-    fi
-  else
-    print_status "Image exists locally and source unchanged"
-  fi
-
-  ACCOUNT_PORTAL_IMAGE_UPDATED=false
-  if [ "$ACCOUNT_NEEDS_BUILD" = "true" ]; then
-    print_status "Building Account Portal image..."
-
-    pushd "$ACCOUNT_PORTAL_SRC" >/dev/null
-
-    # Install npm dependencies if needed
-    if [ ! -d "node_modules" ]; then
-      print_status "Installing npm dependencies..."
-      npm install
-    fi
-
-    # Build with buildx (linux/amd64 for Linode nodes)
-    docker buildx build \
-      --platform linux/amd64 \
-      -t "$ACCOUNT_PORTAL_IMAGE_TAG" \
-      --load \
-      .
-
-    if [ $? -ne 0 ]; then
-      print_error "Failed to build Account Portal image"
-      popd >/dev/null
-      exit 1
-    fi
-
-    popd >/dev/null
-
-    print_status "Account Portal image built successfully"
-
-    # Push to registry
-    print_status "Pushing image to registry..."
-    if docker push "$ACCOUNT_PORTAL_IMAGE_TAG"; then
-      print_status "Account Portal image pushed to registry"
-      echo "$ACCOUNT_SOURCE_HASH" > "$ACCOUNT_HASH_FILE"
-      ACCOUNT_PORTAL_IMAGE_UPDATED=true
-    else
-      print_error "Could not push to registry - image not updated in cluster!"
-      rm -f "$ACCOUNT_HASH_FILE"
-      exit 1
-    fi
-  fi
-
-  # Export for deployment template
-  export ACCOUNT_PORTAL_IMAGE="$ACCOUNT_PORTAL_IMAGE_TAG"
+  print_status "Account Portal image: $ACCOUNT_PORTAL_IMAGE"
 
   # Apply account portal manifests
   print_status "Deploying account portal manifests..."

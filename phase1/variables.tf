@@ -41,7 +41,7 @@ variable "linode_k8s_version" {
   type        = string
   default     = "1.34"
   validation {
-    condition = can(regex("^1\\.(2[4-9]|3[0-9])$", var.linode_k8s_version))
+    condition     = can(regex("^1\\.(2[4-9]|3[0-9])$", var.linode_k8s_version))
     error_message = "Kubernetes version must be between 1.24 and 1.39."
   }
 }
@@ -80,7 +80,7 @@ variable "linode_node_pools" {
   validation {
     condition = alltrue([
       for pool in var.linode_node_pools : pool.autoscaler == null || (
-        pool.autoscaler.min >= 1 && 
+        pool.autoscaler.min >= 1 &&
         pool.autoscaler.max >= pool.autoscaler.min &&
         pool.autoscaler.max <= 10
       )
@@ -112,7 +112,7 @@ variable "dns_provider" {
   type        = string
   default     = "cloudflare"
   validation {
-    condition = contains(["linode", "cloudflare"], var.dns_provider)
+    condition     = contains(["linode", "cloudflare"], var.dns_provider)
     error_message = "DNS provider must be either 'linode' or 'cloudflare'."
   }
 }
@@ -139,7 +139,7 @@ variable "storage_size" {
   type        = number
   default     = 20
   validation {
-    condition = var.storage_size >= 10 && var.storage_size <= 1000
+    condition     = var.storage_size >= 10 && var.storage_size <= 1000
     error_message = "Storage size must be between 10 and 1000 GB."
   }
 }
@@ -161,7 +161,7 @@ variable "turn_server_enabled" {
 variable "turn_server_type" {
   description = "Linode instance type for TURN server"
   type        = string
-  default     = "g6-standard-2"  # 4GB RAM, 2 vCPU
+  default     = "g6-standard-2" # 4GB RAM, 2 vCPU
 }
 
 variable "turn_server_image" {
@@ -199,7 +199,7 @@ variable "openvpn_label" {
 variable "openvpn_type" {
   description = "Linode instance type for OpenVPN server"
   type        = string
-  default     = "g6-nanode-1"  # 1GB RAM, 1 vCPU - cost effective for VPN
+  default     = "g6-nanode-1" # 1GB RAM, 1 vCPU - cost effective for VPN
 }
 
 variable "openvpn_image" {
@@ -235,7 +235,7 @@ variable "jitsi_tester_label" {
 variable "jitsi_tester_type" {
   description = "Linode instance type for Jitsi tester"
   type        = string
-  default     = "g6-standard-2"  # 4GB RAM, 2 vCPU - sufficient for GUI testing
+  default     = "g6-standard-2" # 4GB RAM, 2 vCPU - sufficient for GUI testing
 }
 
 variable "jitsi_tester_region" {

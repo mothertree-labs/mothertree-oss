@@ -1,0 +1,83 @@
+version: 2
+updates:
+  # npm: Admin Portal
+  - package-ecosystem: "npm"
+    directory: "/apps/admin-portal"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+
+  # npm: Account Portal
+  - package-ecosystem: "npm"
+    directory: "/apps/account-portal"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+
+  # Terraform: Phase 1 (cluster, VPN, TURN)
+  - package-ecosystem: "terraform"
+    directory: "/phase1"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+    labels:
+      - "dependencies"
+      - "terraform"
+
+  # Terraform: Infra (K8s infra layer)
+  - package-ecosystem: "terraform"
+    directory: "/infra"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+    labels:
+      - "dependencies"
+      - "terraform"
+
+  # Terraform: CI server
+  - package-ecosystem: "terraform"
+    directory: "/ci/terraform"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+    labels:
+      - "dependencies"
+      - "terraform"
+
+  # Docker: Admin Portal
+  - package-ecosystem: "docker"
+    directory: "/apps/admin-portal"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  # Docker: Account Portal
+  - package-ecosystem: "docker"
+    directory: "/apps/account-portal"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  # Docker: Roundcube
+  - package-ecosystem: "docker"
+    directory: "/apps/docker/roundcube"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    labels:
+      - "dependencies"
+      - "docker"

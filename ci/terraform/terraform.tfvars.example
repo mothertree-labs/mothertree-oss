@@ -1,0 +1,18 @@
+# CI Server Terraform Variables
+# Copy to config/platform/ci/terraform.tfvars with real values
+
+linode_token   = "your-linode-api-token"
+ssh_public_key = "ssh-ed25519 AAAA..."
+
+# VPC support subnet ID (from: cd phase1 && terraform output support_subnet_id)
+vpc_subnet_id = 12345
+
+# VPN server public IP (from: cd phase1 && terraform output openvpn_server_ip)
+# Used in firewall rule to allow SSH via ProxyJump
+vpn_server_public_ip = "1.2.3.4"
+
+# Optional overrides (defaults are usually fine)
+# region           = "us-lax"
+# ci_label         = "mothertree-ci"
+# ci_instance_type = "g6-standard-4"
+# ci_vpc_ip         = "192.168.1.3"

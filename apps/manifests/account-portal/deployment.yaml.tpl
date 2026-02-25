@@ -20,7 +20,7 @@ spec:
       containers:
         - name: account-portal
           image: ${ACCOUNT_PORTAL_IMAGE}
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000
               protocol: TCP
