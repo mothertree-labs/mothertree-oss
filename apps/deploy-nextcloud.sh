@@ -384,6 +384,23 @@ if ! poll_pod_ready "$NS_FILES" "app.kubernetes.io/instance=nextcloud" 600 5; th
     exit 1
 fi
 
+# Step 7a: Run occ upgrade if Nextcloud requires it (e.g. image version bump)
+# When the container image is newer than the DB schema, Nextcloud blocks all occ
+# commands until `occ upgrade` runs. Detect this and handle it automatically.
+NEXTCLOUD_POD_UPGRADE=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$NEXTCLOUD_POD_UPGRADE" ]; then
+    UPGRADE_CHECK=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD_UPGRADE" -c nextcloud -- su -s /bin/sh www-data -c 'php occ status --output=json' 2>&1 || true)
+    if echo "$UPGRADE_CHECK" | grep -q "require upgrade"; then
+        print_status "Nextcloud requires database upgrade (image version newer than DB schema)..."
+        if kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD_UPGRADE" -c nextcloud -- su -s /bin/sh www-data -c 'php occ upgrade' 2>&1; then
+            print_success "Nextcloud database upgrade completed"
+        else
+            print_error "Nextcloud occ upgrade failed"
+            exit 1
+        fi
+    fi
+fi
+
 # Step 7b: Extract/update identity secret from running pod
 # After first install: extract instanceid, passwordsalt, secret and create the identity secret.
 # On every deploy: update the version key to match the installed version.
