@@ -18,6 +18,9 @@ steps:
       - label: ":npm: npm build check"
         command: ".buildkite/scripts/npm-check.sh"
 
+      - label: ":label: Version bump check"
+        command: ".buildkite/scripts/version-check.sh"
+
   - wait: ~
 
   - group: ":docker: Build Images"
@@ -34,9 +37,3 @@ steps:
 
       - label: ":docker: k6 Perf"
         command: ".buildkite/scripts/build-image.sh perf"
-
-  - wait: ~
-
-  - label: ":label: Update Image Tags"
-    if: build.branch == "main"
-    command: ".buildkite/scripts/update-image-tags.sh"

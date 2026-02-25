@@ -23,6 +23,8 @@ kubeconfig.*.yaml
 *.env
 # But track docs/envs/*.env (non-secret domain/host configuration)
 !docs/envs/*.env
+# Track image version config (not a secret — just semver tags)
+!apps/image-versions.env
 
 # Logs
 *.log

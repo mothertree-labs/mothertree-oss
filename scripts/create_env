@@ -978,13 +978,9 @@ if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
     fi
   fi
 
-  # Load image tag from CI-built tags (or fall back to env-based tag)
+  # Load image tags from apps/image-versions.env (or config/platform fallback)
   source "${REPO_ROOT}/scripts/lib/image-tags.sh"
   _mt_load_image_tags
-  # Allow env-based override for backward compat (pre-CI deployments)
-  if [ -z "${ADMIN_PORTAL_IMAGE_TAG:-}" ] && [ "${ADMIN_PORTAL_IMAGE}" = "${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-admin-portal:latest" ]; then
-    export ADMIN_PORTAL_IMAGE="${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-admin-portal:${MT_ENV}"
-  fi
   print_status "Admin Portal image: $ADMIN_PORTAL_IMAGE"
 
   # Apply admin portal manifests
@@ -1067,11 +1063,6 @@ if [ "$ACCOUNT_PORTAL_ENABLED" = "true" ]; then
   # NS_MAIL must point to the tenant mail namespace for the deployment template
   export NS_MAIL="$NS_STALWART"
 
-  # Load image tag from CI-built tags (image-tags.sh already sourced above)
-  # Allow env-based override for backward compat (pre-CI deployments)
-  if [ -z "${ACCOUNT_PORTAL_IMAGE_TAG:-}" ] && [ "${ACCOUNT_PORTAL_IMAGE}" = "${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-account-portal:latest" ]; then
-    export ACCOUNT_PORTAL_IMAGE="${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-account-portal:${MT_ENV}"
-  fi
   print_status "Account Portal image: $ACCOUNT_PORTAL_IMAGE"
 
   # Apply account portal manifests
