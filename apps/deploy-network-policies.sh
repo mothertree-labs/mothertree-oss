@@ -175,6 +175,18 @@ else
 fi
 
 # =============================================================================
+# Apply admin-to-matrix egress (admin portal → Synapse Admin API for user provisioning)
+# =============================================================================
+if kubectl get namespace "$NS_ADMIN" &>/dev/null && kubectl get namespace "$NS_MATRIX" &>/dev/null; then
+    export NAMESPACE="$NS_ADMIN"
+    print_status "[$NS_ADMIN] Applying allow-admin-to-matrix-egress (Admin Portal → Synapse API)..."
+    envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-admin-to-matrix-egress.yaml.tpl" | kubectl apply -f -
+    print_success "[$NS_ADMIN] Admin-to-matrix egress policy applied"
+else
+    print_warning "Admin or matrix namespace does not exist, skipping admin-to-matrix egress policy"
+fi
+
+# =============================================================================
 # Apply files-to-office egress (Nextcloud → Collabora internal on port 9980)
 # =============================================================================
 if kubectl get namespace "$NS_FILES" &>/dev/null && kubectl get namespace "$NS_OFFICE" &>/dev/null; then

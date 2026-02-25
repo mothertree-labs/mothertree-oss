@@ -370,6 +370,7 @@ app.get('/dashboard', requireAuth, requireTenantAdmin, (req, res) => {
 // API Routes
 const keycloakApi = require('./api/keycloak');
 const stalwartApi = require('./api/stalwart');
+const synapseApi = require('./api/synapse');
 
 app.post('/api/invite', verifyOrigin, requireAuth, requireTenantAdmin, async (req, res) => {
   try {
@@ -379,7 +380,7 @@ app.post('/api/invite', verifyOrigin, requireAuth, requireTenantAdmin, async (re
       return res.status(400).json({ error: 'All fields are required' });
     }
 
-    // Create user in Keycloak
+    // Step 1: Create user in Keycloak (fatal — must succeed)
     const result = await keycloakApi.createUser({
       firstName,
       lastName,
@@ -387,8 +388,25 @@ app.post('/api/invite', verifyOrigin, requireAuth, requireTenantAdmin, async (re
       recoveryEmail,
     });
 
-    // Send invitation email
+    // Step 2: Send invitation email (fatal — moved before service provisioning
+    // so the user gets their invite even if downstream services fail)
     await keycloakApi.sendInvitationEmail(result.userId);
+
+    // Step 3: Provision Stalwart email account (non-fatal)
+    try {
+      const defaultQuotaMb = parseInt(process.env.DEFAULT_EMAIL_QUOTA_MB || '5120', 10);
+      const defaultQuotaBytes = defaultQuotaMb * 1024 * 1024;
+      await stalwartApi.ensureUserExists(email, `${firstName} ${lastName}`, defaultQuotaBytes);
+    } catch (err) {
+      console.error('Stalwart provisioning failed (non-fatal):', err.message);
+    }
+
+    // Step 4: Provision Matrix/Synapse account (non-fatal)
+    try {
+      await synapseApi.ensureMatrixUser(email, `${firstName} ${lastName}`);
+    } catch (err) {
+      console.error('Synapse provisioning failed (non-fatal):', err.message);
+    }
 
     res.json({ success: true, userId: result.userId });
   } catch (error) {

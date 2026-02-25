@@ -184,16 +184,6 @@ async function createUser({ firstName, lastName, email, recoveryEmail }) {
 
   console.log('User attributes verified:', JSON.stringify(verifiedUser.attributes));
 
-  // Provision user in Stalwart mail server (non-fatal)
-  try {
-    const stalwartApi = require('./stalwart');
-    const defaultQuotaMb = parseInt(process.env.DEFAULT_EMAIL_QUOTA_MB || '5120', 10);
-    const defaultQuotaBytes = defaultQuotaMb * 1024 * 1024;
-    await stalwartApi.ensureUserExists(email, `${firstName} ${lastName}`, defaultQuotaBytes);
-  } catch (err) {
-    console.error('Stalwart provisioning failed (non-fatal):', err.message);
-  }
-
   return { userId };
 }
 
