@@ -21,6 +21,9 @@ steps:
       - label: ":jest: Account Portal Tests"
         command: "cd apps/account-portal && npm ci --ignore-scripts && npm test"
 
+      - label: ":jest: Admin Portal tests"
+        command: ".buildkite/scripts/admin-portal-test.sh"
+
       - label: ":label: Version bump check"
         command: ".buildkite/scripts/version-check.sh"
 

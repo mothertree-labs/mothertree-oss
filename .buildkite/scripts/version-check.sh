@@ -34,7 +34,32 @@ fi
 
 FAIL=0
 
-# Check each component: if source paths changed (excluding VERSION), VERSION must also change
+# Patterns that don't count as "source changes" requiring a version bump.
+# These are test infrastructure, config, and non-runtime files.
+NON_SOURCE_PATTERNS=(
+  '/__tests__/'
+  '/jest\.config\.'
+  '/\.gitignore$'
+  '/coverage/'
+  '/\.eslintrc'
+  '/\.prettierrc'
+  'image-versions\.env$'
+  '/package\.json$'
+  '/package-lock\.json$'
+)
+
+# Filter out non-source files from a list of changed files.
+# Reads file paths from stdin, outputs only source-relevant files.
+filter_source_files() {
+  local pattern_args=()
+  for pat in "${NON_SOURCE_PATTERNS[@]}"; do
+    pattern_args+=(-e "$pat")
+  done
+  grep -v "${pattern_args[@]}" || true
+}
+
+# Check each component: if source paths changed (excluding VERSION and non-source files),
+# VERSION must also change.
 check_component() {
   local name="$1"
   local version_file="$2"
@@ -45,12 +70,10 @@ check_component() {
   local version_changed=false
 
   for path in "${source_paths[@]}"; do
-    # Check if any changed file starts with this path (excluding the VERSION file itself)
-    if echo "$CHANGED_FILES" | grep -q "^${path}" && \
-       ! echo "$CHANGED_FILES" | grep "^${path}" | grep -qvx "${version_file}"; then
-      # All changes under this path are only the VERSION file itself
-      true
-    elif echo "$CHANGED_FILES" | grep "^${path}" | grep -qvx "${version_file}"; then
+    # Get changed files under this path, excluding VERSION and non-source patterns
+    local relevant
+    relevant=$(echo "$CHANGED_FILES" | grep "^${path}" | grep -vx "${version_file}" | filter_source_files || true)
+    if [ -n "$relevant" ]; then
       source_changed=true
       break
     fi
@@ -66,7 +89,7 @@ check_component() {
     echo ""
     echo "Changed files in ${name}:"
     for path in "${source_paths[@]}"; do
-      echo "$CHANGED_FILES" | grep "^${path}" | grep -vx "${version_file}" || true
+      echo "$CHANGED_FILES" | grep "^${path}" | grep -vx "${version_file}" | filter_source_files || true
     done
     echo ""
     echo "Fix: bump the version in ${version_file}"
@@ -74,7 +97,7 @@ check_component() {
   elif [ "$source_changed" = true ] && [ "$version_changed" = true ]; then
     echo "OK: ${name} — source changed, VERSION bumped"
   else
-    echo "OK: ${name} — no source changes"
+    echo "OK: ${name} — no source changes (test/config-only changes are excluded)"
   fi
 }
 

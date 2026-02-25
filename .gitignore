@@ -37,6 +37,7 @@ node_modules/
 
 # Build artifacts
 .source-hash.*
+coverage/
 
 # OS generated files
 .DS_Store
