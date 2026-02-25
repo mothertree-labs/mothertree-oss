@@ -81,13 +81,18 @@
         mode: "0644"
       notify: Restart Docker
 
-    - name: Create buildkite-agent .docker directory
+    # Buildkite agent systemd sets HOME=/var/lib/buildkite-agent,
+    # so docker config must live there for push auth to work.
+    - name: Create docker config directories
       ansible.builtin.file:
-        path: /home/buildkite-agent/.docker
+        path: "{{ item }}"
         state: directory
         owner: buildkite-agent
         group: buildkite-agent
         mode: "0700"
+      loop:
+        - /var/lib/buildkite-agent/.docker
+        - /home/buildkite-agent/.docker
 
     - name: Configure GHCR docker login
       ansible.builtin.copy:
@@ -99,10 +104,13 @@
               }
             }
           }
-        dest: /home/buildkite-agent/.docker/config.json
+        dest: "{{ item }}"
         owner: buildkite-agent
         group: buildkite-agent
         mode: "0600"
+      loop:
+        - /var/lib/buildkite-agent/.docker/config.json
+        - /home/buildkite-agent/.docker/config.json
       no_log: true
 
     # ── Tools ────────────────────────────────────────────────────────
