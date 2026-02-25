@@ -148,11 +148,12 @@ Never skip this step, even if the changes seem trivial.
 
 **IMPORTANT**: Before EVERY PR creation (`gh pr create`) or PR update push (`git push` to an existing PR branch), you MUST:
 
-1. **Run BOTH the `oss-compliance` agent AND the `security-reviewer` agent** via the Task tool to audit all code changes in the branch
-2. **If CRITICAL or HIGH findings exist from either agent**: Alert the user in the terminal with the full findings list and ask whether to abort or continue. Use `AskUserQuestion` with options: "Abort and fix issues" / "Continue anyway"
-3. **For new PRs**: Include both the OSS compliance and security review output in the PR body under `## OSS Compliance Review` and `## Security Review` sections
-4. **For PR updates**: Post both review outputs as a comment on the existing PR using `gh pr comment`
-5. **If no issues found**: Include clean confirmations in the PR body/comment
+1. **Run ALL THREE agents** via the Task tool: `oss-compliance`, `security-reviewer`, AND `version-bump`
+2. **If CRITICAL or HIGH findings exist from either compliance/security agent**: Alert the user in the terminal with the full findings list and ask whether to abort or continue. Use `AskUserQuestion` with options: "Abort and fix issues" / "Continue anyway"
+3. **The `version-bump` agent** will automatically bump portal versions and stage/commit if needed — no user prompt required
+4. **For new PRs**: Include both the OSS compliance and security review output in the PR body under `## OSS Compliance Review` and `## Security Review` sections
+5. **For PR updates**: Post both review outputs as a comment on the existing PR using `gh pr comment`
+6. **If no issues found**: Include clean confirmations in the PR body/comment
 
 Never skip this step, even if the changes seem trivial.
 
