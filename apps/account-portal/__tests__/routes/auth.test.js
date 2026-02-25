@@ -14,21 +14,39 @@ describe('Health check', () => {
   });
 });
 
-describe('Home page', () => {
-  it('GET / renders home page when unauthenticated', async () => {
+describe('Landing page', () => {
+  it('GET / renders login page when unauthenticated', async () => {
     const app = createTestApp();
     const res = await request(app).get('/');
     expect(res.status).toBe(200);
     expect(res.text).toContain('MotherTree Account');
   });
 
-  it('GET / redirects to /app-passwords when authenticated', async () => {
+  it('GET / redirects to /home when authenticated', async () => {
     const app = createTestApp({
       mockUser: { id: 'user-1', email: 'alice@example.com', name: 'Alice' },
     });
     const res = await request(app).get('/');
     expect(res.status).toBe(302);
-    expect(res.headers.location).toBe('/app-passwords');
+    expect(res.headers.location).toBe('/home');
+  });
+});
+
+describe('Home page (authenticated)', () => {
+  it('GET /home renders dashboard with user info', async () => {
+    const app = createTestApp({
+      mockUser: { id: 'user-1', email: 'alice@example.com', name: 'Alice' },
+    });
+    const res = await request(app).get('/home');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Alice');
+  });
+
+  it('GET /home redirects to / when unauthenticated', async () => {
+    const app = createTestApp();
+    const res = await request(app).get('/home');
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('/');
   });
 });
 

@@ -128,12 +128,25 @@ function createTestApp(options = {}) {
     res.json({ status: 'ok' });
   });
 
-  // Home
+  // Landing page
   app.get('/', (req, res) => {
     if (req.isAuthenticated()) {
-      return res.redirect('/app-passwords');
+      return res.redirect('/home');
     }
-    res.render('home', { title: 'MotherTree Account' });
+    res.render('login', { title: 'MotherTree Account' });
+  });
+
+  // Home (authenticated)
+  app.get('/home', requireAuth, (req, res) => {
+    res.render('home', {
+      title: 'Home',
+      user: req.user,
+      elementHost: process.env.ELEMENT_HOST || '',
+      webmailHost: process.env.WEBMAIL_HOST || '',
+      docsHost: process.env.DOCS_HOST || '',
+      filesHost: process.env.FILES_HOST || '',
+      jitsiHost: process.env.JITSI_HOST || '',
+    });
   });
 
   // App passwords page (authenticated)
