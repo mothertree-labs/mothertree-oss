@@ -174,7 +174,7 @@ data:
     [directory."oidc"]
     type = "oidc"
     timeout = "5s"
-    endpoint.url = "https://${AUTH_HOST}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
+    endpoint.url = "http://keycloak-keycloakx-http.infra-auth.svc.cluster.local/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
     endpoint.method = "userinfo"
     fields.email = "email"
     fields.username = "preferred_username"
@@ -209,7 +209,7 @@ data:
     # OIDC authentication via Keycloak
     [oauth]
     oidc.enable = true
-    oidc.issuer-url = "https://${AUTH_HOST}/realms/${KEYCLOAK_REALM}"
+    oidc.issuer-url = "http://keycloak-keycloakx-http.infra-auth.svc.cluster.local/realms/${KEYCLOAK_REALM}"
     oidc.client-id = "stalwart"
     oidc.client-secret = "%{env:STALWART_OIDC_SECRET}%"
     

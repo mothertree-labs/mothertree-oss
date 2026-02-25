@@ -48,8 +48,8 @@ data:
     $config['oauth_client_id'] = 'roundcube';
     $config['oauth_client_secret'] = getenv('ROUNDCUBE_OIDC_SECRET');
     $config['oauth_auth_uri'] = 'https://${AUTH_HOST}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth';
-    $config['oauth_token_uri'] = 'https://${AUTH_HOST}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token';
-    $config['oauth_identity_uri'] = 'https://${AUTH_HOST}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo';
+    $config['oauth_token_uri'] = '${KEYCLOAK_INTERNAL_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token';
+    $config['oauth_identity_uri'] = '${KEYCLOAK_INTERNAL_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo';
     $config['oauth_identity_fields'] = ['email'];
     $config['oauth_scope'] = 'openid email profile';
     
