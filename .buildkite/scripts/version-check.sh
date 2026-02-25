@@ -44,6 +44,8 @@ NON_SOURCE_PATTERNS=(
   '/\.eslintrc'
   '/\.prettierrc'
   'image-versions\.env$'
+  '/package\.json$'
+  '/package-lock\.json$'
 )
 
 # Filter out non-source files from a list of changed files.
