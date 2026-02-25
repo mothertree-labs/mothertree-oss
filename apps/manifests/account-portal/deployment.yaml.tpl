@@ -81,6 +81,13 @@ spec:
               value: "${STALWART_SUBMISSION_APP_PORT}"
             - name: FILES_HOST
               value: "${FILES_HOST}"
+            # App hosts for the home dashboard (Element uses MATRIX_HOST)
+            - name: ELEMENT_HOST
+              value: "${MATRIX_HOST}"
+            - name: DOCS_HOST
+              value: "${DOCS_HOST}"
+            - name: JITSI_HOST
+              value: "${JITSI_HOST}"
             # Redis for session storage (enables HA with multiple replicas)
             - name: REDIS_HOST
               value: "redis"

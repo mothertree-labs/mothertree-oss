@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= title %></title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/css/tailwind.css">
+</head>
+<body class="bg-white min-h-screen flex items-center justify-center p-8">
+  <div class="bg-cream rounded-xl shadow-lg p-8 max-w-md w-full text-center">
+    <h1 class="text-4xl font-semibold text-coal mb-4">mothertree</h1>
+    <p class="text-warm-gray mb-8">Account</p>
+
+    <a href="/auth/login" class="block w-full bg-sage text-white px-6 py-3 rounded-lg hover:bg-sage-dark transition-colors">
+      Sign In
+    </a>
+
+    <div class="mt-4 pt-4 border-t border-gray-200 space-y-2">
+      <a href="/app-passwords" class="block text-sm text-warm-gray hover:text-sage">
+        Set up email on your phone
+      </a>
+      <a href="/recover" class="block text-sm text-warm-gray hover:text-sage">
+        Lost your passkey?
+      </a>
+    </div>
+
+    <%- include('partials/policy-footer') %>
+  </div>
+</body>
+</html>
