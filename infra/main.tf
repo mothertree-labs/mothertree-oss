@@ -19,7 +19,7 @@ terraform {
     }
     linode = {
       source  = "linode/linode"
-      version = "~> 2.0"
+      version = "~> 3.9"
     }
     tls = {
       source  = "hashicorp/tls"
