@@ -19,6 +19,6 @@
     "openid-client": "5.7.1",
     "ejs": "3.1.10",
     "helmet": "8.0.0",
-    "nodemailer": "6.9.16"
+    "nodemailer": "8.0.1"
   }
 }
