@@ -35,16 +35,11 @@ if [ ! -d "node_modules" ]; then
   npm install
 fi
 
-BUILD_CMD=(docker buildx build
-  --platform "${PLATFORMS}"
-  -t "${IMAGE_TAG}"
-  .
-)
-
 if [[ "${PUSH}" == "true" ]]; then
-  "${BUILD_CMD[@]}" --push
+  docker build -t "${IMAGE_TAG}" .
+  docker push "${IMAGE_TAG}"
   echo "Pushed ${IMAGE_TAG}"
 else
-  "${BUILD_CMD[@]}" --load
+  docker build -t "${IMAGE_TAG}" .
   echo "Built (local) ${IMAGE_TAG}"
 fi

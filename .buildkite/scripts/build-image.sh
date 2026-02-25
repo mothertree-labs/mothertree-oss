@@ -40,8 +40,7 @@ case "${COMPONENT}" in
       "${REPO_ROOT}/apps/scripts/build-roundcube-image.sh"
     ;;
   perf)
-    cd "${REPO_ROOT}/apps"
-    IMAGE_TAG="${IMAGE_NAME}:${TAG}" PUSH=true \
+    IMAGE_TAG="${IMAGE_NAME}:${TAG}" PUSH=true PLATFORMS="linux/amd64" \
       "${REPO_ROOT}/apps/scripts/perf/build-k6-image.sh"
     ;;
   *)
@@ -53,14 +52,8 @@ esac
 
 # Also tag as :latest for backward compatibility
 echo "--- Tagging ${IMAGE_NAME}:latest"
-docker buildx imagetools create \
-  --tag "${IMAGE_NAME}:latest" \
-  "${IMAGE_NAME}:${TAG}" 2>/dev/null || {
-  # Fallback: pull, retag, push (when imagetools not available)
-  docker pull "${IMAGE_NAME}:${TAG}" 2>/dev/null || true
-  docker tag "${IMAGE_NAME}:${TAG}" "${IMAGE_NAME}:latest" 2>/dev/null || true
-  docker push "${IMAGE_NAME}:latest" 2>/dev/null || true
-}
+docker tag "${IMAGE_NAME}:${TAG}" "${IMAGE_NAME}:latest"
+docker push "${IMAGE_NAME}:latest"
 
 # Store tag in Buildkite metadata for the update-image-tags step
 METADATA_KEY=$(echo "${COMPONENT}" | tr '-' '_' | tr '[:lower:]' '[:upper:]')_IMAGE_TAG

@@ -54,20 +54,14 @@ else
   fi
 fi
 
-BUILD_CMD=(docker buildx build
-  --platform "${PLATFORMS}"
-  --build-arg "K6_IMAGE=${K6_IMAGE}"
-  -f perf/docker/k6-runner.Dockerfile
-  -t "${IMAGE_TAG}"
-  .
-)
-
 if [[ "${PUSH}" == "true" ]]; then
-  "${BUILD_CMD[@]}" --push
+  docker build --build-arg "K6_IMAGE=${K6_IMAGE}" \
+    -f perf/docker/k6-runner.Dockerfile -t "${IMAGE_TAG}" .
+  docker push "${IMAGE_TAG}"
   echo "Pushed ${IMAGE_TAG}"
 else
-  # --load only supports single-arch; we defaulted PLATFORMS to linux/amd64 above.
-  "${BUILD_CMD[@]}" --load
+  docker build --build-arg "K6_IMAGE=${K6_IMAGE}" \
+    -f perf/docker/k6-runner.Dockerfile -t "${IMAGE_TAG}" .
   echo "Built (local) ${IMAGE_TAG}"
   echo "Push with: docker push ${IMAGE_TAG}"
 fi

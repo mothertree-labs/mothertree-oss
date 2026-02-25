@@ -76,19 +76,12 @@ fi
 # Build from repo root so COPY can access submodules
 cd "$REPO_ROOT"
 
-BUILD_CMD=(docker buildx build
-    --platform "${PLATFORMS}"
-    -f apps/docker/roundcube/Dockerfile
-    -t "${IMAGE_TAG}"
-    .
-)
-
 if [[ "${PUSH}" == "true" ]]; then
-    "${BUILD_CMD[@]}" --push
+    docker build -f apps/docker/roundcube/Dockerfile -t "${IMAGE_TAG}" .
+    docker push "${IMAGE_TAG}"
     echo "Pushed ${IMAGE_TAG}"
 else
-    # --load only supports single-arch; we defaulted PLATFORMS to linux/amd64 above.
-    "${BUILD_CMD[@]}" --load
+    docker build -f apps/docker/roundcube/Dockerfile -t "${IMAGE_TAG}" .
     echo "Built (local) ${IMAGE_TAG}"
     echo "Push with: PUSH=true $0"
 fi
