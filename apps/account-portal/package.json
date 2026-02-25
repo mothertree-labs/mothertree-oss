@@ -13,7 +13,7 @@
   "dependencies": {
     "express": "5.2.1",
     "express-session": "1.18.1",
-    "connect-redis": "7.1.1",
+    "connect-redis": "9.0.0",
     "redis": "5.11.0",
     "passport": "0.7.0",
     "openid-client": "6.8.2",
