@@ -103,6 +103,16 @@ spec:
                 secretKeyRef:
                   name: admin-portal-secrets
                   key: beginsetup-secret
+            # Synapse Matrix server (for user provisioning during invite)
+            - name: SYNAPSE_ADMIN_URL
+              value: "http://synapse.${NS_MATRIX}.svc.cluster.local:8008"
+            - name: SYNAPSE_SHARED_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: admin-portal-secrets
+                  key: synapse-shared-secret
+            - name: MATRIX_DOMAIN
+              value: "${MATRIX_HOST}"
           resources:
             requests:
               memory: "64Mi"
