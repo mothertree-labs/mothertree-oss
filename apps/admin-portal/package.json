@@ -5,21 +5,25 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "build:css": "tailwindcss -i src/tailwind.css -o public/css/tailwind.css --minify"
+    "build:css": "tailwindcss -i src/tailwind.css -o public/css/tailwind.css --minify",
+    "test": "jest --forceExit --detectOpenHandles"
   },
   "devDependencies": {
-    "@tailwindcss/cli": "^4.2.1"
+    "@tailwindcss/cli": "^4.2.1",
+    "jest": "^30.2.0",
+    "nock": "^14.0.11",
+    "supertest": "^7.2.2"
   },
   "dependencies": {
+    "connect-redis": "9.0.0",
+    "ejs": "4.0.1",
     "express": "5.2.1",
     "express-rate-limit": "8.2.1",
     "express-session": "1.19.0",
-    "connect-redis": "9.0.0",
-    "redis": "5.11.0",
-    "passport": "0.7.0",
-    "openid-client": "5.7.1",
-    "ejs": "4.0.1",
     "helmet": "8.1.0",
-    "nodemailer": "8.0.1"
+    "nodemailer": "8.0.1",
+    "openid-client": "5.7.1",
+    "passport": "0.7.0",
+    "redis": "5.11.0"
   }
 }
