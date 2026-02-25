@@ -10,6 +10,9 @@ updates:
     labels:
       - "dependencies"
       - "npm"
+    ignore:
+      - dependency-name: "openid-client"
+        versions: [">=6"]
 
   # npm: Account Portal
   - package-ecosystem: "npm"
@@ -21,6 +24,9 @@ updates:
     labels:
       - "dependencies"
       - "npm"
+    ignore:
+      - dependency-name: "openid-client"
+        versions: [">=6"]
 
   # Terraform: Phase 1 (cluster, VPN, TURN)
   - package-ecosystem: "terraform"
@@ -63,7 +69,7 @@ updates:
       - "docker"
     ignore:
       - dependency-name: "node"
-        versions: [">=23, <24", ">=25, <26"]
+        versions: [">=23, <24", ">=24, <25", ">=25, <26"]
 
   # Docker: Account Portal
   - package-ecosystem: "docker"
@@ -76,7 +82,7 @@ updates:
       - "docker"
     ignore:
       - dependency-name: "node"
-        versions: [">=23, <24", ">=25, <26"]
+        versions: [">=23, <24", ">=24, <25", ">=25, <26"]
 
   # Docker: Roundcube
   - package-ecosystem: "docker"
