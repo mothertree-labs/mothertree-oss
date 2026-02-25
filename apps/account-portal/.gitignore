@@ -11,6 +11,9 @@ public/css/tailwind.css
 # Production build
 build/
 
+# Test coverage
+coverage/
+
 # Environment files
 .env
 .env.local
