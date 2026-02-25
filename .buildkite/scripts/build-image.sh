@@ -18,7 +18,7 @@ TAG="sha-${COMMIT:0:7}"
 source "${REPO_ROOT}/scripts/lib/paths.sh"
 _mt_resolve_project_conf
 [[ -n "$MT_PROJECT_CONF" ]] && source "$MT_PROJECT_CONF"
-REGISTRY="${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}"
+REGISTRY="${CONTAINER_REGISTRY:?CONTAINER_REGISTRY must be set (via CI hook or config/platform/project.conf)}"
 
 IMAGE_NAME="${REGISTRY}/mothertree-${COMPONENT}"
 
@@ -34,6 +34,8 @@ case "${COMPONENT}" in
       "${REPO_ROOT}/ci/scripts/build-account-portal.sh"
     ;;
   roundcube)
+    # Roundcube needs plugin submodules (both are public repos)
+    git submodule update --init submodules/roundcubemail-plugins-kolab submodules/mailvelope_client
     IMAGE_TAG="${IMAGE_NAME}:${TAG}" PUSH=true \
       "${REPO_ROOT}/apps/scripts/build-roundcube-image.sh"
     ;;
