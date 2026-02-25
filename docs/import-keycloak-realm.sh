@@ -1179,7 +1179,8 @@ else
 fi
 
 # Create passkey-enabled browser flow
-# This flow supports both passkey (WebAuthn Passwordless) and traditional password login for bootstrap
+# Dev: WebAuthn Passwordless + Password Form as ALTERNATIVE (user chooses via "Try another way")
+# Prod: WebAuthn Passwordless as REQUIRED (passkey-only, no password login)
 print_status "Configuring passkey-enabled browser flow..."
 
 # Check if our custom flow already exists
@@ -1303,43 +1304,60 @@ if [ -z "$PASSKEY_FLOW_EXISTS" ]; then
                     print_warning "Failed to add WebAuthn Passwordless (HTTP $ADD_WEBAUTHN_RESPONSE)"
                 fi
 
-                # Step 5: Add Password Form to the credential subflow as ALTERNATIVE (admin bootstrap fallback)
-                print_status "Adding Password Form to credential subflow..."
-                ADD_PASSWORD_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/add_password.json -X POST \
-                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser%20credential/executions/execution" \
-                  -H "Authorization: Bearer $ACCESS_TOKEN" \
-                  -H "Content-Type: application/json" \
-                  -d '{"provider": "auth-password-form"}')
+                # Step 5: Add Password Form only in dev (password login is dev-only)
+                if [ "$MT_ENV" = "dev" ]; then
+                    print_status "Adding Password Form to credential subflow (dev environment)..."
+                    ADD_PASSWORD_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/add_password.json -X POST \
+                      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser%20credential/executions/execution" \
+                      -H "Authorization: Bearer $ACCESS_TOKEN" \
+                      -H "Content-Type: application/json" \
+                      -d '{"provider": "auth-password-form"}')
 
-                if [ "$ADD_PASSWORD_RESPONSE" = "201" ]; then
-                    print_success "Added Password Form to credential subflow"
+                    if [ "$ADD_PASSWORD_RESPONSE" = "201" ]; then
+                        print_success "Added Password Form to credential subflow"
+                    else
+                        print_warning "Failed to add Password Form (HTTP $ADD_PASSWORD_RESPONSE)"
+                    fi
                 else
-                    print_warning "Failed to add Password Form (HTTP $ADD_PASSWORD_RESPONSE)"
+                    print_status "Skipping Password Form (non-dev environment: $MT_ENV)"
                 fi
 
-                # Set both credential authenticators as ALTERNATIVE
+                # Set credential authenticator requirements
                 UPDATED_EXECUTIONS=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
                   "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
                   -H "Authorization: Bearer $ACCESS_TOKEN")
 
                 WEBAUTHN_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "webauthn-authenticator-passwordless") | .id // empty')
                 if [ -n "$WEBAUTHN_EXEC_ID" ]; then
-                    curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
-                      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
-                      -H "Authorization: Bearer $ACCESS_TOKEN" \
-                      -H "Content-Type: application/json" \
-                      -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
-                    print_success "Set WebAuthn Passwordless as ALTERNATIVE"
+                    if [ "$MT_ENV" = "dev" ]; then
+                        # Dev: ALTERNATIVE (user chooses between passkey and password)
+                        curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+                          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+                          -H "Authorization: Bearer $ACCESS_TOKEN" \
+                          -H "Content-Type: application/json" \
+                          -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+                        print_success "Set WebAuthn Passwordless as ALTERNATIVE"
+                    else
+                        # Prod: REQUIRED (passkey is the only credential method)
+                        curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+                          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+                          -H "Authorization: Bearer $ACCESS_TOKEN" \
+                          -H "Content-Type: application/json" \
+                          -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"REQUIRED\"}" > /dev/null 2>&1
+                        print_success "Set WebAuthn Passwordless as REQUIRED (passkey-only)"
+                    fi
                 fi
 
-                PASSWORD_FORM_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "auth-password-form") | .id // empty')
-                if [ -n "$PASSWORD_FORM_EXEC_ID" ]; then
-                    curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
-                      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
-                      -H "Authorization: Bearer $ACCESS_TOKEN" \
-                      -H "Content-Type: application/json" \
-                      -d "{\"id\": \"$PASSWORD_FORM_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
-                    print_success "Set Password Form as ALTERNATIVE (admin bootstrap fallback)"
+                if [ "$MT_ENV" = "dev" ]; then
+                    PASSWORD_FORM_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "auth-password-form") | .id // empty')
+                    if [ -n "$PASSWORD_FORM_EXEC_ID" ]; then
+                        curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+                          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+                          -H "Authorization: Bearer $ACCESS_TOKEN" \
+                          -H "Content-Type: application/json" \
+                          -d "{\"id\": \"$PASSWORD_FORM_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+                        print_success "Set Password Form as ALTERNATIVE"
+                    fi
                 fi
 
                 # Move Username Form to the top of the forms subflow (before credential subflow)
@@ -1487,43 +1505,58 @@ else
             print_warning "Failed to add WebAuthn Passwordless (HTTP $ADD_WEBAUTHN_RESPONSE)"
         fi
 
-        # Step 5: Add Password Form to credential subflow
-        print_status "Adding Password Form to credential subflow..."
-        ADD_PASSWORD_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/add_password.json -X POST \
-          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser%20credential/executions/execution" \
-          -H "Authorization: Bearer $ACCESS_TOKEN" \
-          -H "Content-Type: application/json" \
-          -d '{"provider": "auth-password-form"}')
+        # Step 5: Add Password Form only in dev (password login is dev-only)
+        if [ "$MT_ENV" = "dev" ]; then
+            print_status "Adding Password Form to credential subflow (dev environment)..."
+            ADD_PASSWORD_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/add_password.json -X POST \
+              "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser%20credential/executions/execution" \
+              -H "Authorization: Bearer $ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"provider": "auth-password-form"}')
 
-        if [ "$ADD_PASSWORD_RESPONSE" = "201" ]; then
-            print_success "Added Password Form to credential subflow"
+            if [ "$ADD_PASSWORD_RESPONSE" = "201" ]; then
+                print_success "Added Password Form to credential subflow"
+            else
+                print_warning "Failed to add Password Form (HTTP $ADD_PASSWORD_RESPONSE)"
+            fi
         else
-            print_warning "Failed to add Password Form (HTTP $ADD_PASSWORD_RESPONSE)"
+            print_status "Skipping Password Form (non-dev environment: $MT_ENV)"
         fi
 
-        # Set both credential authenticators as ALTERNATIVE
+        # Set credential authenticator requirements
         UPDATED_EXECUTIONS=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
           "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
           -H "Authorization: Bearer $ACCESS_TOKEN")
 
         WEBAUTHN_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "webauthn-authenticator-passwordless") | .id // empty')
         if [ -n "$WEBAUTHN_EXEC_ID" ]; then
-            curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
-              "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
-              -H "Authorization: Bearer $ACCESS_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
-            print_success "Set WebAuthn Passwordless as ALTERNATIVE"
+            if [ "$MT_ENV" = "dev" ]; then
+                curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+                  -H "Authorization: Bearer $ACCESS_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+                print_success "Set WebAuthn Passwordless as ALTERNATIVE"
+            else
+                curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+                  -H "Authorization: Bearer $ACCESS_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"REQUIRED\"}" > /dev/null 2>&1
+                print_success "Set WebAuthn Passwordless as REQUIRED (passkey-only)"
+            fi
         fi
 
-        PASSWORD_FORM_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "auth-password-form") | .id // empty')
-        if [ -n "$PASSWORD_FORM_EXEC_ID" ]; then
-            curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
-              "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
-              -H "Authorization: Bearer $ACCESS_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"id\": \"$PASSWORD_FORM_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
-            print_success "Set Password Form as ALTERNATIVE"
+        if [ "$MT_ENV" = "dev" ]; then
+            PASSWORD_FORM_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "auth-password-form") | .id // empty')
+            if [ -n "$PASSWORD_FORM_EXEC_ID" ]; then
+                curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+                  -H "Authorization: Bearer $ACCESS_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"id\": \"$PASSWORD_FORM_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+                print_success "Set Password Form as ALTERNATIVE"
+            fi
         fi
 
         # Move Username Form to top of forms subflow
@@ -1537,9 +1570,80 @@ else
             print_success "Username Form moved to top of forms subflow"
         fi
 
-        print_success "Flow restructured: Username Form → credential subflow (WebAuthn | Password)"
+        if [ "$MT_ENV" = "dev" ]; then
+            print_success "Flow restructured: Username Form → credential subflow (WebAuthn | Password)"
+        else
+            print_success "Flow restructured: Username Form → credential subflow (WebAuthn only)"
+        fi
     elif [ -n "$HAS_NEW_FORM" ]; then
         print_success "Flow already has new structure (Username Form + credential subflow)"
+
+        # Enforce env-appropriate credential configuration
+        # In prod: remove Password Form if present, set WebAuthn as REQUIRED
+        # In dev: ensure Password Form exists, set both as ALTERNATIVE
+        UPDATED_EXECUTIONS=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
+          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+          -H "Authorization: Bearer $ACCESS_TOKEN")
+
+        PASSWORD_FORM_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "auth-password-form") | .id // empty')
+        WEBAUTHN_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "webauthn-authenticator-passwordless") | .id // empty')
+
+        if [ "$MT_ENV" != "dev" ]; then
+            # Prod: remove Password Form if it exists (leftover from dev configuration)
+            if [ -n "$PASSWORD_FORM_EXEC_ID" ]; then
+                print_status "Removing Password Form from prod flow (password login is dev-only)..."
+                curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X DELETE \
+                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/executions/$PASSWORD_FORM_EXEC_ID" \
+                  -H "Authorization: Bearer $ACCESS_TOKEN" > /dev/null 2>&1
+                print_success "Removed Password Form from prod flow"
+            fi
+            # Set WebAuthn as REQUIRED (only credential method in prod)
+            if [ -n "$WEBAUTHN_EXEC_ID" ]; then
+                curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+                  -H "Authorization: Bearer $ACCESS_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"REQUIRED\"}" > /dev/null 2>&1
+                print_success "Confirmed WebAuthn Passwordless as REQUIRED (passkey-only)"
+            fi
+        else
+            # Dev: ensure Password Form exists
+            if [ -z "$PASSWORD_FORM_EXEC_ID" ]; then
+                print_status "Adding Password Form to credential subflow (dev environment)..."
+                refresh_token
+                ADD_PASSWORD_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/add_password.json -X POST \
+                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser%20credential/executions/execution" \
+                  -H "Authorization: Bearer $ACCESS_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d '{"provider": "auth-password-form"}')
+                if [ "$ADD_PASSWORD_RESPONSE" = "201" ]; then
+                    print_success "Added Password Form to credential subflow"
+                else
+                    print_warning "Failed to add Password Form (HTTP $ADD_PASSWORD_RESPONSE)"
+                fi
+            fi
+            # Ensure both are ALTERNATIVE in dev
+            UPDATED_EXECUTIONS=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
+              "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+              -H "Authorization: Bearer $ACCESS_TOKEN")
+            WEBAUTHN_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "webauthn-authenticator-passwordless") | .id // empty')
+            PASSWORD_FORM_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "auth-password-form") | .id // empty')
+            if [ -n "$WEBAUTHN_EXEC_ID" ]; then
+                curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+                  -H "Authorization: Bearer $ACCESS_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+            fi
+            if [ -n "$PASSWORD_FORM_EXEC_ID" ]; then
+                curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+                  -H "Authorization: Bearer $ACCESS_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"id\": \"$PASSWORD_FORM_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+            fi
+            print_success "Confirmed credential subflow configured for dev (WebAuthn | Password)"
+        fi
     fi
 
     # Ensure it's set as the default browser flow
