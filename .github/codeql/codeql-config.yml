@@ -1,0 +1,8 @@
+name: "CodeQL config"
+
+paths-ignore:
+  - "**/__tests__/**"
+  - "**/test/**"
+  - "**/tests/**"
+  - "**/*.test.js"
+  - "**/*.spec.js"
