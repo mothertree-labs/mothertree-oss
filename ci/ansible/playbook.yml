@@ -54,6 +54,21 @@
         state: started
       loop: [1, 2, 3]
 
+    # ── Git HTTPS for public repos ────────────────────────────────────
+    - name: Configure Buildkite environment hook (HTTPS clone for GitHub)
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          # Rewrite SSH URLs to HTTPS — the OSS repo is public, no SSH key needed
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="url.https://github.com/.insteadOf"
+          export GIT_CONFIG_VALUE_0="git@github.com:"
+        dest: /etc/buildkite-agent/hooks/environment
+        owner: buildkite-agent
+        group: buildkite-agent
+        mode: "0755"
+      notify: Restart Buildkite agents
+
     # ── Docker Configuration ─────────────────────────────────────────
     - name: Configure Docker daemon
       ansible.builtin.template:
@@ -195,3 +210,9 @@
       ansible.builtin.systemd:
         name: docker
         state: restarted
+
+    - name: Restart Buildkite agents
+      ansible.builtin.systemd:
+        name: "buildkite-agent@{{ item }}"
+        state: restarted
+      loop: [1, 2, 3]
