@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Generic CI image build wrapper
-# Routes to component-specific build scripts with SHA-based tagging
+# Routes to component-specific build scripts with semver tagging from VERSION files.
+# Skips build if the image:version already exists in the registry (idempotent).
 #
 # Usage: .buildkite/scripts/build-image.sh <component>
 #   Components: admin-portal, account-portal, roundcube, perf
@@ -10,9 +11,29 @@ set -euo pipefail
 COMPONENT="${1:?Usage: build-image.sh <component>}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# Compute immutable SHA-based tag
-COMMIT="${BUILDKITE_COMMIT:-$(git rev-parse HEAD)}"
-TAG="sha-${COMMIT:0:7}"
+# Map component name to VERSION file path
+case "${COMPONENT}" in
+  admin-portal)    VERSION_FILE="${REPO_ROOT}/apps/admin-portal/VERSION" ;;
+  account-portal)  VERSION_FILE="${REPO_ROOT}/apps/account-portal/VERSION" ;;
+  roundcube)       VERSION_FILE="${REPO_ROOT}/apps/docker/roundcube/VERSION" ;;
+  perf)            VERSION_FILE="${REPO_ROOT}/perf/VERSION" ;;
+  *)
+    echo "Unknown component: ${COMPONENT}"
+    echo "Valid: admin-portal, account-portal, roundcube, perf"
+    exit 1
+    ;;
+esac
+
+# Read version from VERSION file
+if [ ! -f "${VERSION_FILE}" ]; then
+  echo "ERROR: VERSION file not found: ${VERSION_FILE}"
+  exit 1
+fi
+TAG=$(tr -d '[:space:]' < "${VERSION_FILE}")
+if [ -z "$TAG" ]; then
+  echo "ERROR: VERSION file is empty: ${VERSION_FILE}"
+  exit 1
+fi
 
 # Read container registry from project config
 source "${REPO_ROOT}/scripts/lib/paths.sh"
@@ -23,6 +44,17 @@ REGISTRY="${CONTAINER_REGISTRY:?CONTAINER_REGISTRY must be set (via CI hook or c
 IMAGE_NAME="${REGISTRY}/mothertree-${COMPONENT}"
 
 echo "--- :docker: Building ${COMPONENT} (${IMAGE_NAME}:${TAG})"
+
+# Idempotency: skip build if image already exists in registry
+if docker manifest inspect "${IMAGE_NAME}:${TAG}" >/dev/null 2>&1; then
+  echo "Image ${IMAGE_NAME}:${TAG} already exists in registry, skipping build"
+  # Still ensure :latest points to this version
+  docker pull "${IMAGE_NAME}:${TAG}"
+  docker tag "${IMAGE_NAME}:${TAG}" "${IMAGE_NAME}:latest"
+  docker push "${IMAGE_NAME}:latest"
+  echo "Updated ${IMAGE_NAME}:latest -> ${TAG}"
+  exit 0
+fi
 
 case "${COMPONENT}" in
   admin-portal)
@@ -43,20 +75,11 @@ case "${COMPONENT}" in
     IMAGE_TAG="${IMAGE_NAME}:${TAG}" PUSH=true PLATFORMS="linux/amd64" \
       "${REPO_ROOT}/apps/scripts/perf/build-k6-image.sh"
     ;;
-  *)
-    echo "Unknown component: ${COMPONENT}"
-    echo "Valid: admin-portal, account-portal, roundcube, perf"
-    exit 1
-    ;;
 esac
 
-# Also tag as :latest for backward compatibility
+# Also tag as :latest
 echo "--- Tagging ${IMAGE_NAME}:latest"
 docker tag "${IMAGE_NAME}:${TAG}" "${IMAGE_NAME}:latest"
 docker push "${IMAGE_NAME}:latest"
-
-# Store tag in Buildkite metadata for the update-image-tags step
-METADATA_KEY=$(echo "${COMPONENT}" | tr '-' '_' | tr '[:lower:]' '[:upper:]')_IMAGE_TAG
-buildkite-agent meta-data set "${METADATA_KEY}" "${TAG}" 2>/dev/null || true
 
 echo "Built and pushed ${IMAGE_NAME}:${TAG}"
