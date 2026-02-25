@@ -189,6 +189,8 @@ cat "$REPO_ROOT/docs/health-sidecar-configmap.yaml" | sed "s/namespace: docs/nam
 envsubst '${YPROVIDER_MIN_REPLICAS}' < "$REPO_ROOT/docs/y-provider-deployment.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
 cat "$REPO_ROOT/docs/y-provider-service.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
 # Restart to ensure ConfigMap changes are picked up (wait in background, check later)
+# Brief pause to avoid "restart already triggered within past second" race with backend/frontend restart
+sleep 2
 kubectl -n "$NS_DOCS" rollout restart deploy/docs-y-provider
 kubectl -n "$NS_DOCS" rollout status deploy/docs-y-provider --timeout=300s &
 YPROVIDER_PID=$!
