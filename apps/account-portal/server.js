@@ -752,7 +752,7 @@ app.post('/api/register-guest', verifyOrigin, async (req, res) => {
     }
 
     // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const emailRegex = /^[^\s@]+@[^\s@.]+(?:\.[^\s@.]+)+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ error: 'Invalid email address' });
     }
@@ -873,7 +873,7 @@ app.post('/api/provision-guest', async (req, res) => {
     }
 
     // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const emailRegex = /^[^\s@]+@[^\s@.]+(?:\.[^\s@.]+)+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ success: false, error: 'Invalid email format' });
     }
