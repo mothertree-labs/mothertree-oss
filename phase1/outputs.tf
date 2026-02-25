@@ -56,7 +56,7 @@ output "element_domain" {
 
 output "next_steps" {
   description = "Instructions for Phase 2 deployment"
-  value = <<-EOT
+  value       = <<-EOT
     Phase 1 completed successfully!
     
     Next steps for Phase 2:
@@ -75,12 +75,12 @@ output "next_steps" {
     - Synapse: https://${var.matrix_subdomain}.${var.domain}
     - Element: https://${var.element_subdomain}.${var.domain}
   EOT
-  sensitive = true
+  sensitive   = true
 }
 
 output "deployment_summary" {
   description = "Summary of the deployment"
-  value = <<-EOT
+  value       = <<-EOT
     Matrix infrastructure deployed successfully!
     
     Cluster Details:

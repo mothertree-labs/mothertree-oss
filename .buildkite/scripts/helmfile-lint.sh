@@ -16,6 +16,9 @@ export NS_OFFICE="tn-lint-docs"
 export NS_MATRIX="tn-lint-matrix"
 export NS_FILES="tn-lint-files"
 export NS_JITSI="tn-lint-jitsi"
+export NEXTCLOUD_DB_NAME="lint_nextcloud"
+export TENANT_DB_USER="lint_user"
+export ALERTMANAGER_EMAIL_TO="lint@example.com"
 
 helmfile -e dev lint
 echo "Helmfile lint passed"

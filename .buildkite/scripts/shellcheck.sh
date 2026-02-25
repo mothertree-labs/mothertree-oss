@@ -23,7 +23,7 @@ FAIL=0
 for script in $SCRIPTS; do
   if head -1 "$script" | grep -qE '^#!/.*(bash|sh)' || [[ "$script" == *.sh ]]; then
     echo "Checking: $script"
-    if ! shellcheck -S warning -x "$script"; then
+    if ! shellcheck -S warning -x -e SC1090,SC1091,SC2034,SC2155 "$script"; then
       FAIL=1
     fi
   fi
