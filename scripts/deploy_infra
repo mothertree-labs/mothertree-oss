@@ -101,17 +101,6 @@ if [ -d "$REPO_ROOT/submodules/files_linkeditor" ] && [ -f "$REPO_ROOT/scripts/b
   print_status "files_linkeditor build started (PID: $LINKEDITOR_BUILD_PID)"
 fi
 
-# =============================================================================
-# Start Roundcube image build early (runs in background while other work proceeds)
-# =============================================================================
-ROUNDCUBE_BUILD_PID=""
-if [ -d "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins" ] && [ -f "$REPO_ROOT/apps/scripts/build-roundcube-image.sh" ]; then
-  print_status "Starting Roundcube custom image build+push in background..."
-  PUSH=true "$REPO_ROOT/apps/scripts/build-roundcube-image.sh" --nesting-level=$((MT_NESTING_LEVEL+1)) > /tmp/roundcube-build.log 2>&1 &
-  ROUNDCUBE_BUILD_PID=$!
-  print_status "Roundcube image build started (PID: $ROUNDCUBE_BUILD_PID)"
-fi
-
 # Wait for helm repo update before first helm command
 print_status "Waiting for helm repo update to complete..."
 wait $HELM_REPO_UPDATE_PID 2>/dev/null || true
@@ -992,27 +981,6 @@ elif [ -d "$REPO_ROOT/submodules/files_linkeditor" ]; then
   fi
 else
   print_status "files_linkeditor submodule not found, skipping (optional component)"
-fi
-
-# Wait for Roundcube image build that was started in background at the beginning
-if [ -n "$ROUNDCUBE_BUILD_PID" ]; then
-  print_status "Waiting for Roundcube image build to complete..."
-  if wait $ROUNDCUBE_BUILD_PID; then
-    print_success "Roundcube custom image built"
-  else
-    print_warning "Roundcube image build may have failed. Check /tmp/roundcube-build.log"
-    cat /tmp/roundcube-build.log 2>/dev/null | tail -20 || true
-  fi
-elif [ -d "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins" ]; then
-  if [ -f "$REPO_ROOT/apps/scripts/build-roundcube-image.sh" ]; then
-    print_status "Building and pushing Roundcube custom image..."
-    PUSH=true "$REPO_ROOT/apps/scripts/build-roundcube-image.sh" --nesting-level=$((MT_NESTING_LEVEL+1))
-    print_success "Roundcube custom image built and pushed"
-  else
-    print_warning "build-roundcube-image.sh not found, skipping Roundcube image build"
-  fi
-else
-  print_status "roundcubemail-plugins-kolab submodule not found, skipping Roundcube image build (optional)"
 fi
 
 # Run post-deploy health check (non-blocking)

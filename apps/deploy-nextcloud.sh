@@ -300,9 +300,9 @@ else
 fi
 
 # Step 5e: Package custom apps as ConfigMap for init container
-# Custom apps (files_linkeditor, jitsi_calendar) are packaged as a tar.gz and stored
-# in a ConfigMap. The seed-identity init container extracts them on every pod start,
-# so they survive pod restarts without needing kubectl cp.
+# Custom apps (files_linkeditor, jitsi_calendar, guest_bridge) are packaged as a
+# tar.gz and stored in a ConfigMap. The seed-identity init container extracts them
+# on every pod start, so they survive pod restarts without needing kubectl cp.
 print_status "Packaging custom apps into ConfigMap..."
 CUSTOM_APPS_STAGING=$(mktemp -d)
 CUSTOM_APPS_CHANGED=false
@@ -325,6 +325,13 @@ if [ "${CALENDAR_ENABLED:-false}" = "true" ] && [ -n "${JITSI_HOST:-}" ]; then
         rsync -a "$REPO_ROOT/apps/jitsi_calendar/" "$CUSTOM_APPS_STAGING/jitsi_calendar/"
         CUSTOM_APPS_CHANGED=true
     fi
+fi
+
+# guest_bridge — provisions guest users in Keycloak when sharing with external emails
+if [ -d "$REPO_ROOT/apps/nextcloud-guest-bridge" ]; then
+    mkdir -p "$CUSTOM_APPS_STAGING/guest_bridge"
+    rsync -a "$REPO_ROOT/apps/nextcloud-guest-bridge/" "$CUSTOM_APPS_STAGING/guest_bridge/"
+    CUSTOM_APPS_CHANGED=true
 fi
 
 if [ "$CUSTOM_APPS_CHANGED" = true ]; then
@@ -586,6 +593,35 @@ if [ "${CALENDAR_ENABLED:-false}" = "true" ] && [ -n "${JITSI_HOST:-}" ]; then
     fi
 else
     print_status "Skipping jitsi_calendar (calendar not enabled or JITSI_HOST not set)"
+fi
+
+# Step 9b.1: Enable and configure guest_bridge app
+if [ -d "$REPO_ROOT/apps/nextcloud-guest-bridge" ]; then
+    NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [ -n "$NEXTCLOUD_POD" ]; then
+        print_status "Enabling guest_bridge app..."
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable guest_bridge" 2>/dev/null || true
+
+        # Configure guest_bridge API settings
+        # ACCOUNT_HOST comes from config.sh (e.g., account.dev.example.com)
+        GUEST_BRIDGE_API_URL="https://${ACCOUNT_HOST}/api/provision-guest"
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set guest_bridge.api_url --value='$GUEST_BRIDGE_API_URL'"
+
+        # Get the guest provisioning API key from the account portal secret
+        GUEST_API_KEY=$(kubectl get secret account-portal-secrets -n "$NS_ADMIN" -o jsonpath='{.data.guest-provisioning-api-key}' 2>/dev/null | base64 -d || echo "")
+        if [ -n "$GUEST_API_KEY" ]; then
+            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set guest_bridge.api_key --value='$GUEST_API_KEY'"
+            print_success "guest_bridge app enabled and configured (API: $GUEST_BRIDGE_API_URL)"
+        else
+            print_warning "Guest provisioning API key not found in account-portal-secrets"
+            print_warning "guest_bridge app enabled but will not provision guests until API key is configured"
+            print_warning "Add 'guest_provisioning_api_key' to tenant secrets under 'account_portal' section"
+        fi
+    else
+        print_warning "Nextcloud pod not found, skipping guest_bridge configuration"
+    fi
+else
+    print_status "Skipping guest_bridge (app not found)"
 fi
 
 # Step 9c: Deploy notify_push (Client Push) — replaces browser polling with WebSocket push

@@ -442,6 +442,7 @@ _mt_load_tenant_secrets() {
     "ADMIN_PORTAL_NEXTAUTH_SECRET=" + (.admin_portal.nextauth_secret // "" | @sh) + "\n" +
     "ACCOUNT_PORTAL_OIDC_SECRET=" + (.oidc.account_portal_client_secret // "" | @sh) + "\n" +
     "ACCOUNT_PORTAL_NEXTAUTH_SECRET=" + (.account_portal.session_secret // "" | @sh) + "\n" +
+    "GUEST_PROVISIONING_API_KEY=" + (.account_portal.guest_provisioning_api_key // "" | @sh) + "\n" +
     "REDIS_SESSION_PASSWORD=" + (.admin_portal.redis_password // "" | @sh) + "\n" +
     "BEGINSETUP_SECRET=" + (.admin_portal.beginsetup_secret // "" | @sh) + "\n" +
     "_ALERTBOT_ACCESS_TOKEN=" + (.alertbot.access_token // "" | @sh) + "\n" +
@@ -508,6 +509,7 @@ _mt_load_tenant_secrets() {
   export ROUNDCUBE_OIDC_SECRET ROUNDCUBE_DB_PASSWORD ROUNDCUBE_DES_KEY
   export ADMIN_PORTAL_OIDC_SECRET ADMIN_PORTAL_NEXTAUTH_SECRET
   export ACCOUNT_PORTAL_OIDC_SECRET ACCOUNT_PORTAL_NEXTAUTH_SECRET
+  export GUEST_PROVISIONING_API_KEY
   export REDIS_SESSION_PASSWORD BEGINSETUP_SECRET
   export GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET
   export HEALTHCHECKS_DEADMAN_URL

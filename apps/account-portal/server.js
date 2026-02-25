@@ -338,9 +338,21 @@ function requireAuth(req, res, next) {
 // Routes
 app.get('/', (req, res) => {
   if (req.isAuthenticated()) {
-    return res.redirect('/app-passwords');
+    return res.redirect('/home');
   }
-  res.render('home', { title: 'MotherTree Account' });
+  res.render('login', { title: 'MotherTree Account' });
+});
+
+app.get('/home', requireAuth, (req, res) => {
+  res.render('home', {
+    title: 'Home',
+    user: req.user,
+    elementHost: process.env.ELEMENT_HOST || '',
+    webmailHost: process.env.WEBMAIL_HOST || '',
+    docsHost: process.env.DOCS_HOST || '',
+    filesHost: process.env.FILES_HOST || '',
+    jitsiHost: process.env.JITSI_HOST || '',
+  });
 });
 
 app.get('/auth/login', (req, res, next) => {
@@ -354,10 +366,6 @@ app.get('/auth/login', (req, res, next) => {
 app.get('/auth/callback',
   passport.authenticate('oidc', { failureRedirect: '/auth/error' }),
   async (req, res) => {
-    // Use WEBMAIL_HOST which includes the env prefix (e.g., webmail.dev.example.com)
-    const webmailHost = process.env.WEBMAIL_HOST;
-    const webmailUrl = webmailHost ? `https://${webmailHost}` : null;
-
     // Check if this is a registration completion flow
     const isRegistrationCompletion = req.session.isRegistrationCompletion;
 
@@ -382,16 +390,12 @@ app.get('/auth/callback',
       console.error('ensurePasskeyFirst setup failed:', err.message);
     }
 
-    // If this is registration completion, redirect to webmail (regular users, not admins)
+    // If this is registration completion, redirect to home page
     if (isRegistrationCompletion) {
       delete req.session.isRegistrationCompletion;
       delete req.session.postLoginRedirect;
-      if (webmailUrl) {
-        console.log(`Registration complete, redirecting to: ${webmailUrl}`);
-        return res.redirect(webmailUrl);
-      }
-      // Fallback: if no webmail configured, just show success message
-      console.log('Registration complete, no WEBMAIL_HOST configured');
+      console.log('Registration complete, redirecting to /home');
+      return res.redirect('/home');
     }
 
     // Check if we should redirect somewhere specific (e.g., after registration)
@@ -401,8 +405,8 @@ app.get('/auth/callback',
       return res.redirect(postLoginRedirect);
     }
 
-    // Default: go to app-passwords (user self-service home)
-    res.redirect('/app-passwords');
+    // Default: go to home page
+    res.redirect('/home');
   }
 );
 
@@ -494,10 +498,7 @@ app.delete('/api/app-passwords/:name', verifyOrigin, requireAuth, async (req, re
 app.get('/registration-callback',
   passport.authenticate('oidc-registration', { failureRedirect: '/auth/error' }),
   async (req, res) => {
-    const webmailHost = process.env.WEBMAIL_HOST;
-    const webmailUrl = webmailHost ? `https://${webmailHost}` : '/';
-
-    console.log(`Registration callback for user ${req.user.id}, redirecting to ${webmailUrl}`);
+    console.log(`Registration callback for user ${req.user.id}, redirecting to /home`);
 
     // Swap email from recovery to tenant
     try {
@@ -520,12 +521,12 @@ app.get('/registration-callback',
       console.error('ensurePasskeyFirst setup failed:', err.message);
     }
 
-    // Always redirect to webmail
-    res.redirect(webmailUrl);
+    // Redirect to home page
+    res.redirect('/home');
   }
 );
 
-// Complete registration endpoint - swaps email and redirects to webmail
+// Complete registration endpoint - swaps email and redirects to home page
 // This is the redirect target after passkey registration for NEW USERS (not admins)
 // Registration completion - uses dedicated callback URL (no session state needed)
 app.get('/complete-registration', (req, res, next) => {
@@ -541,10 +542,6 @@ app.get('/complete-registration', (req, res, next) => {
 app.get('/registration/callback',
   passport.authenticate('oidc', { failureRedirect: '/auth/error' }),
   async (req, res) => {
-    // Use WEBMAIL_HOST directly (already includes env prefix like webmail.dev.example.com)
-    const webmailHost = process.env.WEBMAIL_HOST || `webmail.${process.env.TENANT_DOMAIN}`;
-    const webmailUrl = `https://${webmailHost}`;
-
     // Swap email from recovery to tenant
     try {
       const keycloakApi = require('./api/keycloak');
@@ -566,8 +563,8 @@ app.get('/registration/callback',
       console.error('ensurePasskeyFirst setup failed:', err.message);
     }
 
-    // Always redirect to webmail - regular users don't need admin access
-    res.redirect(webmailUrl);
+    // Redirect to home page
+    res.redirect('/home');
   }
 );
 
@@ -752,7 +749,7 @@ app.post('/api/register-guest', verifyOrigin, async (req, res) => {
     }
 
     // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const emailRegex = /^[^\s@]+@[^\s@.]+(?:\.[^\s@.]+)+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ error: 'Invalid email address' });
     }
@@ -834,6 +831,80 @@ app.post('/api/ensure-passkey-priority', async (req, res) => {
   }
 
   res.json({ ok: true });
+});
+
+// Guest Provisioning API — called by Nextcloud guest_bridge app
+// Authenticates via API key (not user session) to create guest users programmatically
+const GUEST_PROVISIONING_API_KEY = process.env.GUEST_PROVISIONING_API_KEY;
+
+// Rate limiter for guest provisioning API (max 30 per IP per hour)
+const guestProvisioningAttempts = new Map();
+function checkGuestProvisioningRateLimit(ip) {
+  const now = Date.now();
+  const hourAgo = now - 60 * 60 * 1000;
+  const attempts = (guestProvisioningAttempts.get(ip) || []).filter(t => t > hourAgo);
+  guestProvisioningAttempts.set(ip, attempts);
+  if (attempts.length >= 30) return false;
+  attempts.push(now);
+  guestProvisioningAttempts.set(ip, attempts);
+  return true;
+}
+
+app.post('/api/provision-guest', async (req, res) => {
+  // Authenticate via API key
+  const apiKey = req.get('X-API-Key');
+  if (!GUEST_PROVISIONING_API_KEY || !apiKey || apiKey !== GUEST_PROVISIONING_API_KEY) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+
+  // Rate limit
+  if (!checkGuestProvisioningRateLimit(req.ip)) {
+    return res.status(429).json({ success: false, error: 'Too many requests' });
+  }
+
+  try {
+    const { email, firstName, lastName, redirectUri } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email is required' });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@.]+(?:\.[^\s@.]+)+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ success: false, error: 'Invalid email format' });
+    }
+
+    // Reject tenant domain emails — guests must use external emails
+    const tenantDomain = process.env.EMAIL_DOMAIN || process.env.TENANT_DOMAIN || '';
+    if (tenantDomain && email.toLowerCase().endsWith('@' + tenantDomain.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot create guest for tenant domain email'
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await keycloakApi.findUserByEmail(email.toLowerCase());
+    if (existingUser) {
+      // User already exists — return success with their ID (idempotent)
+      return res.json({ success: true, userId: existingUser.id, existing: true });
+    }
+
+    // Create the guest user
+    const result = await keycloakApi.createGuestUser({
+      email: email.toLowerCase(),
+      firstName: (firstName || '').trim() || undefined,
+      lastName: (lastName || '').trim() || undefined,
+      redirectUri: redirectUri || undefined,
+    });
+
+    console.log(`[PROVISION-GUEST] Created guest user: ${email} (${result.userId})`);
+    res.json({ success: true, userId: result.userId });
+  } catch (error) {
+    console.error('[PROVISION-GUEST] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // Health check

@@ -81,6 +81,13 @@ spec:
               value: "${STALWART_SUBMISSION_APP_PORT}"
             - name: FILES_HOST
               value: "${FILES_HOST}"
+            # App hosts for the home dashboard (Element uses MATRIX_HOST)
+            - name: ELEMENT_HOST
+              value: "${MATRIX_HOST}"
+            - name: DOCS_HOST
+              value: "${DOCS_HOST}"
+            - name: JITSI_HOST
+              value: "${JITSI_HOST}"
             # Redis for session storage (enables HA with multiple replicas)
             - name: REDIS_HOST
               value: "redis"
@@ -107,6 +114,13 @@ spec:
                 secretKeyRef:
                   name: admin-portal-secrets
                   key: beginsetup-secret
+            # API key for guest provisioning endpoint (called by Nextcloud guest_bridge)
+            - name: GUEST_PROVISIONING_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: account-portal-secrets
+                  key: guest-provisioning-api-key
+                  optional: true
           resources:
             requests:
               memory: "64Mi"

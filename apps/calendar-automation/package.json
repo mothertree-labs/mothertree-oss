@@ -1,0 +1,18 @@
+{
+  "name": "calendar-automation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Automated calendar invite processing for Mothertree tenants. Monitors IMAP for iTIP messages and creates/updates CalDAV events in Nextcloud.",
+  "scripts": {
+    "start": "node server.js",
+    "lint": "node --check server.js"
+  },
+  "dependencies": {
+    "imapflow": "1.0.171",
+    "ical.js": "2.1.0",
+    "node-fetch": "3.3.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
