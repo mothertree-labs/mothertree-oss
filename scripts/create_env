@@ -895,6 +895,24 @@ else
 fi
 
 # =============================================================================
+# Deploy Calendar Automation (if enabled)
+# =============================================================================
+# Requires both Stalwart (IMAP) and Nextcloud (CalDAV) to be running.
+# Processes iTIP email invitations and creates/updates/cancels CalDAV events.
+if [ "$CALENDAR_ENABLED" = "true" ] && [ "$MAIL_ENABLED" = "true" ] && [ "$FILES_ENABLED" = "true" ]; then
+  print_status "Calendar Automation: deploy to $NS_STALWART namespace"
+  if [ -f "$REPO_ROOT/apps/deploy-calendar-automation.sh" ]; then
+    if ! "$REPO_ROOT/apps/deploy-calendar-automation.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
+      print_warning "deploy-calendar-automation.sh failed (non-fatal, calendar invites will need manual processing)"
+    fi
+  else
+    print_warning "deploy-calendar-automation.sh not found at $REPO_ROOT/apps/deploy-calendar-automation.sh"
+  fi
+else
+  print_status "Calendar Automation: skipping (requires calendar_enabled=true, mail_enabled=true, files_enabled=true)"
+fi
+
+# =============================================================================
 # Deploy Admin Portal (if enabled)
 # =============================================================================
 if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
@@ -1057,8 +1075,20 @@ if [ "$ACCOUNT_PORTAL_ENABLED" = "true" ]; then
     fi
   fi
 
+  # Guest provisioning API key (used by Nextcloud guest_bridge to create guest users)
+  if [ -z "${GUEST_PROVISIONING_API_KEY:-}" ] || [ "$GUEST_PROVISIONING_API_KEY" = "null" ] || [[ "${GUEST_PROVISIONING_API_KEY:-}" == *"PLACEHOLDER"* ]]; then
+    GUEST_PROVISIONING_API_KEY=$(read_k8s_secret "$NS_ADMIN" "account-portal-secrets" "guest-provisioning-api-key")
+    if [ -z "$GUEST_PROVISIONING_API_KEY" ]; then
+      print_warning "Guest provisioning API key not configured, generating one..."
+      GUEST_PROVISIONING_API_KEY=$(openssl rand -base64 32)
+    else
+      print_status "Guest provisioning API key: reusing existing value from cluster"
+    fi
+  fi
+
   export ACCOUNT_PORTAL_OIDC_SECRET
   export ACCOUNT_PORTAL_NEXTAUTH_SECRET
+  export GUEST_PROVISIONING_API_KEY
 
   # NS_MAIL must point to the tenant mail namespace for the deployment template
   export NS_MAIL="$NS_STALWART"
