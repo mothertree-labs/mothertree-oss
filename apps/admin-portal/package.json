@@ -8,7 +8,7 @@
     "build:css": "tailwindcss -i src/tailwind.css -o public/css/tailwind.css --minify"
   },
   "devDependencies": {
-    "tailwindcss": "^3.4.0"
+    "@tailwindcss/cli": "^4.2.1"
   },
   "dependencies": {
     "express": "4.21.2",

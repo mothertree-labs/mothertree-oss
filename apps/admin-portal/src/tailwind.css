@@ -1,3 +1,19 @@
+@import "tailwindcss";
+@source "../views/**/*.ejs";
+
+@theme {
+  --font-sans: "Figtree", "system-ui", "-apple-system", "sans-serif";
+  --color-ash: #F3E8D6;
+  --color-coal: #141511;
+  --color-ghost-fern: #A7AE8D;
+  --color-ghost-fern-dark: #8A9475;
+  --color-cinder: #A64330;
+  --color-sage: #A7AE8D;
+  --color-sage-dark: #8A9475;
+  --color-cream: #F3E8D6;
+  --color-warm-gray: #6B6B6B;
+}
+
 /* Self-hosted Figtree font (brand typeface) */
 /* latin-ext */
 @font-face {
@@ -53,10 +69,6 @@
   src: url(../fonts/figtree-italic-latin.woff2) format('woff2');
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
-
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
 
 @layer components {
   .btn-primary {
