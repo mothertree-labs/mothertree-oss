@@ -52,6 +52,8 @@ spec:
               value: "https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}"
             - name: KEYCLOAK_URL
               value: "https://${AUTH_HOST}"
+            - name: KEYCLOAK_INTERNAL_URL
+              value: "http://keycloak-keycloakx-http.infra-auth.svc.cluster.local"
             - name: KEYCLOAK_REALM
               value: "${TENANT_KEYCLOAK_REALM}"
             - name: WEBMAIL_HOST

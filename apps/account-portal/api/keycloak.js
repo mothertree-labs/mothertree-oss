@@ -12,7 +12,7 @@
 
 const crypto = require('crypto');
 
-const KEYCLOAK_URL = process.env.KEYCLOAK_URL;
+const KEYCLOAK_URL = process.env.KEYCLOAK_INTERNAL_URL || process.env.KEYCLOAK_URL;
 const KEYCLOAK_REALM = process.env.KEYCLOAK_REALM;
 const CLIENT_ID = process.env.KEYCLOAK_CLIENT_ID;
 const CLIENT_SECRET = process.env.KEYCLOAK_CLIENT_SECRET;

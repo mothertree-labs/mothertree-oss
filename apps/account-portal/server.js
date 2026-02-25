@@ -209,13 +209,33 @@ function checkBeginSetupRateLimit(ip) {
 // Initialize OIDC
 async function initializeOIDC() {
   const issuerUrl = process.env.KEYCLOAK_ISSUER;
+  const internalUrl = process.env.KEYCLOAK_INTERNAL_URL;
   const clientId = process.env.KEYCLOAK_CLIENT_ID;
   const clientSecret = process.env.KEYCLOAK_CLIENT_SECRET;
   const callbackUrl = `${process.env.BASE_URL}/auth/callback`;
 
   console.log('Initializing OIDC with issuer:', issuerUrl);
 
-  const keycloakIssuer = await Issuer.discover(issuerUrl);
+  let keycloakIssuer;
+  if (internalUrl) {
+    // Use internal Keycloak service for server-to-server calls (avoids ingress PROXY protocol)
+    const internalIssuer = `${internalUrl}/realms/${process.env.KEYCLOAK_REALM}`;
+    console.log('Using internal URL for discovery:', internalIssuer);
+    const res = await fetch(`${internalIssuer}/.well-known/openid-configuration`);
+    if (!res.ok) throw new Error(`OIDC discovery failed: ${res.status}`);
+    const metadata = await res.json();
+    // Rewrite server-to-server endpoints to use internal URL
+    const serverEndpoints = ['token_endpoint', 'userinfo_endpoint', 'jwks_uri',
+      'introspection_endpoint', 'revocation_endpoint'];
+    for (const key of serverEndpoints) {
+      if (metadata[key]) {
+        metadata[key] = metadata[key].replace(metadata.issuer, internalIssuer);
+      }
+    }
+    keycloakIssuer = new Issuer(metadata);
+  } else {
+    keycloakIssuer = await Issuer.discover(issuerUrl);
+  }
   console.log('Discovered issuer:', keycloakIssuer.issuer);
 
   // Main client - uses passkey browser flow
