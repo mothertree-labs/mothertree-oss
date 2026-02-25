@@ -72,7 +72,7 @@ check_component() {
   for path in "${source_paths[@]}"; do
     # Get changed files under this path, excluding VERSION and non-source patterns
     local relevant
-    relevant=$(echo "$CHANGED_FILES" | grep "^${path}" | grep -vx "${version_file}" | filter_source_files)
+    relevant=$(echo "$CHANGED_FILES" | grep "^${path}" | grep -vx "${version_file}" | filter_source_files || true)
     if [ -n "$relevant" ]; then
       source_changed=true
       break
