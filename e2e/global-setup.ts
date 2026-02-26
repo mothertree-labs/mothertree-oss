@@ -5,6 +5,7 @@ import * as fs from 'fs';
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'dev-test-users.sh');
 const TENANT = process.env.E2E_TENANT || 'example';
+const IS_CI = !!process.env.CI || !!process.env.BUILDKITE;
 
 interface TestUser {
   username: string;
@@ -29,7 +30,7 @@ function run(cmd: string): string {
 }
 
 export default async function globalSetup(): Promise<void> {
-  console.log('\n[E2E Global Setup] Creating test users...\n');
+  console.log('\n[E2E Global Setup]\n');
 
   // Clear and recreate .auth directory to force fresh logins
   // (stale cookies from previous runs cause silent auth failures)
@@ -38,6 +39,15 @@ export default async function globalSetup(): Promise<void> {
     fs.rmSync(authDir, { recursive: true });
   }
   fs.mkdirSync(authDir, { recursive: true });
+
+  // In CI, test users are pre-created and permanent — no Keycloak admin access needed.
+  // Locally, create/reset users via dev-test-users.sh (requires kubectl port-forward).
+  if (IS_CI) {
+    console.log('  [setup] CI detected — skipping user management (users are pre-provisioned)\n');
+    return;
+  }
+
+  console.log('  [setup] Local run — managing test users via Keycloak admin API...\n');
 
   // Clean up stale e2e-invite-* users from previous failed test runs
   try {
