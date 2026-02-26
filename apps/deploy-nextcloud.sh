@@ -376,6 +376,70 @@ pushd "$REPO_ROOT/apps" >/dev/null
   fi
 popd >/dev/null
 
+# Step 6b: Route auth traffic through internal ingress (PROXY protocol workaround)
+# The external ingress requires PROXY protocol headers (from Cloudflare → NodeBalancer).
+# In-cluster pods connecting to the external auth hostname get ECONNRESET because
+# kube-proxy routes directly to the external ingress pod, bypassing the NodeBalancer.
+# Fix: Create an internal Ingress for the auth hostname (no PROXY protocol) and add
+# hostAliases to the Nextcloud pod so it resolves the auth hostname internally.
+print_status "Configuring internal auth route for OIDC (PROXY protocol workaround)..."
+
+WILDCARD_TLS_SECRET="wildcard-tls-${MT_TENANT}"
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak-internal-${MT_TENANT}
+  namespace: ${NS_AUTH}
+  labels:
+    app: keycloak
+    tenant: ${MT_TENANT}
+    purpose: internal-oidc
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+spec:
+  ingressClassName: nginx-internal
+  rules:
+  - host: ${AUTH_HOST}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: keycloak-keycloakx-http
+            port:
+              name: http
+  tls:
+  - hosts:
+    - ${AUTH_HOST}
+    secretName: ${WILDCARD_TLS_SECRET}
+EOF
+print_success "Internal auth Ingress created/updated for ${AUTH_HOST}"
+
+# Look up the internal ingress controller's ClusterIP
+INTERNAL_INGRESS_IP=$(kubectl get svc ingress-nginx-internal-controller \
+    -n "$NS_INGRESS_INTERNAL" \
+    -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+
+if [ -z "$INTERNAL_INGRESS_IP" ]; then
+    print_warning "Could not find internal ingress controller ClusterIP"
+    print_warning "Nextcloud OIDC login may fail (PROXY protocol issue)"
+else
+    # Patch the Nextcloud deployment to resolve auth hostname via internal ingress.
+    # Strategic merge patch is idempotent — if hostAliases are already correct, no rollout.
+    # Helm's three-way merge preserves third-party changes, so this survives helmfile sync.
+    print_status "Adding hostAliases to Nextcloud deployment (${AUTH_HOST} → ${INTERNAL_INGRESS_IP})..."
+    kubectl patch deployment nextcloud -n "$NS_FILES" \
+        --type=strategic \
+        -p '{"spec":{"template":{"spec":{"hostAliases":[{"ip":"'"$INTERNAL_INGRESS_IP"'","hostnames":["'"$AUTH_HOST"'"]}]}}}}'
+
+    # Wait for rollout to complete (immediate if patch was a no-op)
+    kubectl rollout status deployment/nextcloud -n "$NS_FILES" --timeout=600s
+    print_success "Nextcloud configured to route auth traffic internally"
+fi
+
 # Step 7: Wait for Nextcloud to be ready
 print_status "Waiting for Nextcloud pod to be ready (this may take a few minutes)..."
 if ! poll_pod_ready "$NS_FILES" "app.kubernetes.io/instance=nextcloud" 600 5; then
