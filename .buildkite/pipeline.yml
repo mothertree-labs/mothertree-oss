@@ -31,7 +31,7 @@ steps:
 
   - group: ":playwright: E2E Browser Tests"
     steps:
-      - label: ":playwright: Element smoke test"
+      - label: ":playwright: Playwright end to end tests"
         command: ".buildkite/scripts/e2e-playwright.sh"
 
   - group: ":docker: Build Images"
