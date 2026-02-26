@@ -27,6 +27,10 @@ steps:
       - label: ":label: Version bump check"
         command: ".buildkite/scripts/version-check.sh"
 
+      - label: ":playwright: E2E Browser Tests"
+        command: ".buildkite/scripts/e2e-playwright.sh"
+        soft_fail: true
+
   - wait: ~
 
   - group: ":docker: Build Images"
