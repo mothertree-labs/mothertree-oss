@@ -68,11 +68,31 @@ export async function keycloakLogin(
   if (await usernameField.count() > 0) {
     await usernameField.fill(username);
     await page.locator(kc.continueBtn).click();
-    // Wait for next step
-    await page.waitForSelector(
+    // Wait for next step — or a Keycloak error (e.g. user doesn't exist)
+    const nextStep = page.locator(
       `${kc.passwordInput}, ${kc.tryAnotherWay}, .authenticator-link`,
-      { timeout: 10_000, state: 'attached' },
     );
+    const kcError = page.locator('.alert-error, .kc-feedback-text, #input-error');
+    const matched = await Promise.race([
+      nextStep.first().waitFor({ timeout: 10_000, state: 'attached' }).then(() => 'next' as const),
+      kcError.first().waitFor({ timeout: 10_000, state: 'attached' }).then(() => 'error' as const),
+    ]).catch(() => 'timeout' as const);
+
+    if (matched === 'error') {
+      const errorText = await kcError.first().textContent().catch(() => '(unknown error)');
+      throw new Error(
+        `Keycloak login failed for "${username}": ${errorText?.trim()}\n` +
+        'Hint: The test user may not exist. In CI, users must be pre-provisioned. ' +
+        'Run: ./scripts/dev-test-users.sh -e dev -t <tenant> create <username> --password <password>',
+      );
+    }
+    if (matched === 'timeout') {
+      const pageText = await page.locator('body').textContent().catch(() => '');
+      throw new Error(
+        `Keycloak login timed out after username step for "${username}". ` +
+        `URL: ${page.url()}\nPage text: ${pageText?.substring(0, 200)}`,
+      );
+    }
   }
 
   // If "Try another way" is visible → we're on the WebAuthn page
@@ -97,12 +117,27 @@ export async function keycloakLogin(
   await page.locator(kc.passwordInput).fill(password);
   await page.locator(kc.passwordSubmitBtn).click();
 
-  // Wait for redirect away from Keycloak
-  await page.waitForFunction(
+  // Wait for redirect away from Keycloak — or an error (wrong password)
+  const redirected = await page.waitForFunction(
     (host: string) => !window.location.hostname.includes(host),
     'auth.',
     { timeout: 15_000 },
-  );
+  ).then(() => true).catch(() => false);
+
+  if (!redirected) {
+    const errorEl = page.locator('.alert-error, .kc-feedback-text, #input-error');
+    const errorText = await errorEl.first().textContent().catch(() => null);
+    if (errorText) {
+      throw new Error(
+        `Keycloak login failed for "${username}": ${errorText.trim()}\n` +
+        'Hint: Check that the test user password is correct.',
+      );
+    }
+    throw new Error(
+      `Keycloak login did not redirect after password submission for "${username}". ` +
+      `URL: ${page.url()}`,
+    );
+  }
 }
 
 /**

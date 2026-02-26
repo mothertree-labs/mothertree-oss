@@ -1,12 +1,11 @@
 import { execSync } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'dev-test-users.sh');
 const TENANT = process.env.E2E_TENANT || 'example';
 const IS_CI = !!process.env.CI || !!process.env.BUILDKITE;
-
-const TEST_USERNAMES = ['e2e-admin', 'e2e-member', 'e2e-email-test1'];
 
 function run(cmd: string): void {
   console.log(`  [teardown] ${cmd}`);
@@ -35,9 +34,25 @@ export default async function globalTeardown(): Promise<void> {
     return;
   }
 
-  console.log('\n[E2E Global Teardown] Deleting test users...\n');
+  // Only delete users that global-setup created fresh this run.
+  // Pre-existing users (e.g. permanent CI users) are left alone.
+  const markerPath = path.join(__dirname, '.auth', 'created-users.json');
+  let usersToDelete: string[] = [];
+  try {
+    usersToDelete = JSON.parse(fs.readFileSync(markerPath, 'utf-8'));
+  } catch {
+    console.log('\n[E2E Global Teardown] No created-users marker — skipping cleanup.\n');
+    return;
+  }
 
-  for (const username of TEST_USERNAMES) {
+  if (usersToDelete.length === 0) {
+    console.log('\n[E2E Global Teardown] All users were pre-existing — skipping cleanup.\n');
+    return;
+  }
+
+  console.log('\n[E2E Global Teardown] Deleting test users created by this run...\n');
+
+  for (const username of usersToDelete) {
     run(`${SCRIPT} -e dev -t ${TENANT} delete ${username}`);
     console.log(`  [teardown] Deleted user: ${username}`);
   }

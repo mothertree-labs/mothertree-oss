@@ -70,6 +70,10 @@ export default async function globalSetup(): Promise<void> {
     console.log('  [setup] Could not list users for cleanup — continuing');
   }
 
+  // Track which users we create fresh (vs. pre-existing) so teardown
+  // only deletes users this run created — not permanent CI users.
+  const createdUsers: string[] = [];
+
   for (const user of TEST_USERS) {
     const adminFlag = user.admin ? ' --admin' : '';
     try {
@@ -77,19 +81,25 @@ export default async function globalSetup(): Promise<void> {
         `${SCRIPT} -e dev -t ${TENANT} create ${user.username} --password ${user.password}${adminFlag}`,
       );
       console.log(`  [setup] Created user: ${user.username}`);
+      createdUsers.push(user.username);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      // User may already exist from a previous failed run
+      // User may already exist from a previous failed run or be pre-provisioned for CI
       if (msg.includes('already exists')) {
         console.log(`  [setup] User ${user.username} already exists, resetting password...`);
         run(
           `${SCRIPT} -e dev -t ${TENANT} reset-password ${user.username} --password ${user.password}`,
         );
+        // Don't add to createdUsers — teardown should leave pre-existing users alone
       } else {
         throw err;
       }
     }
   }
+
+  // Write marker so teardown knows which users to clean up
+  const markerPath = path.join(__dirname, '.auth', 'created-users.json');
+  fs.writeFileSync(markerPath, JSON.stringify(createdUsers));
 
   console.log('\n[E2E Global Setup] All test users ready.\n');
 }
