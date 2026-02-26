@@ -7,7 +7,7 @@
 steps:
   - group: ":playwright: E2E Browser Tests"
     steps:
-      - label: ":playwright: Element smoke test"
+      - label: ":playwright: Smoke tests"
         command: ".buildkite/scripts/e2e-playwright.sh"
 
   - group: ":mag: Validation"
