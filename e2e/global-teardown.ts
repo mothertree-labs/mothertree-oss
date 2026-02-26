@@ -4,6 +4,7 @@ import * as path from 'path';
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'dev-test-users.sh');
 const TENANT = process.env.E2E_TENANT || 'example';
+const IS_CI = !!process.env.CI || !!process.env.BUILDKITE;
 
 const TEST_USERNAMES = ['e2e-admin', 'e2e-member', 'e2e-email-test1'];
 
@@ -22,6 +23,12 @@ function run(cmd: string): void {
 }
 
 export default async function globalTeardown(): Promise<void> {
+  // In CI, test users are permanent — never delete them.
+  if (IS_CI) {
+    console.log('\n[E2E Global Teardown] CI detected — skipping (users are permanent).\n');
+    return;
+  }
+
   // Skip teardown if E2E_KEEP_USERS is set (useful for debugging)
   if (process.env.E2E_KEEP_USERS) {
     console.log('\n[E2E Global Teardown] E2E_KEEP_USERS set — skipping user cleanup.\n');
