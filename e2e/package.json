@@ -1,0 +1,16 @@
+{
+  "name": "mothertree-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "E2E browser tests for Mothertree platform",
+  "scripts": {
+    "test": "playwright test --project=ci",
+    "test:headed": "playwright test --project=manual --headed",
+    "test:debug": "PWDEBUG=1 playwright test --project=manual --headed",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "dotenv": "^16.4.7"
+  }
+}
