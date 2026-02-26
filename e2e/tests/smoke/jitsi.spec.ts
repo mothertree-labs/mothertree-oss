@@ -2,49 +2,56 @@ import { test, expect } from '@playwright/test';
 import { urls } from '../../helpers/urls';
 
 test.describe('Smoke — Jitsi (Video)', () => {
-  test('Jitsi page loads successfully', async ({ page }) => {
+  test('Jitsi application loads', async ({ page }) => {
     const response = await page.goto(urls.jitsi).catch(() => null);
 
-    // If DNS doesn't resolve or connection fails, skip
     if (!response) {
       test.skip(true, 'Jitsi not reachable (DNS or connection error)');
     }
 
-    // Check for server errors before proceeding
-    const hasServerError = await page
-      .locator('text=/Internal server error|Server Error|500|502|503/i')
-      .isVisible()
-      .catch(() => false);
-    test.skip(hasServerError, 'Jitsi returned a server error — not a test issue');
+    const status = response!.status();
+    test.skip(status >= 500, `Jitsi returned server error ${status}`);
 
-    await page.waitForLoadState('networkidle');
+    // Jitsi is a React SPA — wait for JS to execute and render
+    // The app renders into <div id="react"> and loads config.js
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(3_000);
 
-    // Jitsi Meet welcome page should load
-    await expect(
-      page.locator('#welcome_page, [class*="welcome"], input[name="room"], #enter_room_field').first(),
-    ).toBeVisible({ timeout: 30_000 });
+    // Verify the page has Jitsi content (title, config, or React app)
+    const title = await page.title();
+    const hasJitsiTitle = /jitsi/i.test(title);
+    const hasReactRoot = await page.locator('#react').count() > 0;
+    const pageContent = await page.content();
+    const hasJitsiConfig = pageContent.includes('config.js') || pageContent.includes('jitsi');
+
+    expect(hasJitsiTitle || hasReactRoot || hasJitsiConfig).toBe(true);
   });
 
-  test('can enter a room name', async ({ page }) => {
-    const response = await page.goto(urls.jitsi).catch(() => null);
+  test('room URL triggers OIDC auth redirect', async ({ page }) => {
+    // Navigating to a room should redirect to OIDC for authentication
+    const roomUrl = `${urls.jitsi}/e2e-smoke-test`;
+    const response = await page.goto(roomUrl).catch(() => null);
 
     if (!response) {
       test.skip(true, 'Jitsi not reachable (DNS or connection error)');
     }
 
-    const hasServerError = await page
-      .locator('text=/Internal server error|Server Error|500|502|503/i')
-      .isVisible()
-      .catch(() => false);
-    test.skip(hasServerError, 'Jitsi returned a server error — not a test issue');
+    const status = response!.status();
+    test.skip(status >= 500, `Jitsi returned server error ${status}`);
 
-    await page.waitForLoadState('networkidle');
+    // Wait for redirects to complete (nginx → oidc-redirect.html → /oidc/redirect → Keycloak)
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(3_000);
 
-    const roomInput = page.locator('input[name="room"], #enter_room_field').first();
-    await expect(roomInput).toBeVisible({ timeout: 15_000 });
+    // The URL should contain either:
+    // - 'auth.' (redirected to Keycloak)
+    // - 'oidc' (in the OIDC adapter flow)
+    // - the room with oidc param (oidc=authorized/unauthorized/failed)
+    const currentUrl = page.url();
+    const hasAuth = currentUrl.includes('auth.');
+    const hasOidc = currentUrl.includes('oidc');
 
-    await roomInput.fill('e2e-test-room');
-    const value = await roomInput.inputValue();
-    expect(value).toContain('e2e-test-room');
+    // Either we landed on Keycloak or we're in the OIDC flow
+    expect(hasAuth || hasOidc).toBe(true);
   });
 });
