@@ -556,6 +556,14 @@ _mt_export_all() {
   export EMAIL_PROBE_TARGET_EMAIL
   export MATRIX_HOST SYNAPSE_HOST SYNAPSE_ADMIN_HOST ADMIN_HOST ACCOUNT_HOST
   export KEYCLOAK_INTERNAL_URL="http://keycloak-keycloakx-http.infra-auth.svc.cluster.local"
+
+  # Rate limiting: 1-minute sliding window for both envs, higher limit for dev
+  if [ "$MT_ENV" = "dev" ]; then
+    export RATE_LIMIT_MAX="${RATE_LIMIT_MAX:-2000}"       # ~33 QPS
+  else
+    export RATE_LIMIT_MAX="${RATE_LIMIT_MAX:-300}"        # ~5 QPS
+  fi
+  export RATE_LIMIT_WINDOW_MS="${RATE_LIMIT_WINDOW_MS:-60000}"  # 1 minute
   export DOCS_HOST FILES_HOST JITSI_HOST HOME_HOST AUTH_HOST
   export MAIL_HOST IMAP_HOST SMTP_HOST WEBMAIL_HOST CALENDAR_HOST OFFICE_HOST
   export MATRIX_SERVER_NAME WEBADMIN_HOST
