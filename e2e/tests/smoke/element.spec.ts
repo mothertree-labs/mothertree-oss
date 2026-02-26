@@ -20,9 +20,17 @@ test.describe('Smoke — Element (Chat)', () => {
     const hasServerError = await page.locator('text=/Internal server error|Server Error|500|502|503/i').isVisible().catch(() => false);
     test.skip(hasServerError, 'Element returned a server error — not a test issue');
 
-    // If on Keycloak, complete login
+    // If on Keycloak, the SSO session from memberPage may auto-approve and
+    // redirect back. Wait briefly for that before attempting manual login.
     if (page.url().includes('auth.')) {
-      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      const needsLogin = await page.waitForURL(
+        url => !url.toString().includes('auth.'),
+        { timeout: 5_000 },
+      ).then(() => false).catch(() => true);
+
+      if (needsLogin) {
+        await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      }
     }
 
     // Wait for Element to load — it's a React SPA that takes time

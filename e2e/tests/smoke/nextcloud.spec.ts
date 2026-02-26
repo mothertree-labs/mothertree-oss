@@ -9,7 +9,14 @@ test.describe('Smoke — Nextcloud (Files)', () => {
     await page.waitForLoadState('networkidle');
 
     if (page.url().includes('auth.')) {
-      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      const needsLogin = await page.waitForURL(
+        url => !url.toString().includes('auth.'),
+        { timeout: 5_000 },
+      ).then(() => false).catch(() => true);
+
+      if (needsLogin) {
+        await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      }
     }
 
     await page.waitForLoadState('networkidle');
@@ -32,7 +39,14 @@ test.describe('Smoke — Nextcloud (Files)', () => {
     await page.waitForLoadState('networkidle');
 
     if (page.url().includes('auth.')) {
-      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      const needsLogin = await page.waitForURL(
+        url => !url.toString().includes('auth.'),
+        { timeout: 5_000 },
+      ).then(() => false).catch(() => true);
+
+      if (needsLogin) {
+        await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      }
       await page.waitForLoadState('networkidle');
     }
 

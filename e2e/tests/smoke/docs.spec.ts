@@ -7,9 +7,17 @@ test.describe('Smoke — Docs', () => {
   test('SSO login loads Docs main page', async ({ memberPage: page }) => {
     await page.goto(urls.docs);
 
-    // If redirected to Keycloak, complete login
+    // If redirected to Keycloak, the SSO session may auto-approve.
+    // Wait briefly for redirect before attempting manual login.
     if (page.url().includes('auth.')) {
-      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      const needsLogin = await page.waitForURL(
+        url => !url.toString().includes('auth.'),
+        { timeout: 5_000 },
+      ).then(() => false).catch(() => true);
+
+      if (needsLogin) {
+        await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      }
     }
 
     // Wait for the page to settle (OIDC callback may redirect)
