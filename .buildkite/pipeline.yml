@@ -1,10 +1,15 @@
 # Buildkite CI Pipeline for Mothertree
 #
+# E2E browser tests: start first (long-running), never block image builds
 # Validation: runs on every push and PR
-# E2E browser tests: run in parallel — never block image builds
 # Image builds: runs on every build after validation passes
 
 steps:
+  - group: ":playwright: E2E Browser Tests"
+    steps:
+      - label: ":playwright: Element smoke test"
+        command: ".buildkite/scripts/e2e-playwright.sh"
+
   - group: ":mag: Validation"
     key: "validation"
     steps:
@@ -28,11 +33,6 @@ steps:
 
       - label: ":label: Version bump check"
         command: ".buildkite/scripts/version-check.sh"
-
-  - group: ":playwright: E2E Browser Tests"
-    steps:
-      - label: ":playwright: Element smoke test"
-        command: ".buildkite/scripts/e2e-playwright.sh"
 
   - group: ":docker: Build Images"
     depends_on: "validation"
