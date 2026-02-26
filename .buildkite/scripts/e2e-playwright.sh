@@ -12,5 +12,7 @@ fi
 
 cd e2e
 npm ci --ignore-scripts
-npx playwright install --with-deps chromium
+# System deps (libnss3, libatk, etc.) are pre-installed by Ansible.
+# Only download the Chromium browser binary here.
+npx playwright install chromium
 npx playwright test --project=ci

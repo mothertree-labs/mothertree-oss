@@ -67,6 +67,9 @@
           export BUILDKITE_GIT_SUBMODULES="false"
           # Container registry for image builds (from config/platform/project.conf)
           export CONTAINER_REGISTRY="{{ container_registry }}"
+          # E2E Playwright tests — target the dev environment
+          export E2E_BASE_DOMAIN="{{ e2e_base_domain }}"
+          export E2E_TENANT="{{ e2e_tenant }}"
         dest: /etc/buildkite-agent/hooks/environment
         owner: buildkite-agent
         group: buildkite-agent
@@ -136,6 +139,13 @@
         name: nodejs
         state: present
         update_cache: true
+
+    - name: Install Playwright Chromium system dependencies
+      ansible.builtin.shell: npx --yes playwright install-deps chromium
+      args:
+        creates: /usr/lib/x86_64-linux-gnu/libnss3.so
+      environment:
+        HOME: /tmp
 
     - name: Install Terraform
       ansible.builtin.unarchive:
