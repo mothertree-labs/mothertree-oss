@@ -143,7 +143,7 @@
     - name: Install Playwright Chromium system dependencies
       ansible.builtin.shell: npx --yes playwright install-deps chromium
       args:
-        creates: /usr/lib/x86_64-linux-gnu/libnss3.so
+        creates: /usr/lib/x86_64-linux-gnu/libatk-1.0.so.0
       environment:
         HOME: /tmp
 
