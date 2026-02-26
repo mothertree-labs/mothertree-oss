@@ -35,19 +35,12 @@ test.describe('Smoke — Docs', () => {
     await page.waitForLoadState('networkidle').catch(() => {});
     await page.waitForTimeout(2_000);
 
-    // Check if the OIDC callback or server returned an error.
-    // Known issue: the Docs backend's OIDC token exchange can fail when the
-    // backend reaches Keycloak via the external URL (PROXY protocol issue —
-    // in-cluster traffic bypasses the NodeBalancer, causing ECONNRESET).
+    // After OIDC callback, verify no server errors on the page
     const pageText = await page.locator('body').textContent().catch(() => '') || '';
     const hasServerError = /Server Error|Internal Server Error|\b500\b|\b502\b|\b503\b/i.test(pageText);
     const hasOidcError = /OIDC|OpenID|token|callback.*error/i.test(pageText);
-    test.skip(
-      hasServerError || hasOidcError,
-      hasOidcError
-        ? 'Docs OIDC callback failed (likely PROXY protocol issue — backend cannot reach Keycloak)'
-        : 'Docs server returned an error — not a test issue',
-    );
+    expect(hasServerError, 'Docs returned a server error after OIDC callback').toBe(false);
+    expect(hasOidcError, 'Docs OIDC callback failed').toBe(false);
 
     // Verify we left the auth pages
     const hostname = new URL(page.url()).hostname;
