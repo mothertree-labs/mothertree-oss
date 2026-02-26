@@ -66,11 +66,20 @@ extraConfig:
   password_config:
     enabled: false
   # OIDC provider configuration for Keycloak (dev environment)
+  # Uses explicit endpoints instead of discover: true to avoid PROXY protocol issues.
+  # Browser-facing endpoint (authorization) uses the external URL; server-to-server
+  # endpoints (token, userinfo, jwks) use the internal K8s service URL (HTTP).
+  # skip_verification bypasses RFC 8414 HTTPS requirement for internal endpoints.
   oidc_providers:
     - idp_id: keycloak
       idp_name: "Sign in with MotherTree"
-      discover: true
+      discover: false
+      skip_verification: true
       issuer: 'https://{{ env "AUTH_HOST" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}'
+      authorization_endpoint: 'https://{{ env "AUTH_HOST" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/auth'
+      token_endpoint: '{{ env "KEYCLOAK_INTERNAL_URL" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/token'
+      userinfo_endpoint: '{{ env "KEYCLOAK_INTERNAL_URL" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/userinfo'
+      jwks_uri: '{{ env "KEYCLOAK_INTERNAL_URL" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/certs'
       client_id: "matrix-synapse"
       client_secret: {{ env "SYNAPSE_OIDC_CLIENT_SECRET" | quote }}
       scopes: ["openid", "profile", "email"]
