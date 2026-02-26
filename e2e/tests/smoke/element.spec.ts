@@ -20,15 +20,23 @@ test.describe('Smoke — Element (Chat)', () => {
     const hasServerError = await page.locator('text=/Internal server error|Server Error|500|502|503/i').isVisible().catch(() => false);
     test.skip(hasServerError, 'Element returned a server error — not a test issue');
 
-    // If on Keycloak, complete login
+    // Matrix OIDC delegation may land on a MAS consent page
+    // ("Continue to your account") or a Keycloak login form.
     if (page.url().includes('auth.')) {
-      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      const continueLink = page.getByRole('link', { name: 'Continue' });
+      if (await continueLink.isVisible({ timeout: 5_000 }).catch(() => false)) {
+        await continueLink.click();
+      } else {
+        await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      }
     }
 
-    // Wait for Element to load — it's a React SPA that takes time
-    await page.waitForLoadState('networkidle');
+    // Wait for Element to finish loading — use domcontentloaded since
+    // Element's WebSocket connections prevent networkidle from firing
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(3_000);
 
-    // Verify we're not stuck on Keycloak
+    // Verify we left the auth/MAS pages
     const hostname = new URL(page.url()).hostname;
     expect(hostname).not.toContain('auth.');
 
