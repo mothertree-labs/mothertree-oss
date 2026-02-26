@@ -1,10 +1,12 @@
 # Buildkite CI Pipeline for Mothertree
 #
 # Validation: runs on every push and PR
-# Image builds: runs on main branch only after validation passes
+# E2E browser tests: run in parallel — never block image builds
+# Image builds: runs on every build after validation passes
 
 steps:
   - group: ":mag: Validation"
+    key: "validation"
     steps:
       - label: ":bash: ShellCheck"
         command: ".buildkite/scripts/shellcheck.sh"
@@ -27,14 +29,13 @@ steps:
       - label: ":label: Version bump check"
         command: ".buildkite/scripts/version-check.sh"
 
-      - label: ":playwright: E2E Browser Tests"
+  - group: ":playwright: E2E Browser Tests"
+    steps:
+      - label: ":playwright: Playwright end to end tests"
         command: ".buildkite/scripts/e2e-playwright.sh"
-        soft_fail: true
-
-  - wait: ~
 
   - group: ":docker: Build Images"
-    if: build.branch == "main"
+    depends_on: "validation"
     steps:
       - label: ":docker: Admin Portal"
         command: ".buildkite/scripts/build-image.sh admin-portal"
