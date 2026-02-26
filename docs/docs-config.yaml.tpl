@@ -85,11 +85,14 @@ data:
   DJANGO_SUPERUSER_PASSWORD: "${DJANGO_SUPERUSER_PASSWORD}"
   
   # OIDC settings for Keycloak (realm name is tenant-specific)
-  OIDC_OP_JWKS_ENDPOINT: "https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/protocol/openid-connect/certs"
+  # Browser-facing endpoints use external AUTH_HOST (user's browser redirects here)
   OIDC_OP_AUTHORIZATION_ENDPOINT: "https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/protocol/openid-connect/auth"
-  OIDC_OP_TOKEN_ENDPOINT: "https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/protocol/openid-connect/token"
-  OIDC_OP_USER_ENDPOINT: "https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
   OIDC_OP_LOGOUT_ENDPOINT: "https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/protocol/openid-connect/logout"
+  # Server-side endpoints use internal Keycloak URL to avoid PROXY protocol issue
+  # (in-cluster traffic to external URL bypasses NodeBalancer → ECONNRESET)
+  OIDC_OP_TOKEN_ENDPOINT: "${KEYCLOAK_INTERNAL_URL}/realms/${TENANT_KEYCLOAK_REALM}/protocol/openid-connect/token"
+  OIDC_OP_USER_ENDPOINT: "${KEYCLOAK_INTERNAL_URL}/realms/${TENANT_KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
+  OIDC_OP_JWKS_ENDPOINT: "${KEYCLOAK_INTERNAL_URL}/realms/${TENANT_KEYCLOAK_REALM}/protocol/openid-connect/certs"
   OIDC_RP_CLIENT_ID: "docs-app"
   OIDC_RP_SIGN_ALGO: "RS256"
   OIDC_RP_SCOPES: "openid email profile"
