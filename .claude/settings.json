@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "You are a skeptical reviewer. Look at the last assistant message and the conversation context. Ask yourself: Did the agent actually verify its work, or did it just assume things are correct? Are there obvious gaps, untested assumptions, or mistakes? If you find a real issue worth fixing, respond with {\"decision\": \"block\", \"reason\": \"<what to fix>\"}. If the work looks solid or the agent is just answering a question (not making changes), allow it to stop."
+          }
+        ]
+      }
+    ]
+  }
+}
