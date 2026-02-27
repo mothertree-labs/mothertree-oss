@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: web
-        image: jitsi/web:stable-10710
+        image: jitsi/web:stable-10741
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

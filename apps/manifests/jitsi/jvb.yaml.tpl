@@ -126,7 +126,7 @@ spec:
           mountPath: /shared
       containers:
       - name: jvb
-        image: jitsi/jvb:stable-10710
+        image: jitsi/jvb:stable-10741
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
