@@ -11,6 +11,26 @@ externalDatabase:
 # Hostname and S3 Object Storage
 nextcloud:
   host: '{{ env "FILES_HOST" }}'
+  # Dev: disable rate limiting and brute force protection so E2E tests
+  # (which make many rapid OIDC login attempts) don't get throttled.
+  # Nextcloud's rate limits are hardcoded in PHP annotations (5 req/100s)
+  # with no multiplier config — the only option is enable/disable.
+  configs:
+    dev-ratelimit.config.php: |-
+      <?php
+      $CONFIG = array (
+        'ratelimit.protection.enabled' => false,
+        'auth.bruteforce.protection.enabled' => false,
+      );
+    # Pretty URLs: overwrite.cli.url enables Apache .htaccess front-controller
+    # rewrites (e.g. /apps/files → index.php). Without this, Apache returns 403
+    # for any URL that isn't directly handled by a RewriteRule.
+    pretty-urls.config.php: |-
+      <?php
+      $CONFIG = array (
+        'overwrite.cli.url' => 'https://{{ env "FILES_HOST" }}',
+        'htaccess.RewriteBase' => '/',
+      );
   trustedDomains:
     - '{{ env "FILES_HOST" }}'
     - '{{ env "CALENDAR_HOST" }}'

@@ -376,15 +376,17 @@ pushd "$REPO_ROOT/apps" >/dev/null
   fi
 popd >/dev/null
 
-# Step 6b: Route auth traffic through internal ingress (PROXY protocol workaround)
+# Step 6b: Route in-cluster traffic through internal ingress (PROXY protocol workaround)
 # The external ingress requires PROXY protocol headers (from Cloudflare → NodeBalancer).
-# In-cluster pods connecting to the external auth hostname get ECONNRESET because
-# kube-proxy routes directly to the external ingress pod, bypassing the NodeBalancer.
-# Fix: Create an internal Ingress for the auth hostname (no PROXY protocol) and add
-# hostAliases to the Nextcloud pod so it resolves the auth hostname internally.
-print_status "Configuring internal auth route for OIDC (PROXY protocol workaround)..."
+# In-cluster pods connecting to external hostnames get ECONNRESET because kube-proxy
+# routes directly to the external ingress pod, bypassing the NodeBalancer.
+# Fix: Create internal Ingresses (no PROXY protocol) and add hostAliases to the
+# Nextcloud pod so it resolves these hostnames via the internal ingress.
+print_status "Configuring internal routes for OIDC and Collabora (PROXY protocol workaround)..."
 
 WILDCARD_TLS_SECRET="wildcard-tls-${MT_TENANT}"
+
+# Internal ingress for Keycloak (auth) — required for OIDC login
 cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -418,6 +420,40 @@ spec:
 EOF
 print_success "Internal auth Ingress created/updated for ${AUTH_HOST}"
 
+# Internal ingress for Collabora (office) — needed so richdocuments can reach the
+# discovery endpoint without hitting the external ingress PROXY protocol wall
+if [ "${OFFICE_ENABLED}" = "true" ]; then
+    cat <<EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: collabora-internal-${MT_TENANT}
+  namespace: ${NS_OFFICE}
+  labels:
+    app: collabora
+    tenant: ${MT_TENANT}
+    purpose: internal-office
+spec:
+  ingressClassName: nginx-internal
+  rules:
+  - host: ${OFFICE_HOST}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: collabora-online
+            port:
+              number: 9980
+  tls:
+  - hosts:
+    - ${OFFICE_HOST}
+    secretName: ${WILDCARD_TLS_SECRET}
+EOF
+    print_success "Internal Collabora Ingress created/updated for ${OFFICE_HOST}"
+fi
+
 # Look up the internal ingress controller's ClusterIP
 INTERNAL_INGRESS_IP=$(kubectl get svc ingress-nginx-internal-controller \
     -n "$NS_INGRESS_INTERNAL" \
@@ -427,17 +463,26 @@ if [ -z "$INTERNAL_INGRESS_IP" ]; then
     print_warning "Could not find internal ingress controller ClusterIP"
     print_warning "Nextcloud OIDC login may fail (PROXY protocol issue)"
 else
-    # Patch the Nextcloud deployment to resolve auth hostname via internal ingress.
+    # Build hostnames list: always include AUTH_HOST, add OFFICE_HOST when enabled.
+    # All hostnames share one IP, so they go in a single hostAliases entry.
+    # (Strategic merge uses 'ip' as the merge key — separate entries with the same
+    # IP would overwrite each other instead of merging hostnames.)
+    INTERNAL_HOSTNAMES='"'"$AUTH_HOST"'"'
+    if [ "${OFFICE_ENABLED}" = "true" ]; then
+        INTERNAL_HOSTNAMES="${INTERNAL_HOSTNAMES}"',"'"$OFFICE_HOST"'"'
+    fi
+
+    # Patch the Nextcloud deployment to resolve hostnames via internal ingress.
     # Strategic merge patch is idempotent — if hostAliases are already correct, no rollout.
     # Helm's three-way merge preserves third-party changes, so this survives helmfile sync.
-    print_status "Adding hostAliases to Nextcloud deployment (${AUTH_HOST} → ${INTERNAL_INGRESS_IP})..."
+    print_status "Adding hostAliases to Nextcloud deployment (${AUTH_HOST}${OFFICE_ENABLED:+, ${OFFICE_HOST}} → ${INTERNAL_INGRESS_IP})..."
     kubectl patch deployment nextcloud -n "$NS_FILES" \
         --type=strategic \
-        -p '{"spec":{"template":{"spec":{"hostAliases":[{"ip":"'"$INTERNAL_INGRESS_IP"'","hostnames":["'"$AUTH_HOST"'"]}]}}}}'
+        -p '{"spec":{"template":{"spec":{"hostAliases":[{"ip":"'"$INTERNAL_INGRESS_IP"'","hostnames":['"$INTERNAL_HOSTNAMES"']}]}}}}'
 
     # Wait for rollout to complete (immediate if patch was a no-op)
     kubectl rollout status deployment/nextcloud -n "$NS_FILES" --timeout=600s
-    print_success "Nextcloud configured to route auth traffic internally"
+    print_success "Nextcloud configured to route traffic internally"
 fi
 
 # Step 7: Wait for Nextcloud to be ready
@@ -548,6 +593,24 @@ if [ -n "$NEXTCLOUD_POD" ]; then
     fi
 else
     print_warning "Nextcloud pod not found, skipping trusted_domains check"
+fi
+
+# Step 7d: Set overwrite.cli.url for pretty URLs (.htaccess rewrites)
+# Without this, Apache can't rewrite /apps/calendar (and similar paths) to index.php,
+# causing 404 errors on the calendar subdomain and any pretty URL route.
+print_status "Configuring overwrite.cli.url for pretty URLs..."
+NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$NEXTCLOUD_POD" ]; then
+    if timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+            su -s /bin/sh www-data -c "php occ config:system:set overwrite.cli.url --value='https://$FILES_HOST'" 2>/dev/null && \
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+            su -s /bin/sh www-data -c "php occ maintenance:update:htaccess" 2>/dev/null && \
+        print_success "overwrite.cli.url set and .htaccess updated" || \
+        print_warning "Failed to set overwrite.cli.url (non-critical on first install)"
+    fi
+else
+    print_warning "Nextcloud pod not found, skipping overwrite.cli.url"
 fi
 
 # Step 8: Generate and apply OIDC configuration job from template

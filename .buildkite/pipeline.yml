@@ -7,8 +7,20 @@
 steps:
   - group: ":playwright: E2E Browser Tests"
     steps:
-      - label: ":playwright: Smoke tests"
+      - label: ":playwright: E2E (1/3)"
         command: ".buildkite/scripts/e2e-playwright.sh"
+        env:
+          E2E_SHARD: "1/3"
+
+      - label: ":playwright: E2E (2/3)"
+        command: ".buildkite/scripts/e2e-playwright.sh"
+        env:
+          E2E_SHARD: "2/3"
+
+      - label: ":playwright: E2E (3/3)"
+        command: ".buildkite/scripts/e2e-playwright.sh"
+        env:
+          E2E_SHARD: "3/3"
 
   - group: ":mag: Validation"
     key: "validation"
