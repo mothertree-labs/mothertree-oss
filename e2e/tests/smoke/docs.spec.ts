@@ -14,9 +14,7 @@ test.describe('Smoke — Docs', () => {
     // The Next.js frontend should serve static HTML (200)
     // OIDC redirects happen client-side after JS loads, so the initial response is the frontend
     const status = response!.status();
-    test.skip(status >= 500, `Docs returned server error ${status}`);
-
-    expect(status).toBe(200);
+    expect(status, `Docs returned HTTP ${status} — expected 200`).toBe(200);
   });
 
   test('SSO login loads Docs main page', async ({ memberPage: page }) => {

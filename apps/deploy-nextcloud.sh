@@ -550,6 +550,24 @@ else
     print_warning "Nextcloud pod not found, skipping trusted_domains check"
 fi
 
+# Step 7d: Set overwrite.cli.url for pretty URLs (.htaccess rewrites)
+# Without this, Apache can't rewrite /apps/calendar (and similar paths) to index.php,
+# causing 404 errors on the calendar subdomain and any pretty URL route.
+print_status "Configuring overwrite.cli.url for pretty URLs..."
+NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$NEXTCLOUD_POD" ]; then
+    if timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+            su -s /bin/sh www-data -c "php occ config:system:set overwrite.cli.url --value='https://$FILES_HOST'" 2>/dev/null && \
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+            su -s /bin/sh www-data -c "php occ maintenance:update:htaccess" 2>/dev/null && \
+        print_success "overwrite.cli.url set and .htaccess updated" || \
+        print_warning "Failed to set overwrite.cli.url (non-critical on first install)"
+    fi
+else
+    print_warning "Nextcloud pod not found, skipping overwrite.cli.url"
+fi
+
 # Step 8: Generate and apply OIDC configuration job from template
 print_status "Configuring OIDC authentication via Job..."
 

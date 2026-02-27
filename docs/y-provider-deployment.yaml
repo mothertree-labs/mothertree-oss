@@ -77,16 +77,15 @@ spec:
               memory: 256Mi
         
         # Health check sidecar - tests backend connectivity
+        # Uses internal service URL (not external) to avoid PROXY protocol issue
+        # (in-cluster traffic to external URL bypasses NodeBalancer → ECONNRESET)
         - name: health-sidecar
           image: busybox:1.36
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/scripts/health-check.sh"]
           env:
             - name: COLLABORATION_BACKEND_BASE_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: env-d-yprovider
-                  key: COLLABORATION_BACKEND_BASE_URL
+              value: "http://backend:8000"
             - name: HEALTH_CHECK_INTERVAL
               value: "10"
             - name: HEALTH_PORT
