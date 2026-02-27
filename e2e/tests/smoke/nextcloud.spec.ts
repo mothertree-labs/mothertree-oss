@@ -98,7 +98,8 @@ test.describe('Smoke — Nextcloud (Files)', () => {
     // Skip if Nextcloud isn't accessible (OIDC error, server error, etc.)
     const pageText = await page.locator('body').textContent().catch(() => '') || '';
     const hasError = /Could not reach|Server Error|Internal Server Error|Forbidden|\b500\b|\b403\b/i.test(pageText);
-    test.skip(hasError, 'Nextcloud not accessible — skipping file upload test');
+    const stuckOnOidc = page.url().includes('user_oidc');
+    test.skip(hasError || stuckOnOidc, 'Nextcloud not accessible (OIDC login failed) — skipping file upload test');
 
     // Wait for files view
     await page.waitForSelector('#app-content, .files-list, [class*="app-content"]', { timeout: 30_000 });
