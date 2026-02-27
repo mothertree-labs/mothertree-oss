@@ -135,6 +135,6 @@ No portal code changes detected. No version bump needed.
 - Only bump versions for changes that affect the Docker image (runtime code, views, dependencies)
 - Test-only changes (`__tests__/`, `jest.config.js`) do NOT require a version bump
 - Manifest/deploy script changes (`apps/manifests/`, `apps/deploy-*.sh`) do NOT require a version bump — they deploy existing images
-- CI pipeline changes (`.buildkite/`) do NOT require a version bump
+- CI pipeline changes (`.woodpecker/`) do NOT require a version bump
 - If BOTH VERSION and image-versions.env were changed but are out of sync, fix image-versions.env to match VERSION
 - The commit message for the bump should include `Co-Authored-By: Claude, for mothertree <info@mothertree.org>`

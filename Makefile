@@ -15,10 +15,10 @@ lint:
 
 # Run all CI validation checks locally
 ci-validate:
-	.buildkite/scripts/shellcheck.sh
-	.buildkite/scripts/terraform-validate.sh
-	.buildkite/scripts/helmfile-lint.sh
-	.buildkite/scripts/npm-check.sh
+	ci/scripts/shellcheck.sh
+	ci/scripts/terraform-validate.sh
+	ci/scripts/helmfile-lint.sh
+	ci/scripts/npm-check.sh
 
 # Build all images locally (no push)
 ci-build:

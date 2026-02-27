@@ -1,0 +1,42 @@
+when:
+  - event: [push, pull_request]
+
+depends_on:
+  - validate
+
+steps:
+  - name: build-admin-portal
+    image: bash
+    environment:
+      CONTAINER_REGISTRY:
+        from_secret: container_registry
+    commands:
+      - ci/scripts/build-image.sh admin-portal
+    depends_on: []
+
+  - name: build-account-portal
+    image: bash
+    environment:
+      CONTAINER_REGISTRY:
+        from_secret: container_registry
+    commands:
+      - ci/scripts/build-image.sh account-portal
+    depends_on: []
+
+  - name: build-roundcube
+    image: bash
+    environment:
+      CONTAINER_REGISTRY:
+        from_secret: container_registry
+    commands:
+      - ci/scripts/build-image.sh roundcube
+    depends_on: []
+
+  - name: build-k6-perf
+    image: bash
+    environment:
+      CONTAINER_REGISTRY:
+        from_secret: container_registry
+    commands:
+      - ci/scripts/build-image.sh perf
+    depends_on: []

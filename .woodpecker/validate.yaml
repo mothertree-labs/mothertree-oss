@@ -1,0 +1,45 @@
+when:
+  - event: [push, pull_request]
+
+steps:
+  - name: shellcheck
+    image: bash
+    commands:
+      - ci/scripts/shellcheck.sh
+    depends_on: []
+
+  - name: terraform-validate
+    image: bash
+    commands:
+      - ci/scripts/terraform-validate.sh
+    depends_on: []
+
+  - name: helmfile-lint
+    image: bash
+    commands:
+      - ci/scripts/helmfile-lint.sh
+    depends_on: []
+
+  - name: npm-check
+    image: bash
+    commands:
+      - ci/scripts/npm-check.sh
+    depends_on: []
+
+  - name: account-portal-tests
+    image: bash
+    commands:
+      - cd apps/account-portal && npm ci --ignore-scripts && npm test
+    depends_on: []
+
+  - name: admin-portal-tests
+    image: bash
+    commands:
+      - ci/scripts/admin-portal-test.sh
+    depends_on: []
+
+  - name: version-check
+    image: bash
+    commands:
+      - ci/scripts/version-check.sh
+    depends_on: []

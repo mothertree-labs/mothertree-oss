@@ -5,7 +5,7 @@ import * as fs from 'fs';
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'dev-test-users.sh');
 const TENANT = process.env.E2E_TENANT || 'example';
-const IS_CI = !!process.env.CI || !!process.env.BUILDKITE;
+const IS_CI = !!process.env.CI;
 
 function run(cmd: string): void {
   console.log(`  [teardown] ${cmd}`);

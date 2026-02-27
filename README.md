@@ -1,6 +1,7 @@
 # Mothertree
 
-[![Build status](https://badge.buildkite.com/6ecbacab09970436b94913023d19b562b23c44a0c1121d082a.svg?branch=main)](https://buildkite.com/mothertree-labs/mothertree)
+<!-- TODO: Update with actual Woodpecker hostname after deployment -->
+[![Build status](https://ci.example.com/api/badges/mothertree-labs/mothertree-oss/status.svg?branch=main)](https://ci.example.com/mothertree-labs/mothertree-oss)
 
 Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Element (web client), Docs (collaborative editing), Nextcloud (files), Jitsi (video conferencing), and email (Stalwart + Roundcube) per tenant — with shared infrastructure for auth (Keycloak), database (PostgreSQL), monitoring (Prometheus/Grafana), and ingress (NGINX).
 
