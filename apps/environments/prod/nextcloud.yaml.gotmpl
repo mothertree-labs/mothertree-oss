@@ -11,6 +11,16 @@ externalDatabase:
 # Hostname and S3 Object Storage
 nextcloud:
   host: '{{ env "FILES_HOST" }}'
+  configs:
+    # Pretty URLs: overwrite.cli.url enables Apache .htaccess front-controller
+    # rewrites (e.g. /apps/files → index.php). Without this, Apache returns 403
+    # for any URL that isn't directly handled by a RewriteRule.
+    pretty-urls.config.php: |-
+      <?php
+      $CONFIG = array (
+        'overwrite.cli.url' => 'https://{{ env "FILES_HOST" }}',
+        'htaccess.RewriteBase' => '/',
+      );
   trustedDomains:
     - '{{ env "FILES_HOST" }}'
     - '{{ env "CALENDAR_HOST" }}'

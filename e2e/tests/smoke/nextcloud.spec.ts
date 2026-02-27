@@ -44,17 +44,14 @@ test.describe('Smoke — Nextcloud (Files)', () => {
     await page.waitForLoadState('networkidle').catch(() => {});
     await page.waitForTimeout(3_000);
 
-    // OIDC login still fails despite internal ingress + hostAliases (PR #87).
-    // Server-to-server connectivity works (curl from pod → Keycloak returns 200),
-    // but the browser OIDC flow fails during code exchange. See GitHub issue.
-    const currentUrl = page.url();
     const pageText = await page.locator('body').textContent().catch(() => '') || '';
+
+    // OIDC login must succeed — the session cookie fix (cookie_secure) ensures
+    // the PHP session survives the redirect from Keycloak back to Nextcloud
     const hasOidcError = /Could not reach the OpenID Connect provider/i.test(pageText);
-    const hasOidcLoginFailure = currentUrl.includes('user_oidc');
-    test.skip(
-      hasOidcError || hasOidcLoginFailure,
-      'Nextcloud OIDC login broken — see GitHub issue for investigation notes',
-    );
+    const hasOidcLoginFailure = page.url().includes('user_oidc');
+    expect(hasOidcError, 'Nextcloud OIDC: "Could not reach the OpenID Connect provider"').toBe(false);
+    expect(hasOidcLoginFailure, 'Nextcloud OIDC: stuck on user_oidc login page').toBe(false);
 
     // Check for server/client errors
     const hasServerError = /Server Error|Internal Server Error|\b500\b|\b502\b|\b503\b/i.test(pageText);
@@ -95,11 +92,12 @@ test.describe('Smoke — Nextcloud (Files)', () => {
       await page.waitForLoadState('networkidle');
     }
 
-    // Skip if Nextcloud isn't accessible (OIDC error, server error, etc.)
+    // OIDC login must succeed before we can test file upload
     const pageText = await page.locator('body').textContent().catch(() => '') || '';
     const hasError = /Could not reach|Server Error|Internal Server Error|Forbidden|\b500\b|\b403\b/i.test(pageText);
     const stuckOnOidc = page.url().includes('user_oidc');
-    test.skip(hasError || stuckOnOidc, 'Nextcloud not accessible (OIDC login failed) — skipping file upload test');
+    expect(hasError, 'Nextcloud returned an error page').toBe(false);
+    expect(stuckOnOidc, 'Nextcloud OIDC login failed — stuck on user_oidc page').toBe(false);
 
     // Wait for files view
     await page.waitForSelector('#app-content, .files-list, [class*="app-content"]', { timeout: 30_000 });
