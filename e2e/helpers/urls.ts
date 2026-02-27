@@ -12,6 +12,7 @@ export const urls = {
   element: `https://matrix.${baseDomain}`,
   docs: `https://docs.${baseDomain}`,
   files: `https://files.${baseDomain}`,
+  calendar: `https://calendar.${baseDomain}`,
   jitsi: `https://jitsi.${baseDomain}`,
   webmail: `https://webmail.${baseDomain}`,
   keycloak: `https://auth.${baseDomain}`,

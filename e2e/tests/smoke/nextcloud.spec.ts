@@ -5,28 +5,26 @@ import { keycloakLogin } from '../../helpers/auth';
 
 test.describe('Smoke — Nextcloud (Files)', () => {
   test('Nextcloud server responds', async ({ memberPage: page }) => {
-    // Use a fresh page to avoid SSO auto-login triggering the broken OIDC flow
+    // Use a fresh page to avoid SSO auto-login triggering the OIDC flow
     const freshPage = await page.context().browser()!.newContext({ ignoreHTTPSErrors: true }).then(ctx => ctx.newPage());
 
     const response = await freshPage.goto(urls.files).catch(() => null);
     const finalUrl = freshPage.url();
+    const status = response?.status() ?? 0;
     await freshPage.close();
 
     if (!response) {
       test.skip(true, 'Nextcloud not reachable (DNS or connection error)');
     }
 
-    const status = response!.status();
-    test.skip(status >= 500, `Nextcloud returned server error ${status}`);
-
-    // When Nextcloud's OIDC module can't reach the provider (PROXY protocol issue),
-    // the login redirect chain ends at /apps/user_oidc/login/1 with a 404.
-    // The server IS up — it's the OIDC integration that's broken.
+    // Nextcloud's OIDC module failing to reach Keycloak (PROXY protocol issue)
+    // causes a 404 at /apps/user_oidc/login/1. This is now a real failure since
+    // PR #87 fixed the issue with hostAliases + internal ingress.
     const isOidcFailure = status === 404 && finalUrl.includes('user_oidc');
-    test.skip(isOidcFailure, 'Nextcloud OIDC login returns 404 (PROXY protocol issue — cannot reach Keycloak)');
+    expect(isOidcFailure, 'Nextcloud OIDC login returns 404 — cannot reach Keycloak (PROXY protocol issue)').toBe(false);
 
-    // Any HTTP response means the server is up
-    expect(status).toBeLessThan(500);
+    // Any HTTP response means the server is up — should not be a 5xx
+    expect(status, `Nextcloud returned HTTP ${status}`).toBeLessThan(500);
   });
 
   test('SSO login loads Nextcloud', async ({ memberPage: page }) => {
@@ -46,26 +44,22 @@ test.describe('Smoke — Nextcloud (Files)', () => {
     await page.waitForLoadState('networkidle').catch(() => {});
     await page.waitForTimeout(3_000);
 
-    // Check for the known OIDC provider connectivity issue.
-    // Nextcloud's user_oidc app shows this when it can't reach Keycloak's
-    // discovery endpoint. Root cause: PROXY protocol issue — in-cluster
-    // traffic to the external Keycloak URL bypasses the NodeBalancer.
+    // OIDC provider connectivity failures should now be real test failures
+    // (PR #87 fixed the PROXY protocol issue with internal ingress + hostAliases)
     const currentUrl = page.url();
     const pageText = await page.locator('body').textContent().catch(() => '') || '';
     const hasOidcError = /Could not reach the OpenID Connect provider/i.test(pageText);
     const hasOidcLoginFailure = currentUrl.includes('user_oidc');
-    test.skip(
+    expect(
       hasOidcError || hasOidcLoginFailure,
-      'Nextcloud OIDC login failed (PROXY protocol issue — backend cannot reach Keycloak)',
-    );
+      'Nextcloud OIDC login failed — backend cannot reach Keycloak',
+    ).toBe(false);
 
-    // Check for other server/client errors
+    // Check for server/client errors
     const hasServerError = /Server Error|Internal Server Error|\b500\b|\b502\b|\b503\b/i.test(pageText);
     const hasClientError = /Page not found|Not Found|\b404\b/i.test(pageText);
-    test.skip(
-      hasServerError || hasClientError,
-      'Nextcloud returned an error — not a test issue',
-    );
+    expect(hasServerError, 'Nextcloud returned a server error').toBe(false);
+    expect(hasClientError, 'Nextcloud returned a client error (404)').toBe(false);
 
     // Verify we left the auth pages
     const hostname = new URL(page.url()).hostname;
