@@ -15,4 +15,11 @@ npm ci --ignore-scripts
 # System deps (libnss3, libatk, etc.) are pre-installed by Ansible.
 # Only download the Chromium browser binary here.
 npx playwright install chromium
-npx playwright test --project=ci
+
+SHARD_ARG=""
+if [[ -n "${E2E_SHARD:-}" ]]; then
+  SHARD_ARG="--shard=${E2E_SHARD}"
+  echo "Running shard ${E2E_SHARD}"
+fi
+
+npx playwright test --project=ci ${SHARD_ARG}
