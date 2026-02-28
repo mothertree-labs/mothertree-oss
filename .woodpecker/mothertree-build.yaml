@@ -17,6 +17,8 @@ when:
   - event: push
     branch: main
 
+skip_clone: true
+
 steps:
   - name: complete
     image: bash
