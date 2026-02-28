@@ -19,7 +19,7 @@ resource "linode_sshkey" "ci_key" {
 }
 
 # Firewall for CI server
-# Buildkite agents connect outbound only - no inbound ports needed except SSH from VPN server
+# Woodpecker uses Cloudflare Tunnel (outbound only) - no inbound ports needed except SSH from VPN server
 resource "linode_firewall" "ci_firewall" {
   label = "${var.ci_label}-firewall"
   tags  = var.tags
@@ -44,7 +44,7 @@ resource "linode_instance" "ci_server" {
   image  = "linode/ubuntu24.04"
   region = var.region
   type   = var.ci_instance_type
-  tags   = concat(var.tags, ["ci", "buildkite"])
+  tags   = concat(var.tags, ["ci", "woodpecker"])
 
   authorized_keys = [var.ssh_public_key]
 
@@ -74,7 +74,7 @@ resource "linode_instance" "ci_server" {
     }
   }
 
-  # Cloud-init: install Docker and create buildkite user
+  # Cloud-init: install Docker and create woodpecker user
   metadata {
     user_data = base64encode(templatefile("${path.module}/user-data.yaml", {}))
   }

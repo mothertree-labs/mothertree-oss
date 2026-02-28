@@ -4,7 +4,7 @@ set -euo pipefail
 echo "--- :bash: Running ShellCheck"
 
 # Find all shell scripts in project directories (excluding submodules and node_modules)
-SCRIPTS=$(find scripts apps/scripts apps/deploy-*.sh ci/scripts .buildkite/scripts -name '*.sh' \
+SCRIPTS=$(find scripts apps/scripts apps/deploy-*.sh ci/scripts -name '*.sh' \
   -not -path "*/node_modules/*" \
   -not -path "*/submodules/*" \
   2>/dev/null || true)

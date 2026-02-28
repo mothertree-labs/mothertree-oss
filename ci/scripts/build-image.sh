@@ -3,7 +3,7 @@
 # Routes to component-specific build scripts with semver tagging from VERSION files.
 # Skips build if the image:version already exists in the registry (idempotent).
 #
-# Usage: .buildkite/scripts/build-image.sh <component>
+# Usage: ci/scripts/build-image.sh <component>
 #   Components: admin-portal, account-portal, roundcube, perf
 
 set -euo pipefail

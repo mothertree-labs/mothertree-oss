@@ -2,18 +2,18 @@
 # Validate that VERSION files are bumped when source files change.
 # Runs on every push/PR. Fails with a clear error if source changed but VERSION didn't.
 #
-# Usage: .buildkite/scripts/version-check.sh
+# Usage: ci/scripts/version-check.sh
 
 set -euo pipefail
 
 echo "--- :label: Checking VERSION bumps"
 
 # Determine base ref for diffing
-if [ -n "${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-}" ] && [ "${BUILDKITE_PULL_REQUEST_BASE_BRANCH}" != "" ]; then
+if [ -n "${CI_COMMIT_TARGET_BRANCH:-}" ]; then
   # PR: diff against target branch
-  git fetch origin "${BUILDKITE_PULL_REQUEST_BASE_BRANCH}" --depth=1 2>/dev/null || true
-  BASE_REF="origin/${BUILDKITE_PULL_REQUEST_BASE_BRANCH}"
-elif [ "${BUILDKITE_BRANCH:-}" = "main" ]; then
+  git fetch origin "${CI_COMMIT_TARGET_BRANCH}" --depth=1 2>/dev/null || true
+  BASE_REF="origin/${CI_COMMIT_TARGET_BRANCH}"
+elif [ "${CI_COMMIT_BRANCH:-}" = "main" ]; then
   # Main branch: diff against previous commit
   BASE_REF="HEAD~1"
 else

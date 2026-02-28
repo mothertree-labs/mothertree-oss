@@ -1,0 +1,55 @@
+when:
+  - event: [push, pull_request]
+
+clone:
+  - name: clone
+    image: woodpeckerci/plugin-git
+    settings:
+      recursive: false
+
+steps:
+  - name: shellcheck
+    image: bash
+    commands:
+      - ci/scripts/shellcheck.sh
+    depends_on: []
+
+  - name: terraform-validate
+    image: bash
+    commands:
+      - ci/scripts/terraform-validate.sh
+    depends_on: []
+
+  - name: helmfile-lint
+    image: bash
+    commands:
+      - ci/scripts/helmfile-lint.sh
+    depends_on: []
+
+  - name: version-check
+    image: bash
+    commands:
+      - ci/scripts/version-check.sh
+    depends_on: []
+
+  # npm steps must be sequential — they share the workspace and
+  # concurrent npm ci in the same directory corrupts node_modules.
+  - name: npm-check
+    image: bash
+    commands:
+      - ci/scripts/npm-check.sh
+    depends_on: []
+
+  - name: account-portal-tests
+    image: bash
+    commands:
+      - cd apps/account-portal
+      - "[ -d node_modules ] || npm ci --ignore-scripts"
+      - npm test
+    depends_on: [npm-check]
+
+  - name: admin-portal-tests
+    image: bash
+    commands:
+      - ci/scripts/admin-portal-test.sh
+    depends_on: [npm-check]

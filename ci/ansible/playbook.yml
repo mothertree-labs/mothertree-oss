@@ -1,82 +1,150 @@
 ---
-# Configure Buildkite CI Server
+# Configure Woodpecker CI Server
 # Run: ansible-playbook -i inventory.yml playbook.yml
 #
 # Requires vars from ansible-vars.yml (private):
-#   buildkite_agent_token, ghcr_username, ghcr_pat
+#   woodpecker_agent_secret, woodpecker_github_client, woodpecker_github_secret,
+#   woodpecker_host, woodpecker_admin, cloudflare_tunnel_token,
+#   ghcr_username, ghcr_pat
 
-- name: Configure Buildkite CI Server
+- name: Configure Woodpecker CI Server
   hosts: ci_servers
   become: true
   vars_files:
     - "{{ vars_file | default('ansible-vars.yml') }}"
 
-  tasks:
-    # ── Buildkite Agent ──────────────────────────────────────────────
-    - name: Add Buildkite apt key
-      ansible.builtin.shell: |
-        curl -fsSL https://keys.openpgp.org/vks/v1/by-fingerprint/32A37959C2FA5C3C99EFBC32A79206696452D198 \
-          | gpg --dearmor -o /usr/share/keyrings/buildkite-agent-archive-keyring.gpg
-      args:
-        creates: /usr/share/keyrings/buildkite-agent-archive-keyring.gpg
+  vars:
+    woodpecker_version: "{{ woodpecker_version_override | default('3.13.0') }}"
+    plugin_git_version: "{{ plugin_git_version_override | default('2.8.1') }}"
 
-    - name: Add Buildkite apt repository
+  tasks:
+    # ── Remove Buildkite (cleanup from previous installation) ──────
+    - name: Stop and disable Buildkite agent instances
+      ansible.builtin.systemd:
+        name: "buildkite-agent@{{ item }}"
+        enabled: false
+        state: stopped
+      loop: [1, 2, 3]
+      failed_when: false
+
+    - name: Remove Buildkite agent package
+      ansible.builtin.apt:
+        name: buildkite-agent
+        state: absent
+
+    - name: Remove Buildkite apt repository
       ansible.builtin.apt_repository:
         repo: "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main"
         filename: buildkite-agent
+        state: absent
 
-    - name: Install Buildkite agent
+    # ── Install Woodpecker (pinned .deb from GitHub releases) ──────
+    - name: Download Woodpecker .deb packages
+      ansible.builtin.get_url:
+        url: "https://github.com/woodpecker-ci/woodpecker/releases/download/v{{ woodpecker_version }}/{{ item }}_{{ woodpecker_version }}_amd64.deb"
+        dest: "/tmp/{{ item }}_{{ woodpecker_version }}_amd64.deb"
+        mode: "0644"
+      loop:
+        - woodpecker-server
+        - woodpecker-agent
+        - woodpecker-cli
+
+    - name: Install Woodpecker .deb packages
       ansible.builtin.apt:
-        name: buildkite-agent
+        deb: "/tmp/{{ item }}_{{ woodpecker_version }}_amd64.deb"
+      loop:
+        - woodpecker-server
+        - woodpecker-agent
+        - woodpecker-cli
+
+    # ── Install plugin-git (local backend clone step) ──────────────
+    - name: Download plugin-git binary
+      ansible.builtin.get_url:
+        url: "https://github.com/woodpecker-ci/plugin-git/releases/download/{{ plugin_git_version }}/linux-amd64_plugin-git"
+        dest: /usr/local/bin/plugin-git
+        mode: "0755"
+
+    # ── Install cloudflared ────────────────────────────────────────
+    - name: Add Cloudflare apt key
+      ansible.builtin.shell: |
+        curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+          | gpg --dearmor -o /usr/share/keyrings/cloudflare-main.gpg
+      args:
+        creates: /usr/share/keyrings/cloudflare-main.gpg
+
+    - name: Add Cloudflare apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main"
+        filename: cloudflared
+
+    - name: Install cloudflared
+      ansible.builtin.apt:
+        name: cloudflared
         state: present
         update_cache: true
 
-    - name: Configure Buildkite agent
+    # ── Configure Woodpecker server ────────────────────────────────
+    - name: Create Woodpecker config directory
+      ansible.builtin.file:
+        path: /etc/woodpecker
+        state: directory
+        mode: "0755"
+
+    - name: Configure Woodpecker server environment
       ansible.builtin.template:
-        src: templates/buildkite-agent.cfg.j2
-        dest: /etc/buildkite-agent/buildkite-agent.cfg
-        owner: buildkite-agent
-        group: buildkite-agent
+        src: templates/woodpecker-server.env.j2
+        dest: /etc/woodpecker/woodpecker-server.env
+        owner: root
+        group: root
         mode: "0600"
       no_log: true
+      notify: Restart Woodpecker server
 
-    - name: Add buildkite-agent to docker group
+    - name: Configure Woodpecker agent environment
+      ansible.builtin.template:
+        src: templates/woodpecker-agent.env.j2
+        dest: /etc/woodpecker/woodpecker-agent.env
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      notify: Restart Woodpecker agent
+
+    - name: Create woodpecker system user
       ansible.builtin.user:
-        name: buildkite-agent
+        name: woodpecker
+        system: true
+        create_home: true
+        shell: /bin/bash
         groups: docker
         append: true
 
-    # ── 3 Agent Instances ────────────────────────────────────────────
-    - name: Enable and start Buildkite agent instances
+    - name: Enable and start Woodpecker server
       ansible.builtin.systemd:
-        name: "buildkite-agent@{{ item }}"
+        name: woodpecker-server
         enabled: true
         state: started
-      loop: [1, 2, 3]
 
-    # ── Git HTTPS for public repos ────────────────────────────────────
-    - name: Configure Buildkite environment hook (HTTPS clone for GitHub)
-      ansible.builtin.copy:
-        content: |
-          #!/bin/bash
-          # Rewrite SSH URLs to HTTPS — the OSS repo is public, no SSH key needed
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0="url.https://github.com/.insteadOf"
-          export GIT_CONFIG_VALUE_0="git@github.com:"
-          # Skip private submodules — pipeline steps init what they need
-          export BUILDKITE_GIT_SUBMODULES="false"
-          # Container registry for image builds (from config/platform/project.conf)
-          export CONTAINER_REGISTRY="{{ container_registry }}"
-          # E2E Playwright tests — target the dev environment
-          export E2E_BASE_DOMAIN="{{ e2e_base_domain }}"
-          export E2E_TENANT="{{ e2e_tenant }}"
-        dest: /etc/buildkite-agent/hooks/environment
-        owner: buildkite-agent
-        group: buildkite-agent
-        mode: "0755"
-      notify: Restart Buildkite agents
+    - name: Enable and start Woodpecker agent
+      ansible.builtin.systemd:
+        name: woodpecker-agent
+        enabled: true
+        state: started
 
-    # ── Docker Configuration ─────────────────────────────────────────
+    # ── Configure Cloudflare Tunnel (dashboard-managed, token-based) ─
+    - name: Install cloudflared systemd service
+      ansible.builtin.shell: "cloudflared service install {{ cloudflare_tunnel_token }}"
+      args:
+        creates: /etc/systemd/system/cloudflared.service
+      no_log: true
+
+    - name: Enable and start cloudflared
+      ansible.builtin.systemd:
+        name: cloudflared
+        enabled: true
+        state: started
+
+    # ── Docker Configuration ───────────────────────────────────────
     - name: Configure Docker daemon
       ansible.builtin.template:
         src: templates/docker-daemon.json.j2
@@ -84,18 +152,16 @@
         mode: "0644"
       notify: Restart Docker
 
-    # Buildkite agent systemd sets HOME=/var/lib/buildkite-agent,
-    # so docker config must live there for push auth to work.
     - name: Create docker config directories
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
-        owner: buildkite-agent
-        group: buildkite-agent
+        owner: woodpecker
+        group: woodpecker
         mode: "0700"
       loop:
-        - /var/lib/buildkite-agent/.docker
-        - /home/buildkite-agent/.docker
+        - /var/lib/woodpecker/.docker
+        - /home/woodpecker/.docker
 
     - name: Configure GHCR docker login
       ansible.builtin.copy:
@@ -108,18 +174,20 @@
             }
           }
         dest: "{{ item }}"
-        owner: buildkite-agent
-        group: buildkite-agent
+        owner: woodpecker
+        group: woodpecker
         mode: "0600"
       loop:
-        - /var/lib/buildkite-agent/.docker/config.json
-        - /home/buildkite-agent/.docker/config.json
+        - /var/lib/woodpecker/.docker/config.json
+        - /home/woodpecker/.docker/config.json
       no_log: true
 
-    # ── Tools ────────────────────────────────────────────────────────
-    - name: Install ShellCheck
+    # ── Tools ──────────────────────────────────────────────────────
+    - name: Install ShellCheck and git-lfs
       ansible.builtin.apt:
-        name: shellcheck
+        name:
+          - shellcheck
+          - git-lfs
         state: present
 
     - name: Install Node.js 20 apt key
@@ -180,21 +248,21 @@
         dest: /usr/local/bin/yq
         mode: "0755"
 
-    # ── SSH Deploy Keys ──────────────────────────────────────────────
-    - name: Create buildkite-agent .ssh directory
+    # ── SSH Deploy Keys ────────────────────────────────────────────
+    - name: Create woodpecker .ssh directory
       ansible.builtin.file:
-        path: /home/buildkite-agent/.ssh
+        path: /home/woodpecker/.ssh
         state: directory
-        owner: buildkite-agent
-        group: buildkite-agent
+        owner: woodpecker
+        group: woodpecker
         mode: "0700"
 
     - name: Install SSH deploy keys
       ansible.builtin.copy:
         content: "{{ item.key }}"
-        dest: "/home/buildkite-agent/.ssh/{{ item.name }}"
-        owner: buildkite-agent
-        group: buildkite-agent
+        dest: "/home/woodpecker/.ssh/{{ item.name }}"
+        owner: woodpecker
+        group: woodpecker
         mode: "0600"
       loop: "{{ ssh_deploy_keys | default([]) }}"
       no_log: true
@@ -207,25 +275,25 @@
           Host {{ key.host_alias }}
             HostName github.com
             User git
-            IdentityFile /home/buildkite-agent/.ssh/{{ key.name }}
+            IdentityFile /home/woodpecker/.ssh/{{ key.name }}
             IdentitiesOnly yes
           {% endfor %}
 
           Host github.com
             StrictHostKeyChecking accept-new
-        dest: /home/buildkite-agent/.ssh/config
-        owner: buildkite-agent
-        group: buildkite-agent
+        dest: /home/woodpecker/.ssh/config
+        owner: woodpecker
+        group: woodpecker
         mode: "0600"
 
-    # ── Docker Buildx ────────────────────────────────────────────────
+    # ── Docker Buildx ──────────────────────────────────────────────
     - name: Set up default buildx builder
       ansible.builtin.shell: |
         docker buildx create --name mt-builder --driver docker-container --bootstrap --use
       become: true
-      become_user: buildkite-agent
+      become_user: woodpecker
       args:
-        creates: /home/buildkite-agent/.docker/buildx
+        creates: /home/woodpecker/.docker/buildx
 
   handlers:
     - name: Restart Docker
@@ -233,8 +301,13 @@
         name: docker
         state: restarted
 
-    - name: Restart Buildkite agents
+    - name: Restart Woodpecker server
       ansible.builtin.systemd:
-        name: "buildkite-agent@{{ item }}"
+        name: woodpecker-server
         state: restarted
-      loop: [1, 2, 3]
+
+    - name: Restart Woodpecker agent
+      ansible.builtin.systemd:
+        name: woodpecker-agent
+        state: restarted
+

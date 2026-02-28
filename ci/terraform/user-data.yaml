@@ -20,9 +20,9 @@ runcmd:
   - apt-get update
   - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin
 
-  # Create buildkite-agent user and add to docker group
-  - useradd -m -s /bin/bash buildkite-agent || true
-  - usermod -aG docker buildkite-agent
+  # Create woodpecker user and add to docker group
+  - useradd -m -s /bin/bash woodpecker || true
+  - usermod -aG docker woodpecker
 
   # Enable and start Docker
   - systemctl enable docker
