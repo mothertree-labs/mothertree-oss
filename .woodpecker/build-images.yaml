@@ -1,5 +1,7 @@
 when:
-  - event: [push, pull_request]
+  - event: pull_request
+  - event: push
+    branch: main
 
 depends_on:
   - validate

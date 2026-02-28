@@ -1,5 +1,10 @@
+depends_on:
+  - e2e-setup
+
 when:
-  - event: [push, pull_request]
+  - event: pull_request
+  - event: push
+    branch: main
 
 clone:
   - name: clone
@@ -11,7 +16,7 @@ steps:
   - name: e2e-tests
     image: bash
     environment:
-      E2E_SHARD: "2/5"
+      E2E_SHARD: "2/10"
       E2E_BASE_DOMAIN:
         from_secret: e2e_base_domain
       E2E_TENANT:
