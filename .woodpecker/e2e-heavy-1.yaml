@@ -16,8 +16,7 @@ steps:
   - name: e2e-tests
     image: bash
     environment:
-      E2E_SHARD: "5/10"
-      E2E_GREP_INVERT: "@heavy"
+      E2E_GREP: "@heavy1"
       E2E_BASE_DOMAIN:
         from_secret: e2e_base_domain
       E2E_TENANT:

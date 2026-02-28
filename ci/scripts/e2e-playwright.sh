@@ -20,10 +20,18 @@ npm ci --ignore-scripts
 # Only download the Chromium browser binary if not already cached.
 npx playwright install chromium
 
-SHARD_ARG=""
+EXTRA_ARGS=()
 if [[ -n "${E2E_SHARD:-}" ]]; then
-  SHARD_ARG="--shard=${E2E_SHARD}"
+  EXTRA_ARGS+=("--shard=${E2E_SHARD}")
   echo "Running shard ${E2E_SHARD}"
 fi
+if [[ -n "${E2E_GREP:-}" ]]; then
+  EXTRA_ARGS+=("--grep" "${E2E_GREP}")
+  echo "Grep: ${E2E_GREP}"
+fi
+if [[ -n "${E2E_GREP_INVERT:-}" ]]; then
+  EXTRA_ARGS+=("--grep-invert" "${E2E_GREP_INVERT}")
+  echo "Grep invert: ${E2E_GREP_INVERT}"
+fi
 
-npx playwright test --project=ci ${SHARD_ARG}
+npx playwright test --project=ci "${EXTRA_ARGS[@]}"
