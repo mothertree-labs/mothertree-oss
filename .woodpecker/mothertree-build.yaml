@@ -29,6 +29,6 @@ steps:
       - echo ""
       - echo "====================================="
       - echo "  All checks passed!"
-      - echo "  Total build time: ${minutes}m ${seconds}s"
+      - 'echo "  Total build time: ${minutes}m ${seconds}s"'
       - echo "====================================="
       - echo ""
