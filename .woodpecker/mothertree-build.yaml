@@ -23,12 +23,4 @@ steps:
   - name: complete
     image: bash
     commands:
-      - elapsed=$(( $(date +%s) - CI_PIPELINE_CREATED ))
-      - minutes=$((elapsed / 60))
-      - seconds=$((elapsed % 60))
-      - echo ""
-      - echo "====================================="
-      - echo "  All checks passed!"
-      - 'echo "  Total build time: ${minutes}m ${seconds}s"'
-      - echo "====================================="
-      - echo ""
+      - 'elapsed=$(( $(date +%s) - CI_PIPELINE_CREATED )); echo ""; echo "====================================="; echo "  All checks passed!"; echo "  Total build time: $((elapsed / 60))m $((elapsed % 60))s"; echo "====================================="; echo ""'
