@@ -26,6 +26,14 @@ steps:
       - ci/scripts/helmfile-lint.sh
     depends_on: []
 
+  - name: version-check
+    image: bash
+    commands:
+      - ci/scripts/version-check.sh
+    depends_on: []
+
+  # npm steps must be sequential — they share the workspace and
+  # concurrent npm ci in the same directory corrupts node_modules.
   - name: npm-check
     image: bash
     commands:
@@ -35,17 +43,11 @@ steps:
   - name: account-portal-tests
     image: bash
     commands:
-      - cd apps/account-portal && npm ci --ignore-scripts && npm test
-    depends_on: []
+      - cd apps/account-portal && npm test
+    depends_on: [npm-check]
 
   - name: admin-portal-tests
     image: bash
     commands:
       - ci/scripts/admin-portal-test.sh
-    depends_on: []
-
-  - name: version-check
-    image: bash
-    commands:
-      - ci/scripts/version-check.sh
-    depends_on: []
+    depends_on: [npm-check]

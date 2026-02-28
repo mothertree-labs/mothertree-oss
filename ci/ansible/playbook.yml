@@ -183,9 +183,11 @@
       no_log: true
 
     # ── Tools ──────────────────────────────────────────────────────
-    - name: Install ShellCheck
+    - name: Install ShellCheck and git-lfs
       ansible.builtin.apt:
-        name: shellcheck
+        name:
+          - shellcheck
+          - git-lfs
         state: present
 
     - name: Install Node.js 20 apt key

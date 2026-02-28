@@ -4,5 +4,5 @@ set -euo pipefail
 echo "--- :jest: Admin Portal tests"
 
 cd apps/admin-portal
-npm ci --ignore-scripts
+# Dependencies are already installed by the npm-check step
 npm test
