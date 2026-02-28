@@ -24,11 +24,19 @@ spec:
       containers:
         - image: redis:8
           name: redis
+          command: ["redis-server"]
+          args:
+            - "--maxmemory"
+            - "896mb"
+            - "--maxmemory-policy"
+            - "allkeys-lru"
+            - "--save"
+            - ""
           resources:
             requests:
               cpu: 10m
-              memory: 64Mi
+              memory: 128Mi
             limits:
               cpu: 200m
-              memory: 128Mi
+              memory: 1024Mi
       restartPolicy: Always
