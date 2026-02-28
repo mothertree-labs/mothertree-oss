@@ -1,0 +1,16 @@
+when:
+  - event: [push, pull_request]
+
+clone:
+  - name: clone
+    image: woodpeckerci/plugin-git
+    settings:
+      recursive: false
+
+steps:
+  - name: e2e-setup
+    image: bash
+    environment:
+      CI: "true"
+    commands:
+      - ci/scripts/e2e-setup.sh
