@@ -12,7 +12,7 @@ fi
 
 # Use the shared browser cache populated by the e2e-setup pipeline.
 # If browsers are already present, playwright install is a no-op.
-export PLAYWRIGHT_BROWSERS_PATH=/var/cache/playwright
+export PLAYWRIGHT_BROWSERS_PATH=/tmp/playwright-browsers
 
 cd e2e
 npm ci --ignore-scripts

@@ -3,10 +3,10 @@ set -euo pipefail
 
 echo "--- :playwright: E2E Setup (npm ci + Chromium)"
 
-# Woodpecker local backend gives each pipeline its own temp dir, so the
-# default ~/.cache/ms-playwright path is not shared between pipelines.
-# Use a persistent host path so shards can reuse the downloaded browsers.
-export PLAYWRIGHT_BROWSERS_PATH=/var/cache/playwright
+# Woodpecker local backend gives each pipeline its own temp dir (and HOME),
+# so the default ~/.cache/ms-playwright is not shared between pipelines.
+# Use a fixed path under /tmp so shards can reuse the downloaded browsers.
+export PLAYWRIGHT_BROWSERS_PATH=/tmp/playwright-browsers
 mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
 
 cd e2e
