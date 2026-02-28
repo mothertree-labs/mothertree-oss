@@ -1,6 +1,11 @@
 when:
   - event: [push, pull_request]
 
+clone:
+  - name: clone
+    settings:
+      recursive: false
+
 steps:
   - name: e2e-tests
     image: bash

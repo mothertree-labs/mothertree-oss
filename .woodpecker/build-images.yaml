@@ -4,6 +4,11 @@ when:
 depends_on:
   - validate
 
+clone:
+  - name: clone
+    settings:
+      recursive: false
+
 steps:
   - name: build-admin-portal
     image: bash
