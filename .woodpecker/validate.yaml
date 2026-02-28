@@ -43,7 +43,9 @@ steps:
   - name: account-portal-tests
     image: bash
     commands:
-      - cd apps/account-portal && npm test
+      - cd apps/account-portal
+      - "[ -d node_modules ] || npm ci --ignore-scripts"
+      - npm test
     depends_on: [npm-check]
 
   - name: admin-portal-tests
