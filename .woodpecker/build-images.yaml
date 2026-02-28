@@ -6,6 +6,7 @@ depends_on:
 
 clone:
   - name: clone
+    image: woodpeckerci/plugin-git
     settings:
       recursive: false
 
