@@ -10,10 +10,14 @@ if [[ -z "${E2E_BASE_DOMAIN:-}" || -z "${E2E_TENANT:-}" ]]; then
   exit 0
 fi
 
+# Use the shared browser cache populated by the e2e-setup pipeline.
+# If browsers are already present, playwright install is a no-op.
+export PLAYWRIGHT_BROWSERS_PATH=/var/cache/playwright
+
 cd e2e
 npm ci --ignore-scripts
 # System deps (libnss3, libatk, etc.) are pre-installed by Ansible.
-# Only download the Chromium browser binary here.
+# Only download the Chromium browser binary if not already cached.
 npx playwright install chromium
 
 SHARD_ARG=""
