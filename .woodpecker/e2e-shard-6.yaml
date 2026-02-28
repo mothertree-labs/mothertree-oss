@@ -16,7 +16,7 @@ steps:
   - name: e2e-tests
     image: bash
     environment:
-      E2E_SHARD: "3/10"
+      E2E_SHARD: "6/10"
       E2E_BASE_DOMAIN:
         from_secret: e2e_base_domain
       E2E_TENANT:
