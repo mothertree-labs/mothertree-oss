@@ -21,12 +21,6 @@ steps:
         from_secret: e2e_base_domain
       E2E_TENANT:
         from_secret: e2e_tenant
-      E2E_STALWART_ADMIN_PASSWORD:
-        from_secret: e2e_stalwart_admin_password
-      E2E_STALWART_IMAP_HOST:
-        from_secret: e2e_stalwart_imap_host
-      E2E_STALWART_IMAP_PORT:
-        from_secret: e2e_stalwart_imap_port
       E2E_ECHO_GROUP_ADDRESS:
         from_secret: e2e_echo_group_address
       CI: "true"
