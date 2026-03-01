@@ -2,8 +2,6 @@
  * Stalwart Mail Server API client
  *
  * All operations use admin Basic auth via the admin API.
- * The self-service Bearer token API doesn't work when storage.directory = "oidc"
- * because OIDC creates virtual principals that can't manage internal directory secrets.
  */
 
 const STALWART_API_URL = process.env.STALWART_API_URL;
@@ -17,8 +15,23 @@ function getAdminAuth() {
 }
 
 /**
- * Ensure a user principal exists in Stalwart's internal directory.
- * Creates the principal if it doesn't exist (lazy provisioning).
+ * Reload Stalwart configuration and clear directory caches.
+ * Called after principal changes to ensure RCPT TO reflects current state.
+ */
+async function reloadConfig() {
+  const adminAuth = getAdminAuth();
+  const response = await fetch(`${STALWART_API_URL}/api/reload`, {
+    headers: { 'Authorization': adminAuth },
+  });
+  if (!response.ok) {
+    console.warn(`Stalwart: config reload returned ${response.status}`);
+  }
+}
+
+/**
+ * Ensure a user principal exists in Stalwart.
+ * Uses /api/principal/deploy which works with both OIDC and internal directories
+ * (unlike POST /api/principal which returns "unsupported" with OIDC directory).
  */
 async function ensureUserExists(email, name, quotaBytes) {
   const adminAuth = getAdminAuth();
@@ -27,8 +40,13 @@ async function ensureUserExists(email, name, quotaBytes) {
     headers: { 'Authorization': adminAuth },
   });
 
+  // Stalwart returns HTTP 200 for all responses, including errors.
+  // Must parse the body to check for {"error":"notFound"}.
   if (checkResponse.ok) {
-    return { created: false };
+    const checkData = await checkResponse.json();
+    if (!checkData.error) {
+      return { created: false };
+    }
   }
 
   console.log(`Stalwart: creating principal for ${email}`);
@@ -42,7 +60,7 @@ async function ensureUserExists(email, name, quotaBytes) {
   if (quotaBytes) {
     body.quota = quotaBytes;
   }
-  const createResponse = await fetch(`${STALWART_API_URL}/api/principal`, {
+  const createResponse = await fetch(`${STALWART_API_URL}/api/principal/deploy`, {
     method: 'POST',
     headers: {
       'Authorization': adminAuth,
@@ -59,6 +77,17 @@ async function ensureUserExists(email, name, quotaBytes) {
     const error = await createResponse.text();
     throw new Error(`Failed to create Stalwart principal: ${createResponse.status} ${error}`);
   }
+
+  const responseData = await createResponse.json();
+  if (responseData.error === 'fieldAlreadyExists') {
+    return { created: false };
+  }
+  if (responseData.error) {
+    throw new Error(`Stalwart principal creation failed: ${responseData.error} - ${responseData.details || 'no details'}`);
+  }
+
+  // Clear directory cache so RCPT TO picks up the new principal immediately
+  await reloadConfig();
 
   console.log(`Stalwart: principal ${email} created`);
   return { created: true };
