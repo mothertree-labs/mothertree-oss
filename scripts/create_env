@@ -912,6 +912,11 @@ else
   print_status "Calendar Automation: skipping (requires calendar_enabled=true, mail_enabled=true, files_enabled=true)"
 fi
 
+# Load platform release version (before portal deploys so RELEASE_VERSION is available to envsubst)
+source "${REPO_ROOT}/scripts/lib/release.sh"
+_mt_load_release_version
+print_status "Release version: $RELEASE_VERSION"
+
 # =============================================================================
 # Deploy Admin Portal (if enabled)
 # =============================================================================

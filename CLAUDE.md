@@ -120,7 +120,7 @@ mt_load_tenant_config
 
 ## Key Env Vars (set by config.sh)
 
-`MT_ENV`, `MT_TENANT`, `KUBECONFIG`, `NS_MATRIX`, `NS_FILES`, `NS_INGRESS`, `NS_AUTH`, `NS_DB`, `NS_MONITORING`, `MATRIX_HOST`, `JITSI_HOST`, `FILES_HOST`, `AUTH_HOST`, `TENANT_DOMAIN`, `TENANT_ENV_DNS_LABEL`, `INFRA_DOMAIN`, `PG_HOST`, `S3_CLUSTER`
+`MT_ENV`, `MT_TENANT`, `KUBECONFIG`, `NS_MATRIX`, `NS_FILES`, `NS_INGRESS`, `NS_AUTH`, `NS_DB`, `NS_MONITORING`, `MATRIX_HOST`, `JITSI_HOST`, `FILES_HOST`, `AUTH_HOST`, `TENANT_DOMAIN`, `TENANT_ENV_DNS_LABEL`, `INFRA_DOMAIN`, `PG_HOST`, `S3_CLUSTER`, `RELEASE_VERSION`
 
 ## Build/Test Commands
 
@@ -166,6 +166,17 @@ Never skip this step, even if the changes seem trivial.
 ## Troubleshooting
 
 - **`deploy_infra` fails with "Connection closed by UNKNOWN port 65535" for turn-server**: This means the SSH host key for the VPN tunnel IP in `~/.ssh/known_hosts` is stale (e.g., VPN server was rebuilt). The ProxyJump through the VPN fails host key verification, producing the misleading port 65535 error. **Fix**: `ssh-keygen -R <tunnel-ip>` (prod: `10.8.0.1`, dev: `10.9.0.1`), then re-run `deploy_infra`.
+
+## Release Versioning
+
+The platform has a root `VERSION` file (semver, e.g. `0.8.0`) and a deploy-time release string computed by `scripts/lib/release.sh`:
+
+- **Format**: `<version>-<short-hash>[-M]` — e.g. `0.8.0-ab292eb` (clean) or `0.8.0-ab292eb-M` (dirty/modified)
+- **Env var**: `RELEASE_VERSION` — exported by `_mt_load_release_version`, injected into portal containers
+- **Endpoint**: `GET /version` on admin and account portals — returns `{ version, environment }` (public, no auth)
+- **Changelog**: `CHANGELOG.md` in repo root, [Keep a Changelog](https://keepachangelog.com/) format
+
+To cut a release: update `VERSION`, add a `CHANGELOG.md` entry, commit, tag `v<version>`.
 
 ## Important Notes
 

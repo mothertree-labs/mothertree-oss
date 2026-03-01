@@ -125,6 +125,8 @@ spec:
                   name: account-portal-secrets
                   key: guest-provisioning-api-key
                   optional: true
+            - name: RELEASE_VERSION
+              value: "${RELEASE_VERSION}"
           resources:
             requests:
               memory: "64Mi"
