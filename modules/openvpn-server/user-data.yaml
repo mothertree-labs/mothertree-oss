@@ -350,6 +350,13 @@ runcmd:
   - ufw allow from ${vpn_network_cidr} to any port 80
   - ufw allow from ${vpn_network_cidr} to any port 443
   - ufw allow from ${vpn_network_cidr} to any port 53
+  # SMTP relay - K8s cluster nodes and VPN clients send outbound mail here
+  - ufw allow from 10.0.0.0/8 to any port 25 proto tcp
+  - ufw allow from 172.16.0.0/12 to any port 25 proto tcp
+  - ufw allow from 192.168.0.0/16 to any port 25 proto tcp
+  - ufw allow 25/tcp
+  # SOCKS5 proxy for Blackbox Exporter probes
+  - ufw allow from 192.168.0.0/16 to any port 1080 proto tcp
   - echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
   - sysctl -p
   # Add FORWARD rules for VPN traffic (must be before iptables-save)

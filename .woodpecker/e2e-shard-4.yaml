@@ -21,6 +21,8 @@ steps:
         from_secret: e2e_base_domain
       E2E_TENANT:
         from_secret: e2e_tenant
+      E2E_ECHO_GROUP_ADDRESS:
+        from_secret: e2e_echo_group_address
       CI: "true"
     commands:
       - ci/scripts/e2e-playwright.sh

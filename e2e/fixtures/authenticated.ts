@@ -13,6 +13,7 @@ type AuthFixtures = {
   adminPage: Page;
   memberPage: Page;
   emailTestPage: Page;
+  emailRecvPage: Page;
 };
 
 /**
@@ -42,6 +43,11 @@ const ROLE_PORTAL: Record<keyof typeof TEST_USERS, {
     validationSelector: 'h1:has-text("Welcome,")',
   },
   emailTest: {
+    loginUrl: `${urls.accountPortal}/auth/login`,
+    validationUrl: `${urls.accountPortal}/home`,
+    validationSelector: 'h1:has-text("Welcome,")',
+  },
+  emailRecv: {
     loginUrl: `${urls.accountPortal}/auth/login`,
     validationUrl: `${urls.accountPortal}/home`,
     validationSelector: 'h1:has-text("Welcome,")',
@@ -193,6 +199,12 @@ export const test = base.extend<AuthFixtures>({
 
   emailTestPage: async ({ context }, use) => {
     const page = await getAuthenticatedPage(context, 'emailTest');
+    await use(page);
+    await page.context().close();
+  },
+
+  emailRecvPage: async ({ context }, use) => {
+    const page = await getAuthenticatedPage(context, 'emailRecv');
     await use(page);
     await page.context().close();
   },
