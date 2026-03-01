@@ -19,6 +19,9 @@ RUN composer require --no-plugins --no-scripts \
     pear/http_request2:^2.6 \
     pear/net_sieve:~1.4.0
 
+# Install keyboard shortcuts plugin via Composer (uses Roundcube plugin-installer)
+RUN composer require joachimneu/keyboard_shortcuts:dev-master
+
 # Copy Kolab plugins from submodules (pre-patched with bearer token support)
 COPY submodules/roundcubemail-plugins-kolab/plugins/calendar /usr/src/roundcubemail/plugins/calendar
 COPY submodules/roundcubemail-plugins-kolab/plugins/libcalendaring /usr/src/roundcubemail/plugins/libcalendaring

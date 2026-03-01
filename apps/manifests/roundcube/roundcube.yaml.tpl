@@ -128,7 +128,8 @@ data:
         'calendar',
         'libcalendaring',
         'libkolab',
-        'mailvelope_client'
+        'mailvelope_client',
+        'keyboard_shortcuts'
     ];
 
     // markasjunk plugin - adds "Junk" / "Not Junk" toolbar buttons
