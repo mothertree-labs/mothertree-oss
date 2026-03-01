@@ -133,7 +133,9 @@ REALM="$TENANT_KEYCLOAK_REALM"
 
 cleanup() {
     kill $PF_PID 2>/dev/null || true
+    kill $STALWART_PF_PID 2>/dev/null || true
 }
+STALWART_PF_PID=""
 trap cleanup EXIT
 
 # Get admin credentials
@@ -191,6 +193,80 @@ assign_role() {
 }
 
 # ============================================================================
+# Helper: ensure Stalwart mail principal exists for a user
+# Uses /api/principal/deploy (works with OIDC directory mode).
+# ============================================================================
+ensure_stalwart_principal() {
+    local email="$1"
+    local display_name="${2:-$email}"
+
+    if [ -z "${STALWART_ADMIN_PASSWORD:-}" ]; then
+        print_warning "STALWART_ADMIN_PASSWORD not set — skipping Stalwart principal creation"
+        return 0
+    fi
+
+    # Start port-forward to Stalwart if not already running
+    if [ -z "$STALWART_PF_PID" ] || ! kill -0 "$STALWART_PF_PID" 2>/dev/null; then
+        print_status "Setting up port-forward to Stalwart service..."
+        kubectl -n "$NS_STALWART" port-forward svc/stalwart 8090:8080 > /tmp/stalwart-pf.log 2>&1 &
+        STALWART_PF_PID=$!
+        sleep 3
+    fi
+
+    local stalwart_url="http://localhost:8090"
+    local admin_auth
+    admin_auth="Basic $(printf 'admin:%s' "$STALWART_ADMIN_PASSWORD" | base64)"
+
+    # Use username (without domain) as the principal name to match what Stalwart's
+    # OIDC auto-provisioner creates (uses preferred_username from the token).
+    local principal_name="${email%%@*}"
+
+    # Check if principal already exists (by username, not full email)
+    local check_body
+    check_body=$(curl -s "$stalwart_url/api/principal/$principal_name" \
+      -H "Authorization: $admin_auth")
+
+    if echo "$check_body" | jq -e '.error' > /dev/null 2>&1; then
+        # Principal doesn't exist (error = "notFound") or other error — try to create
+        :
+    else
+        print_status "Stalwart principal already exists for $principal_name"
+        return 0
+    fi
+
+    # Create principal via /api/principal/deploy
+    local deploy_body
+    deploy_body=$(jq -n \
+      --arg name "$principal_name" \
+      --arg email "$email" \
+      --arg desc "$display_name" \
+      '{type: "individual", name: $name, emails: [$email], description: $desc, secrets: []}')
+
+    local response
+    response=$(curl -s -X POST "$stalwart_url/api/principal/deploy" \
+      -H "Authorization: $admin_auth" \
+      -H "Content-Type: application/json" \
+      -d "$deploy_body")
+
+    local error
+    error=$(echo "$response" | jq -r '.error // empty')
+    if [ -n "$error" ]; then
+        if [ "$error" = "fieldAlreadyExists" ]; then
+            print_status "Stalwart principal already exists for $email"
+            return 0
+        fi
+        print_warning "Stalwart principal creation returned: $error"
+        return 0
+    fi
+
+    # Reload config so RCPT TO picks up the new principal immediately
+    curl -s -X GET "$stalwart_url/api/reload" \
+      -H "Authorization: $admin_auth" > /dev/null 2>&1
+
+    print_success "Created Stalwart mail principal for $email"
+}
+
+# ============================================================================
 # Commands
 # ============================================================================
 
@@ -212,6 +288,8 @@ cmd_create() {
     if [ -n "$EXISTING" ]; then
         print_warning "User '$USERNAME' already exists (ID: $EXISTING)"
         print_status "Use 'reset-password' to change their password"
+        # Still ensure Stalwart principal exists (may be missing for pre-existing users)
+        ensure_stalwart_principal "$email" "$USERNAME Test"
         return 0
     fi
 
@@ -277,6 +355,9 @@ USERJSON
     if $ADMIN_FLAG; then
         assign_role "$USER_ID" "tenant-admin"
     fi
+
+    # Create Stalwart mail principal so the user can receive email immediately
+    ensure_stalwart_principal "$email" "$USERNAME Test"
 
     echo ""
     print_success "Test user ready!"

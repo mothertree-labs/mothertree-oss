@@ -11,73 +11,97 @@ const config = fs.existsSync(configPath)
   ? JSON.parse(fs.readFileSync(configPath, 'utf-8'))
   : {};
 
-const echoGroupAddress = config.echoGroupAddress;
+const echoGroupAddress = process.env.E2E_ECHO_GROUP_ADDRESS || config.echoGroupAddress;
+
+/**
+ * Helper: log into Roundcube via OIDC for the given page/user.
+ * Triggers the OIDC flow directly, handles Keycloak login if no SSO session.
+ */
+async function roundcubeLogin(page: import('@playwright/test').Page, username: string, password: string) {
+  await page.goto(`${urls.webmail}/?_task=login&_action=oauth`);
+  await page.waitForLoadState('networkidle');
+
+  // Check hostname (not full URL) — the OIDC callback URL contains 'auth.' in
+  // query params (iss=https://auth.../realms/...) which would false-positive.
+  const onKeycloak = new URL(page.url()).hostname.startsWith('auth.');
+  if (onKeycloak) {
+    await keycloakLogin(page, username, password);
+    await page.waitForLoadState('networkidle');
+  }
+
+  await page.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
+}
 
 test.describe('Email — Round-Trip via Echo Group', () => {
   test.skip(!echoGroupAddress, 'Skipped: echoGroupAddress not configured in e2e.config.json');
 
-  test('send email to echo group and receive bounce-back', async ({ emailTestPage: page }) => {
-    const user = TEST_USERS.emailTest;
+  // This test verifies the full email path: outbound (Roundcube → Stalwart → Postfix → internet)
+  // and inbound (internet → Postfix → Stalwart → inbox). It sends from one user (e2e-mailrt)
+  // to an external echo group, which forwards to a different user (e2e-mailrcv) who is a
+  // member of the group. Using two users avoids Stalwart's duplicate message detection
+  // (same Message-ID in sender's Sent folder vs. the forwarded copy).
+  test('send email to echo group and verify delivery to group member', async ({
+    emailTestPage: senderPage,
+    emailRecvPage: receiverPage,
+  }) => {
+    test.setTimeout(40_000); // Email round-trip through external echo group needs extra time
 
-    // Navigate to Roundcube
-    await page.goto(urls.webmail);
-    await page.waitForLoadState('networkidle');
+    const sender = TEST_USERS.emailTest;
+    const receiver = TEST_USERS.emailRecv;
 
-    if (page.url().includes('auth.')) {
-      await keycloakLogin(page, user.username, user.password);
-      await page.waitForLoadState('networkidle');
-    }
+    // ── Step 1: Sender logs into Roundcube and sends email to the echo group ──
+    await roundcubeLogin(senderPage, sender.username, sender.password);
 
-    // Wait for Roundcube inbox to load
-    await page.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
+    await senderPage.getByRole('button', { name: 'Compose' }).click();
+    const subjectInput = senderPage.getByRole('textbox', { name: 'Subject' });
+    await subjectInput.waitFor({ timeout: 15_000 });
 
-    // Click compose
-    await page.locator('a.compose, [data-command="compose"], .button.compose').first().click();
-    await page.waitForSelector('input[name="_to"], #compose-to', { timeout: 15_000 });
+    const toInput = senderPage.locator('.recipient-input input').first();
+    await toInput.click();
+    await toInput.pressSequentially(echoGroupAddress);
+    await toInput.press('Enter');
 
-    // Fill compose form
     const subject = `E2E Round-Trip Test ${Date.now()}`;
-    await page.locator('input[name="_to"], #compose-to').first().fill(echoGroupAddress);
-    await page.locator('input[name="_subject"], #compose-subject').first().fill(subject);
+    await subjectInput.fill(subject);
 
-    // Type message body in the editor
-    const bodyFrame = page.frameLocator('iframe[name="composebody"], iframe.mce-edit-area');
-    const bodyInput = page.locator('textarea[name="_message"], #composebody');
-    if (await bodyInput.isVisible()) {
-      await bodyInput.fill('E2E round-trip test message');
-    } else {
-      await bodyFrame.locator('body').fill('E2E round-trip test message');
-    }
+    const bodyFrame = senderPage.frameLocator('iframe').first();
+    await bodyFrame.locator('body').fill('E2E round-trip test message');
 
-    // Send the email
-    await page.locator('a.send, [data-command="send"], .button.send').first().click();
+    await senderPage.getByRole('button', { name: 'Send' }).click();
 
-    // Wait for send confirmation and return to inbox
-    await page.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
+    // Wait for send to complete (returns to inbox)
+    await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
 
-    // Poll inbox for the echo response (up to 2 minutes)
+    // ── Step 2: Receiver logs into Roundcube and polls for the forwarded email ──
+    await roundcubeLogin(receiverPage, receiver.username, receiver.password);
+
     const maxWait = 120_000;
     const pollInterval = 5_000;
     let found = false;
     const start = Date.now();
 
     while (Date.now() - start < maxWait) {
-      // Refresh the inbox
-      await page.locator('a.refresh, [data-command="checkmail"], .button.refresh').first().click();
-      await page.waitForTimeout(2000);
+      // Refresh inbox
+      const refreshed = await receiverPage.getByRole('button', { name: /refresh|check/i }).first()
+        .click({ timeout: 3000 }).then(() => true).catch(() => false);
+      if (!refreshed) {
+        await receiverPage.reload();
+        await receiverPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 15_000 });
+      }
+      await receiverPage.waitForTimeout(2000);
 
-      // Check if the echoed email appears in the message list
-      const messageList = page.locator('#messagelist');
-      const hasSubject = await messageList.locator(`text=${subject}`).isVisible().catch(() => false);
+      // Check if the email appears in the message list
+      const hasSubject = await receiverPage.locator(`td:has-text("${subject}")`).first()
+        .isVisible().catch(() => false);
 
       if (hasSubject) {
         found = true;
         break;
       }
 
-      await page.waitForTimeout(pollInterval);
+      await receiverPage.waitForTimeout(pollInterval);
     }
 
-    expect(found).toBe(true);
+    expect(found, `Expected email with subject "${subject}" to appear in receiver's inbox within ${maxWait / 1000}s`).toBe(true);
   });
 });

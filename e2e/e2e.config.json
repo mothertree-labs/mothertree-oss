@@ -1,4 +1,5 @@
 {
   "echoGroupAddress": "",
-  "emailTestUser": "e2e-email-test1"
+  "emailSendUser": "e2e-mailrt",
+  "emailRecvUser": "e2e-mailrcv"
 }

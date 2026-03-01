@@ -17,9 +17,15 @@ export const TEST_USERS = {
     email: `e2e-member@${baseDomain}`,
   },
   emailTest: {
-    username: 'e2e-email-test1',
-    password: 'e2e-testpass-email',
-    email: `e2e-email-test1@${baseDomain}`,
+    username: 'e2e-mailrt',
+    password: 'e2e-testpass-mailrt',
+    email: `e2e-mailrt@${baseDomain}`,
+  },
+  /** Receiver for email round-trip test — member of the echo group. */
+  emailRecv: {
+    username: 'e2e-mailrcv',
+    password: 'e2e-testpass-mailrcv',
+    email: `e2e-mailrcv@${baseDomain}`,
   },
 } as const;
 

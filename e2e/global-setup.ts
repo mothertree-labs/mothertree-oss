@@ -16,7 +16,8 @@ interface TestUser {
 const TEST_USERS: TestUser[] = [
   { username: 'e2e-admin', password: 'e2e-testpass-admin', admin: true },
   { username: 'e2e-member', password: 'e2e-testpass-member' },
-  { username: 'e2e-email-test1', password: 'e2e-testpass-email' },
+  { username: 'e2e-mailrt', password: 'e2e-testpass-mailrt' },
+  { username: 'e2e-mailrcv', password: 'e2e-testpass-mailrcv' },
 ];
 
 function run(cmd: string): string {
