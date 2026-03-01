@@ -38,6 +38,11 @@ spec:
         env:
         - name: KEYCLOAK_ORIGIN
           value: "https://${AUTH_HOST}"
+        # Internal URL for server-to-server calls (code→token exchange).
+        # Bypasses the external ingress which requires PROXY protocol headers
+        # that in-cluster pods don't send, causing ECONNRESET.
+        - name: KEYCLOAK_ORIGIN_INTERNAL
+          value: "http://keycloak-keycloakx-http.infra-auth.svc.cluster.local"
         - name: KEYCLOAK_REALM
           value: "${TENANT_KEYCLOAK_REALM}"
         - name: KEYCLOAK_CLIENT_ID
