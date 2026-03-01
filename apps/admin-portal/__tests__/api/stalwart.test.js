@@ -52,18 +52,20 @@ describe('ensureUserExists', () => {
   test('creates user when not found and returns created:true', async () => {
     const stalwart = getStalwart();
 
-    // Check user - 404
-    fetchMock.mockResolvedValueOnce(mockResponse('Not Found', { status: 404 }));
-    // Create user - 200
+    // Check user - 200 with {"error":"notFound"} (Stalwart returns 200 for all responses)
+    fetchMock.mockResolvedValueOnce(mockResponse({ error: 'notFound', item: 'new@test.com' }));
+    // Create user - 200 (no error in body)
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: { id: 1 } }));
+    // Reload config (cache clear)
     fetchMock.mockResolvedValueOnce(mockResponse({ data: {} }));
 
     const result = await stalwart.ensureUserExists('new@test.com', 'New User', 1073741824);
 
     expect(result.created).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
 
     const createCall = fetchMock.mock.calls[1];
-    expect(createCall[0]).toBe(`${STALWART_URL}/api/principal`);
+    expect(createCall[0]).toBe(`${STALWART_URL}/api/principal/deploy`);
     expect(createCall[1].method).toBe('POST');
 
     const body = JSON.parse(createCall[1].body);
@@ -72,22 +74,35 @@ describe('ensureUserExists', () => {
     expect(body.emails).toEqual(['new@test.com']);
     expect(body.description).toBe('New User');
     expect(body.quota).toBe(1073741824);
+
+    // Verify reload was called
+    expect(fetchMock.mock.calls[2][0]).toBe(`${STALWART_URL}/api/reload`);
   });
 
   test('returns created:false on 409 conflict (race condition)', async () => {
     const stalwart = getStalwart();
 
-    fetchMock.mockResolvedValueOnce(mockResponse('Not Found', { status: 404 }));
+    fetchMock.mockResolvedValueOnce(mockResponse({ error: 'notFound', item: 'race@test.com' }));
     fetchMock.mockResolvedValueOnce(mockResponse('Conflict', { status: 409 }));
 
     const result = await stalwart.ensureUserExists('race@test.com', 'Race User', 0);
     expect(result.created).toBe(false);
   });
 
+  test('returns created:false when deploy endpoint returns fieldAlreadyExists', async () => {
+    const stalwart = getStalwart();
+
+    fetchMock.mockResolvedValueOnce(mockResponse({ error: 'notFound', item: 'exists@test.com' }));
+    fetchMock.mockResolvedValueOnce(mockResponse({ error: 'fieldAlreadyExists' }));
+
+    const result = await stalwart.ensureUserExists('exists@test.com', 'Existing User', 0);
+    expect(result.created).toBe(false);
+  });
+
   test('throws on create failure (non-409)', async () => {
     const stalwart = getStalwart();
 
-    fetchMock.mockResolvedValueOnce(mockResponse('Not Found', { status: 404 }));
+    fetchMock.mockResolvedValueOnce(mockResponse({ error: 'notFound', item: 'fail@test.com' }));
     fetchMock.mockResolvedValueOnce(mockResponse('Internal Error', { status: 500 }));
 
     await expect(stalwart.ensureUserExists('fail@test.com', 'Fail User', 0))
@@ -97,13 +112,27 @@ describe('ensureUserExists', () => {
   test('omits quota field when quotaBytes is 0/falsy', async () => {
     const stalwart = getStalwart();
 
-    fetchMock.mockResolvedValueOnce(mockResponse('Not Found', { status: 404 }));
-    fetchMock.mockResolvedValueOnce(mockResponse({ data: {} }));
+    fetchMock.mockResolvedValueOnce(mockResponse({ error: 'notFound', item: 'noq@test.com' }));
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: { id: 2 } }));
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: {} })); // reload
 
     await stalwart.ensureUserExists('noq@test.com', 'No Quota', 0);
 
     const body = JSON.parse(fetchMock.mock.calls[1][1].body);
     expect(body.quota).toBeUndefined();
+  });
+
+  test('throws when API returns unsupported error (OIDC directory mode)', async () => {
+    const stalwart = getStalwart();
+
+    fetchMock.mockResolvedValueOnce(mockResponse({ error: 'notFound', item: 'oidc@test.com' }));
+    fetchMock.mockResolvedValueOnce(mockResponse({
+      error: 'unsupported',
+      details: 'OpenID directory cannot be managed.',
+    }));
+
+    await expect(stalwart.ensureUserExists('oidc@test.com', 'OIDC User', 0))
+      .rejects.toThrow('Stalwart principal creation failed: unsupported');
   });
 
   test('throws when Stalwart API is not configured', () => {

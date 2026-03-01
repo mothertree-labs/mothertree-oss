@@ -47,16 +47,19 @@ describe('stalwart.js', () => {
 
     it('creates user when they do not exist', async () => {
       global.fetch
-        // Check returns 404
-        .mockResolvedValueOnce(mockResponse(404, 'Not Found'))
-        // Create returns 201
-        .mockResolvedValueOnce(mockResponse(201, ''));
+        // Check user - 200 with {"error":"notFound"} (Stalwart returns 200 for all responses)
+        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'bob@example.com' }))
+        // Create user - 200 (no error in body)
+        .mockResolvedValueOnce(mockResponse(200, { data: { id: 1 } }))
+        // Reload config (cache clear)
+        .mockResolvedValueOnce(mockResponse(200, { data: {} }));
 
       const result = await stalwart.ensureUserExists('bob@example.com', 'Bob', 1073741824);
       expect(result).toEqual({ created: true });
 
       // Verify the POST body
       const createCall = global.fetch.mock.calls[1];
+      expect(createCall[0]).toContain('/api/principal/deploy');
       expect(createCall[1].method).toBe('POST');
       const body = JSON.parse(createCall[1].body);
       expect(body.type).toBe('individual');
@@ -67,8 +70,9 @@ describe('stalwart.js', () => {
 
     it('creates user without quota when not specified', async () => {
       global.fetch
-        .mockResolvedValueOnce(mockResponse(404, 'Not Found'))
-        .mockResolvedValueOnce(mockResponse(201, ''));
+        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'user@example.com' }))
+        .mockResolvedValueOnce(mockResponse(200, { data: { id: 2 } }))
+        .mockResolvedValueOnce(mockResponse(200, { data: {} })); // reload
 
       await stalwart.ensureUserExists('user@example.com', 'User');
 
@@ -78,16 +82,25 @@ describe('stalwart.js', () => {
 
     it('returns { created: false } on 409 conflict during creation', async () => {
       global.fetch
-        .mockResolvedValueOnce(mockResponse(404, 'Not Found'))
+        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'user@example.com' }))
         .mockResolvedValueOnce(mockResponse(409, 'Conflict'));
 
       const result = await stalwart.ensureUserExists('user@example.com', 'User');
       expect(result).toEqual({ created: false });
     });
 
+    it('returns { created: false } when deploy endpoint returns fieldAlreadyExists', async () => {
+      global.fetch
+        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'exists@example.com' }))
+        .mockResolvedValueOnce(mockResponse(200, { error: 'fieldAlreadyExists' }));
+
+      const result = await stalwart.ensureUserExists('exists@example.com', 'Existing User');
+      expect(result).toEqual({ created: false });
+    });
+
     it('throws on non-409 creation failure', async () => {
       global.fetch
-        .mockResolvedValueOnce(mockResponse(404, 'Not Found'))
+        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'user@example.com' }))
         .mockResolvedValueOnce(mockResponse(500, 'Internal Server Error'));
 
       await expect(stalwart.ensureUserExists('user@example.com', 'User'))
@@ -96,13 +109,26 @@ describe('stalwart.js', () => {
 
     it('uses empty string for description when name is not provided', async () => {
       global.fetch
-        .mockResolvedValueOnce(mockResponse(404, ''))
-        .mockResolvedValueOnce(mockResponse(201, ''));
+        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'user@example.com' }))
+        .mockResolvedValueOnce(mockResponse(200, { data: { id: 3 } }))
+        .mockResolvedValueOnce(mockResponse(200, { data: {} })); // reload
 
       await stalwart.ensureUserExists('user@example.com');
 
       const body = JSON.parse(global.fetch.mock.calls[1][1].body);
       expect(body.description).toBe('');
+    });
+
+    it('throws when API returns unsupported error (OIDC directory mode)', async () => {
+      global.fetch
+        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'oidc@example.com' }))
+        .mockResolvedValueOnce(mockResponse(200, {
+          error: 'unsupported',
+          details: 'OpenID directory cannot be managed.',
+        }));
+
+      await expect(stalwart.ensureUserExists('oidc@example.com', 'OIDC User', 0))
+        .rejects.toThrow('Stalwart principal creation failed: unsupported');
     });
   });
 
