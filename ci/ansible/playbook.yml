@@ -119,6 +119,54 @@
         groups: docker
         append: true
 
+    - name: Ensure agent.conf is writable by woodpecker user
+      ansible.builtin.file:
+        path: /etc/woodpecker/agent.conf
+        state: touch
+        owner: woodpecker
+        group: woodpecker
+        mode: "0644"
+
+    - name: Pre-create shared Playwright browser cache with correct ownership
+      ansible.builtin.file:
+        path: /tmp/playwright-browsers
+        state: directory
+        owner: woodpecker
+        group: woodpecker
+        mode: "0755"
+
+    - name: Override agent systemd unit (add server dependency + auto-restart)
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=WoodpeckerCI agent
+          Documentation=https://woodpecker-ci.org/docs/administration/configuration/agent
+          Requires=network.target woodpecker-server.service
+          After=network.target woodpecker-server.service
+          ConditionFileNotEmpty=/etc/woodpecker/woodpecker-agent.env
+          ConditionPathExists=/etc/woodpecker/woodpecker-agent.env
+
+          [Service]
+          Type=simple
+          EnvironmentFile=/etc/woodpecker/woodpecker-agent.env
+          User=woodpecker
+          Group=woodpecker
+          ExecStart=/usr/local/bin/woodpecker-agent
+          WorkingDirectory=/var/lib/woodpecker/
+          StateDirectory=woodpecker
+          Restart=on-failure
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /usr/local/lib/systemd/system/woodpecker-agent.service
+        mode: "0644"
+      notify: Restart Woodpecker agent
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+
     - name: Enable and start Woodpecker server
       ansible.builtin.systemd:
         name: woodpecker-server
