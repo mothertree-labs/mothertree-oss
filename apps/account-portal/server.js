@@ -54,7 +54,7 @@ app.use(rateLimit({
   max: parseInt(process.env.RATE_LIMIT_MAX, 10) || 100,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.path === '/health',
+  skip: (req) => req.path === '/health' || req.path === '/version',
 }));
 
 // Policy URLs (configurable via environment variables)
@@ -911,6 +911,14 @@ app.post('/api/provision-guest', async (req, res) => {
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// Version endpoint (public, no auth)
+app.get('/version', (req, res) => {
+  res.json({
+    version: process.env.RELEASE_VERSION || 'unknown',
+    environment: process.env.NODE_ENV || 'development',
+  });
 });
 
 // Global error handler - catches unhandled errors like OIDC session failures
