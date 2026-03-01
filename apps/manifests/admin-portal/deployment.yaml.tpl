@@ -117,6 +117,8 @@ spec:
                   key: synapse-shared-secret
             - name: MATRIX_DOMAIN
               value: "${MATRIX_HOST}"
+            - name: RELEASE_VERSION
+              value: "${RELEASE_VERSION}"
           resources:
             requests:
               memory: "64Mi"
