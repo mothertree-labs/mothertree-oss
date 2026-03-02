@@ -674,6 +674,17 @@ additionalPrometheusRulesMap:
             for: 5m
             labels:
               severity: critical
+      - name: hpa-alerts
+        rules:
+          - alert: HPAMaxedOut
+            annotations:
+              summary: 'HPA {{ $labels.horizontalpodautoscaler }} in {{ $labels.namespace }} is at max replicas'
+              description: 'HPA {{ $labels.horizontalpodautoscaler }} in {{ $labels.namespace }} has been running at its maximum replica count for over 5 minutes. This may indicate the service needs more capacity or is in a crash loop.'
+            expr: |-
+              kube_horizontalpodautoscaler_status_current_replicas == kube_horizontalpodautoscaler_spec_max_replicas
+            for: 5m
+            labels:
+              severity: warning
 
 # Node exporter subchart resources — kube-prometheus-stack passes these via the subchart key
 prometheus-node-exporter:
