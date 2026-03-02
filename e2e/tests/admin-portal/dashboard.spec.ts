@@ -1,5 +1,6 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { selectors } from '../../helpers/selectors';
+import { TEST_USERS } from '../../helpers/test-users';
 
 test.describe('Admin Portal — Dashboard', () => {
   // The adminPage fixture already authenticates and navigates to admin portal.
@@ -11,8 +12,8 @@ test.describe('Admin Portal — Dashboard', () => {
     // Wait for the members list to load (replaces "Loading members...")
     await expect(page.locator(ap.membersList)).not.toContainText('Loading members...', { timeout: 10_000 });
 
-    // Should contain at least the e2e-admin user
-    await expect(page.locator(ap.membersList)).toContainText('e2e-admin');
+    // Should contain at least the admin test user
+    await expect(page.locator(ap.membersList)).toContainText(TEST_USERS.admin.username);
   });
 
   test('shows guests section', async ({ adminPage: page }) => {

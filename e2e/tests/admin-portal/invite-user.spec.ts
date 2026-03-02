@@ -1,5 +1,6 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { selectors } from '../../helpers/selectors';
+import { TEST_USERS } from '../../helpers/test-users';
 
 test.describe('Admin Portal — Invite User', () => {
   // The adminPage fixture already authenticates and navigates to admin portal.
@@ -52,7 +53,7 @@ test.describe('Admin Portal — Invite User', () => {
     // Try to invite with an existing username
     await page.fill(ap.firstNameInput, 'Duplicate');
     await page.fill(ap.lastNameInput, 'Test');
-    await page.fill(ap.emailUsernameInput, 'e2e-admin');
+    await page.fill(ap.emailUsernameInput, TEST_USERS.admin.username);
     await page.fill(ap.recoveryEmailInput, 'dup@example.com');
 
     await page.click(ap.inviteSubmitBtn);
