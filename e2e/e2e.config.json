@@ -1,4 +1,5 @@
 {
   "echoGroupAddress": "",
-  "calendarEnabled": true
+  "calendarEnabled": true,
+  "collaboraEnabled": true
 }
