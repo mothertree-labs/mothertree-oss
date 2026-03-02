@@ -14,4 +14,19 @@ php /var/www/html/occ config:app:set --type=string --value=0 user_oidc allow_mul
     echo "[before-starting] Warning: could not set allow_multiple_user_backends (user_oidc may not be installed yet)"
 }
 
+# Disable sharebymail to prevent unauthenticated public links via email shares (Issue #119).
+# The Bitnami image ships with sharebymail enabled by default, so pod restarts re-enable it.
+echo "[before-starting] Disabling sharebymail (prevents unauthenticated email share links)..."
+php /var/www/html/occ app:disable sharebymail 2>/dev/null || {
+    echo "[before-starting] Warning: could not disable sharebymail"
+}
+
+# Defense-in-depth: enforce share security policies on public link shares
+echo "[before-starting] Enforcing share security policies..."
+php /var/www/html/occ config:app:set core shareapi_enforce_links_password --value='yes' 2>/dev/null || true
+php /var/www/html/occ config:app:set core shareapi_default_expire_date --value='yes' 2>/dev/null || true
+php /var/www/html/occ config:app:set core shareapi_expire_after_n_days --value='30' 2>/dev/null || true
+php /var/www/html/occ config:app:set core shareapi_enforce_expire_date --value='yes' 2>/dev/null || true
+php /var/www/html/occ config:app:set core shareapi_default_permissions --value='1' 2>/dev/null || true
+
 echo "[before-starting] Done"

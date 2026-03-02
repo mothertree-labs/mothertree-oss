@@ -266,7 +266,24 @@ spec:
               echo "Enabling guest_bridge app..."
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable guest_bridge" 2>/dev/null || true
               echo "Guest bridge app enabled (API config set by deploy-nextcloud.sh)"
-              
+
+              # === Share Security Policies (Issue #119) ===
+              # Disable sharebymail to prevent unauthenticated public links when sharing
+              # with external email addresses. sharebymail sends a token-based URL that
+              # grants access without OIDC authentication, bypassing Keycloak identity.
+              # guest_bridge remains installed but dormant (no TYPE_EMAIL events fire).
+              echo "Disabling sharebymail app (prevents unauthenticated email share links)..."
+              kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:disable sharebymail" 2>/dev/null || true
+
+              # Defense-in-depth: enforce security policies on public link shares (TYPE_LINK)
+              echo "Configuring share security policies..."
+              kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_links_password --value='yes'"
+              kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set core shareapi_default_expire_date --value='yes'"
+              kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set core shareapi_expire_after_n_days --value='30'"
+              kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_expire_date --value='yes'"
+              kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:app:set core shareapi_default_permissions --value='1'"
+              echo "Share security policies configured"
+
               # Set default app to Files (skip dashboard splash screen)
               echo "Setting default app to Files..."
               kubectl exec -n "$POD_NAMESPACE" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set defaultapp --value='files'"
