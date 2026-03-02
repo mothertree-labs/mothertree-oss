@@ -98,8 +98,6 @@ spec:
           value: "8080"
         - name: LOG_LEVEL
           value: "info"
-        - name: NODE_TLS_REJECT_UNAUTHORIZED
-          value: "0"
         volumeMounts:
         - name: app
           mountPath: /app
