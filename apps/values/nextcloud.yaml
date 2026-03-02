@@ -31,10 +31,10 @@ externalDatabase:
 # Resource limits
 resources:
   requests:
-    cpu: 100m
+    cpu: 500m
     memory: 192Mi
   limits:
-    cpu: 1000m
+    cpu: 2000m
     memory: 2Gi
 
 # No PVC — use chart-default emptyDir for /var/www/html

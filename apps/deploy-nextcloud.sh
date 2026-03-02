@@ -1030,6 +1030,11 @@ else
     print_warning "Grafana dashboard configmap not found, skipping"
 fi
 
+# Step 11: Deploy HPA for auto-scaling
+print_status "Deploying HPA for Nextcloud..."
+envsubst '${NS_FILES} ${TENANT_NAME} ${NEXTCLOUD_MIN_REPLICAS} ${NEXTCLOUD_MAX_REPLICAS} ${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}' < "$REPO_ROOT/apps/manifests/nextcloud/nextcloud-hpa.yaml.tpl" | kubectl apply -f -
+print_success "Nextcloud HPA deployed (CPU 80% threshold, scaleDown window: ${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}s)"
+
 # Migration notice: old PVC
 if [ -n "${PVC_EXISTS:-}" ]; then
     echo ""
