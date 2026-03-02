@@ -9,6 +9,16 @@
 
 set -e
 
+# Run occ upgrade to reconcile app version mismatches between the filesystem
+# and database. This is critical for HPA scale-up: the custom-apps ConfigMap
+# may contain an older app version than what was auto-updated on the first pod.
+# Without this, Nextcloud returns 503 ("Update needed") because needUpgrade()
+# detects the mismatch. Safe to run when nothing needs upgrading (no-op).
+echo "[before-starting] Running occ upgrade (reconcile app versions)..."
+php /var/www/html/occ upgrade --no-interaction 2>/dev/null || {
+    echo "[before-starting] Warning: occ upgrade returned non-zero (may be first install)"
+}
+
 echo "[before-starting] Enforcing OIDC-only login (allow_multiple_user_backends=0)..."
 php /var/www/html/occ config:app:set --type=string --value=0 user_oidc allow_multiple_user_backends 2>/dev/null || {
     echo "[before-starting] Warning: could not set allow_multiple_user_backends (user_oidc may not be installed yet)"
