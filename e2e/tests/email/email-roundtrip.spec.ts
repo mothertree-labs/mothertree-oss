@@ -33,7 +33,9 @@ async function roundcubeLogin(page: import('@playwright/test').Page, username: s
 }
 
 test.describe('Email — Round-Trip via Echo Group', () => {
-  test.skip(!echoGroupAddress, 'Skipped: echoGroupAddress not configured in e2e.config.json');
+  test('echoGroupAddress must be configured', () => {
+    expect(echoGroupAddress, 'Set E2E_ECHO_GROUP_ADDRESS env var or echoGroupAddress in e2e.config.json').toBeTruthy();
+  });
 
   // This test verifies the full email path: outbound (Roundcube → Stalwart → Postfix → internet)
   // and inbound (internet → Postfix → Stalwart → inbox). It sends from one user (e2e-mailrt)
