@@ -43,14 +43,24 @@ mt_deploy_start "deploy-nextcloud"
 
 mt_require_commands kubectl helm envsubst openssl
 
-# Helper: get a running, non-terminating Nextcloud pod name.
-# During rolling updates or node failures, Terminating pods may linger in the
-# pod list.  {.items[0]} would pick the oldest (terminating) pod, causing every
-# subsequent `kubectl exec` to hang.  This helper filters them out.
+# Helper: get a running, non-terminating, Ready Nextcloud pod name.
+# During rolling updates or HPA scale-up, not-yet-ready pods may appear in the
+# pod list.  Picking one causes "container not found" errors because the
+# nextcloud container hasn't passed readiness yet.  This helper prefers a Ready
+# pod, falling back to any non-terminating pod if none are Ready yet.
 _get_nc_pod() {
-    kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud \
-        -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{"|"}{.metadata.name}{"\n"}{end}' 2>/dev/null \
-        | grep '^|' | head -1 | cut -d'|' -f2 || true
+    local pods
+    pods=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud \
+        -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+    # Prefer Ready pods (no deletionTimestamp, Ready=True)
+    local ready_pod
+    ready_pod=$(echo "$pods" | grep '^|True|' | head -1 | cut -d'|' -f3)
+    if [ -n "$ready_pod" ]; then
+        echo "$ready_pod"
+        return
+    fi
+    # Fall back to any non-terminating pod
+    echo "$pods" | grep '^|' | head -1 | cut -d'|' -f3 || true
 }
 
 print_status "Starting Nextcloud deployment for environment: $MT_ENV"
