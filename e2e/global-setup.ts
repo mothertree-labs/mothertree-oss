@@ -1,23 +1,19 @@
 import { execSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import { TEST_USERS } from './helpers/test-users';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'dev-test-users.sh');
 const TENANT = process.env.E2E_TENANT || 'example';
 const IS_CI = !!process.env.CI;
 
-interface TestUser {
-  username: string;
-  password: string;
-  admin?: boolean;
-}
-
-const TEST_USERS: TestUser[] = [
-  { username: 'e2e-admin', password: 'e2e-testpass-admin', admin: true },
-  { username: 'e2e-member', password: 'e2e-testpass-member' },
-  { username: 'e2e-mailrt', password: 'e2e-testpass-mailrt' },
-  { username: 'e2e-mailrcv', password: 'e2e-testpass-mailrcv' },
+/** Local users to create/reset during setup (derived from TEST_USERS). */
+const LOCAL_USERS = [
+  { username: TEST_USERS.admin.username, password: TEST_USERS.admin.password, admin: true },
+  { username: TEST_USERS.member.username, password: TEST_USERS.member.password },
+  { username: TEST_USERS.emailTest.username, password: TEST_USERS.emailTest.password },
+  { username: TEST_USERS.emailRecv.username, password: TEST_USERS.emailRecv.password },
 ];
 
 function run(cmd: string): string {
@@ -75,7 +71,7 @@ export default async function globalSetup(): Promise<void> {
   // only deletes users this run created — not permanent CI users.
   const createdUsers: string[] = [];
 
-  for (const user of TEST_USERS) {
+  for (const user of LOCAL_USERS) {
     const adminFlag = user.admin ? ' --admin' : '';
     try {
       run(
