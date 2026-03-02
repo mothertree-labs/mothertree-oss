@@ -26,7 +26,14 @@ async function handleNextcloudLogin(page: Page): Promise<void> {
   if (onNativeLogin) {
     // Trigger OIDC flow — navigate to the user_oidc login endpoint,
     // which redirects to Keycloak. The existing SSO session should auto-complete.
-    await page.goto(`${urls.files}/apps/user_oidc/login/1`);
+    // Use a timeout since this can hang when Nextcloud can't reach Keycloak.
+    const oidcResponse = await page.goto(`${urls.files}/apps/user_oidc/login/1`, { timeout: 30_000 }).catch(() => null);
+
+    if (!oidcResponse) {
+      // OIDC endpoint timed out — Nextcloud can't reach Keycloak, nothing we can do
+      return;
+    }
+
     await page.waitForLoadState('networkidle').catch(() => {});
 
     // If Keycloak session expired, we'll land on the Keycloak login page
