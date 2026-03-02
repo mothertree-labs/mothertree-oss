@@ -74,6 +74,14 @@ kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=keycloakx -n "$
 print_success "Keycloak pod is ready (readiness probe passed)"
 
 # Access Keycloak via service using port-forward (simplest way to access from outside cluster)
+# Kill any stale port-forward on 8080 from a previous failed run, otherwise the new
+# port-forward silently fails and the script uses a flaky/dead connection.
+STALE_PF=$(lsof -ti:8080 2>/dev/null || true)
+if [ -n "$STALE_PF" ]; then
+    print_status "Killing stale port-forward on port 8080 (PID: $STALE_PF)..."
+    kill $STALE_PF 2>/dev/null || true
+    sleep 1
+fi
 print_status "Setting up port-forward to Keycloak service..."
 kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http 8080:80 > /tmp/keycloak-pf.log 2>&1 &
 PF_PID=$!
