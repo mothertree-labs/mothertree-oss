@@ -30,6 +30,7 @@ metadata:
 type: Opaque
 stringData:
   STALWART_ADMIN_PASSWORD: "${STALWART_ADMIN_PASSWORD}"
+  STALWART_MASTER_SECRET: "${STALWART_MASTER_SECRET}"
   STALWART_DB_PASSWORD: "${STALWART_DB_PASSWORD}"
   STALWART_OIDC_SECRET: "${STALWART_OIDC_SECRET}"
   S3_ACCESS_KEY: "${S3_MAIL_ACCESS_KEY}"
@@ -205,6 +206,10 @@ data:
     [authentication]
     fallback-admin.user = "admin"
     fallback-admin.secret = "%{env:STALWART_ADMIN_PASSWORD}%"
+    # Master-user auth for mailbox impersonation (used by calendar-automation)
+    # Login as "user@domain%master" with admin password to access any user's mailbox
+    master.user = "master"
+    master.secret = "%{env:STALWART_MASTER_SECRET}%"
     
     # OIDC authentication via Keycloak
     [oauth]
@@ -264,7 +269,7 @@ data:
     # See: https://stalw.art/docs/configuration/overview/#local-and-database-settings
     [config]
     local-keys = ["store.*", "directory.*", "tracer.*", "!server.blocked-ip.*",
-                  "server.*", "authentication.fallback-admin.*",
+                  "server.*", "authentication.fallback-admin.*", "authentication.master.*",
                   "cluster.*", "config.local-keys.*", "storage.data", "storage.blob",
                   "storage.lookup", "storage.fts", "storage.directory", "certificate.*",
                   "session.rcpt.*", "queue.strategy.*", "queue.route.*", "oauth.*",
@@ -334,6 +339,11 @@ spec:
             secretKeyRef:
               name: stalwart-secrets
               key: STALWART_ADMIN_PASSWORD
+        - name: STALWART_MASTER_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: stalwart-secrets
+              key: STALWART_MASTER_SECRET
         - name: STALWART_DB_PASSWORD
           valueFrom:
             secretKeyRef:

@@ -15,7 +15,7 @@
  *
  * Environment variables:
  *   IMAP_HOST            - Stalwart IMAP hostname (cluster-internal)
- *   IMAP_PORT            - Stalwart IMAP port (default: 993)
+ *   IMAP_PORT            - Stalwart IMAP port (default: 994, internal directory for master-user auth)
  *   STALWART_API_URL     - Stalwart management API URL (e.g., http://stalwart:8080)
  *   STALWART_ADMIN_PASSWORD - Admin password for Stalwart API and IMAP
  *   CALDAV_BASE_URL      - Nextcloud CalDAV base URL (e.g., https://files.dev.example.com/remote.php/dav)
@@ -27,6 +27,7 @@
  */
 
 const http = require('node:http');
+const fs = require('node:fs');
 const { ImapFlow } = require('imapflow');
 const ICAL = require('ical.js');
 
@@ -37,7 +38,7 @@ const ICAL = require('ical.js');
 const config = {
   imap: {
     host: requiredEnv('IMAP_HOST'),
-    port: parseInt(process.env.IMAP_PORT || '993', 10),
+    port: parseInt(process.env.IMAP_PORT || '994', 10),
     secure: true,
     // TLS options for cluster-internal connections (cert is for public hostname)
     tls: { rejectUnauthorized: false },
@@ -48,8 +49,10 @@ const config = {
   },
   caldav: {
     baseUrl: requiredEnv('CALDAV_BASE_URL'),
-    adminUser: requiredEnv('CALDAV_ADMIN_USER'),
-    adminPassword: requiredEnv('CALDAV_ADMIN_PASSWORD'),
+    adminUser: process.env.CALDAV_ADMIN_USER || '',
+    adminPassword: process.env.CALDAV_ADMIN_PASSWORD || '',
+    // Per-user app passwords for CalDAV (Nextcloud requires per-user auth)
+    tokenFile: process.env.CALDAV_TOKEN_FILE || '/app/caldav-tokens.json',
   },
   pollIntervalMs: parseInt(process.env.POLL_INTERVAL_SECONDS || '60', 10) * 1000,
   healthPort: parseInt(process.env.HEALTH_PORT || '8080', 10),
@@ -151,17 +154,25 @@ async function listStalwartUsers() {
   const body = await resp.json();
 
   // API returns { data: { items: [...], total: N } }
+  // Each item is { name, emails, type, ... }
+  // Return objects with both name (for IMAP master-user auth) and email (for CalDAV)
+  let items = [];
   if (body.data && body.data.items) {
-    return body.data.items;
+    items = body.data.items;
+  } else if (Array.isArray(body.data)) {
+    items = body.data;
+  } else {
+    log('warn', 'Unexpected Stalwart API response format', { body });
+    return [];
   }
 
-  // Fallback: older API format returns { data: [...] }
-  if (Array.isArray(body.data)) {
-    return body.data;
-  }
-
-  log('warn', 'Unexpected Stalwart API response format', { body });
-  return [];
+  // Extract user info: name (Stalwart principal name) and primary email
+  return items
+    .filter((u) => u.emails && u.emails.length > 0)
+    .map((u) => ({
+      name: u.name,
+      email: u.emails[0],
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -170,15 +181,16 @@ async function listStalwartUsers() {
 
 /**
  * Connect to IMAP as admin on behalf of a user.
- * Stalwart supports master-user authentication: "user%admin" with admin password.
+ * Stalwart supports master-user authentication: "name%master" with admin password.
+ * The name must be the Stalwart principal name (not email), e.g. "e2e-member" not "e2e-member@domain".
  */
-function createImapClient(userEmail) {
+function createImapClient(stalwartName) {
   return new ImapFlow({
     host: config.imap.host,
     port: config.imap.port,
     secure: config.imap.secure,
     auth: {
-      user: `${userEmail}%admin`,
+      user: `${stalwartName}%master`,
       pass: config.stalwart.adminPassword,
     },
     tls: config.imap.tls,
@@ -189,34 +201,40 @@ function createImapClient(userEmail) {
 /**
  * Scan a user's INBOX for unprocessed iTIP messages.
  * Returns an array of { uid, calendarData, method, from } objects.
+ * @param {string} stalwartName - Stalwart principal name (for IMAP master-user auth)
  */
-async function scanUserInbox(userEmail) {
-  const client = createImapClient(userEmail);
+async function scanUserInbox(stalwartName) {
+  const client = createImapClient(stalwartName);
   const results = [];
 
   try {
     await client.connect();
 
     const mailbox = await client.mailboxOpen('INBOX');
+    log('debug', 'Opened INBOX', { user: stalwartName, exists: mailbox.exists });
     if (!mailbox.exists || mailbox.exists === 0) {
       return results;
     }
 
-    // Search for messages that are NOT flagged as processed
-    // and have content-type text/calendar (search by header)
-    // Note: Not all IMAP servers support HEADER Content-Type search,
-    // so we fetch recent messages and filter client-side
+    // Search for unprocessed messages.
+    // Stalwart may not support keyword flag searches ($CalendarProcessed),
+    // returning undefined instead of throwing. Fall back to all messages
+    // and filter by flags client-side in the fetch loop.
     let uids;
     try {
-      // Try to search for messages without the $CalendarProcessed flag
       uids = await client.search({
         not: { flag: '$CalendarProcessed' },
       });
     } catch {
-      // Fallback: search for all unseen/recent messages
-      log('debug', 'Flag search not supported, falling back to all messages', { user: userEmail });
+      // Keyword flag search not supported
+    }
+
+    if (!uids || !Array.isArray(uids)) {
+      log('debug', 'Keyword search not supported, falling back to all messages', { user: stalwartName });
       uids = await client.search({ all: true });
     }
+
+    log('debug', 'Search results', { user: stalwartName, unprocessedCount: uids?.length || 0 });
 
     if (!uids || uids.length === 0) {
       return results;
@@ -225,27 +243,44 @@ async function scanUserInbox(userEmail) {
     // Limit to last 100 messages to avoid processing huge backlogs
     const recentUids = uids.slice(-100);
 
+    // Phase 1: Collect messages with calendar parts (metadata only).
+    // Do NOT issue download commands inside the fetch iterator — IMAP
+    // doesn't allow interleaved commands during a multi-message FETCH.
+    const candidates = [];
     for await (const msg of client.fetch(recentUids, {
       uid: true,
       flags: true,
       bodyStructure: true,
       envelope: true,
     })) {
-      // Skip already processed messages
       if (msg.flags && msg.flags.has('$CalendarProcessed')) {
         continue;
       }
 
-      // Check if message has text/calendar parts
       const calendarParts = findCalendarParts(msg.bodyStructure);
       if (calendarParts.length === 0) {
         continue;
       }
 
-      // Fetch the calendar part content
-      for (const part of calendarParts) {
+      log('debug', 'Found calendar part(s)', {
+        user: stalwartName,
+        uid: msg.uid,
+        subject: msg.envelope?.subject,
+        parts: calendarParts,
+      });
+
+      candidates.push({
+        uid: msg.uid,
+        calendarParts,
+        from: msg.envelope?.from?.[0]?.address || 'unknown',
+      });
+    }
+
+    // Phase 2: Download calendar data from each candidate message.
+    for (const candidate of candidates) {
+      for (const part of candidate.calendarParts) {
         try {
-          const partData = await client.download(msg.uid, part.path, { uid: true });
+          const partData = await client.download(candidate.uid, part.path, { uid: true });
           const chunks = [];
           for await (const chunk of partData.content) {
             chunks.push(chunk);
@@ -255,16 +290,16 @@ async function scanUserInbox(userEmail) {
           const method = parseICalMethod(calendarData);
           if (method) {
             results.push({
-              uid: msg.uid,
+              uid: candidate.uid,
               calendarData,
               method,
-              from: msg.envelope?.from?.[0]?.address || 'unknown',
+              from: candidate.from,
             });
           }
         } catch (err) {
           log('warn', 'Failed to download calendar part', {
-            user: userEmail,
-            uid: msg.uid,
+            user: stalwartName,
+            uid: candidate.uid,
             part: part.path,
             error: err.message,
           });
@@ -272,7 +307,12 @@ async function scanUserInbox(userEmail) {
       }
     }
   } catch (err) {
-    log('error', 'IMAP scan failed', { user: userEmail, error: err.message });
+    // Auth failures manifest as "Unexpected close" when Stalwart closes the
+    // connection after rejecting auth. These are common for misconfigured
+    // accounts. Log at debug level since processUser() already logs the warning.
+    const isAuthIssue = err.authenticationFailed || err.message === 'Unexpected close';
+    const level = isAuthIssue ? 'debug' : 'error';
+    log(level, 'IMAP scan failed', { user: stalwartName, error: err.message });
     throw err;
   } finally {
     try {
@@ -288,14 +328,14 @@ async function scanUserInbox(userEmail) {
 /**
  * Mark a message as processed by adding the $CalendarProcessed flag.
  */
-async function markAsProcessed(userEmail, uid) {
-  const client = createImapClient(userEmail);
+async function markAsProcessed(stalwartName, uid) {
+  const client = createImapClient(stalwartName);
 
   try {
     await client.connect();
     await client.mailboxOpen('INBOX');
     await client.messageFlagsAdd(uid, ['$CalendarProcessed'], { uid: true });
-    log('debug', 'Marked message as processed', { user: userEmail, uid });
+    log('debug', 'Marked message as processed', { user: stalwartName, uid });
   } finally {
     try {
       await client.logout();
@@ -386,6 +426,22 @@ function parseICalEvent(icalData) {
 }
 
 /**
+ * Strip the METHOD property from iCal data for CalDAV storage.
+ * iTIP messages (REQUEST/REPLY/CANCEL) include METHOD, but CalDAV forbids it.
+ */
+function stripMethodForStorage(icalData) {
+  try {
+    const jcal = ICAL.parse(icalData);
+    const comp = new ICAL.Component(jcal);
+    comp.removeProperty('method');
+    return comp.toString();
+  } catch {
+    // Fallback: regex removal
+    return icalData.replace(/^METHOD:[^\r\n]*\r?\n/m, '');
+  }
+}
+
+/**
  * Rewrite the attendee PARTSTAT for the given user to NEEDS-ACTION in the iCal data.
  * This creates a "tentative" entry -- the user hasn't accepted yet.
  */
@@ -458,22 +514,54 @@ function applyReplyToEvent(existingIcal, replyIcal) {
 
 /**
  * Build the CalDAV URL for an event in a user's personal calendar.
+ * Nextcloud user IDs are full email addresses (configured via --mapping-uid=email in OIDC).
  */
 function caldavEventUrl(userEmail, eventUid) {
-  // Extract username from email (part before @)
-  const username = userEmail.split('@')[0];
-  // Nextcloud CalDAV path: /remote.php/dav/calendars/{username}/personal/{uid}.ics
   const baseUrl = config.caldav.baseUrl.replace(/\/$/, '');
-  return `${baseUrl}/calendars/${username}/personal/${encodeURIComponent(eventUid)}.ics`;
+  return `${baseUrl}/calendars/${userEmail}/personal/${eventUid}.ics`;
 }
 
 /**
- * Create CalDAV Basic auth header using admin credentials.
+ * Per-user CalDAV app passwords.
+ * Nextcloud CalDAV is user-scoped — admin cannot access other users' calendars.
+ * We use Nextcloud app passwords (created via occ at deploy time) to authenticate
+ * as each user for CalDAV operations.
  */
-function caldavAuthHeader() {
-  return 'Basic ' + Buffer.from(
-    `${config.caldav.adminUser}:${config.caldav.adminPassword}`
-  ).toString('base64');
+const caldavTokens = {};
+
+function loadCaldavTokens() {
+  try {
+    const data = fs.readFileSync(config.caldav.tokenFile, 'utf-8');
+    const tokens = JSON.parse(data);
+    Object.assign(caldavTokens, tokens);
+    log('info', 'Loaded CalDAV tokens', { userCount: Object.keys(tokens).length });
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      log('warn', 'CalDAV token file not found, CalDAV operations will fail', {
+        path: config.caldav.tokenFile,
+      });
+    } else {
+      log('error', 'Failed to load CalDAV tokens', { error: err.message });
+    }
+  }
+}
+
+/**
+ * Create CalDAV Basic auth header for a specific user.
+ * Uses per-user app password if available, falls back to admin credentials.
+ */
+function caldavAuthHeader(userEmail) {
+  const appPassword = caldavTokens[userEmail];
+  if (appPassword) {
+    return 'Basic ' + Buffer.from(`${userEmail}:${appPassword}`).toString('base64');
+  }
+  // Fallback to admin credentials (only works for admin's own calendars)
+  if (config.caldav.adminUser && config.caldav.adminPassword) {
+    return 'Basic ' + Buffer.from(
+      `${config.caldav.adminUser}:${config.caldav.adminPassword}`
+    ).toString('base64');
+  }
+  return null;
 }
 
 /**
@@ -481,12 +569,17 @@ function caldavAuthHeader() {
  */
 async function caldavGetEvent(userEmail, eventUid) {
   const url = caldavEventUrl(userEmail, eventUid);
+  const auth = caldavAuthHeader(userEmail);
+  if (!auth) {
+    log('warn', 'No CalDAV credentials for user', { user: userEmail });
+    return null;
+  }
 
   try {
     const resp = await fetch(url, {
       method: 'GET',
       headers: {
-        Authorization: caldavAuthHeader(),
+        Authorization: auth,
       },
     });
 
@@ -508,11 +601,13 @@ async function caldavGetEvent(userEmail, eventUid) {
  */
 async function caldavPutEvent(userEmail, eventUid, icalData) {
   const url = caldavEventUrl(userEmail, eventUid);
+  const auth = caldavAuthHeader(userEmail);
+  if (!auth) throw new Error(`No CalDAV credentials for user ${userEmail}`);
 
   const resp = await fetch(url, {
     method: 'PUT',
     headers: {
-      Authorization: caldavAuthHeader(),
+      Authorization: auth,
       'Content-Type': 'text/calendar; charset=utf-8',
     },
     body: icalData,
@@ -531,11 +626,13 @@ async function caldavPutEvent(userEmail, eventUid, icalData) {
  */
 async function caldavDeleteEvent(userEmail, eventUid) {
   const url = caldavEventUrl(userEmail, eventUid);
+  const auth = caldavAuthHeader(userEmail);
+  if (!auth) throw new Error(`No CalDAV credentials for user ${userEmail}`);
 
   const resp = await fetch(url, {
     method: 'DELETE',
     headers: {
-      Authorization: caldavAuthHeader(),
+      Authorization: auth,
     },
   });
 
@@ -558,15 +655,20 @@ async function caldavDeleteEvent(userEmail, eventUid) {
  * If it doesn't exist, try to create it via MKCALENDAR.
  */
 async function ensureCalendarExists(userEmail) {
-  const username = userEmail.split('@')[0];
+  const auth = caldavAuthHeader(userEmail);
+  if (!auth) {
+    log('warn', 'No CalDAV credentials for user, skipping calendar check', { user: userEmail });
+    return false;
+  }
+
   const baseUrl = config.caldav.baseUrl.replace(/\/$/, '');
-  const calUrl = `${baseUrl}/calendars/${username}/personal/`;
+  const calUrl = `${baseUrl}/calendars/${userEmail}/personal/`;
 
   try {
     const resp = await fetch(calUrl, {
       method: 'PROPFIND',
       headers: {
-        Authorization: caldavAuthHeader(),
+        Authorization: auth,
         Depth: '0',
         'Content-Type': 'application/xml',
       },
@@ -583,7 +685,7 @@ async function ensureCalendarExists(userEmail) {
       const mkResp = await fetch(calUrl, {
         method: 'MKCALENDAR',
         headers: {
-          Authorization: caldavAuthHeader(),
+          Authorization: auth,
           'Content-Type': 'application/xml',
         },
         body: `<?xml version="1.0" encoding="utf-8"?>
@@ -630,9 +732,24 @@ async function processRequest(userEmail, icalData) {
   await ensureCalendarExists(userEmail);
 
   // Set attendee status to NEEDS-ACTION (tentative in the calendar)
-  const modifiedIcal = setAttendeeNeedsAction(icalData, userEmail);
+  // Strip METHOD property — iTIP uses it but CalDAV storage forbids it
+  const modifiedIcal = stripMethodForStorage(setAttendeeNeedsAction(icalData, userEmail));
 
-  await caldavPutEvent(userEmail, event.uid, modifiedIcal);
+  try {
+    await caldavPutEvent(userEmail, event.uid, modifiedIcal);
+  } catch (err) {
+    // Nextcloud returns 400 "uid already exists" when the event exists at a different
+    // filename (e.g., created by Nextcloud's internal scheduling). Treat as success.
+    if (err.message && err.message.includes('already exists')) {
+      log('info', 'Event already exists in calendar (likely via internal scheduling)', {
+        user: userEmail,
+        eventUid: event.uid,
+        summary: event.summary,
+      });
+      return true;
+    }
+    throw err;
+  }
   metrics.eventsCreated++;
 
   log('info', 'Event created/updated from REQUEST', {
@@ -720,13 +837,16 @@ async function processCancel(userEmail, icalData) {
 /**
  * Process a single user: scan inbox, process iTIP messages, mark as done.
  */
-async function processUser(userEmail) {
+async function processUser(user) {
+  const { name: stalwartName, email: userEmail } = user;
   let messages;
   try {
-    messages = await scanUserInbox(userEmail);
+    messages = await scanUserInbox(stalwartName);
   } catch (err) {
-    // IMAP connection failures are non-fatal for individual users
-    log('warn', 'Failed to scan inbox', { user: userEmail, error: err.message });
+    // IMAP connection failures are non-fatal for individual users.
+    // Auth-related issues (common for misconfigured accounts) are debug-level.
+    const isAuthIssue = err.authenticationFailed || err.message === 'Unexpected close';
+    log(isAuthIssue ? 'debug' : 'warn', 'Failed to scan inbox', { user, error: err.message });
     return;
   }
 
@@ -758,7 +878,7 @@ async function processUser(userEmail) {
       }
 
       if (processed) {
-        await markAsProcessed(userEmail, msg.uid);
+        await markAsProcessed(stalwartName, msg.uid);
         metrics.messagesProcessed++;
       }
     } catch (err) {
@@ -796,13 +916,13 @@ async function pollCycle() {
     log('debug', `Scanning ${users.length} user(s)`);
 
     // Process users sequentially to avoid overwhelming IMAP/CalDAV
-    for (const userEmail of users) {
+    for (const user of users) {
       try {
-        await processUser(userEmail);
+        await processUser(user);
       } catch (err) {
         metrics.errors++;
         log('error', 'Unexpected error processing user', {
-          user: userEmail,
+          user,
           error: err.message,
         });
       }
@@ -837,6 +957,9 @@ async function main() {
     caldavBaseUrl: config.caldav.baseUrl,
     pollIntervalMs: config.pollIntervalMs,
   });
+
+  // Load per-user CalDAV app passwords
+  loadCaldavTokens();
 
   // Start health check server
   healthServer = startHealthServer();

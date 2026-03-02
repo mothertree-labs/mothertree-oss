@@ -119,8 +119,9 @@ export POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-60}"
 
 # Generate config checksum for pod annotations (triggers restart on config change)
 RENDERED_CONFIG=$(envsubst < "$REPO_ROOT/apps/manifests/calendar-automation/deployment.yaml.tpl" 2>/dev/null || echo "")
+APP_CODE_HASH=$(sha256sum "$REPO_ROOT/apps/calendar-automation/server.js" | cut -d' ' -f1 | head -c 12)
 export CONFIG_CHECKSUM
-CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$NEXTCLOUD_ADMIN_PASSWORD$RENDERED_CONFIG" | sha256sum | cut -d' ' -f1 | head -c 12)
+CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$NEXTCLOUD_ADMIN_PASSWORD$RENDERED_CONFIG$APP_CODE_HASH" | sha256sum | cut -d' ' -f1 | head -c 12)
 print_status "Config checksum: $CONFIG_CHECKSUM"
 
 # Ensure namespace exists (should already exist from Stalwart deployment)
@@ -151,27 +152,6 @@ print_success "Application ConfigMap created"
 # For v1, we create a separate ConfigMap with an install script.
 print_status "Creating npm install script ConfigMap..."
 
-cat <<'INSTALL_EOF' | kubectl apply -f -
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: calendar-automation-install
-  namespace: NS_MAIL_PLACEHOLDER
-data:
-  install.sh: |
-    #!/bin/sh
-    set -e
-    cp /app-src/package.json /app/package.json
-    cp /app-src/server.js /app/server.js
-    cd /app
-    npm install --production 2>&1
-    echo "Dependencies installed successfully"
-INSTALL_EOF
-
-# Patch the namespace (envsubst can't be used on heredoc with single quotes)
-kubectl get configmap calendar-automation-install -n "$NS_MAIL" >/dev/null 2>&1 && \
-    kubectl delete configmap calendar-automation-install -n "$NS_MAIL" --ignore-not-found >/dev/null
-
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -191,12 +171,67 @@ EOF
 print_success "Install script ConfigMap created"
 
 # =============================================================================
+# Create per-user CalDAV app passwords
+# =============================================================================
+# Nextcloud CalDAV is user-scoped — admin cannot access other users' calendars.
+# We create a Nextcloud app password for each user via `occ`, allowing
+# calendar-automation to authenticate as each user for CalDAV operations.
+print_status "Creating per-user CalDAV app passwords..."
+
+mt_require_commands jq
+
+NEXTCLOUD_POD=$(kubectl get pods -n "$NS_FILES" -l app.kubernetes.io/name=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+if [ -z "$NEXTCLOUD_POD" ]; then
+    print_warning "Nextcloud pod not found in $NS_FILES, skipping CalDAV token creation"
+else
+    # Ensure app password auth is enabled alongside OIDC
+    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+        php occ config:app:set --type=string --value=1 user_oidc allow_multiple_user_backends 2>/dev/null || true
+
+    # Ensure admin password matches K8s secret (may drift after Helm upgrades)
+    # Pass password via env flag to avoid shell interpolation in process args
+    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+        env "OC_PASS=${NEXTCLOUD_ADMIN_PASSWORD}" php occ user:resetpassword --password-from-env admin 2>/dev/null || true
+
+    # List Nextcloud users via occ (reliable, no cross-namespace API call needed)
+    NC_USER_JSON=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+        php occ user:list --output=json 2>/dev/null || echo "{}")
+    USER_EMAILS=$(echo "$NC_USER_JSON" | jq -r 'keys[] | select(. != "admin")' 2>/dev/null || echo "")
+
+    # Create app passwords for each user and build JSON token map
+    CALDAV_TOKENS="{}"
+    TOKEN_COUNT=0
+    while IFS= read -r user_email; do
+        [ -z "$user_email" ] && continue
+        # Create new app password (pipe empty string to skip interactive password prompt)
+        # Output format: "app password:\n<token>" — password is on the line after the label
+        APP_PASS=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+            sh -c "echo '' | php occ user:auth-tokens:add '$user_email'" 2>/dev/null \
+            | grep -A1 "app password:" | tail -1 | tr -d '[:space:]')
+        if [ -n "$APP_PASS" ]; then
+            # Build JSON incrementally using jq
+            CALDAV_TOKENS=$(echo "$CALDAV_TOKENS" | jq --arg k "$user_email" --arg v "$APP_PASS" '. + {($k): $v}')
+            TOKEN_COUNT=$((TOKEN_COUNT + 1))
+        else
+            print_warning "Failed to create CalDAV token for $user_email"
+        fi
+    done <<< "$USER_EMAILS"
+
+    # Store tokens as a Secret (mounted read-only in the calendar-automation pod)
+    kubectl create secret generic calendar-automation-caldav-tokens \
+        --namespace="$NS_MAIL" \
+        --from-literal=caldav-tokens.json="$CALDAV_TOKENS" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    print_success "CalDAV app passwords created for $TOKEN_COUNT user(s)"
+fi
+
+# =============================================================================
 # Apply deployment manifest
 # =============================================================================
 print_status "Applying calendar automation manifests..."
 
 # Use explicit variable list for envsubst to avoid substituting unintended variables
-envsubst '${NS_MAIL} ${TENANT_NAME} ${FILES_HOST} ${NEXTCLOUD_ADMIN_USER} ${NEXTCLOUD_ADMIN_PASSWORD} ${STALWART_ADMIN_PASSWORD} ${CALENDAR_AUTOMATION_MEMORY_REQUEST} ${CALENDAR_AUTOMATION_MEMORY_LIMIT} ${CALENDAR_AUTOMATION_CPU_REQUEST} ${CALENDAR_AUTOMATION_CPU_LIMIT} ${POLL_INTERVAL_SECONDS} ${CONFIG_CHECKSUM}' \
+envsubst '${NS_MAIL} ${NS_FILES} ${TENANT_NAME} ${FILES_HOST} ${NEXTCLOUD_ADMIN_USER} ${NEXTCLOUD_ADMIN_PASSWORD} ${STALWART_ADMIN_PASSWORD} ${CALENDAR_AUTOMATION_MEMORY_REQUEST} ${CALENDAR_AUTOMATION_MEMORY_LIMIT} ${CALENDAR_AUTOMATION_CPU_REQUEST} ${CALENDAR_AUTOMATION_CPU_LIMIT} ${POLL_INTERVAL_SECONDS} ${CONFIG_CHECKSUM}' \
     < "$REPO_ROOT/apps/manifests/calendar-automation/deployment.yaml.tpl" | kubectl apply -f -
 print_success "Calendar Automation Deployment and Service applied"
 
@@ -217,6 +252,10 @@ kubectl patch deployment calendar-automation -n "$NS_MAIL" --type='json' -p='[
         "name": "npm-install",
         "image": "node:22-alpine",
         "command": ["sh", "/install/install.sh"],
+        "env": [
+          {"name": "HOME", "value": "/app"},
+          {"name": "npm_config_cache", "value": "/app/.npm-cache"}
+        ],
         "securityContext": {
           "allowPrivilegeEscalation": false,
           "capabilities": {"drop": ["ALL"]},
@@ -237,14 +276,16 @@ kubectl patch deployment calendar-automation -n "$NS_MAIL" --type='json' -p='[
     "value": [
       {"name": "app-src", "configMap": {"name": "calendar-automation-app"}},
       {"name": "app", "emptyDir": {}},
-      {"name": "install-script", "configMap": {"name": "calendar-automation-install", "defaultMode": 493}}
+      {"name": "install-script", "configMap": {"name": "calendar-automation-install", "defaultMode": 493}},
+      {"name": "caldav-tokens", "secret": {"secretName": "calendar-automation-caldav-tokens", "optional": true}}
     ]
   },
   {
     "op": "replace",
     "path": "/spec/template/spec/containers/0/volumeMounts",
     "value": [
-      {"name": "app", "mountPath": "/app", "readOnly": false}
+      {"name": "app", "mountPath": "/app", "readOnly": false},
+      {"name": "caldav-tokens", "mountPath": "/config", "readOnly": true}
     ]
   }
 ]'
@@ -263,7 +304,7 @@ print_success "Calendar Automation Service deployed successfully for $MT_ENV env
 echo ""
 print_status "Namespace: $NS_MAIL"
 print_status "CalDAV target: https://${FILES_HOST}/remote.php/dav"
-print_status "IMAP source: stalwart.${NS_MAIL}.svc.cluster.local:993"
+print_status "IMAP source: stalwart.${NS_MAIL}.svc.cluster.local:994 (internal directory for master-user auth)"
 print_status "Polling interval: ${POLL_INTERVAL_SECONDS}s"
 echo ""
 print_status "The service will:"

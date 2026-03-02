@@ -99,6 +99,17 @@ export const selectors = {
     deleteUserBtn: '[data-action="delete-user"]',
   },
 
+  // ─── Nextcloud Calendar ────────────────────────────────────────────
+  nextcloudCalendar: {
+    newEventBtn: 'button:has-text("New event")',
+    eventTitleInput: 'input[placeholder*="Event title"], input[placeholder*="event title"]',
+    addAttendeeInput: 'input[placeholder*="Search for"], input[placeholder*="search for"], input[placeholder*="Add attendee"]',
+    saveBtn: 'button.primary:has-text("Save"), button[type="submit"]:has-text("Save")',
+    acceptBtn: 'button:has-text("Accept")',
+    declineBtn: 'button:has-text("Decline")',
+    calendarEvent: '.fc-event',
+  },
+
   // ─── Guest Registration ────────────────────────────────────────────
   guest: {
     registerForm: '#registerForm',

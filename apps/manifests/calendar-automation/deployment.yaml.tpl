@@ -70,16 +70,16 @@ spec:
         - name: IMAP_HOST
           value: "stalwart.${NS_MAIL}.svc.cluster.local"
         - name: IMAP_PORT
-          value: "993"
+          value: "994"
         - name: STALWART_API_URL
-          value: "http://stalwart.${NS_MAIL}.svc.cluster.local:8080"
+          value: "http://stalwart.${NS_MAIL}.svc.cluster.local:443"
         - name: STALWART_ADMIN_PASSWORD
           valueFrom:
             secretKeyRef:
               name: calendar-automation-secrets
               key: STALWART_ADMIN_PASSWORD
         - name: CALDAV_BASE_URL
-          value: "https://${FILES_HOST}/remote.php/dav"
+          value: "http://nextcloud.${NS_FILES}.svc.cluster.local:8080/remote.php/dav"
         - name: CALDAV_ADMIN_USER
           valueFrom:
             secretKeyRef:
@@ -90,6 +90,8 @@ spec:
             secretKeyRef:
               name: calendar-automation-secrets
               key: CALDAV_ADMIN_PASSWORD
+        - name: CALDAV_TOKEN_FILE
+          value: "/config/caldav-tokens.json"
         - name: POLL_INTERVAL_SECONDS
           value: "${POLL_INTERVAL_SECONDS}"
         - name: HEALTH_PORT
