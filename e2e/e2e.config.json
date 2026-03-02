@@ -1,5 +1,3 @@
 {
-  "echoGroupAddress": "",
-  "emailSendUser": "e2e-mailrt",
-  "emailRecvUser": "e2e-mailrcv"
+  "echoGroupAddress": ""
 }
