@@ -2,6 +2,40 @@ import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
+import { Page } from '@playwright/test';
+
+/**
+ * Handle Nextcloud login — covers both Keycloak redirect and Nextcloud's
+ * native login page. Sometimes the OIDC auto-redirect fails and Nextcloud
+ * shows its own login form instead. When that happens, trigger the OIDC
+ * flow manually by navigating to the user_oidc login endpoint.
+ */
+async function handleNextcloudLogin(page: Page): Promise<void> {
+  if (page.url().includes('auth.')) {
+    // Landed on Keycloak — complete the login flow
+    await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+    await page.waitForLoadState('networkidle').catch(() => {});
+    return;
+  }
+
+  // Check if we're on Nextcloud's native login page (not the app itself)
+  const onNativeLogin = page.url().includes('/login') &&
+    !page.url().includes('user_oidc') &&
+    await page.locator('input[name="password"], #password').isVisible({ timeout: 2_000 }).catch(() => false);
+
+  if (onNativeLogin) {
+    // Trigger OIDC flow — navigate to the user_oidc login endpoint,
+    // which redirects to Keycloak. The existing SSO session should auto-complete.
+    await page.goto(`${urls.files}/apps/user_oidc/login/1`);
+    await page.waitForLoadState('networkidle').catch(() => {});
+
+    // If Keycloak session expired, we'll land on the Keycloak login page
+    if (page.url().includes('auth.')) {
+      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      await page.waitForLoadState('networkidle').catch(() => {});
+    }
+  }
+}
 
 test.describe('Smoke — Nextcloud (Files)', () => {
   test('Nextcloud server responds', async ({ memberPage: page }) => {
@@ -36,9 +70,7 @@ test.describe('Smoke — Nextcloud (Files)', () => {
 
     await page.waitForLoadState('networkidle').catch(() => {});
 
-    if (page.url().includes('auth.')) {
-      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
-    }
+    await handleNextcloudLogin(page);
 
     // Nextcloud is a heavy PHP app — give it time to load after OIDC callback
     await page.waitForLoadState('networkidle').catch(() => {});
@@ -87,10 +119,7 @@ test.describe('Smoke — Nextcloud (Files)', () => {
 
     await page.waitForLoadState('networkidle');
 
-    if (page.url().includes('auth.')) {
-      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
-      await page.waitForLoadState('networkidle');
-    }
+    await handleNextcloudLogin(page);
 
     // OIDC login must succeed before we can test file upload
     const pageText = await page.locator('body').textContent().catch(() => '') || '';
