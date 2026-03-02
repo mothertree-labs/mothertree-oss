@@ -964,28 +964,20 @@ else
     print_warning "Nextcloud pod not found, skipping app store URL ConfigMap"
 fi
 
-# Step 9d: Run occ upgrade again after app installations
-# Steps 8–9c install apps (OIDC job, notify_push, etc.) which may require DB
-# migrations. Without this, Nextcloud blocks all occ commands ("require upgrade")
-# and theming/config commands below will fail.
-NEXTCLOUD_POD_PRE_THEME=$(_get_nc_pod)
-if [ -n "$NEXTCLOUD_POD_PRE_THEME" ]; then
-    UPGRADE_CHECK_2=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD_PRE_THEME" -c nextcloud -- su -s /bin/sh www-data -c 'php occ status --output=json' 2>&1 || true)
-    if echo "$UPGRADE_CHECK_2" | grep -q "require upgrade"; then
-        print_status "Nextcloud requires upgrade after app installations..."
-        if timeout 300 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD_PRE_THEME" -c nextcloud -- su -s /bin/sh www-data -c 'php occ upgrade' 2>&1; then
-            print_success "Post-app-install upgrade completed"
-        else
-            print_error "Post-app-install occ upgrade failed"
-            exit 1
-        fi
-    fi
-fi
-
-# Step 9e: Configure Nextcloud theming (brand colors, logo, name)
+# Step 9d: Configure Nextcloud theming (brand colors, logo, name)
+# Run occ upgrade unconditionally on the SAME pod we'll use for theming.
+# With HPA ≥2 replicas, a rolling-update pod may run occ upgrade via its
+# before-starting hook, modifying app version records in the shared DB.
+# That puts THIS pod into "require upgrade" state mid-stream.  A conditional
+# check (occ status) is racy — the state can flip between check and use.
+# occ upgrade is a no-op (<1s) when nothing needs upgrading.
 print_status "Configuring Nextcloud theming..."
 NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
+    # Reconcile app versions on this specific pod before running any occ commands.
+    timeout 300 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+        su -s /bin/sh www-data -c 'php occ upgrade' 2>&1 || true
+
     # Ensure theming app is enabled
     kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable theming" 2>/dev/null || true
 
