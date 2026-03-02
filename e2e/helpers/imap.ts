@@ -75,10 +75,15 @@ async function connectAsMaster(
       await client.connect();
       return client;
     } catch (err: unknown) {
+      // Auth failures manifest differently depending on the connection path:
+      // - Direct/cluster-internal: "Authentication failed" or "Command failed"
+      // - Via ingress/TLS proxy: "Unexpected close" or "Connection not available"
       const isAuthFailure =
         err instanceof Error &&
         (err.message.includes('Authentication failed') ||
-          err.message.includes('Command failed'));
+          err.message.includes('Command failed') ||
+          err.message.includes('Unexpected close') ||
+          err.message.includes('Connection not available'));
       if (!isAuthFailure) throw err;
       await client.logout().catch(() => {});
     }
