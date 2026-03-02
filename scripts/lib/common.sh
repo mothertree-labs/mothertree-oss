@@ -180,26 +180,27 @@ poll_pod_ready() {
 
     local elapsed=0
     while [ $elapsed -lt $timeout ]; do
-        # Check if pod is ready
-        local ready_status
-        ready_status=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || true
+        # Build a JSON-lines list of non-terminating pods (no deletionTimestamp).
+        # This avoids picking a Terminating pod stuck on a dead node, which would
+        # cause every subsequent check to read stale status or hang on exec.
+        local _pod_json
+        _pod_json=$(kubectl get pods -n "$namespace" -l "$selector" \
+            -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{"|"}{.metadata.name}{"|"}{.status.phase}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.status.conditions[?(@.type=="PodScheduled")].status}{"|"}{.spec.nodeName}{"|"}{.status.containerStatuses[0].state.waiting.reason}{"\n"}{end}' 2>/dev/null \
+            | grep '^|' | head -1) || true
+
+        # Parse fields: |name|phase|ready|scheduled|node|waitReason
+        local pod_name pod_phase ready_status scheduled_status pod_node waiting_reason
+        pod_name=$(echo "$_pod_json" | cut -d'|' -f2)
+        pod_phase=$(echo "$_pod_json" | cut -d'|' -f3)
+        ready_status=$(echo "$_pod_json" | cut -d'|' -f4)
+        scheduled_status=$(echo "$_pod_json" | cut -d'|' -f5)
+        pod_node=$(echo "$_pod_json" | cut -d'|' -f6)
+        waiting_reason=$(echo "$_pod_json" | cut -d'|' -f7)
 
         if [ "$ready_status" = "True" ]; then
-            local pod_name
-            pod_name=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
             print_success "Pod ready: $pod_name"
             return 0
         fi
-
-        # Get current pod phase and any waiting reason for status display
-        local pod_phase
-        pod_phase=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].status.phase}' 2>/dev/null) || true
-        local waiting_reason
-        waiting_reason=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].status.containerStatuses[0].state.waiting.reason}' 2>/dev/null) || true
-        local scheduled_status
-        scheduled_status=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].status.conditions[?(@.type=="PodScheduled")].status}' 2>/dev/null) || true
-        local pod_node
-        pod_node=$(kubectl get pods -n "$namespace" -l "$selector" -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null) || true
 
         # Check for failure conditions
         if echo "$waiting_reason" | grep -qE "CrashLoopBackOff|ImagePullBackOff|ErrImagePull"; then
