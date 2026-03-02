@@ -43,6 +43,16 @@ mt_deploy_start "deploy-nextcloud"
 
 mt_require_commands kubectl helm envsubst openssl
 
+# Helper: get a running, non-terminating Nextcloud pod name.
+# During rolling updates or node failures, Terminating pods may linger in the
+# pod list.  {.items[0]} would pick the oldest (terminating) pod, causing every
+# subsequent `kubectl exec` to hang.  This helper filters them out.
+_get_nc_pod() {
+    kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud \
+        -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{"|"}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+        | grep '^|' | head -1 | cut -d'|' -f2 || true
+}
+
 print_status "Starting Nextcloud deployment for environment: $MT_ENV"
 print_status "Database namespace: $NS_DB"
 print_status "Files namespace: $NS_FILES"
@@ -228,7 +238,7 @@ IDENTITY_SECRET_EXISTS=$(kubectl get secret nextcloud-identity -n "$NS_FILES" -o
 PVC_EXISTS=$(kubectl get pvc nextcloud-nextcloud -n "$NS_FILES" -o name 2>/dev/null || true)
 if [ -n "$PVC_EXISTS" ] && [ -z "$IDENTITY_SECRET_EXISTS" ]; then
     print_status "PVC migration: PVC exists but identity secret doesn't — extracting identity from running pod..."
-    NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    NEXTCLOUD_POD=$(_get_nc_pod)
     if [ -n "$NEXTCLOUD_POD" ]; then
         if timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
             # Extract identity values from config.php using PHP for accurate parsing
@@ -555,12 +565,12 @@ fi
 # Step 7a: Run occ upgrade if Nextcloud requires it (e.g. image version bump)
 # When the container image is newer than the DB schema, Nextcloud blocks all occ
 # commands until `occ upgrade` runs. Detect this and handle it automatically.
-NEXTCLOUD_POD_UPGRADE=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+NEXTCLOUD_POD_UPGRADE=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD_UPGRADE" ]; then
-    UPGRADE_CHECK=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD_UPGRADE" -c nextcloud -- su -s /bin/sh www-data -c 'php occ status --output=json' 2>&1 || true)
+    UPGRADE_CHECK=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD_UPGRADE" -c nextcloud -- su -s /bin/sh www-data -c 'php occ status --output=json' 2>&1 || true)
     if echo "$UPGRADE_CHECK" | grep -q "require upgrade"; then
         print_status "Nextcloud requires database upgrade (image version newer than DB schema)..."
-        if kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD_UPGRADE" -c nextcloud -- su -s /bin/sh www-data -c 'php occ upgrade' 2>&1; then
+        if timeout 300 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD_UPGRADE" -c nextcloud -- su -s /bin/sh www-data -c 'php occ upgrade' 2>&1; then
             print_success "Nextcloud database upgrade completed"
         else
             print_error "Nextcloud occ upgrade failed"
@@ -573,7 +583,7 @@ fi
 # After first install: extract instanceid, passwordsalt, secret and create the identity secret.
 # On every deploy: update the version key to match the installed version.
 print_status "Managing Nextcloud identity secret..."
-NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
     # Wait for config.php to appear (entrypoint creates it during first install)
     for attempt in $(seq 1 60); do
@@ -618,7 +628,7 @@ fi
 
 # Step 7c: Reconcile trusted_domains (ensure calendar host is included)
 print_status "Checking trusted_domains configuration..."
-NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
     if timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
         # Get current trusted_domains list
@@ -658,7 +668,7 @@ fi
 # Without this, Apache can't rewrite /apps/calendar (and similar paths) to index.php,
 # causing 404 errors on the calendar subdomain and any pretty URL route.
 print_status "Configuring overwrite.cli.url for pretty URLs..."
-NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
     if timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
         kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
@@ -677,7 +687,7 @@ print_status "Configuring OIDC authentication via Job..."
 
 # First, wait for Nextcloud installation to complete
 print_status "Waiting for Nextcloud installation to complete..."
-NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
     for attempt in $(seq 1 30); do
         INSTALLED=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- cat /var/www/html/config/config.php 2>/dev/null | grep "'installed'" | grep "true" || true)
@@ -741,7 +751,7 @@ fi
 # the external hostname's cache won't include the new app routes, causing 404 errors.
 # Flushing APCu forces Nextcloud to rebuild the route table with all installed apps.
 print_status "Flushing APCu route cache (graceful Apache restart)..."
-NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
     # APCu is per-process in Apache prefork mode. A graceful restart (SIGUSR1) recreates
     # all child workers, clearing their APCu caches. The parent process stays alive (PID 1),
@@ -757,7 +767,7 @@ fi
 # Here we just run the occ commands to enable/configure the app.
 print_status "Configuring files_linkeditor app..."
 if [ -d "$REPO_ROOT/submodules/files_linkeditor" ]; then
-    NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    NEXTCLOUD_POD=$(_get_nc_pod)
     if [ -n "$NEXTCLOUD_POD" ]; then
         # Update MIME type mappings (mimetypemapping.json is written by init container)
         print_status "Updating MIME type mappings..."
@@ -800,7 +810,7 @@ fi
 
 # Step 9b.1: Enable and configure guest_bridge app
 if [ -d "$REPO_ROOT/apps/nextcloud-guest-bridge" ]; then
-    NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    NEXTCLOUD_POD=$(_get_nc_pod)
     if [ -n "$NEXTCLOUD_POD" ]; then
         print_status "Enabling guest_bridge app..."
         kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable guest_bridge" 2>/dev/null || true
@@ -842,7 +852,7 @@ fi
 
 # Step 9c: Deploy notify_push (Client Push) — replaces browser polling with WebSocket push
 print_status "Deploying notify_push (Client Push)..."
-NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
     # Build connection URLs from values already available in this script
     # URL-encode passwords: base64 can contain +, /, = which break URL parsing
@@ -908,7 +918,7 @@ fi
 # them in a ConfigMap. The init container reads these URLs and downloads+extracts the apps
 # on every boot. This adds ~15-30s to pod startup but ensures all apps are always present.
 print_status "Creating app store download URLs ConfigMap..."
-NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
     # App store API requires 3-part version (32.0.5), not 4-part (32.0.5.0)
     NC_API_VERSION=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
@@ -946,7 +956,7 @@ fi
 
 # Step 9d: Configure Nextcloud theming (brand colors, logo, name)
 print_status "Configuring Nextcloud theming..."
-NEXTCLOUD_POD=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
     # Ensure theming app is enabled
     kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable theming" 2>/dev/null || true
