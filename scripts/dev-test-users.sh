@@ -240,7 +240,7 @@ ensure_stalwart_principal() {
       --arg name "$principal_name" \
       --arg email "$email" \
       --arg desc "$display_name" \
-      '{type: "individual", name: $name, emails: [$email], description: $desc, secrets: []}')
+      '{type: "individual", name: $name, emails: [$email], description: $desc, roles: ["user"], secrets: []}')
 
     local response
     response=$(curl -s -X POST "$stalwart_url/api/principal/deploy" \

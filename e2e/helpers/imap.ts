@@ -37,16 +37,15 @@ export function isImapConfigured(): boolean {
 }
 
 /**
- * Create an ImapFlow client authenticated as master on behalf of a user.
- * Uses Stalwart's master-user auth pattern: "user%master" with admin password.
+ * Create an ImapFlow client for the given auth user string.
  */
-function createClient(userEmail: string, config: ImapConfig): typeof ImapFlow {
+function createClient(authUser: string, config: ImapConfig): typeof ImapFlow {
   return new ImapFlow({
     host: config.host,
     port: config.port,
     secure: true,
     auth: {
-      user: `${userEmail}%master`,
+      user: authUser,
       pass: config.adminPassword,
     },
     tls: {
@@ -54,6 +53,40 @@ function createClient(userEmail: string, config: ImapConfig): typeof ImapFlow {
     },
     logger: false,
   });
+}
+
+/**
+ * Connect to IMAP as master on behalf of a user.
+ *
+ * Stalwart master-user auth uses the principal name (not email).
+ * Some principals use "user@domain" as name, others use just "user".
+ * We try email first, then fall back to short username.
+ */
+async function connectAsMaster(
+  userEmail: string,
+  config: ImapConfig,
+): Promise<typeof ImapFlow> {
+  const username = userEmail.split('@')[0];
+  const candidates = [userEmail, username];
+
+  for (const name of candidates) {
+    const client = createClient(`${name}%master`, config);
+    try {
+      await client.connect();
+      return client;
+    } catch (err: unknown) {
+      const isAuthFailure =
+        err instanceof Error &&
+        (err.message.includes('Authentication failed') ||
+          err.message.includes('Command failed'));
+      if (!isAuthFailure) throw err;
+      await client.logout().catch(() => {});
+    }
+  }
+
+  throw new Error(
+    `IMAP master-user auth failed for ${userEmail} (tried: ${candidates.map((c) => c + '%master').join(', ')})`,
+  );
 }
 
 /**
@@ -72,10 +105,9 @@ export async function appendCalendarEmail(opts: {
     );
   }
 
-  const client = createClient(opts.userEmail, config);
+  const client = await connectAsMaster(opts.userEmail, config);
 
   try {
-    await client.connect();
     await client.append('INBOX', opts.mimeMessage, ['\\Recent']);
   } finally {
     await client.logout().catch(() => {});
@@ -97,11 +129,9 @@ export async function checkSentFolder(opts: {
     );
   }
 
-  const client = createClient(opts.userEmail, config);
+  const client = await connectAsMaster(opts.userEmail, config);
 
   try {
-    await client.connect();
-
     // Try common sent folder names
     const sentFolders = ['Sent', 'INBOX.Sent', 'Sent Items', 'Sent Messages'];
     for (const folder of sentFolders) {

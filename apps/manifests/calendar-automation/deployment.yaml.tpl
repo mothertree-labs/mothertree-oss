@@ -70,9 +70,9 @@ spec:
         - name: IMAP_HOST
           value: "stalwart.${NS_MAIL}.svc.cluster.local"
         - name: IMAP_PORT
-          value: "994"
+          value: "993"
         - name: STALWART_API_URL
-          value: "http://stalwart.${NS_MAIL}.svc.cluster.local:443"
+          value: "http://stalwart.${NS_MAIL}.svc.cluster.local:8080"
         - name: STALWART_ADMIN_PASSWORD
           valueFrom:
             secretKeyRef:

@@ -32,12 +32,20 @@ const config = fs.existsSync(configPath)
 /**
  * Navigate to Nextcloud calendar and complete OIDC login.
  * Returns the Nextcloud user ID (may differ from Keycloak username).
+ *
+ * Nextcloud with allow_multiple_user_backends=1 shows its own login page
+ * instead of auto-redirecting to Keycloak. We handle this by navigating
+ * directly to the OIDC login endpoint when the page lands on the
+ * Nextcloud login form.
  */
 async function loginToCalendar(
   page: import('@playwright/test').Page,
   user: { username: string; password: string },
 ): Promise<string> {
-  await page.goto(urls.calendar);
+  // Navigate directly to the OIDC login endpoint with a redirect to calendar.
+  // This bypasses the Nextcloud native login page entirely.
+  const redirectUrl = encodeURIComponent('/apps/calendar');
+  await page.goto(`${urls.files}/apps/user_oidc/login/1?redirectUrl=${redirectUrl}`);
   await page.waitForLoadState('networkidle').catch(() => {});
 
   if (page.url().includes('auth.')) {
@@ -51,15 +59,18 @@ async function loginToCalendar(
 }
 
 test.describe('Calendar — External Invite via Calendar Automation', () => {
-  test.skip(
-    !config.calendarEnabled,
-    'Skipped: calendarEnabled not set in e2e.config.json',
-  );
-  test.skip(
-    !isImapConfigured(),
-    'Skipped: E2E_STALWART_ADMIN_PASSWORD not set (required for IMAP access)',
-  );
   test.setTimeout(300_000); // 5 minutes
+
+  test('prerequisites: calendar and IMAP must be configured', () => {
+    expect(
+      config.calendarEnabled,
+      'Set calendarEnabled: true in e2e.config.json',
+    ).toBeTruthy();
+    expect(
+      isImapConfigured(),
+      'E2E_STALWART_ADMIN_PASSWORD must be set (required for IMAP access)',
+    ).toBeTruthy();
+  });
 
   test('incoming external REQUEST creates event in CalDAV', async ({
     emailTestPage,

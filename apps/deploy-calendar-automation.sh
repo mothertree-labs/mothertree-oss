@@ -304,7 +304,7 @@ print_success "Calendar Automation Service deployed successfully for $MT_ENV env
 echo ""
 print_status "Namespace: $NS_MAIL"
 print_status "CalDAV target: https://${FILES_HOST}/remote.php/dav"
-print_status "IMAP source: stalwart.${NS_MAIL}.svc.cluster.local:994 (internal directory for master-user auth)"
+print_status "IMAP source: stalwart.${NS_MAIL}.svc.cluster.local:993 (master-user auth)"
 print_status "Polling interval: ${POLL_INTERVAL_SECONDS}s"
 echo ""
 print_status "The service will:"

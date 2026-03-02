@@ -79,9 +79,9 @@ spec:
               app: calendar-automation
       ports:
         - protocol: TCP
-          port: 994
+          port: 993
         - protocol: TCP
-          port: 443
+          port: 8080
     # Email probe (same namespace) connecting to Stalwart for SMTP submission and IMAP
     - from:
         - podSelector:

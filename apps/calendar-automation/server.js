@@ -15,7 +15,7 @@
  *
  * Environment variables:
  *   IMAP_HOST            - Stalwart IMAP hostname (cluster-internal)
- *   IMAP_PORT            - Stalwart IMAP port (default: 994, internal directory for master-user auth)
+ *   IMAP_PORT            - Stalwart IMAP port (default: 993, IMAPS with master-user auth)
  *   STALWART_API_URL     - Stalwart management API URL (e.g., http://stalwart:8080)
  *   STALWART_ADMIN_PASSWORD - Admin password for Stalwart API and IMAP
  *   CALDAV_BASE_URL      - Nextcloud CalDAV base URL (e.g., https://files.dev.example.com/remote.php/dav)
@@ -38,7 +38,7 @@ const ICAL = require('ical.js');
 const config = {
   imap: {
     host: requiredEnv('IMAP_HOST'),
-    port: parseInt(process.env.IMAP_PORT || '994', 10),
+    port: parseInt(process.env.IMAP_PORT || '993', 10),
     secure: true,
     // TLS options for cluster-internal connections (cert is for public hostname)
     tls: { rejectUnauthorized: false },

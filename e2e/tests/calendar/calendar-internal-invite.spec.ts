@@ -25,12 +25,20 @@ const config = fs.existsSync(configPath)
  * Navigate to Nextcloud calendar and complete OIDC login.
  * Returns the Nextcloud user ID (which may differ from the Keycloak username
  * for OIDC-provisioned users).
+ *
+ * Nextcloud with allow_multiple_user_backends=1 shows its own login page
+ * instead of auto-redirecting to Keycloak. We handle this by navigating
+ * directly to the OIDC login endpoint when the page lands on the
+ * Nextcloud login form.
  */
 async function loginToCalendar(
   page: import('@playwright/test').Page,
   user: { username: string; password: string },
 ): Promise<string> {
-  await page.goto(urls.calendar);
+  // Navigate directly to the OIDC login endpoint with a redirect to calendar.
+  // This bypasses the Nextcloud native login page entirely.
+  const redirectUrl = encodeURIComponent('/apps/calendar');
+  await page.goto(`${urls.files}/apps/user_oidc/login/1?redirectUrl=${redirectUrl}`);
   await page.waitForLoadState('networkidle').catch(() => {});
 
   if (page.url().includes('auth.')) {
@@ -44,11 +52,14 @@ async function loginToCalendar(
 }
 
 test.describe('Calendar — Internal Invite Round-Trip', () => {
-  test.skip(
-    !config.calendarEnabled,
-    'Skipped: calendarEnabled not set in e2e.config.json',
-  );
   test.setTimeout(300_000); // 5 minutes
+
+  test('prerequisites: calendar must be enabled', () => {
+    expect(
+      config.calendarEnabled,
+      'Set calendarEnabled: true in e2e.config.json',
+    ).toBeTruthy();
+  });
 
   test('organizer creates event with attendee, recipient sees it via CalDAV scheduling', async ({
     memberPage,
