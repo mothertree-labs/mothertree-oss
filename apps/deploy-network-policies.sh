@@ -211,6 +211,18 @@ else
 fi
 
 # =============================================================================
+# Apply files-to-admin egress (Nextcloud guest_bridge → Account Portal API on port 3000)
+# =============================================================================
+if kubectl get namespace "$NS_FILES" &>/dev/null && kubectl get namespace "$NS_ADMIN" &>/dev/null; then
+    export NAMESPACE="$NS_FILES"
+    print_status "[$NS_FILES] Applying allow-files-to-admin-egress (guest_bridge → Account Portal port 3000)..."
+    envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-files-to-admin-egress.yaml.tpl" | kubectl apply -f -
+    print_success "[$NS_FILES] Files-to-admin egress policy applied"
+else
+    print_warning "Files or admin namespace does not exist, skipping files-to-admin egress policy"
+fi
+
+# =============================================================================
 # Apply Redis protection to admin namespace
 # =============================================================================
 if kubectl get namespace "$NS_ADMIN" &>/dev/null; then
@@ -256,6 +268,7 @@ print_status "  - allow-webmail-to-mail-egress  (webmail → mail: IMAP/SMTP/Sie
 print_status "  - allow-admin-to-mail-egress    (admin → mail: Stalwart HTTP API)"
 print_status "  - allow-mail-to-files-egress    (mail → files: CalDAV port 8080)"
 print_status "  - allow-files-to-office-egress  (files → office: Collabora port 9980)"
+print_status "  - allow-files-to-admin-egress   (files → admin: Account Portal API port 3000)"
 print_status "  - allow-mail-ingress            (mail: accept from Postfix + Roundcube + Admin)"
 print_status "Targeted ingress restrictions:"
 print_status "  - protect-redis              (admin namespace: only portal pods)"

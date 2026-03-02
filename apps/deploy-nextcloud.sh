@@ -761,8 +761,8 @@ if [ -d "$REPO_ROOT/apps/nextcloud-guest-bridge" ]; then
         kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable guest_bridge" 2>/dev/null || true
 
         # Configure guest_bridge API settings
-        # ACCOUNT_HOST comes from config.sh (e.g., account.dev.example.com)
-        GUEST_BRIDGE_API_URL="https://${ACCOUNT_HOST}/api/provision-guest"
+        # Use internal K8s service URL to avoid PROXY protocol issues on external ingress
+        GUEST_BRIDGE_API_URL="http://account-portal.${NS_ADMIN}.svc.cluster.local/api/provision-guest"
         kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set guest_bridge.api_url --value='$GUEST_BRIDGE_API_URL'"
 
         # Get the guest provisioning API key from the account portal secret
@@ -770,6 +770,19 @@ if [ -d "$REPO_ROOT/apps/nextcloud-guest-bridge" ]; then
         if [ -n "$GUEST_API_KEY" ]; then
             kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set guest_bridge.api_key --value='$GUEST_API_KEY'"
             print_success "guest_bridge app enabled and configured (API: $GUEST_BRIDGE_API_URL)"
+
+            # Verify guest bridge can reach account portal internally
+            print_status "Verifying guest_bridge connectivity to account portal..."
+            HEALTH_CHECK=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+                curl -sf -o /dev/null -w "%{http_code}" \
+                --connect-timeout 5 --max-time 10 \
+                "http://account-portal.${NS_ADMIN}.svc.cluster.local/health" 2>/dev/null || echo "000")
+            if [ "$HEALTH_CHECK" = "200" ]; then
+                print_success "guest_bridge → account portal connectivity verified"
+            else
+                print_warning "guest_bridge cannot reach account portal (HTTP $HEALTH_CHECK)"
+                print_warning "Guest provisioning may fail — check network policies and account-portal deployment"
+            fi
         else
             print_warning "Guest provisioning API key not found in account-portal-secrets"
             print_warning "guest_bridge app enabled but will not provision guests until API key is configured"
