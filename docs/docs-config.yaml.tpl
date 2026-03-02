@@ -20,6 +20,9 @@ data:
   DB_PORT: "5432"
   DB_NAME: "${DOCS_DB_NAME}"
   DB_USER: "${TENANT_DB_USER}"
+  # Keep DB connections alive for 10 minutes to reduce connection churn
+  # during rolling deploys (Django default is 0 = close after each request)
+  CONN_MAX_AGE: "600"
   
   # Redis settings
   REDIS_HOST: "redis"
