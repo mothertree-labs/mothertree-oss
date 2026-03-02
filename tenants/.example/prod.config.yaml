@@ -163,11 +163,15 @@ resources:
     cpu_request: 500m
     cpu_limit: 1000m
 
-  # Nextcloud - cannot scale yet (PVC constraint)
+  # Nextcloud - HPA-enabled (emptyDir storage, no PVC constraint)
   nextcloud:
-    replicas: 1  # No HPA - PVC with ReadWriteOnce
+    min_replicas: 2
+    max_replicas: 5
     memory_request: 512Mi
     memory_limit: 1Gi
+    cpu_request: 500m
+    cpu_limit: 2000m
+    hpa_scaledown_window: 300
     storage_size: 10Gi
 
   # PostgreSQL is shared infrastructure - configured via deploy_infra, not per-tenant

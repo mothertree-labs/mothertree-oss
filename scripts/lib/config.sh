@@ -315,7 +315,11 @@ _mt_load_scaling_config() {
     "KEYCLOAK_REPLICAS=" + (.resources.keycloak.replicas | tostring | @sh) + "\n" +
     "REDIS_REPLICAS=" + (.resources.redis.replicas | tostring | @sh) + "\n" +
     "SYNAPSE_REPLICAS=" + (.resources.synapse.replicas // 1 | tostring | @sh) + "\n" +
-    "NEXTCLOUD_REPLICAS=" + (.resources.nextcloud.replicas // 1 | tostring | @sh) + "\n" +
+    "NEXTCLOUD_MIN_REPLICAS=" + (.resources.nextcloud.min_replicas | tostring | @sh) + "\n" +
+    "NEXTCLOUD_MAX_REPLICAS=" + (.resources.nextcloud.max_replicas | tostring | @sh) + "\n" +
+    "NEXTCLOUD_CPU_REQUEST=" + (.resources.nextcloud.cpu_request // "500m" | tostring | @sh) + "\n" +
+    "NEXTCLOUD_CPU_LIMIT=" + (.resources.nextcloud.cpu_limit // "2000m" | tostring | @sh) + "\n" +
+    "NEXTCLOUD_HPA_SCALEDOWN_WINDOW=" + (.resources.nextcloud.hpa_scaledown_window // 300 | tostring | @sh) + "\n" +
     "EMAIL_PROBE_MEMORY_REQUEST=" + (.resources.email_probe.memory_request // "32Mi" | tostring | @sh) + "\n" +
     "EMAIL_PROBE_MEMORY_LIMIT=" + (.resources.email_probe.memory_limit // "64Mi" | tostring | @sh) + "\n" +
     "EMAIL_PROBE_CPU_REQUEST=" + (.resources.email_probe.cpu_request // "10m" | tostring | @sh) + "\n" +
@@ -345,6 +349,8 @@ _mt_load_scaling_config() {
   [ "$SYNAPSE_ADMIN_MAX_REPLICAS" = "null" ] || [ -z "$SYNAPSE_ADMIN_MAX_REPLICAS" ] && _missing+=("resources.synapse_admin.max_replicas")
   [ "$STALWART_MIN_REPLICAS" = "null" ] || [ -z "$STALWART_MIN_REPLICAS" ] && _missing+=("resources.stalwart.min_replicas")
   [ "$STALWART_MAX_REPLICAS" = "null" ] || [ -z "$STALWART_MAX_REPLICAS" ] && _missing+=("resources.stalwart.max_replicas")
+  [ "$NEXTCLOUD_MIN_REPLICAS" = "null" ] || [ -z "$NEXTCLOUD_MIN_REPLICAS" ] && _missing+=("resources.nextcloud.min_replicas")
+  [ "$NEXTCLOUD_MAX_REPLICAS" = "null" ] || [ -z "$NEXTCLOUD_MAX_REPLICAS" ] && _missing+=("resources.nextcloud.max_replicas")
   [ "$KEYCLOAK_REPLICAS" = "null" ] || [ -z "$KEYCLOAK_REPLICAS" ] && _missing+=("resources.keycloak.replicas")
   [ "$REDIS_REPLICAS" = "null" ] || [ -z "$REDIS_REPLICAS" ] && _missing+=("resources.redis.replicas")
 
@@ -374,7 +380,9 @@ _mt_load_scaling_config() {
   export STALWART_SMTPS_PORT STALWART_SUBMISSION_PORT STALWART_IMAPS_PORT
   export STALWART_IMAPS_APP_PORT STALWART_SUBMISSION_APP_PORT
   export KEYCLOAK_REPLICAS REDIS_REPLICAS
-  export SYNAPSE_REPLICAS NEXTCLOUD_REPLICAS
+  export SYNAPSE_REPLICAS
+  export NEXTCLOUD_MIN_REPLICAS NEXTCLOUD_MAX_REPLICAS
+  export NEXTCLOUD_CPU_REQUEST NEXTCLOUD_CPU_LIMIT NEXTCLOUD_HPA_SCALEDOWN_WINDOW
   export EMAIL_PROBE_MEMORY_REQUEST EMAIL_PROBE_MEMORY_LIMIT
   export EMAIL_PROBE_CPU_REQUEST EMAIL_PROBE_CPU_LIMIT
 }
