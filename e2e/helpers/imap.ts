@@ -108,6 +108,9 @@ async function connectAsMaster(
  * Append a MIME email with a text/calendar part to a user's INBOX.
  * This simulates receiving an external calendar invitation via email,
  * which calendar-automation will then pick up and process.
+ *
+ * Retries the full connect+append operation to handle transient IMAP
+ * connection drops (common via external ingress in CI).
  */
 export async function appendCalendarEmail(opts: {
   userEmail: string;
@@ -120,13 +123,24 @@ export async function appendCalendarEmail(opts: {
     );
   }
 
-  const client = await connectAsMaster(opts.userEmail, config);
+  const maxAttempts = 3;
+  let lastError: unknown;
 
-  try {
-    await client.append('INBOX', opts.mimeMessage, ['\\Recent']);
-  } finally {
-    await client.logout().catch(() => {});
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const client = await connectAsMaster(opts.userEmail, config);
+    try {
+      await client.append('INBOX', opts.mimeMessage, ['\\Recent']);
+      return;
+    } catch (err: unknown) {
+      lastError = err;
+      await client.logout().catch(() => {});
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 2_000));
+      }
+    }
   }
+
+  throw lastError;
 }
 
 /**
