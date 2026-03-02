@@ -954,7 +954,25 @@ else
     print_warning "Nextcloud pod not found, skipping app store URL ConfigMap"
 fi
 
-# Step 9d: Configure Nextcloud theming (brand colors, logo, name)
+# Step 9d: Run occ upgrade again after app installations
+# Steps 8–9c install apps (OIDC job, notify_push, etc.) which may require DB
+# migrations. Without this, Nextcloud blocks all occ commands ("require upgrade")
+# and theming/config commands below will fail.
+NEXTCLOUD_POD_PRE_THEME=$(_get_nc_pod)
+if [ -n "$NEXTCLOUD_POD_PRE_THEME" ]; then
+    UPGRADE_CHECK_2=$(timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD_PRE_THEME" -c nextcloud -- su -s /bin/sh www-data -c 'php occ status --output=json' 2>&1 || true)
+    if echo "$UPGRADE_CHECK_2" | grep -q "require upgrade"; then
+        print_status "Nextcloud requires upgrade after app installations..."
+        if timeout 300 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD_PRE_THEME" -c nextcloud -- su -s /bin/sh www-data -c 'php occ upgrade' 2>&1; then
+            print_success "Post-app-install upgrade completed"
+        else
+            print_error "Post-app-install occ upgrade failed"
+            exit 1
+        fi
+    fi
+fi
+
+# Step 9e: Configure Nextcloud theming (brand colors, logo, name)
 print_status "Configuring Nextcloud theming..."
 NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
