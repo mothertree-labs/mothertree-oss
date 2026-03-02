@@ -769,7 +769,7 @@ if [ -d "$REPO_ROOT/apps/nextcloud-guest-bridge" ]; then
         GUEST_API_KEY=$(kubectl get secret account-portal-secrets -n "$NS_ADMIN" -o jsonpath='{.data.guest-provisioning-api-key}' 2>/dev/null | base64 -d || echo "")
         if [ -n "$GUEST_API_KEY" ]; then
             kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set guest_bridge.api_key --value='$GUEST_API_KEY'"
-            print_success "guest_bridge app enabled and configured (API: $GUEST_BRIDGE_API_URL)"
+            print_success "guest_bridge app enabled and configured (API: $GUEST_BRIDGE_API_URL) [dormant: sharebymail disabled per #119]"
 
             # Verify guest bridge can reach account portal internally
             print_status "Verifying guest_bridge connectivity to account portal..."
