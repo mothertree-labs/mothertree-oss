@@ -466,6 +466,38 @@ spec:
     secretName: ${WILDCARD_TLS_SECRET}
 EOF
     print_success "Internal Collabora Ingress created/updated for ${OFFICE_HOST}"
+
+    # Internal ingress for Nextcloud (files) — needed so Collabora can reach the
+    # WOPI CheckFileInfo endpoint without hitting the external ingress PROXY protocol wall
+    cat <<EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nextcloud-internal-${MT_TENANT}
+  namespace: ${NS_FILES}
+  labels:
+    app: nextcloud
+    tenant: ${MT_TENANT}
+    purpose: internal-wopi
+spec:
+  ingressClassName: nginx-internal
+  rules:
+  - host: ${FILES_HOST}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: nextcloud
+            port:
+              number: 8080
+  tls:
+  - hosts:
+    - ${FILES_HOST}
+    secretName: ${WILDCARD_TLS_SECRET}
+EOF
+    print_success "Internal Nextcloud Ingress created/updated for ${FILES_HOST}"
 fi
 
 # Look up the internal ingress controller's ClusterIP
@@ -497,6 +529,19 @@ else
     # Wait for rollout to complete (immediate if patch was a no-op)
     kubectl rollout status deployment/nextcloud -n "$NS_FILES" --timeout=600s
     print_success "Nextcloud configured to route traffic internally"
+
+    # Patch the Collabora deployment so it resolves FILES_HOST via internal ingress.
+    # Without this, Collabora's WOPI CheckFileInfo callback to https://FILES_HOST/...
+    # hits the external ingress (which requires PROXY protocol) and gets ECONNRESET.
+    if [ "${OFFICE_ENABLED}" = "true" ]; then
+        print_status "Adding hostAliases to Collabora deployment (${FILES_HOST} → ${INTERNAL_INGRESS_IP})..."
+        kubectl patch deployment collabora-online -n "$NS_OFFICE" \
+            --type=strategic \
+            -p '{"spec":{"template":{"spec":{"hostAliases":[{"ip":"'"$INTERNAL_INGRESS_IP"'","hostnames":["'"$FILES_HOST"'"]}]}}}}'
+
+        kubectl rollout status deployment/collabora-online -n "$NS_OFFICE" --timeout=300s
+        print_success "Collabora configured to route WOPI traffic internally"
+    fi
 fi
 
 # Step 7: Wait for Nextcloud to be ready

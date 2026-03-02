@@ -14,6 +14,7 @@ export const urls = {
   files: `https://files.${baseDomain}`,
   calendar: `https://calendar.${baseDomain}`,
   jitsi: `https://jitsi.${baseDomain}`,
+  office: `https://office.${baseDomain}`,
   webmail: `https://webmail.${baseDomain}`,
   keycloak: `https://auth.${baseDomain}`,
   baseDomain,
