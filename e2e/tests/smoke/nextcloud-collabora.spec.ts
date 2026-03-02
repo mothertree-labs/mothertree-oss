@@ -104,28 +104,41 @@ test.describe('Smoke — Nextcloud Collabora (Office)', () => {
       buffer: Buffer.from('E2E Collabora WOPI test'),
     });
 
-    // Wait for upload
-    await page.waitForTimeout(3_000);
+    // Wait for upload to complete and file to appear in the list
+    const fileRow = page.locator(`[data-cy-files-list-row-name="${testFileName}"]`);
+    await fileRow.waitFor({ state: 'visible', timeout: 15_000 });
 
-    // Step 3: Click the uploaded file to open it in Collabora
-    const fileRow = page.locator(`[data-cy-files-list] [data-cy-files-list-row-name="${testFileName}"], .files-list tr[data-file="${testFileName}"], a:has-text("${testFileName}")`);
-    await fileRow.first().click({ timeout: 10_000 });
+    // Step 3: Click the uploaded file's name link to open it in Collabora.
+    // Must click the name link specifically — clicking other parts of the row
+    // just selects the file without opening it.
+    const fileNameLink = fileRow.locator('.files-list__row-name-link');
+    await fileNameLink.click({ timeout: 10_000 });
 
     // Step 4: Verify Collabora iframe loads
-    // When richdocuments opens a file, it creates an iframe with id="richdocuments-frame"
-    // pointing to the Collabora server. If WOPI CheckFileInfo fails (ECONNRESET),
-    // the iframe won't load or will show an error.
-    const collaboraFrame = page.locator('#richdocuments-frame, iframe[src*="cool.html"], iframe[src*="loleaflet"]');
-    const frameLoaded = await collaboraFrame
-      .first()
-      .isVisible({ timeout: 30_000 })
-      .catch(() => false);
+    // richdocuments 9.x creates an iframe with data-cy="coolframe" and a dynamic
+    // id like "collaboraframe_<random>". The iframe starts hidden (visibility: hidden)
+    // and becomes visible once cool.html loads and sends Frame_Ready.
+    // Use waitFor + expect (auto-retrying) — isVisible() returns immediately without waiting.
+    const collaboraFrame = page.locator('iframe[data-cy="coolframe"]');
+    try {
+      await collaboraFrame.first().waitFor({ state: 'visible', timeout: 30_000 });
+    } catch {
+      // Dump diagnostic info on failure
+      const iframes = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('iframe')).map(f => ({
+          id: f.id, dataCy: f.getAttribute('data-cy'),
+          visible: f.offsetParent !== null, style: f.getAttribute('style'),
+        }))
+      );
+      const hasViewer = await page.evaluate(() => !!document.querySelector('.office-viewer'));
+      const pageText = await page.locator('body').textContent().catch(() => '') || '';
+      const hasWopiError = /WOPI|wopi.*error|failed to read document|document loading failed/i.test(pageText);
+      console.log(`[collabora] Frame not loaded. URL: ${page.url()}`);
+      console.log(`[collabora] office-viewer present: ${hasViewer}`);
+      console.log(`[collabora] iframes:`, JSON.stringify(iframes));
 
-    // Check for WOPI error messages that appear when CheckFileInfo fails
-    const pageText = await page.locator('body').textContent().catch(() => '') || '';
-    const hasWopiError = /WOPI|wopi.*error|failed to read document|document loading failed/i.test(pageText);
-
-    expect(hasWopiError, 'WOPI error detected — Collabora cannot reach Nextcloud (PROXY protocol issue)').toBe(false);
-    expect(frameLoaded, 'Collabora iframe did not load — richdocuments failed to open document via WOPI').toBe(true);
+      expect(hasWopiError, 'WOPI error detected — Collabora cannot reach Nextcloud (PROXY protocol issue)').toBe(false);
+      expect(false, 'Collabora iframe did not load — richdocuments failed to open document via WOPI').toBe(true);
+    }
   });
 });
