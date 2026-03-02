@@ -359,6 +359,20 @@ else
 fi
 rm -rf "$CUSTOM_APPS_STAGING"
 
+# Step 5b: Create before-starting hook ConfigMap
+# This hook runs on every pod start to enforce OIDC-only login.
+# Because /var/www/html is an emptyDir, pod restarts trigger a fresh Nextcloud
+# install which resets user_oidc allow_multiple_user_backends to its default (1).
+# The hook sets it back to 0, preventing the native login form from appearing.
+HOOK_SCRIPT="$REPO_ROOT/apps/manifests/nextcloud/before-starting-hook.sh"
+if [ -f "$HOOK_SCRIPT" ]; then
+    kubectl create configmap nextcloud-before-starting \
+        --namespace "$NS_FILES" \
+        --from-file=enforce-oidc-login.sh="$HOOK_SCRIPT" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    print_status "before-starting hook ConfigMap created/updated"
+fi
+
 # Step 6: Deploy Nextcloud via helmfile
 print_status "Deploying Nextcloud via helmfile..."
 pushd "$REPO_ROOT/apps" >/dev/null

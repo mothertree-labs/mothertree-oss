@@ -206,12 +206,19 @@ nextcloud:
       configMap:
         name: nextcloud-appstore-urls
         optional: true
+    - name: before-starting-hook
+      configMap:
+        name: nextcloud-before-starting
+        defaultMode: 0755
+        optional: true
 
   # Mount pandoc binary in Nextcloud container
   extraVolumeMounts:
     - name: pandoc-bin
       mountPath: /usr/local/bin/pandoc
       subPath: pandoc
+    - name: before-starting-hook
+      mountPath: /docker-entrypoint-hooks.d/before-starting
 
 # Ingress will be configured in environment-specific files
 ingress:

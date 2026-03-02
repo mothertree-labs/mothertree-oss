@@ -5,10 +5,10 @@ import { keycloakLogin } from '../../helpers/auth';
 import { Page } from '@playwright/test';
 
 /**
- * Handle Nextcloud login — covers both Keycloak redirect and Nextcloud's
- * native login page. Sometimes the OIDC auto-redirect fails and Nextcloud
- * shows its own login form instead. When that happens, trigger the OIDC
- * flow manually by navigating to the user_oidc login endpoint.
+ * Handle Nextcloud login — completes the Keycloak OIDC flow when redirected.
+ * This should ONLY need to handle the Keycloak redirect case. If Nextcloud
+ * shows its native login page, that's a configuration bug (allow_multiple_user_backends=1)
+ * and the dedicated 'login redirects to Keycloak' test will catch it.
  */
 async function handleNextcloudLogin(page: Page): Promise<void> {
   if (page.url().includes('auth.')) {
@@ -115,6 +115,84 @@ test.describe('Smoke — Nextcloud (Files)', () => {
       const htmlLength = (await page.content()).length;
       expect(htmlLength).toBeGreaterThan(1000);
     }
+  });
+
+  test('login redirects to Keycloak, not native login form', async ({ memberPage: page }) => {
+    // Use a fresh browser context without any existing session cookies.
+    // This simulates an unauthenticated user visiting Nextcloud for the first time.
+    const freshContext = await page.context().browser()!.newContext({ ignoreHTTPSErrors: true });
+    const freshPage = await freshContext.newPage();
+
+    const response = await freshPage.goto(`${urls.files}/login`).catch(() => null);
+
+    if (!response) {
+      await freshPage.close();
+      await freshContext.close();
+      test.skip(true, 'Nextcloud not reachable (DNS or connection error)');
+      return; // unreachable but satisfies TS
+    }
+
+    // Follow redirects and check where we end up
+    await freshPage.waitForLoadState('networkidle').catch(() => {});
+    const finalUrl = freshPage.url();
+
+    // The native Nextcloud login page has a visible password field.
+    // If allow_multiple_user_backends=0 (correct), /login auto-redirects to
+    // /apps/user_oidc/login/1 which then redirects to Keycloak (auth.*).
+    // If allow_multiple_user_backends=1 (broken), /login shows the native form.
+    const hasPasswordField = await freshPage
+      .locator('input[name="password"], #password')
+      .isVisible({ timeout: 3_000 })
+      .catch(() => false);
+
+    const onNativeLogin = !finalUrl.includes('user_oidc') &&
+      !finalUrl.includes('auth.') &&
+      hasPasswordField;
+
+    await freshPage.close();
+    await freshContext.close();
+
+    expect(
+      onNativeLogin,
+      'Nextcloud is showing its native login page instead of redirecting to Keycloak. ' +
+      'This means allow_multiple_user_backends is set to 1 (should be 0). ' +
+      'Fix: run "php occ config:app:set --value=0 user_oidc allow_multiple_user_backends" ' +
+      'or redeploy Nextcloud to trigger the before-starting hook.'
+    ).toBe(false);
+  });
+
+  test('calendar app responds (pretty URLs working)', async ({ memberPage: page }) => {
+    // Test that /apps/calendar doesn't return a raw Apache 404.
+    // This catches missing .htaccess pretty URL rewrite rules
+    // (occ maintenance:update:htaccess not run, or overwrite.cli.url not set).
+    const freshContext = await page.context().browser()!.newContext({ ignoreHTTPSErrors: true });
+    const freshPage = await freshContext.newPage();
+
+    const response = await freshPage.goto(`${urls.files}/apps/calendar`).catch(() => null);
+
+    if (!response) {
+      await freshPage.close();
+      await freshContext.close();
+      test.skip(true, 'Nextcloud not reachable (DNS or connection error)');
+      return;
+    }
+
+    const status = response.status();
+    const bodyText = await freshPage.locator('body').textContent().catch(() => '') || '';
+    await freshPage.close();
+    await freshContext.close();
+
+    // A raw Apache 404 (not PHP) indicates broken .htaccess rewrite rules.
+    // Valid responses: 302 (redirect to login/OIDC), 401 (unauthorized), 200 (loaded).
+    // Invalid: 404 with Apache error page text.
+    const isApache404 = status === 404 &&
+      /Apache.*Server|The requested URL was not found/i.test(bodyText);
+
+    expect(
+      isApache404,
+      'Nextcloud /apps/calendar returns Apache 404 — .htaccess pretty URL rewrite rules are missing. ' +
+      'Fix: run "php occ maintenance:update:htaccess" (requires overwrite.cli.url to be set).'
+    ).toBe(false);
   });
 
   test('can upload a file when Nextcloud is accessible', async ({ memberPage: page }) => {
