@@ -209,6 +209,41 @@ refresh_token() {
     fi
 }
 
+# Helper: GET a Keycloak API endpoint with retry on transient failures.
+# Under load (e.g. DB connection pool exhaustion), Keycloak returns 500 errors
+# that produce non-JSON responses. Without retry, jq fails and set -e kills
+# the script. This retries up to 3 times with a 5s backoff.
+# Usage: RESULT=$(keycloak_get "/admin/realms/$REALM/clients")
+keycloak_get() {
+    local path="$1"
+    local max_retries=3
+    local delay=5
+    for attempt in $(seq 1 $max_retries); do
+        local response
+        local http_code
+        response=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "\n%{http_code}" \
+          "$KEYCLOAK_URL$path" \
+          -H "Authorization: Bearer $ACCESS_TOKEN")
+        http_code=$(echo "$response" | tail -1)
+        response=$(echo "$response" | sed '$d')
+
+        if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ] 2>/dev/null && echo "$response" | jq empty 2>/dev/null; then
+            echo "$response"
+            return 0
+        fi
+
+        if [ "$attempt" -lt "$max_retries" ]; then
+            print_warning "Keycloak API returned HTTP $http_code for $path (attempt $attempt/$max_retries), retrying in ${delay}s..."
+            refresh_token
+            sleep $delay
+        else
+            print_error "Keycloak API failed after $max_retries attempts (HTTP $http_code) for $path"
+            print_error "Response: ${response:0:200}"
+            return 1
+        fi
+    done
+}
+
 # Create temporary realm config with environment-specific variables
 print_status "Preparing realm configuration with environment-specific variables..."
 TEMP_CONFIG=$(mktemp)
@@ -384,8 +419,7 @@ if [ -z "$DOCS_CLIENT_ID" ] || [ "$DOCS_CLIENT_ID" = "null" ]; then
 fi
 
 # Get current client configuration
-DOCS_CLIENT_CONFIG=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$DOCS_CLIENT_ID" \
-  -H "Authorization: Bearer $ACCESS_TOKEN")
+DOCS_CLIENT_CONFIG=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$DOCS_CLIENT_ID")
 
 # Update client with new secret (update the full client object)
 DOCS_CLIENT_UPDATE=$(echo "$DOCS_CLIENT_CONFIG" | jq ". + {secret: \"$OIDC_RP_CLIENT_SECRET\"}")
@@ -408,8 +442,7 @@ fi
 # Update docs-app client redirect URIs to match environment (realm import doesn't always update existing clients)
 print_status "Updating docs-app client redirect URIs for environment..."
 # Get current client configuration again (we already have DOCS_CLIENT_ID and DOCS_CLIENT_CONFIG above)
-DOCS_CLIENT_CONFIG=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$DOCS_CLIENT_ID" \
-  -H "Authorization: Bearer $ACCESS_TOKEN")
+DOCS_CLIENT_CONFIG=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$DOCS_CLIENT_ID")
 
 # Update client with correct redirect URIs and web origins
 # Include both the wildcard pattern and the specific callback path
@@ -444,8 +477,7 @@ if [ -z "$MATRIX_CLIENT_ID" ] || [ "$MATRIX_CLIENT_ID" = "null" ]; then
     exit 1
 else
     # Get current client configuration
-    MATRIX_CLIENT_CONFIG=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$MATRIX_CLIENT_ID" \
-      -H "Authorization: Bearer $ACCESS_TOKEN")
+    MATRIX_CLIENT_CONFIG=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$MATRIX_CLIENT_ID")
 
     # Update client with correct secret, redirect URIs and web origins
     # Include secret from SYNAPSE_OIDC_CLIENT_SECRET env var if set
@@ -552,8 +584,7 @@ EOF
 else
     # Get current client configuration
     print_status "nextcloud-app client found, updating it..."
-    NEXTCLOUD_CLIENT_CONFIG=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$NEXTCLOUD_CLIENT_ID" \
-      -H "Authorization: Bearer $ACCESS_TOKEN")
+    NEXTCLOUD_CLIENT_CONFIG=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$NEXTCLOUD_CLIENT_ID")
 
     # Update client with correct redirect URIs, web origins, and secret
     # Note: Nextcloud user_oidc app uses /apps/user_oidc/code as the callback path
@@ -635,8 +666,7 @@ EOF
 else
     # Get current client configuration
     print_status "jitsi client found, updating it..."
-    JITSI_CLIENT_CONFIG=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$JITSI_CLIENT_ID" \
-      -H "Authorization: Bearer $ACCESS_TOKEN")
+    JITSI_CLIENT_CONFIG=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$JITSI_CLIENT_ID")
 
     # Update client with correct redirect URIs and web origins
     JITSI_CLIENT_UPDATE=$(echo "$JITSI_CLIENT_CONFIG" | jq ". + {
@@ -711,8 +741,7 @@ EOF
     else
         # Get current client configuration
         print_status "stalwart client found, updating it..."
-        STALWART_CLIENT_CONFIG=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$STALWART_KC_CLIENT_ID" \
-          -H "Authorization: Bearer $ACCESS_TOKEN")
+        STALWART_CLIENT_CONFIG=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$STALWART_KC_CLIENT_ID")
 
         # Update client with correct secret, redirect URIs and web origins
         STALWART_CLIENT_UPDATE=$(echo "$STALWART_CLIENT_CONFIG" | jq ". + {
@@ -790,8 +819,7 @@ EOF
     else
         # Get current client configuration
         print_status "roundcube client found, updating it..."
-        ROUNDCUBE_CLIENT_CONFIG=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$ROUNDCUBE_KC_CLIENT_ID" \
-          -H "Authorization: Bearer $ACCESS_TOKEN")
+        ROUNDCUBE_CLIENT_CONFIG=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$ROUNDCUBE_KC_CLIENT_ID")
 
         # Update client with correct secret, redirect URIs and web origins
         ROUNDCUBE_CLIENT_UPDATE=$(echo "$ROUNDCUBE_CLIENT_CONFIG" | jq ". + {
@@ -971,8 +999,7 @@ EOF
     else
         # Get current client configuration
         print_status "admin-portal client found, updating it..."
-        ADMIN_PORTAL_CLIENT_CONFIG=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$ADMIN_PORTAL_KC_CLIENT_ID" \
-          -H "Authorization: Bearer $ACCESS_TOKEN")
+        ADMIN_PORTAL_CLIENT_CONFIG=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$ADMIN_PORTAL_KC_CLIENT_ID")
 
         # Update client with correct secret, redirect URIs and web origins
         ADMIN_PORTAL_CLIENT_UPDATE=$(echo "$ADMIN_PORTAL_CLIENT_CONFIG" | jq ". + {
@@ -1067,9 +1094,7 @@ for CLIENT_NAME in nextcloud-app docs-app roundcube; do
     fi
 
     # Get current client config, add offline_access to default scopes, remove from optional
-    CLIENT_CONFIG=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
-      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID" \
-      -H "Authorization: Bearer $ACCESS_TOKEN")
+    CLIENT_CONFIG=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID")
 
     # Check if already in default scopes
     HAS_OFFLINE=$(echo "$CLIENT_CONFIG" | jq -r '.defaultClientScopes | index("offline_access") // empty')
