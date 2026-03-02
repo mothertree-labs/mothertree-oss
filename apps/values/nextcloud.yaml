@@ -2,8 +2,10 @@
 # Conservative resource allocation for 2-node cluster
 # Uses shared PostgreSQL database (docs-postgresql)
 
-# Replica count
-replicaCount: 1
+# Replica count — intentionally omitted so Helm does not conflict with the HPA
+# (kube-controller-manager owns .spec.replicas; setting it here causes
+# "conflict with kube-controller-manager using apps/v1: .spec.replicas" on upgrade).
+# The chart defaults to 1; the HPA manages scaling from there.
 
 # Disable internal SQLite database
 internalDatabase:
