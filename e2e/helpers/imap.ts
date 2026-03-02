@@ -61,6 +61,9 @@ function createClient(authUser: string, config: ImapConfig): typeof ImapFlow {
  * Stalwart master-user auth uses the principal name (not email).
  * Some principals use "user@domain" as name, others use just "user".
  * We try email first, then fall back to short username.
+ *
+ * Retries the full candidate list up to 3 times with a delay to handle
+ * transient connection issues (common when connecting via external ingress).
  */
 async function connectAsMaster(
   userEmail: string,
@@ -68,29 +71,36 @@ async function connectAsMaster(
 ): Promise<typeof ImapFlow> {
   const username = userEmail.split('@')[0];
   const candidates = [userEmail, username];
+  const maxAttempts = 3;
 
-  for (const name of candidates) {
-    const client = createClient(`${name}%master`, config);
-    try {
-      await client.connect();
-      return client;
-    } catch (err: unknown) {
-      // Auth failures manifest differently depending on the connection path:
-      // - Direct/cluster-internal: "Authentication failed" or "Command failed"
-      // - Via ingress/TLS proxy: "Unexpected close" or "Connection not available"
-      const isAuthFailure =
-        err instanceof Error &&
-        (err.message.includes('Authentication failed') ||
-          err.message.includes('Command failed') ||
-          err.message.includes('Unexpected close') ||
-          err.message.includes('Connection not available'));
-      if (!isAuthFailure) throw err;
-      await client.logout().catch(() => {});
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    for (const name of candidates) {
+      const client = createClient(`${name}%master`, config);
+      try {
+        await client.connect();
+        return client;
+      } catch (err: unknown) {
+        // Auth/connection failures manifest differently depending on the path:
+        // - Direct/cluster-internal: "Authentication failed" or "Command failed"
+        // - Via ingress/TLS proxy: "Unexpected close" or "Connection not available"
+        const isRetryable =
+          err instanceof Error &&
+          (err.message.includes('Authentication failed') ||
+            err.message.includes('Command failed') ||
+            err.message.includes('Unexpected close') ||
+            err.message.includes('Connection not available'));
+        if (!isRetryable) throw err;
+        await client.logout().catch(() => {});
+      }
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 2_000));
     }
   }
 
   throw new Error(
-    `IMAP master-user auth failed for ${userEmail} (tried: ${candidates.map((c) => c + '%master').join(', ')})`,
+    `IMAP master-user auth failed for ${userEmail} (tried: ${candidates.map((c) => c + '%master').join(', ')}, ${maxAttempts} attempts)`,
   );
 }
 
