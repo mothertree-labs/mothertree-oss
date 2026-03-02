@@ -153,6 +153,18 @@ else
     print_warning "Mail namespace $NS_STALWART does not exist, skipping mail ingress policy"
 fi
 
+# =============================================================================
+# Apply mail-to-files egress (calendar-automation → Nextcloud CalDAV on port 8080)
+# =============================================================================
+if kubectl get namespace "$NS_STALWART" &>/dev/null && kubectl get namespace "$NS_FILES" &>/dev/null; then
+    export NAMESPACE="$NS_STALWART"
+    print_status "[$NS_STALWART] Applying allow-mail-to-files-egress (Calendar Automation → Nextcloud CalDAV)..."
+    envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-mail-to-files-egress.yaml.tpl" | kubectl apply -f -
+    print_success "[$NS_STALWART] Mail-to-files egress policy applied"
+else
+    print_warning "Mail or files namespace does not exist, skipping mail-to-files egress policy"
+fi
+
 if kubectl get namespace "$NS_WEBMAIL" &>/dev/null; then
     export NAMESPACE="$NS_WEBMAIL"
     print_status "[$NS_WEBMAIL] Applying allow-webmail-to-mail-egress (Roundcube → Stalwart)..."
@@ -242,6 +254,7 @@ print_status "  - allow-jitsi-media-egress    (jitsi: UDP for ICE/media + TURN T
 print_status "Cross-namespace policies:"
 print_status "  - allow-webmail-to-mail-egress  (webmail → mail: IMAP/SMTP/Sieve)"
 print_status "  - allow-admin-to-mail-egress    (admin → mail: Stalwart HTTP API)"
+print_status "  - allow-mail-to-files-egress    (mail → files: CalDAV port 8080)"
 print_status "  - allow-files-to-office-egress  (files → office: Collabora port 9980)"
 print_status "  - allow-mail-ingress            (mail: accept from Postfix + Roundcube + Admin)"
 print_status "Targeted ingress restrictions:"

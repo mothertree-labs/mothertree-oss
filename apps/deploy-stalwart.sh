@@ -112,6 +112,12 @@ if [ -z "$S3_MAIL_BUCKET" ] || [ "$S3_MAIL_BUCKET" = "null" ]; then
     exit 1
 fi
 
+# Generate SHA-512 crypt hash of admin password for master-user authentication
+# Stalwart master.secret requires a hashed password (not plaintext)
+export STALWART_MASTER_SECRET
+STALWART_MASTER_SECRET=$(openssl passwd -6 -salt "$(openssl rand -hex 8)" "$STALWART_ADMIN_PASSWORD")
+print_status "Master-user secret hash generated"
+
 # Generate config checksum for pod annotations
 # Include both secrets AND the rendered config template to trigger restarts on any config change
 RENDERED_CONFIG=$(envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" 2>/dev/null || echo "")

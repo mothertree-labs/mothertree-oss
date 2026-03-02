@@ -79,7 +79,7 @@ spec:
               name: calendar-automation-secrets
               key: STALWART_ADMIN_PASSWORD
         - name: CALDAV_BASE_URL
-          value: "https://${FILES_HOST}/remote.php/dav"
+          value: "http://nextcloud.${NS_FILES}.svc.cluster.local:8080/remote.php/dav"
         - name: CALDAV_ADMIN_USER
           valueFrom:
             secretKeyRef:
@@ -90,14 +90,14 @@ spec:
             secretKeyRef:
               name: calendar-automation-secrets
               key: CALDAV_ADMIN_PASSWORD
+        - name: CALDAV_TOKEN_FILE
+          value: "/config/caldav-tokens.json"
         - name: POLL_INTERVAL_SECONDS
           value: "${POLL_INTERVAL_SECONDS}"
         - name: HEALTH_PORT
           value: "8080"
         - name: LOG_LEVEL
           value: "info"
-        - name: NODE_TLS_REJECT_UNAUTHORIZED
-          value: "0"
         volumeMounts:
         - name: app
           mountPath: /app
