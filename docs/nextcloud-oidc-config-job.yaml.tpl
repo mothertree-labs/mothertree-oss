@@ -75,14 +75,21 @@ spec:
 
               # Helper: resolve a Running, Ready Nextcloud pod (skips Terminating pods).
               # Called before each kubectl exec to tolerate HPA scale-down and rolling updates.
+              # Prefers Ready pods to avoid exec into containers that are still starting up.
               get_nc_pod() {
-                kubectl get pod -n "$POD_NAMESPACE" \
+                local pods
+                pods=$(kubectl get pod -n "$POD_NAMESPACE" \
                   -l app.kubernetes.io/instance=nextcloud \
-                  --field-selector=status.phase=Running \
-                  -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.deletionTimestamp}{"\n"}{end}' 2>/dev/null \
-                | while read -r name ts; do
-                    [ -z "$ts" ] && echo "$name" && break
-                  done
+                  -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+                # Prefer Ready pods (no deletionTimestamp, Ready=True)
+                local ready_pod
+                ready_pod=$(echo "$pods" | grep '^|True|' | head -1 | cut -d'|' -f3)
+                if [ -n "$ready_pod" ]; then
+                  echo "$ready_pod"
+                  return
+                fi
+                # Fall back to any non-terminating pod
+                echo "$pods" | grep '^|' | head -1 | cut -d'|' -f3 || true
               }
 
               # Helper: kubectl exec against a freshly-resolved pod.

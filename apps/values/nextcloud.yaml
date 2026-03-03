@@ -2,6 +2,16 @@
 # Conservative resource allocation for 2-node cluster
 # Uses shared PostgreSQL database (docs-postgresql)
 
+# Enable startup probe so the liveness probe doesn't kill pods during
+# before-starting-hook.sh (which runs occ upgrade, app installs, etc.).
+# The liveness probe is suspended until the startup probe passes.
+startupProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+
 # Use the chart's built-in HPA. This omits .spec.replicas from the Deployment
 # template entirely, avoiding Helm 4 SSA conflicts with kube-controller-manager
 # which owns .spec.replicas via the HPA scale subresource.
