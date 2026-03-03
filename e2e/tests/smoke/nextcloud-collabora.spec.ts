@@ -1,8 +1,6 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
-import { TEST_USERS } from '../../helpers/test-users';
-import { keycloakLogin } from '../../helpers/auth';
-import { Page } from '@playwright/test';
+import { handleNextcloudLogin, waitForNextcloudReady } from '../../helpers/nextcloud';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -10,32 +8,6 @@ const configPath = path.join(__dirname, '..', '..', 'e2e.config.json');
 const config = fs.existsSync(configPath)
   ? JSON.parse(fs.readFileSync(configPath, 'utf-8'))
   : {};
-
-/**
- * Handle Nextcloud login — completes the Keycloak OIDC flow when redirected.
- */
-async function handleNextcloudLogin(page: Page): Promise<void> {
-  if (page.url().includes('auth.')) {
-    await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
-    await page.waitForLoadState('networkidle').catch(() => {});
-    return;
-  }
-
-  const onNativeLogin = page.url().includes('/login') &&
-    !page.url().includes('user_oidc') &&
-    await page.locator('input[name="password"], #password').isVisible({ timeout: 2_000 }).catch(() => false);
-
-  if (onNativeLogin) {
-    const oidcResponse = await page.goto(`${urls.files}/apps/user_oidc/login/1`, { timeout: 30_000 }).catch(() => null);
-    if (!oidcResponse) return;
-    await page.waitForLoadState('networkidle').catch(() => {});
-
-    if (page.url().includes('auth.')) {
-      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
-      await page.waitForLoadState('networkidle').catch(() => {});
-    }
-  }
-}
 
 test.describe('Smoke — Nextcloud Collabora (Office)', () => {
   test('Collabora discovery endpoint responds', async ({ memberPage: page }) => {
@@ -82,13 +54,8 @@ test.describe('Smoke — Nextcloud Collabora (Office)', () => {
     await page.waitForLoadState('networkidle').catch(() => {});
     await page.waitForTimeout(3_000);
 
-    // Verify we're logged in
-    const hasContent = await page
-      .locator('#app-content, .files-list, [class*="app-content"]')
-      .first()
-      .isVisible({ timeout: 15_000 })
-      .catch(() => false);
-    expect(hasContent, 'Nextcloud files view did not load after login').toBe(true);
+    // Verify we're logged in (retries if Nextcloud is in maintenance mode during HPA scale-up)
+    await waitForNextcloudReady(page, { timeout: 15_000 });
 
     // Step 2: Upload a test .odt file using the real upload UI flow.
     // Click New → Upload files → provide file via the native file chooser dialog.
