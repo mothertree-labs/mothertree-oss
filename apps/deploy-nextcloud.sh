@@ -393,29 +393,29 @@ if [ -f "$HOOK_SCRIPT" ]; then
     print_status "before-starting hook ConfigMap created/updated"
 fi
 
-# Step 5c: Create/update app store download URLs ConfigMap before helmfile sync
+# Step 5c: Ensure appstore-urls ConfigMap exists before helmfile sync (create only)
 # App store apps (user_oidc, calendar, richdocuments, external, notify_push) live on
 # emptyDir and are lost on pod restart. The init container downloads them from URLs
 # stored in this ConfigMap on every boot.
 #
-# CRITICAL: This must run BEFORE helmfile sync. Without it, new pods from a rolling
-# update start with ZERO app store apps in custom_apps/. Their before-starting hook
-# runs `occ upgrade` which modifies the shared DB to reflect the missing apps —
-# putting all pods into "require upgrade" state and breaking occ commands.
+# CRITICAL: Only CREATE this ConfigMap if it doesn't exist yet (first deploy).
+# Never UPDATE it before helmfile sync — updating would give new pods (from rolling
+# update or HPA scale-up) different app versions than existing pods. When the new
+# pod's before-starting hook runs `occ upgrade`, the version mismatch modifies the
+# shared DB, breaking occ commands on all other pods ("require upgrade").
 #
-# We derive the NC version from the Helm chart's appVersion (no running pod needed),
-# then query the Nextcloud app store API for compatible download URLs.
-# After the deploy stabilizes, step 9c.1 refreshes the ConfigMap from the actual
-# running pod's version (as a consistency check).
-print_status "Ensuring app store download URLs ConfigMap is up to date..."
-NC_CHART_VERSION=$(grep -A3 'chart: nextcloud/nextcloud' "$REPO_ROOT/apps/helmfile.yaml.gotmpl" \
-    | grep 'version:' | head -1 | awk '{print $2}')
-if [ -n "$NC_CHART_VERSION" ]; then
-    NC_APP_VERSION=$(helm show chart nextcloud/nextcloud --version "$NC_CHART_VERSION" 2>/dev/null \
-        | grep '^appVersion:' | awk '{print $2}')
-fi
-if [ -n "${NC_APP_VERSION:-}" ]; then
-    APP_URLS=$(curl -sf "https://apps.nextcloud.com/api/v1/platform/${NC_APP_VERSION}/apps.json" | python3 -c "
+# The ConfigMap is refreshed AFTER all occ commands complete (step 9c.1), when it's
+# safe for future pods to pick up new versions.
+if ! kubectl get configmap nextcloud-appstore-urls -n "$NS_FILES" &>/dev/null; then
+    print_status "Creating initial app store download URLs ConfigMap (first deploy)..."
+    NC_CHART_VERSION=$(grep -A3 'chart: nextcloud/nextcloud' "$REPO_ROOT/apps/helmfile.yaml.gotmpl" \
+        | grep 'version:' | head -1 | awk '{print $2}')
+    if [ -n "$NC_CHART_VERSION" ]; then
+        NC_APP_VERSION=$(helm show chart nextcloud/nextcloud --version "$NC_CHART_VERSION" 2>/dev/null \
+            | grep '^appVersion:' | awk '{print $2}')
+    fi
+    if [ -n "${NC_APP_VERSION:-}" ]; then
+        APP_URLS=$(curl -sf "https://apps.nextcloud.com/api/v1/platform/${NC_APP_VERSION}/apps.json" | python3 -c "
 import json, sys, os
 apps = json.load(sys.stdin)
 needed = {'user_oidc', 'calendar', 'richdocuments', 'external', 'notify_push'}
@@ -426,18 +426,21 @@ for a in apps:
         r = a['releases'][0]
         print(f\"{a['id']}|{r['download']}\")
 " 2>/dev/null || true)
-    if [ -n "$APP_URLS" ]; then
-        kubectl create configmap nextcloud-appstore-urls \
-            --namespace "$NS_FILES" \
-            --from-literal=app-urls="$APP_URLS" \
-            --dry-run=client -o yaml | kubectl apply -f -
-        APP_COUNT=$(echo "$APP_URLS" | wc -l | tr -d ' ')
-        print_success "App store URLs ConfigMap updated ($APP_COUNT apps for NC $NC_APP_VERSION)"
+        if [ -n "$APP_URLS" ]; then
+            kubectl create configmap nextcloud-appstore-urls \
+                --namespace "$NS_FILES" \
+                --from-literal=app-urls="$APP_URLS" \
+                --dry-run=client -o yaml | kubectl apply -f -
+            APP_COUNT=$(echo "$APP_URLS" | wc -l | tr -d ' ')
+            print_success "App store URLs ConfigMap created ($APP_COUNT apps for NC $NC_APP_VERSION)"
+        else
+            print_warning "Could not fetch app store URLs from API (non-critical for first deploy)"
+        fi
     else
-        print_warning "Could not fetch app store URLs from API (app store may be down)"
+        print_warning "Could not determine NC version from Helm chart ${NC_CHART_VERSION:-unknown}"
     fi
 else
-    print_warning "Could not determine NC version from Helm chart ${NC_CHART_VERSION:-unknown}"
+    print_status "App store URLs ConfigMap already exists (preserving for version consistency)"
 fi
 
 # Step 6: Deploy Nextcloud via helmfile
@@ -971,10 +974,10 @@ else
     print_warning "Nextcloud pod not found, skipping notify_push deployment"
 fi
 
-# Step 9c.1: Refresh app store download URLs ConfigMap (post-deploy)
-# Step 5c created/updated this ConfigMap before helmfile sync using the chart's appVersion.
-# Now refresh it using the actual running pod's version — this ensures the URLs match
-# the exact NC version in the running container (consistency check).
+# Step 9c.1: Update app store download URLs ConfigMap (post-deploy, post-theming)
+# This is the ONLY place the ConfigMap gets updated (step 5c only creates if missing).
+# By running after all occ commands, we ensure that during the deploy window, all pods
+# share the same app versions. Future pod restarts/scale-ups will get these URLs.
 print_status "Refreshing app store download URLs ConfigMap..."
 NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
