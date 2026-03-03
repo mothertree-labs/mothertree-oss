@@ -483,10 +483,11 @@ pushd "$REPO_ROOT/apps" >/dev/null
   if [ "${SKIP_HELM_REPO_UPDATE:-}" = "true" ]; then
     SKIP_DEPS_FLAG="--skip-deps"
   fi
-  # --args --force-conflicts: Helm 4 uses server-side apply by default. The HPA
-  # controller owns .spec.replicas, causing "conflict with kube-controller-manager".
-  # --force-conflicts lets Helm adopt the field; HPA immediately reclaims it after sync.
-  if helmfile -e "$MT_ENV" -l name=nextcloud sync $SKIP_DEPS_FLAG --args --force-conflicts; then
+  # --sync-args passes flags to `helm upgrade --install` (not `helm template`).
+  # Helm 4 uses server-side apply by default. The HPA controller owns .spec.replicas,
+  # causing "conflict with kube-controller-manager". --force-conflicts lets Helm adopt
+  # the field; HPA immediately reclaims it after sync.
+  if helmfile -e "$MT_ENV" -l name=nextcloud sync $SKIP_DEPS_FLAG --sync-args --force-conflicts; then
     print_success "Nextcloud deployed successfully"
   else
     print_error "Nextcloud deployment failed"
