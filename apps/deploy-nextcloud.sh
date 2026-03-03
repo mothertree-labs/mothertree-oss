@@ -43,14 +43,24 @@ mt_deploy_start "deploy-nextcloud"
 
 mt_require_commands kubectl helm envsubst openssl
 
-# Helper: get a running, non-terminating Nextcloud pod name.
-# During rolling updates or node failures, Terminating pods may linger in the
-# pod list.  {.items[0]} would pick the oldest (terminating) pod, causing every
-# subsequent `kubectl exec` to hang.  This helper filters them out.
+# Helper: get a running, non-terminating, Ready Nextcloud pod name.
+# During rolling updates or HPA scale-up, not-yet-ready pods may appear in the
+# pod list.  Picking one causes "container not found" errors because the
+# nextcloud container hasn't passed readiness yet.  This helper prefers a Ready
+# pod, falling back to any non-terminating pod if none are Ready yet.
 _get_nc_pod() {
-    kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud \
-        -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{"|"}{.metadata.name}{"\n"}{end}' 2>/dev/null \
-        | grep '^|' | head -1 | cut -d'|' -f2 || true
+    local pods
+    pods=$(kubectl get pod -n "$NS_FILES" -l app.kubernetes.io/instance=nextcloud \
+        -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+    # Prefer Ready pods (no deletionTimestamp, Ready=True)
+    local ready_pod
+    ready_pod=$(echo "$pods" | grep '^|True|' | head -1 | cut -d'|' -f3)
+    if [ -n "$ready_pod" ]; then
+        echo "$ready_pod"
+        return
+    fi
+    # Fall back to any non-terminating pod
+    echo "$pods" | grep '^|' | head -1 | cut -d'|' -f3 || true
 }
 
 print_status "Starting Nextcloud deployment for environment: $MT_ENV"
@@ -383,6 +393,56 @@ if [ -f "$HOOK_SCRIPT" ]; then
     print_status "before-starting hook ConfigMap created/updated"
 fi
 
+# Step 5c: Ensure appstore-urls ConfigMap exists before helmfile sync (create only)
+# App store apps (user_oidc, calendar, richdocuments, external, notify_push) live on
+# emptyDir and are lost on pod restart. The init container downloads them from URLs
+# stored in this ConfigMap on every boot.
+#
+# CRITICAL: Only CREATE this ConfigMap if it doesn't exist yet (first deploy).
+# Never UPDATE it before helmfile sync — updating would give new pods (from rolling
+# update or HPA scale-up) different app versions than existing pods. When the new
+# pod's before-starting hook runs `occ upgrade`, the version mismatch modifies the
+# shared DB, breaking occ commands on all other pods ("require upgrade").
+#
+# The ConfigMap is refreshed AFTER all occ commands complete (step 9c.1), when it's
+# safe for future pods to pick up new versions.
+if ! kubectl get configmap nextcloud-appstore-urls -n "$NS_FILES" &>/dev/null; then
+    print_status "Creating initial app store download URLs ConfigMap (first deploy)..."
+    NC_CHART_VERSION=$(grep -A3 'chart: nextcloud/nextcloud' "$REPO_ROOT/apps/helmfile.yaml.gotmpl" \
+        | grep 'version:' | head -1 | awk '{print $2}')
+    if [ -n "$NC_CHART_VERSION" ]; then
+        NC_APP_VERSION=$(helm show chart nextcloud/nextcloud --version "$NC_CHART_VERSION" 2>/dev/null \
+            | grep '^appVersion:' | awk '{print $2}')
+    fi
+    if [ -n "${NC_APP_VERSION:-}" ]; then
+        APP_URLS=$(curl -sf "https://apps.nextcloud.com/api/v1/platform/${NC_APP_VERSION}/apps.json" | python3 -c "
+import json, sys, os
+apps = json.load(sys.stdin)
+needed = {'user_oidc', 'calendar', 'richdocuments', 'external', 'notify_push'}
+if os.environ.get('GOOGLE_IMPORT_ENABLED') == 'true':
+    needed.add('integration_google')
+for a in apps:
+    if a['id'] in needed and a.get('releases'):
+        r = a['releases'][0]
+        print(f\"{a['id']}|{r['download']}\")
+" 2>/dev/null || true)
+        if [ -n "$APP_URLS" ]; then
+            kubectl create configmap nextcloud-appstore-urls \
+                --namespace "$NS_FILES" \
+                --from-literal=app-urls="$APP_URLS" \
+                --dry-run=client -o yaml | kubectl apply -f -
+            APP_COUNT=$(echo "$APP_URLS" | wc -l | tr -d ' ')
+            print_success "App store URLs ConfigMap created ($APP_COUNT apps for NC $NC_APP_VERSION)"
+        else
+            print_warning "Could not fetch app store URLs from API (non-critical for first deploy)"
+        fi
+    else
+        print_warning "Could not determine NC version from Helm chart ${NC_CHART_VERSION:-unknown}"
+    fi
+else
+    print_status "App store URLs ConfigMap already exists (preserving for version consistency)"
+fi
+
 # Step 6: Deploy Nextcloud via helmfile
 print_status "Deploying Nextcloud via helmfile..."
 pushd "$REPO_ROOT/apps" >/dev/null
@@ -392,7 +452,10 @@ pushd "$REPO_ROOT/apps" >/dev/null
   if [ "${SKIP_HELM_REPO_UPDATE:-}" = "true" ]; then
     SKIP_DEPS_FLAG="--skip-deps"
   fi
-  if helmfile -e "$MT_ENV" -l name=nextcloud sync $SKIP_DEPS_FLAG; then
+  # --args --force-conflicts: Helm 4 uses server-side apply by default. The HPA
+  # controller owns .spec.replicas, causing "conflict with kube-controller-manager".
+  # --force-conflicts lets Helm adopt the field; HPA immediately reclaims it after sync.
+  if helmfile -e "$MT_ENV" -l name=nextcloud sync $SKIP_DEPS_FLAG --args --force-conflicts; then
     print_success "Nextcloud deployed successfully"
   else
     print_error "Nextcloud deployment failed"
@@ -911,13 +974,11 @@ else
     print_warning "Nextcloud pod not found, skipping notify_push deployment"
 fi
 
-# Step 9c.1: Create/update app store download URLs ConfigMap
-# App store apps (user_oidc, calendar, richdocuments, external, notify_push) are installed
-# by the OIDC config job during deploy, but live on emptyDir and are lost on pod restart.
-# To survive restarts, we query the Nextcloud app store API for download URLs and store
-# them in a ConfigMap. The init container reads these URLs and downloads+extracts the apps
-# on every boot. This adds ~15-30s to pod startup but ensures all apps are always present.
-print_status "Creating app store download URLs ConfigMap..."
+# Step 9c.1: Update app store download URLs ConfigMap (post-deploy, post-theming)
+# This is the ONLY place the ConfigMap gets updated (step 5c only creates if missing).
+# By running after all occ commands, we ensure that during the deploy window, all pods
+# share the same app versions. Future pod restarts/scale-ups will get these URLs.
+print_status "Refreshing app store download URLs ConfigMap..."
 NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
     # App store API requires 3-part version (32.0.5), not 4-part (32.0.5.0)
@@ -955,9 +1016,25 @@ else
 fi
 
 # Step 9d: Configure Nextcloud theming (brand colors, logo, name)
+# Run occ upgrade unconditionally on the SAME pod we'll use for theming.
+# With HPA ≥2 replicas, a rolling-update pod may run occ upgrade via its
+# before-starting hook, modifying app version records in the shared DB.
+# That puts THIS pod into "require upgrade" state mid-stream.  A conditional
+# check (occ status) is racy — the state can flip between check and use.
+# occ upgrade is a no-op (<1s) when nothing needs upgrading.
 print_status "Configuring Nextcloud theming..."
 NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
+    # Reconcile app versions on this specific pod before running any occ commands.
+    # Step 7a already ran occ upgrade after the pod became Ready, so this is typically
+    # a no-op (<1s). But if another pod modified the DB since then (e.g. HPA scaled up
+    # a new pod mid-deploy), this catches the drift.
+    UPGRADE_OUTPUT=$(timeout 300 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+        su -s /bin/sh www-data -c 'php occ upgrade' 2>&1) || {
+        print_warning "occ upgrade returned non-zero on $NEXTCLOUD_POD (may be first install):"
+        echo "$UPGRADE_OUTPUT" | tail -5 | while read -r line; do print_warning "  $line"; done
+    }
+
     # Ensure theming app is enabled
     kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable theming" 2>/dev/null || true
 
