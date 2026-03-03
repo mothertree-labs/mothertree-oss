@@ -126,7 +126,13 @@ test.describe('Smoke — Nextcloud Collabora (Office)', () => {
         buffer: Buffer.from('E2E Collabora WOPI test'),
       });
 
-      // Wait for upload to complete and file to appear in the list
+      // Wait for the upload to finish, then reload the file list. NC32's Vue
+      // file list doesn't always reflect uploads triggered via the fileChooser
+      // API. A reload guarantees the server-side file appears in the DOM.
+      await page.waitForTimeout(3_000);
+      await page.goto(`${urls.files}/apps/files/`);
+      await page.waitForLoadState('networkidle').catch(() => {});
+
       const fileRow = page.locator(`[data-cy-files-list-row-name="${testFileName}"]`);
       await fileRow.waitFor({ state: 'visible', timeout: 15_000 });
 
