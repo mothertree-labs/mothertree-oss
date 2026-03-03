@@ -63,6 +63,37 @@ _get_nc_pod() {
     echo "$pods" | grep '^|' | head -1 | cut -d'|' -f3 || true
 }
 
+# Helper: run an occ command with automatic retry on "require upgrade" errors.
+# With HPA ≥2 replicas, another pod's before-starting hook can run occ upgrade
+# between our individual theming commands, flipping the DB into "require upgrade"
+# state.  This wrapper detects that and re-runs occ upgrade before retrying.
+_nc_occ_retry() {
+    local pod="$1"
+    shift
+    local cmd="$*"
+    local max_retries=3
+    for attempt in $(seq 1 "$max_retries"); do
+        local output
+        output=$(kubectl exec -n "$NS_FILES" "$pod" -c nextcloud -- \
+            su -s /bin/sh www-data -c "$cmd" 2>&1) && {
+            [ -n "$output" ] && echo "$output"
+            return 0
+        }
+        if echo "$output" | grep -qi "require upgrade"; then
+            print_warning "require upgrade detected (attempt $attempt/$max_retries), reconciling..."
+            kubectl exec -n "$NS_FILES" "$pod" -c nextcloud -- \
+                su -s /bin/sh www-data -c 'php occ upgrade --no-interaction' 2>/dev/null || true
+            sleep 2
+        else
+            # Non-upgrade error — don't retry
+            echo "$output"
+            return 1
+        fi
+    done
+    print_error "occ command failed after $max_retries retries: $cmd"
+    return 1
+}
+
 print_status "Starting Nextcloud deployment for environment: $MT_ENV"
 print_status "Database namespace: $NS_DB"
 print_status "Files namespace: $NS_FILES"
@@ -1016,52 +1047,43 @@ else
 fi
 
 # Step 9d: Configure Nextcloud theming (brand colors, logo, name)
-# Run occ upgrade unconditionally on the SAME pod we'll use for theming.
-# With HPA ≥2 replicas, a rolling-update pod may run occ upgrade via its
-# before-starting hook, modifying app version records in the shared DB.
-# That puts THIS pod into "require upgrade" state mid-stream.  A conditional
-# check (occ status) is racy — the state can flip between check and use.
-# occ upgrade is a no-op (<1s) when nothing needs upgrading.
+# Each occ command uses _nc_occ_retry which automatically detects "require upgrade"
+# errors (caused by HPA-scaled pods running occ upgrade via their before-starting
+# hook) and recovers by re-running occ upgrade before retrying the command.
 print_status "Configuring Nextcloud theming..."
 NEXTCLOUD_POD=$(_get_nc_pod)
 if [ -n "$NEXTCLOUD_POD" ]; then
-    # Reconcile app versions on this specific pod before running any occ commands.
-    # Step 7a already ran occ upgrade after the pod became Ready, so this is typically
-    # a no-op (<1s). But if another pod modified the DB since then (e.g. HPA scaled up
-    # a new pod mid-deploy), this catches the drift.
+    # Initial reconciliation — catches any drift since step 7a.
     UPGRADE_OUTPUT=$(timeout 300 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-        su -s /bin/sh www-data -c 'php occ upgrade' 2>&1) || {
+        su -s /bin/sh www-data -c 'php occ upgrade --no-interaction' 2>&1) || {
         print_warning "occ upgrade returned non-zero on $NEXTCLOUD_POD (may be first install):"
         echo "$UPGRADE_OUTPUT" | tail -5 | while read -r line; do print_warning "  $line"; done
     }
 
     # Ensure theming app is enabled
-    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable theming" 2>/dev/null || true
+    _nc_occ_retry "$NEXTCLOUD_POD" "php occ app:enable theming" 2>/dev/null || true
 
     # Set primary brand color (sage green)
-    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config primary_color '#A7AE8D'"
+    _nc_occ_retry "$NEXTCLOUD_POD" "php occ theming:config primary_color '#A7AE8D'"
     print_success "Primary color set to #A7AE8D (sage)"
 
     # Set instance name from tenant display name
     THEMING_NAME="${TENANT_DISPLAY_NAME:-Mothertree}"
-    # Use env var passthrough to avoid shell injection from names with special chars
-    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" --  \
-        env "MT_THEMING_NAME=$THEMING_NAME" \
-        su -s /bin/sh www-data -c 'php occ theming:config name "$MT_THEMING_NAME"'
+    _nc_occ_retry "$NEXTCLOUD_POD" "php occ theming:config name '$THEMING_NAME'"
     print_success "Instance name set to: $THEMING_NAME"
 
     # Set URL (link target when clicking instance name)
     THEMING_URL="https://${TENANT_DOMAIN}"
-    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config url '$THEMING_URL'"
+    _nc_occ_retry "$NEXTCLOUD_POD" "php occ theming:config url '$THEMING_URL'"
     print_success "Instance URL set to: $THEMING_URL"
 
     # Set legal/policy links (from tenant config, exported by config.sh)
     if [ -n "${TERMS_OF_USE_URL:-}" ]; then
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config imprintUrl '$TERMS_OF_USE_URL'"
+        _nc_occ_retry "$NEXTCLOUD_POD" "php occ theming:config imprintUrl '$TERMS_OF_USE_URL'"
         print_success "Legal notice URL set"
     fi
     if [ -n "${PRIVACY_POLICY_URL:-}" ]; then
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config privacyUrl '$PRIVACY_POLICY_URL'"
+        _nc_occ_retry "$NEXTCLOUD_POD" "php occ theming:config privacyUrl '$PRIVACY_POLICY_URL'"
         print_success "Privacy policy URL set"
     fi
 
@@ -1071,7 +1093,7 @@ if [ -n "$NEXTCLOUD_POD" ]; then
         # Login page logo (dark/coal version for light backgrounds)
         if [ -f "$ASSETS_DIR/logo.svg" ]; then
             kubectl cp "$ASSETS_DIR/logo.svg" "$NS_FILES/$NEXTCLOUD_POD:/tmp/mt-logo.svg"
-            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config logo /tmp/mt-logo.svg"
+            _nc_occ_retry "$NEXTCLOUD_POD" "php occ theming:config logo /tmp/mt-logo.svg"
             kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- rm -f /tmp/mt-logo.svg
             print_success "Login logo applied (dark variant)"
         fi
@@ -1079,7 +1101,7 @@ if [ -n "$NEXTCLOUD_POD" ]; then
         # Header logo (same coal version — visible on ash background)
         if [ -f "$ASSETS_DIR/logo.svg" ]; then
             kubectl cp "$ASSETS_DIR/logo.svg" "$NS_FILES/$NEXTCLOUD_POD:/tmp/mt-logoheader.svg"
-            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config logoheader /tmp/mt-logoheader.svg"
+            _nc_occ_retry "$NEXTCLOUD_POD" "php occ theming:config logoheader /tmp/mt-logoheader.svg"
             kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- rm -f /tmp/mt-logoheader.svg
             print_success "Header logo applied (coal variant)"
         fi
@@ -1087,7 +1109,7 @@ if [ -n "$NEXTCLOUD_POD" ]; then
         # Favicon
         if [ -f "$ASSETS_DIR/favicon.svg" ]; then
             kubectl cp "$ASSETS_DIR/favicon.svg" "$NS_FILES/$NEXTCLOUD_POD:/tmp/mt-favicon.svg"
-            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config favicon /tmp/mt-favicon.svg"
+            _nc_occ_retry "$NEXTCLOUD_POD" "php occ theming:config favicon /tmp/mt-favicon.svg"
             kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- rm -f /tmp/mt-favicon.svg
             print_success "Favicon applied"
         fi
@@ -1096,12 +1118,12 @@ if [ -n "$NEXTCLOUD_POD" ]; then
     fi
 
     # Set background to plain color mode (removes default blue watercolor wallpaper)
-    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c 'php occ theming:config background "backgroundColor"'
+    _nc_occ_retry "$NEXTCLOUD_POD" "php occ theming:config background 'backgroundColor'"
     # Set the actual background color (ghost fern)
-    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config background_color '#A7AE8D'"
+    _nc_occ_retry "$NEXTCLOUD_POD" "php occ theming:config background_color '#A7AE8D'"
 
     # Enforce brand colors for all users (users can still toggle light/dark mode)
-    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ theming:config disable-user-theming yes"
+    _nc_occ_retry "$NEXTCLOUD_POD" "php occ theming:config disable-user-theming yes"
 
     print_success "Nextcloud theming configured"
 else
