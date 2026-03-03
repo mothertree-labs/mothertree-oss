@@ -483,11 +483,10 @@ pushd "$REPO_ROOT/apps" >/dev/null
   if [ "${SKIP_HELM_REPO_UPDATE:-}" = "true" ]; then
     SKIP_DEPS_FLAG="--skip-deps"
   fi
-  # --sync-args passes flags to `helm upgrade --install` (not `helm template`).
-  # Helm 4 uses server-side apply by default. The HPA controller owns .spec.replicas,
-  # causing "conflict with kube-controller-manager". --force-conflicts lets Helm adopt
-  # the field; HPA immediately reclaims it after sync.
-  if helmfile -e "$MT_ENV" -l name=nextcloud sync $SKIP_DEPS_FLAG --sync-args --force-conflicts; then
+  # The chart's hpa.enabled=true omits .spec.replicas from the Deployment, avoiding
+  # Helm 4 SSA conflicts with kube-controller-manager (which owns .spec.replicas
+  # via the HPA scale subresource).
+  if helmfile -e "$MT_ENV" -l name=nextcloud sync $SKIP_DEPS_FLAG; then
     print_success "Nextcloud deployed successfully"
   else
     print_error "Nextcloud deployment failed"
@@ -1140,10 +1139,14 @@ else
     print_warning "Grafana dashboard configmap not found, skipping"
 fi
 
-# Step 11: Deploy HPA for auto-scaling
-print_status "Deploying HPA for Nextcloud..."
-envsubst '${NS_FILES} ${TENANT_NAME} ${NEXTCLOUD_MIN_REPLICAS} ${NEXTCLOUD_MAX_REPLICAS} ${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}' < "$REPO_ROOT/apps/manifests/nextcloud/nextcloud-hpa.yaml.tpl" | kubectl apply -f -
-print_success "Nextcloud HPA deployed (CPU 80% threshold, scaleDown window: ${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}s)"
+# Step 11: HPA managed by chart (hpa.enabled=true in values)
+# Clean up the old custom HPA if it exists from a previous deploy
+if kubectl get hpa nextcloud-hpa -n "$NS_FILES" &>/dev/null; then
+    print_status "Removing old custom HPA (now managed by chart)..."
+    kubectl delete hpa nextcloud-hpa -n "$NS_FILES"
+    print_success "Old custom HPA removed"
+fi
+print_success "Nextcloud HPA managed by chart (CPU 80%, min=${NEXTCLOUD_MIN_REPLICAS}, max=${NEXTCLOUD_MAX_REPLICAS})"
 
 # Migration notice: old PVC
 if [ -n "${PVC_EXISTS:-}" ]; then

@@ -9,15 +9,19 @@
 
 set -e
 
-# Run occ upgrade to reconcile app version mismatches between the filesystem
-# and database. This is critical for HPA scale-up: the custom-apps ConfigMap
-# may contain an older app version than what was auto-updated on the first pod.
-# Without this, Nextcloud returns 503 ("Update needed") because needUpgrade()
-# detects the mismatch. Safe to run when nothing needs upgrading (no-op).
-echo "[before-starting] Running occ upgrade (reconcile app versions)..."
-php /var/www/html/occ upgrade --no-interaction 2>/dev/null || {
-    echo "[before-starting] Warning: occ upgrade returned non-zero (may be first install)"
-}
+# Only run occ upgrade when the database actually needs it. Running upgrade
+# unconditionally sets maintenance=true in the shared DB, which causes all
+# other pods to return 503 during HPA scale-up (even when no upgrade is needed).
+needs_upgrade=$(php /var/www/html/occ status --output=json 2>/dev/null \
+  | grep -o '"needsDbUpgrade":true' || true)
+if [ -n "$needs_upgrade" ]; then
+    echo "[before-starting] DB upgrade needed — running occ upgrade..."
+    php /var/www/html/occ upgrade --no-interaction 2>/dev/null || {
+        echo "[before-starting] Warning: occ upgrade returned non-zero (may be first install)"
+    }
+else
+    echo "[before-starting] No DB upgrade needed, skipping occ upgrade"
+fi
 
 echo "[before-starting] Enforcing OIDC-only login (allow_multiple_user_backends=0)..."
 php /var/www/html/occ config:app:set --type=string --value=0 user_oidc allow_multiple_user_backends 2>/dev/null || {

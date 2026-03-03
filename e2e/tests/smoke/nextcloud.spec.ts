@@ -1,48 +1,6 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
-import { TEST_USERS } from '../../helpers/test-users';
-import { keycloakLogin } from '../../helpers/auth';
-import { Page } from '@playwright/test';
-
-/**
- * Handle Nextcloud login — completes the Keycloak OIDC flow when redirected.
- * This should ONLY need to handle the Keycloak redirect case. If Nextcloud
- * shows its native login page, that's a configuration bug (allow_multiple_user_backends=1)
- * and the dedicated 'login redirects to Keycloak' test will catch it.
- */
-async function handleNextcloudLogin(page: Page): Promise<void> {
-  if (page.url().includes('auth.')) {
-    // Landed on Keycloak — complete the login flow
-    await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
-    await page.waitForLoadState('networkidle').catch(() => {});
-    return;
-  }
-
-  // Check if we're on Nextcloud's native login page (not the app itself)
-  const onNativeLogin = page.url().includes('/login') &&
-    !page.url().includes('user_oidc') &&
-    await page.locator('input[name="password"], #password').isVisible({ timeout: 2_000 }).catch(() => false);
-
-  if (onNativeLogin) {
-    // Trigger OIDC flow — navigate to the user_oidc login endpoint,
-    // which redirects to Keycloak. The existing SSO session should auto-complete.
-    // Use a timeout since this can hang when Nextcloud can't reach Keycloak.
-    const oidcResponse = await page.goto(`${urls.files}/apps/user_oidc/login/1`, { timeout: 30_000 }).catch(() => null);
-
-    if (!oidcResponse) {
-      // OIDC endpoint timed out — Nextcloud can't reach Keycloak, nothing we can do
-      return;
-    }
-
-    await page.waitForLoadState('networkidle').catch(() => {});
-
-    // If Keycloak session expired, we'll land on the Keycloak login page
-    if (page.url().includes('auth.')) {
-      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
-      await page.waitForLoadState('networkidle').catch(() => {});
-    }
-  }
-}
+import { handleNextcloudLogin, waitForNextcloudReady } from '../../helpers/nextcloud';
 
 test.describe('Smoke — Nextcloud (Files)', () => {
   test('Nextcloud server responds', async ({ memberPage: page }) => {
@@ -213,8 +171,8 @@ test.describe('Smoke — Nextcloud (Files)', () => {
     expect(hasError, 'Nextcloud returned an error page').toBe(false);
     expect(stuckOnOidc, 'Nextcloud OIDC login failed — stuck on user_oidc page').toBe(false);
 
-    // Wait for files view
-    await page.waitForSelector('#app-content, .files-list, [class*="app-content"]', { timeout: 30_000 });
+    // Wait for files view (retries if Nextcloud is in maintenance mode during HPA scale-up)
+    await waitForNextcloudReady(page);
 
     // Nextcloud has a hidden file input for uploads
     const fileInput = page.locator('input[type="file"]');

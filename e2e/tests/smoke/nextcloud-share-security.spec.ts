@@ -1,33 +1,7 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
-import { keycloakLogin } from '../../helpers/auth';
-import { TEST_USERS } from '../../helpers/test-users';
 import { Page } from '@playwright/test';
-
-/**
- * Handle Nextcloud login — same pattern as nextcloud.spec.ts.
- */
-async function handleNextcloudLogin(page: Page): Promise<void> {
-  if (page.url().includes('auth.')) {
-    await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
-    await page.waitForLoadState('networkidle').catch(() => {});
-    return;
-  }
-
-  const onNativeLogin = page.url().includes('/login') &&
-    !page.url().includes('user_oidc') &&
-    await page.locator('input[name="password"], #password').isVisible({ timeout: 2_000 }).catch(() => false);
-
-  if (onNativeLogin) {
-    const oidcResponse = await page.goto(`${urls.files}/apps/user_oidc/login/1`, { timeout: 30_000 }).catch(() => null);
-    if (!oidcResponse) return;
-    await page.waitForLoadState('networkidle').catch(() => {});
-    if (page.url().includes('auth.')) {
-      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
-      await page.waitForLoadState('networkidle').catch(() => {});
-    }
-  }
-}
+import { handleNextcloudLogin, waitForNextcloudReady } from '../../helpers/nextcloud';
 
 /**
  * Fetch Nextcloud capabilities via the OCS API.
@@ -47,8 +21,8 @@ async function fetchCapabilities(page: Page): Promise<Record<string, any>> {
   await handleNextcloudLogin(page);
   await page.waitForLoadState('networkidle').catch(() => {});
 
-  // Wait for Nextcloud app to fully load (OC.requesttoken becomes available)
-  await page.waitForSelector('#app-content, .files-list, [class*="app-content"]', { timeout: 30_000 });
+  // Wait for Nextcloud app to fully load (retries if in maintenance mode during HPA scale-up)
+  await waitForNextcloudReady(page);
 
   // Fetch capabilities inside the browser context (avoids CSRF 412)
   const result = await page.evaluate(async () => {

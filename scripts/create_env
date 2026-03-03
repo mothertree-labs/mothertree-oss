@@ -721,13 +721,14 @@ print_status "Element branding ConfigMap created in namespace $NS_MATRIX"
 
 # Deploy Synapse and Element via helmfile
 # Use sync instead of apply to skip slow diff operation
+# Exclude nextcloud — already deployed by deploy-nextcloud.sh (line ~632)
 print_status "Apps: helmfile sync (Synapse, Element)"
 pushd "$REPO_ROOT/apps" >/dev/null
   max_retries=3
   retry_count=0
   while [ $retry_count -lt $max_retries ]; do
     # Use --skip-deps since repos are already updated at start of create_env
-    if helmfile -e "$MT_ENV" -l tier=apps sync --skip-deps; then
+    if helmfile -e "$MT_ENV" -l "tier=apps,name!=nextcloud" sync --skip-deps; then
       break
     fi
     retry_count=$((retry_count + 1))
