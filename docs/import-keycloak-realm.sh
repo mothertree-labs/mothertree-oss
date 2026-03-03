@@ -245,6 +245,23 @@ else
     exit 1
 fi
 
+# Disable brute force protection in dev — CI runs 10 parallel E2E shards that
+# authenticate the same test user simultaneously, triggering Keycloak's quick
+# login check and temporarily disabling the account.
+if [ "$MT_ENV" = "dev" ]; then
+    print_status "Disabling brute force protection (dev environment)..."
+    BF_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /dev/null -X PUT \
+      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"bruteForceProtected": false}')
+    if [ "$BF_RESPONSE" = "204" ]; then
+        print_success "Brute force protection disabled for dev"
+    else
+        print_warning "Failed to disable brute force protection (HTTP $BF_RESPONSE), continuing..."
+    fi
+fi
+
 # Update realm frontendUrl to use tenant's auth domain (multi-domain support)
 # This ensures the realm uses the correct domain for redirects and links
 print_status "Setting realm frontendUrl to https://${AUTH_HOST}..."
