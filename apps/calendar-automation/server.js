@@ -597,6 +597,112 @@ async function caldavGetEvent(userEmail, eventUid) {
 }
 
 /**
+ * Find an event by its VEVENT UID using CalDAV REPORT.
+ * Nextcloud may store events with a different filename than the VEVENT UID
+ * (e.g., events created via the UI use generated UUIDs as filenames).
+ * Returns { href, ical } or null if not found.
+ */
+async function caldavFindEventByUid(userEmail, eventUid) {
+  const auth = caldavAuthHeader(userEmail);
+  if (!auth) {
+    log('warn', 'No CalDAV credentials for user', { user: userEmail });
+    return null;
+  }
+
+  const baseUrl = config.caldav.baseUrl.replace(/\/$/, '');
+  const calUrl = `${baseUrl}/calendars/${userEmail}/personal/`;
+
+  // XML-escape the eventUid to prevent injection via crafted iCal UIDs
+  const escapedUid = eventUid
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+
+  const reportBody =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">' +
+    '<d:prop><d:getetag/><c:calendar-data/></d:prop>' +
+    '<c:filter><c:comp-filter name="VCALENDAR">' +
+    '<c:comp-filter name="VEVENT">' +
+    '<c:prop-filter name="UID">' +
+    `<c:text-match>${escapedUid}</c:text-match>` +
+    '</c:prop-filter>' +
+    '</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>';
+
+  try {
+    const resp = await fetch(calUrl, {
+      method: 'REPORT',
+      headers: {
+        Authorization: auth,
+        'Content-Type': 'application/xml; charset=utf-8',
+        Depth: '1',
+      },
+      body: reportBody,
+    });
+
+    if (!resp.ok && resp.status !== 207) {
+      log('warn', 'CalDAV REPORT failed', { url: calUrl, status: resp.status });
+      return null;
+    }
+
+    const xml = await resp.text();
+
+    // Parse the multistatus response to extract href and calendar-data
+    const hrefMatch = /<d:href>([^<]+)<\/d:href>/i.exec(xml);
+    const calDataMatch = /<(?:cal:|c:|C:|caldav:)?calendar-data[^>]*>([\s\S]*?)<\/(?:cal:|c:|C:|caldav:)?calendar-data>/i.exec(xml);
+
+    if (!hrefMatch || !calDataMatch) {
+      return null;
+    }
+
+    const ical = calDataMatch[1]
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .trim();
+
+    return { href: hrefMatch[1], ical };
+  } catch (err) {
+    log('error', 'CalDAV REPORT error', { url: calUrl, error: err.message });
+    return null;
+  }
+}
+
+/**
+ * PUT a calendar event to a specific CalDAV URL (href from REPORT).
+ */
+async function caldavPutEventAt(href, userEmail, icalData) {
+  const auth = caldavAuthHeader(userEmail);
+  if (!auth) throw new Error(`No CalDAV credentials for user ${userEmail}`);
+
+  // href is an absolute path like /remote.php/dav/calendars/user/personal/FILE.ics
+  // Construct full URL from the CalDAV base URL's origin
+  const baseUrl = config.caldav.baseUrl.replace(/\/$/, '');
+  const origin = new URL(baseUrl).origin;
+  const url = `${origin}${href}`;
+
+  const resp = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      Authorization: auth,
+      'Content-Type': 'text/calendar; charset=utf-8',
+    },
+    body: icalData,
+  });
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`CalDAV PUT failed: ${resp.status} ${resp.statusText} - ${body}`);
+  }
+
+  log('debug', 'CalDAV PUT success', { url, status: resp.status });
+}
+
+/**
  * PUT (create or update) a calendar event via CalDAV.
  */
 async function caldavPutEvent(userEmail, eventUid, icalData) {
@@ -764,6 +870,10 @@ async function processRequest(userEmail, icalData) {
 /**
  * Process a REPLY (attendee response to an existing invitation).
  * Updates the attendee PARTSTAT in the existing CalDAV event.
+ *
+ * Uses CalDAV REPORT to find the event by VEVENT UID, since Nextcloud
+ * may store events with a different filename (e.g., events created via
+ * the Nextcloud UI use generated UUIDs, not the VEVENT UID).
  */
 async function processReply(userEmail, icalData) {
   const event = parseICalEvent(icalData);
@@ -778,24 +888,31 @@ async function processReply(userEmail, icalData) {
     attendees: event.attendees.map((a) => `${a.value}=${a.partstat}`),
   });
 
-  // Get the existing event
-  const existingIcal = await caldavGetEvent(userEmail, event.uid);
-  if (!existingIcal) {
-    log('warn', 'REPLY for unknown event, skipping', {
+  // Find the existing event by UID using REPORT (handles filename mismatches)
+  const found = await caldavFindEventByUid(userEmail, event.uid);
+  if (!found) {
+    log('warn', 'REPLY for unknown event, marking as processed to avoid retry loop', {
       user: userEmail,
       eventUid: event.uid,
     });
-    return false;
+    return true;
   }
 
+  log('debug', 'Found event via REPORT', {
+    user: userEmail,
+    eventUid: event.uid,
+    href: found.href,
+  });
+
   // Merge the reply into the existing event
-  const updatedIcal = applyReplyToEvent(existingIcal, icalData);
-  await caldavPutEvent(userEmail, event.uid, updatedIcal);
+  const updatedIcal = applyReplyToEvent(found.ical, icalData);
+  await caldavPutEventAt(found.href, userEmail, updatedIcal);
   metrics.eventsUpdated++;
 
   log('info', 'Event updated from REPLY', {
     user: userEmail,
     eventUid: event.uid,
+    href: found.href,
   });
 
   return true;

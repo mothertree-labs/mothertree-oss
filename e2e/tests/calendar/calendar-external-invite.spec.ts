@@ -4,8 +4,10 @@ import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
 import {
   caldavDelete,
+  caldavDeleteByFilename,
   caldavGet,
   caldavPut,
+  caldavPutWithFilename,
   getNextcloudUserId,
   parsePartstat,
   pollForEvent,
@@ -303,5 +305,109 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
     // Verify event is really gone
     const afterCancel = await caldavGet(emailTestPage, recipientNcId, uid);
     expect(afterCancel, 'Event should be deleted after CANCEL').toBeNull();
+  });
+
+  test('REPLY updates PARTSTAT even when CalDAV filename differs from event UID', async ({
+    memberPage,
+  }) => {
+    const organizer = TEST_USERS.member;
+    const timestamp = Date.now();
+    const uid = `e2e-ext-reply-fname-${timestamp}`;
+    const summary = `E2E Reply Filename Mismatch ${timestamp}`;
+    const externalAttendee = 'external-att@example.org';
+    const dtstart = futureDateIcal(8, 10);
+    const dtend = futureDateIcal(8, 11);
+
+    // Use a filename that differs from the VEVENT UID, simulating events
+    // created via the Nextcloud UI (which generates its own filenames)
+    const caldavFilename = `NC-GENERATED-${timestamp}.ics`;
+
+    let organizerNcId = '';
+
+    try {
+      organizerNcId = await loginToCalendar(memberPage, organizer);
+      console.log(`Nextcloud user ID for organizer: ${organizerNcId}`);
+
+      // Seed event with a DIFFERENT filename than the VEVENT UID
+      const seedIcal = buildEvent({
+        uid,
+        summary,
+        organizer: organizer.email,
+        attendees: [
+          {
+            email: externalAttendee,
+            partstat: 'NEEDS-ACTION',
+            cn: 'External Attendee',
+          },
+        ],
+        dtstart,
+        dtend,
+      });
+
+      await caldavPutWithFilename(
+        memberPage,
+        organizerNcId,
+        caldavFilename,
+        seedIcal,
+      );
+
+      // Verify seed exists via REPORT (not direct GET by UID)
+      const seeded = await pollForEvent(
+        memberPage,
+        organizerNcId,
+        summary,
+        10_000,
+      );
+      expect(seeded, 'Seeded event should be findable via REPORT').toBeTruthy();
+
+      // Craft iTIP REPLY — external attendee accepts
+      const replyIcal = buildReply({
+        uid,
+        summary,
+        organizer: organizer.email,
+        attendee: {
+          email: externalAttendee,
+          partstat: 'ACCEPTED',
+          cn: 'External Attendee',
+        },
+        dtstart,
+        dtend,
+      });
+
+      const mimeMessage = buildMimeEmail({
+        from: `External Attendee <${externalAttendee}>`,
+        to: organizer.email,
+        subject: `Re: ${summary}`,
+        icalBody: replyIcal,
+        method: 'REPLY',
+      });
+
+      await appendCalendarEmail({
+        userEmail: organizer.email,
+        mimeMessage,
+      });
+
+      // Poll CalDAV for PARTSTAT to update to ACCEPTED
+      const updatedIcal = await pollForPartstat(
+        memberPage,
+        organizerNcId,
+        summary,
+        externalAttendee,
+        'ACCEPTED',
+        180_000,
+      );
+
+      expect(updatedIcal).toBeTruthy();
+    } finally {
+      if (organizerNcId) {
+        await caldavDeleteByFilename(
+          memberPage,
+          organizerNcId,
+          caldavFilename,
+        ).catch((e) =>
+          console.warn('Cleanup: failed to delete event:', e.message),
+        );
+      }
+    }
   });
 });

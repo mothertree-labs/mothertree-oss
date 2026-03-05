@@ -285,6 +285,50 @@ export async function caldavPut(
 }
 
 /**
+ * PUT an iCal event with a custom filename (different from the VEVENT UID).
+ * Simulates events created via the Nextcloud UI, which generates its own
+ * filenames (uppercase UUIDs) that don't match the VEVENT UID.
+ */
+export async function caldavPutWithFilename(
+  page: Page,
+  username: string,
+  filename: string,
+  icalBody: string,
+): Promise<void> {
+  const path = `${CALDAV_PATH}/calendars/${username}/personal/${filename}`;
+
+  const result = await caldavFetch(page, path, 'PUT', icalBody, {
+    'Content-Type': 'text/calendar; charset=utf-8',
+  });
+
+  if (result.status >= 400 && result.status !== 201) {
+    throw new Error(
+      `CalDAV PUT failed for ${filename}: HTTP ${result.status} — ${result.body.substring(0, 200)}`,
+    );
+  }
+}
+
+/**
+ * DELETE an event by its full resource filename (for cleanup of events
+ * created with caldavPutWithFilename).
+ */
+export async function caldavDeleteByFilename(
+  page: Page,
+  username: string,
+  filename: string,
+): Promise<void> {
+  const path = `${CALDAV_PATH}/calendars/${username}/personal/${filename}`;
+
+  const result = await caldavFetch(page, path, 'DELETE');
+
+  if (result.status >= 400 && result.status !== 404) {
+    console.warn(
+      `CalDAV DELETE warning for ${filename}: HTTP ${result.status} — ${result.body.substring(0, 200)}`,
+    );
+  }
+}
+
+/**
  * DELETE an event from a user's personal calendar (cleanup).
  * Silently ignores 404 (event already gone).
  */
