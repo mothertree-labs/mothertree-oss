@@ -223,6 +223,11 @@ else
         --from-literal=caldav-tokens.json="$CALDAV_TOKENS" \
         --dry-run=client -o yaml | kubectl apply -f -
     print_success "CalDAV app passwords created for $TOKEN_COUNT user(s)"
+
+    # Restore OIDC-only login (undo the temporary enable from above)
+    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+        php occ config:app:set --type=string --value=0 user_oidc allow_multiple_user_backends 2>/dev/null || true
+    print_status "Restored OIDC-only login (allow_multiple_user_backends=0)"
 fi
 
 # =============================================================================
