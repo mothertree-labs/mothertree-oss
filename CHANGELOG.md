@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 - Removed CPU limits from all workloads, fixed low CPU requests (#145)
+- Increased Vector log collector memory limits to fix OOMKill on busy nodes
 - Disabled sharebymail and enforced share security policies (#123)
 - Disabled Keycloak brute force protection for dev environment (#137)
 - Increased Prometheus memory limits in dev, reduced retention to 7d (#127)
