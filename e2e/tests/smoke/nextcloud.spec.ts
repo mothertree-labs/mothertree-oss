@@ -174,20 +174,34 @@ test.describe('Smoke — Nextcloud (Files)', () => {
     // Wait for files view (retries if Nextcloud is in maintenance mode during HPA scale-up)
     await waitForNextcloudReady(page);
 
-    // Nextcloud has a hidden file input for uploads
-    const fileInput = page.locator('input[type="file"]');
-    if (await fileInput.count() > 0) {
-      const testFileName = `e2e-test-${Date.now()}.txt`;
-      await fileInput.first().setInputFiles({
-        name: testFileName,
-        mimeType: 'text/plain',
-        buffer: Buffer.from('E2E test file content'),
-      });
+    // Upload a file via WebDAV and verify it appears in the page.
+    const testFileName = `e2e-test-${Date.now()}.txt`;
+    try {
+      const uploadStatus = await page.evaluate(async (name) => {
+        const token = document.querySelector('head[data-requesttoken]')?.getAttribute('data-requesttoken') || '';
+        const resp = await fetch('/remote.php/dav/files/' + OC.currentUser + '/' + name, {
+          method: 'PUT',
+          headers: { 'requesttoken': token, 'Content-Type': 'text/plain' },
+          body: 'E2E test file content',
+        });
+        return resp.status;
+      }, testFileName);
 
-      // Wait for upload to complete
-      await page.waitForTimeout(3_000);
+      expect(uploadStatus, `WebDAV upload returned HTTP ${uploadStatus}`).toBeLessThan(300);
+
+      await page.goto(`${urls.files}/apps/files/recent`);
+      await page.waitForLoadState('networkidle').catch(() => {});
       const pageContent = await page.content();
       expect(pageContent).toContain('e2e-test');
+    } finally {
+      // Clean up — prevent file accumulation on persistent CI users
+      await page.evaluate(async (name) => {
+        const token = document.querySelector('head[data-requesttoken]')?.getAttribute('data-requesttoken') || '';
+        await fetch('/remote.php/dav/files/' + OC.currentUser + '/' + name, {
+          method: 'DELETE',
+          headers: { 'requesttoken': token },
+        }).catch(() => {});
+      }, testFileName).catch(() => {});
     }
   });
 });
