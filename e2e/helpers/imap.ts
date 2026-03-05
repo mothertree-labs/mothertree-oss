@@ -144,6 +144,49 @@ export async function appendCalendarEmail(opts: {
 }
 
 /**
+ * Count messages in the user's INBOX whose subject contains the given string.
+ * Useful for asserting that no outbound scheduling emails were generated.
+ */
+export async function countInboxBySubject(opts: {
+  userEmail: string;
+  subjectContains: string;
+}): Promise<number> {
+  const config = getImapConfig();
+  if (!config) {
+    throw new Error(
+      'IMAP not configured: E2E_STALWART_ADMIN_PASSWORD is not set',
+    );
+  }
+
+  const client = await connectAsMaster(opts.userEmail, config);
+
+  try {
+    const mailbox = await client.mailboxOpen('INBOX');
+    if (!mailbox.exists || mailbox.exists === 0) {
+      return 0;
+    }
+
+    // Fetch all message envelopes and filter client-side (Stalwart SEARCH
+    // by header is unreliable for substring matching)
+    const uids = await client.search({ all: true });
+    if (!uids || uids.length === 0) return 0;
+
+    let count = 0;
+    const needle = opts.subjectContains.toLowerCase();
+    for await (const msg of client.fetch(uids, { uid: true, envelope: true })) {
+      const subject = (msg.envelope?.subject || '').toLowerCase();
+      if (subject.includes(needle)) {
+        count++;
+      }
+    }
+
+    return count;
+  } finally {
+    await client.logout().catch(() => {});
+  }
+}
+
+/**
  * Check if a message with a matching subject exists in the user's Sent folder.
  * Returns true if found. Useful for verifying outgoing iTIP responses.
  */
