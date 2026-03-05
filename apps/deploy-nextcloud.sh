@@ -416,10 +416,12 @@ rm -rf "$CUSTOM_APPS_STAGING"
 # install which resets user_oidc allow_multiple_user_backends to its default (1).
 # The hook sets it back to 0, preventing the native login form from appearing.
 HOOK_SCRIPT="$REPO_ROOT/apps/manifests/nextcloud/before-starting-hook.sh"
+OIDC_HEALTH_SCRIPT="$REPO_ROOT/apps/manifests/nextcloud/oidc-health.php"
 if [ -f "$HOOK_SCRIPT" ]; then
     kubectl create configmap nextcloud-before-starting \
         --namespace "$NS_FILES" \
         --from-file=enforce-oidc-login.sh="$HOOK_SCRIPT" \
+        --from-file=oidc-health.php="$OIDC_HEALTH_SCRIPT" \
         --dry-run=client -o yaml | kubectl apply -f -
     print_status "before-starting hook ConfigMap created/updated"
 fi

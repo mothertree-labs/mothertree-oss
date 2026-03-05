@@ -290,6 +290,20 @@
         include: [helmfile]
         mode: "0755"
 
+    - name: Install kustomize (required by helmfile jsonPatches/strategicMergePatches)
+      ansible.builtin.get_url:
+        url: https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz
+        dest: /tmp/kustomize.tar.gz
+        mode: "0644"
+
+    - name: Extract kustomize
+      ansible.builtin.unarchive:
+        src: /tmp/kustomize.tar.gz
+        dest: /usr/local/bin
+        remote_src: true
+        include: [kustomize]
+        mode: "0755"
+
     - name: Install yq
       ansible.builtin.get_url:
         url: https://github.com/mikefarah/yq/releases/download/v4.44.6/yq_linux_amd64

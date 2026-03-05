@@ -43,4 +43,7 @@ php /var/www/html/occ config:app:set core shareapi_expire_after_n_days --value='
 php /var/www/html/occ config:app:set core shareapi_enforce_expire_date --value='yes' 2>/dev/null || true
 php /var/www/html/occ config:app:set core shareapi_default_permissions --value='1' 2>/dev/null || true
 
+# Install OIDC health check script (exec readiness probe uses this via CLI)
+cp /docker-entrypoint-hooks.d/before-starting/oidc-health.php /var/www/html/oidc-health.php 2>/dev/null || true
+
 echo "[before-starting] Done"

@@ -273,3 +273,22 @@ releases:
       - values/nextcloud.yaml
       - environments/{{ .Environment.Name }}/nextcloud.yaml.gotmpl
     createNamespace: false  # Created by create_env
+    jsonPatches:
+      - target:
+          group: apps
+          version: v1
+          kind: Deployment
+          name: nextcloud
+        patch:
+          - op: replace
+            path: /spec/template/spec/containers/0/readinessProbe
+            value:
+              exec:
+                command:
+                  - php
+                  - /var/www/html/oidc-health.php
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              timeoutSeconds: 5
+              successThreshold: 1
+              failureThreshold: 3
