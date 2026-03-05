@@ -1,6 +1,6 @@
-# NOTE: The gauge thresholds (3.1% for request boundary) depend on JVB CPU
-# request/limit ratio in jvb.yaml. Currently: 100m/3200m = 3.1%
-# If you change the CPU values, update the threshold at 3.1 below.
+# NOTE: JVB has no CPU limit (can burst freely). The gauge threshold at 3.1
+# is a legacy value from when the limit was 3200m. Consider updating the
+# dashboard to use absolute CPU values instead of percentages.
 apiVersion: v1
 kind: ConfigMap
 metadata:

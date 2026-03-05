@@ -125,7 +125,6 @@ spec:
               cpu: "100m"  # Minimum 100m to prevent HPA triggering on idle fluctuations
             limits:
               memory: "128Mi"
-              cpu: "200m"
           livenessProbe:
             httpGet:
               path: /health

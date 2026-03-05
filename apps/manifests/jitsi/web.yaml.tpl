@@ -136,7 +136,6 @@ spec:
             cpu: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
             memory: 48Mi
           limits:
-            cpu: 300m
             memory: 128Mi
       volumes:
       - name: web-config
