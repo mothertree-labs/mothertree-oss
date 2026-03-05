@@ -1,7 +1,7 @@
 # HPA for Jitsi Video Bridge (JVB)
 # Scales based on absolute CPU usage per pod (not % of request).
-# CPU request is kept low (100m) for bin-packing; limit is 3200m for burst.
-# Target 2800m means: scale up when JVBs approach their CPU limit.
+# No CPU limit — JVB can burst freely. Target 2800m means: scale up when
+# JVB CPU usage is high enough that adding capacity improves call quality.
 # Note: JVB uses hostPort, so scaling beyond node count requires cluster autoscaler
 # to provision new nodes. Pods will be Pending until nodes are available.
 apiVersion: autoscaling/v2
