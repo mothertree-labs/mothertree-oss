@@ -57,9 +57,6 @@ test.describe('Smoke — Nextcloud Collabora (Office)', () => {
     // Verify we're logged in (retries if Nextcloud is in maintenance mode during HPA scale-up)
     await waitForNextcloudReady(page, { timeout: 15_000 });
 
-    // Step 2: Upload a test .odt file using the real upload UI flow.
-    // Click New → Upload files → provide file via the native file chooser dialog.
-    // Using setInputFiles on a hidden input doesn't trigger NC's Vue uploader.
     const testFileName = `e2e-wopi-${Date.now()}.odt`;
 
     // Delete the test file via WebDAV when the test ends (pass or fail).
@@ -74,29 +71,25 @@ test.describe('Smoke — Nextcloud Collabora (Office)', () => {
     };
 
     try {
-      // Open the "New" menu and click "Upload files", intercepting the file chooser.
-      // This is the real user flow: click +New → Upload files → pick a file.
-      const newButton = page.locator('form[data-cy-upload-picker] button').first();
-      await newButton.click({ timeout: 10_000 });
+      // Step 2: Upload via WebDAV — deterministic and verifiable, unlike the
+      // filechooser UI which fails consistently in headless CI.
+      // This test is about Collabora/WOPI, not the Nextcloud upload UI.
+      const uploadStatus = await page.evaluate(async (name) => {
+        const token = document.querySelector('head[data-requesttoken]')?.getAttribute('data-requesttoken') || '';
+        const resp = await fetch('/remote.php/dav/files/' + OC.currentUser + '/' + name, {
+          method: 'PUT',
+          headers: {
+            'requesttoken': token,
+            'Content-Type': 'application/vnd.oasis.opendocument.text',
+          },
+          body: 'E2E Collabora WOPI test',
+        });
+        return resp.status;
+      }, testFileName);
 
-      const uploadMenuItem = page.getByRole('menuitem', { name: 'Upload files' });
-      await uploadMenuItem.waitFor({ state: 'visible', timeout: 5_000 });
+      expect(uploadStatus, `WebDAV PUT returned HTTP ${uploadStatus}, expected 2xx`).toBeLessThan(300);
 
-      const [fileChooser] = await Promise.all([
-        page.waitForEvent('filechooser'),
-        uploadMenuItem.click(),
-      ]);
-
-      await fileChooser.setFiles({
-        name: testFileName,
-        mimeType: 'application/vnd.oasis.opendocument.text',
-        buffer: Buffer.from('E2E Collabora WOPI test'),
-      });
-
-      // Wait for the upload to finish, then reload the file list. NC32's Vue
-      // file list doesn't always reflect uploads triggered via the fileChooser
-      // API. A reload guarantees the server-side file appears in the DOM.
-      await page.waitForTimeout(3_000);
+      // Reload file list so the uploaded file appears in the DOM.
       await page.goto(`${urls.files}/apps/files/`);
       await page.waitForLoadState('networkidle').catch(() => {});
 
