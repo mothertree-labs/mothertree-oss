@@ -4,7 +4,7 @@ autoscaling:
   enabled: false
 
 collabora:
-  extra_params: --o:ssl.enable=false --o:ssl.termination=true
+  extra_params: --o:ssl.enable=false --o:ssl.termination=true --o:logging.level=information
 
 resources:
   requests:
