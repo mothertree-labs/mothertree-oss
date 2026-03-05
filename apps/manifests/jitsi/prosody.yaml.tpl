@@ -155,10 +155,9 @@ spec:
         # Memory raised from 256Mi after Feb 2026 incident: XML stream corruption at ~342Mi usage
         resources:
           requests:
-            cpu: 10m
+            cpu: 50m
             memory: 64Mi
           limits:
-            cpu: 300m
             memory: 512Mi
       volumes:
       - name: prosody-config

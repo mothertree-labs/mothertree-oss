@@ -52,7 +52,6 @@ spec:
               cpu: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
               memory: 64Mi
             limits:
-              cpu: 200m
               memory: 128Mi
           volumeMounts:
             - name: config

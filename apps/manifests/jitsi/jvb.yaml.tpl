@@ -238,17 +238,12 @@ spec:
           httpGet:
             path: /about/health
             port: 8080
-        # NOTE: If you change CPU request/limit values, update the threshold in
-        # jitsi-dashboard-configmap.yaml gauge panel (id: 3). The green/yellow
-        # threshold should be (request/limit * 100)%. Currently: 50m/3200m = 1.6%
-        # Low request allows scheduling on smaller nodes; high limit allows burst for video
         # Memory tuned based on actual usage (~250Mi observed idle)
         resources:
           requests:
             cpu: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
             memory: 300Mi
           limits:
-            cpu: 3200m  # 80% of g6-standard-4 (4 cores)
             memory: 2Gi
       volumes:
       - name: shared-data

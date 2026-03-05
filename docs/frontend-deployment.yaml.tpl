@@ -51,7 +51,6 @@ spec:
               cpu: 100m
               memory: 32Mi
             limits:
-              cpu: 200m
               memory: 128Mi
           securityContext:
             runAsUser: 101

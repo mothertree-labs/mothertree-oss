@@ -86,6 +86,5 @@ spec:
               cpu: 5m
               memory: 16Mi
             limits:
-              cpu: 100m
               memory: 32Mi
       terminationGracePeriodSeconds: 5

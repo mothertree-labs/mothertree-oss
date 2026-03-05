@@ -798,7 +798,6 @@ resource "kubernetes_deployment" "postfix" {
               memory = "32Mi"
             }
             limits = {
-              cpu    = "100m"
               memory = "64Mi"
             }
           }
@@ -1023,7 +1022,6 @@ resource "kubernetes_deployment" "postfix" {
               memory = "64Mi"
             }
             limits = {
-              cpu    = "200m"
               memory = "256Mi"
             }
           }
