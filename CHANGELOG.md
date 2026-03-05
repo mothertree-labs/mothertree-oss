@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - PostgreSQL connection exhaustion in dev (#129)
 - Guest bridge ECONNRESET by using internal service URL (#121)
 - OIDC endpoint timeout handling during Nextcloud login (#116)
+- Calendar automation REPLY processing for Nextcloud UI-created events (#147)
 
 ### Changed
 - Removed CPU limits from all workloads, fixed low CPU requests (#145)
