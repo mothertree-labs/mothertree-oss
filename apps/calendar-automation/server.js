@@ -690,6 +690,10 @@ async function caldavPutEventAt(href, userEmail, icalData) {
     headers: {
       Authorization: auth,
       'Content-Type': 'text/calendar; charset=utf-8',
+      // Suppress Nextcloud's IMipPlugin from sending scheduling emails.
+      // Without this, every programmatic PUT triggers an outbound iMIP,
+      // creating a feedback loop with external mail providers (e.g. Gmail).
+      'Schedule-Reply': 'F',
     },
     body: icalData,
   });
@@ -715,6 +719,7 @@ async function caldavPutEvent(userEmail, eventUid, icalData) {
     headers: {
       Authorization: auth,
       'Content-Type': 'text/calendar; charset=utf-8',
+      'Schedule-Reply': 'F',
     },
     body: icalData,
   });
