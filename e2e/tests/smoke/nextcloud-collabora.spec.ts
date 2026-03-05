@@ -89,8 +89,11 @@ test.describe('Smoke — Nextcloud Collabora (Office)', () => {
 
       expect(uploadStatus, `WebDAV PUT returned HTTP ${uploadStatus}, expected 2xx`).toBeLessThan(300);
 
-      // Reload file list so the uploaded file appears in the DOM.
-      await page.goto(`${urls.files}/apps/files/`);
+      // Navigate to the Recent view — the just-uploaded file appears at the top.
+      // The default "All files" view sorts by name ascending and uses virtual
+      // scrolling, so the file may be below the fold if the CI user has many
+      // accumulated files from previous test runs.
+      await page.goto(`${urls.files}/apps/files/recent`);
       await page.waitForLoadState('networkidle').catch(() => {});
 
       const fileRow = page.locator(`[data-cy-files-list-row-name="${testFileName}"]`);
