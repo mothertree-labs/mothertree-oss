@@ -153,7 +153,7 @@ kubectl -n "$NS_DOCS" create configmap docs-invitation-patch \
 
 # Update backend deployment to reference PostgreSQL in db namespace
 # Uses envsubst for replica count from tenant config
-envsubst '${DOCS_BACKEND_MIN_REPLICAS}' < "$REPO_ROOT/docs/backend-deployment.yaml" | \
+envsubst '${DOCS_BACKEND_MIN_REPLICAS} ${DOCS_GUNICORN_WORKERS}' < "$REPO_ROOT/docs/backend-deployment.yaml" | \
   sed "s/namespace: docs/namespace: $NS_DOCS/g" | \
   sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g" | \
   kubectl apply -f -

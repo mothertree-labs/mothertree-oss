@@ -277,6 +277,7 @@ _mt_load_scaling_config() {
   eval "$(yq '
     "DOCS_BACKEND_MIN_REPLICAS=" + (.resources.docs.backend.min_replicas | tostring | @sh) + "\n" +
     "DOCS_BACKEND_MAX_REPLICAS=" + (.resources.docs.backend.max_replicas | tostring | @sh) + "\n" +
+    "DOCS_GUNICORN_WORKERS=" + (.resources.docs.backend.gunicorn_workers // 3 | tostring | @sh) + "\n" +
     "DOCS_FRONTEND_MIN_REPLICAS=" + (.resources.docs.frontend.min_replicas | tostring | @sh) + "\n" +
     "DOCS_FRONTEND_MAX_REPLICAS=" + (.resources.docs.frontend.max_replicas | tostring | @sh) + "\n" +
     "YPROVIDER_MIN_REPLICAS=" + (.resources.docs.y_provider.min_replicas | tostring | @sh) + "\n" +
@@ -362,7 +363,7 @@ _mt_load_scaling_config() {
     exit 1
   fi
 
-  export DOCS_BACKEND_MIN_REPLICAS DOCS_BACKEND_MAX_REPLICAS
+  export DOCS_BACKEND_MIN_REPLICAS DOCS_BACKEND_MAX_REPLICAS DOCS_GUNICORN_WORKERS
   export DOCS_FRONTEND_MIN_REPLICAS DOCS_FRONTEND_MAX_REPLICAS
   export YPROVIDER_MIN_REPLICAS YPROVIDER_MAX_REPLICAS
   export ELEMENT_MIN_REPLICAS ELEMENT_MAX_REPLICAS

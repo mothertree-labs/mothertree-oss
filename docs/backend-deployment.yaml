@@ -71,7 +71,7 @@ spec:
               print("Patched settings.py with MediaMiddleware and custom storage backend")
               EOF
               python /app/patches/patch_invitation.py && \
-              exec gunicorn -c /usr/local/etc/gunicorn/impress.py impress.wsgi:application
+              exec gunicorn -c /usr/local/etc/gunicorn/impress.py --workers ${DOCS_GUNICORN_WORKERS} impress.wsgi:application
           ports:
           - containerPort: 8000
             name: http
