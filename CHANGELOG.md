@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-03-05
+
+### Fixed
+- CalDAV Schedule-Reply header to prevent iMIP feedback loop (#150)
+- Collabora E2E test: use WebDAV upload instead of filechooser UI (#148)
+- Nextcloud upload test cleanup, use WebDAV + Recent view (#149)
+
+### Changed
+- Removed CPU limits from all managed pods, bumped low Jitsi CPU requests (#151)
+
 ## [0.9.0] - 2026-03-05
 
 ### Added
