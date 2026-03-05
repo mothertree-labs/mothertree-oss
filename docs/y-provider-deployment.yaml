@@ -73,7 +73,6 @@ spec:
               cpu: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
               memory: 128Mi
             limits:
-              cpu: 200m
               memory: 256Mi
         
         # Health check sidecar - tests backend connectivity
@@ -99,10 +98,9 @@ spec:
               readOnly: true
           resources:
             requests:
-              cpu: 5m
+              cpu: 10m
               memory: 16Mi
             limits:
-              cpu: 100m
               memory: 32Mi
       
       volumes:

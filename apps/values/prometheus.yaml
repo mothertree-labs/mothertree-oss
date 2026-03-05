@@ -25,7 +25,6 @@ prometheus:
         cpu: 200m  # Prometheus is heavily utilized, needs higher baseline
         memory: 1280Mi
       limits:
-        cpu: 500m
         memory: 2Gi
   ingress:
     enabled: true
@@ -127,10 +126,9 @@ grafana:
   # Memory INCREASED based on actual usage (~230Mi observed)
   resources:
     requests:
-      cpu: 10m
+      cpu: 50m
       memory: 320Mi
     limits:
-      cpu: 200m
       memory: 512Mi
   ingress:
     enabled: true
@@ -163,10 +161,9 @@ alertmanager:
     # Storage disabled to reduce PVC count - alert state is ephemeral
     resources:
       requests:
-        cpu: 10m
+        cpu: 50m
         memory: 64Mi
       limits:
-        cpu: 100m
         memory: 128Mi
   ingress:
     enabled: true
@@ -192,20 +189,18 @@ kubeStateMetrics:
 prometheusOperator:
   resources:
     requests:
-      cpu: 10m
+      cpu: 50m
       memory: 64Mi
     limits:
-      cpu: 100m
       memory: 128Mi
 
 # Kube-state-metrics resources  
 kube-state-metrics:
   resources:
     requests:
-      cpu: 10m
+      cpu: 50m
       memory: 32Mi
     limits:
-      cpu: 100m
       memory: 512Mi
 
 # Disable noisy default alert rules
@@ -216,36 +211,8 @@ defaultRules:
     KubePodNotReady: true
     KubeContainerWaiting: true
 
-# Custom replacement for CPUThrottlingHigh with 50% threshold (default is 25%)
+# CPU limits removed from all workloads — no CFS throttling possible, so no custom alert needed
 additionalPrometheusRulesMap:
-  cpu-throttling:
-    groups:
-      - name: cpu-throttling.rules
-        rules:
-          - alert: CPUThrottlingHigh
-            annotations:
-              description: '{{ $value | humanizePercentage }} throttling of CPU in namespace {{ $labels.namespace }} for container {{ $labels.container }} in pod {{ $labels.pod }}.'
-              summary: Processes experience elevated CPU throttling.
-            expr: |-
-              sum without (id, metrics_path, name, image, endpoint, job, node) (
-                topk by (cluster, namespace, pod, container, instance) (1,
-                  increase(
-                    container_cpu_cfs_throttled_periods_total{container!="", job="kubelet", metrics_path="/metrics/cadvisor"}
-                  [5m])
-                )
-              )
-              / on (cluster, namespace, pod, container, instance) group_left
-              sum without (id, metrics_path, name, image, endpoint, job, node) (
-                topk by (cluster, namespace, pod, container, instance) (1,
-                  increase(
-                    container_cpu_cfs_periods_total{job="kubelet", metrics_path="/metrics/cadvisor"}
-                  [5m])
-                )
-              )
-              > ( 50 / 100 )
-            for: 15m
-            labels:
-              severity: info
   kubernetes-custom:
     groups:
       - name: kubernetes-custom.rules

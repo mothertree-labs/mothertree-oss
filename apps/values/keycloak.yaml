@@ -26,7 +26,6 @@ resources:
     cpu: 150m
     memory: 512Mi
   limits:
-    cpu: 500m
     memory: 1Gi
 
 # Ingress configuration

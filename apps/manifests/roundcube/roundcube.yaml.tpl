@@ -16,7 +16,7 @@
 #   ROUNDCUBE_DB_NAME - PostgreSQL database name
 #   ROUNDCUBE_DB_USER - PostgreSQL username
 #   ROUNDCUBE_DB_PASSWORD - PostgreSQL password
-#   ROUNDCUBE_MEMORY_REQUEST, ROUNDCUBE_MEMORY_LIMIT, ROUNDCUBE_CPU_REQUEST, ROUNDCUBE_CPU_LIMIT
+#   ROUNDCUBE_MEMORY_REQUEST, ROUNDCUBE_MEMORY_LIMIT, ROUNDCUBE_CPU_REQUEST
 
 ---
 apiVersion: v1
@@ -244,7 +244,6 @@ spec:
             cpu: "${ROUNDCUBE_CPU_REQUEST}"
           limits:
             memory: "${ROUNDCUBE_MEMORY_LIMIT}"
-            cpu: "${ROUNDCUBE_CPU_LIMIT}"
         livenessProbe:
           httpGet:
             path: /skins/mothertree/images/logo.svg

@@ -44,13 +44,11 @@ proxy:
   http:
     enabled: true  # Enables HTTP
 
-# Resources — CPU limit allows generous startup burst while preventing unbounded consumption
 resources:
   requests:
     cpu: 100m
     memory: 512Mi
   limits:
-    cpu: 2000m
     memory: 2048Mi
 
 # Ingress - DISABLED: We manage ingresses per-tenant to support multi-tenant auth domains

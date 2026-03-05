@@ -12,7 +12,7 @@
 #   NEXTCLOUD_ADMIN_PASSWORD - Nextcloud admin password
 #   STALWART_ADMIN_PASSWORD - Stalwart admin password (for IMAP + API access)
 #   CALENDAR_AUTOMATION_MEMORY_REQUEST, CALENDAR_AUTOMATION_MEMORY_LIMIT
-#   CALENDAR_AUTOMATION_CPU_REQUEST, CALENDAR_AUTOMATION_CPU_LIMIT
+#   CALENDAR_AUTOMATION_CPU_REQUEST
 #   POLL_INTERVAL_SECONDS - How often to scan inboxes (default: 60)
 #   CONFIG_CHECKSUM - Checksum of config for pod restart on change
 
@@ -108,7 +108,6 @@ spec:
             cpu: "${CALENDAR_AUTOMATION_CPU_REQUEST}"
           limits:
             memory: "${CALENDAR_AUTOMATION_MEMORY_LIMIT}"
-            cpu: "${CALENDAR_AUTOMATION_CPU_LIMIT}"
         livenessProbe:
           httpGet:
             path: /healthz

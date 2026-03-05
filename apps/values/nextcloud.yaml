@@ -57,7 +57,6 @@ resources:
     cpu: 500m
     memory: 192Mi
   limits:
-    cpu: 2000m
     memory: 2Gi
 
 # No PVC — use chart-default emptyDir for /var/www/html
@@ -283,7 +282,6 @@ cronjob:
         cpu: 100m
         memory: 64Mi
       limits:
-        cpu: 1000m
         memory: 512Mi
 
 # Disable built-in MariaDB (we use PostgreSQL)

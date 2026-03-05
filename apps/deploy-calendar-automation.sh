@@ -113,8 +113,7 @@ print_status "Nextcloud admin user: $NEXTCLOUD_ADMIN_USER"
 # =============================================================================
 export CALENDAR_AUTOMATION_MEMORY_REQUEST="${CALENDAR_AUTOMATION_MEMORY_REQUEST:-64Mi}"
 export CALENDAR_AUTOMATION_MEMORY_LIMIT="${CALENDAR_AUTOMATION_MEMORY_LIMIT:-128Mi}"
-export CALENDAR_AUTOMATION_CPU_REQUEST="${CALENDAR_AUTOMATION_CPU_REQUEST:-10m}"
-export CALENDAR_AUTOMATION_CPU_LIMIT="${CALENDAR_AUTOMATION_CPU_LIMIT:-100m}"
+export CALENDAR_AUTOMATION_CPU_REQUEST="${CALENDAR_AUTOMATION_CPU_REQUEST:-50m}"
 export POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-60}"
 
 # Generate config checksum for pod annotations (triggers restart on config change)
@@ -236,7 +235,7 @@ fi
 print_status "Applying calendar automation manifests..."
 
 # Use explicit variable list for envsubst to avoid substituting unintended variables
-envsubst '${NS_MAIL} ${NS_FILES} ${TENANT_NAME} ${FILES_HOST} ${NEXTCLOUD_ADMIN_USER} ${NEXTCLOUD_ADMIN_PASSWORD} ${STALWART_ADMIN_PASSWORD} ${CALENDAR_AUTOMATION_MEMORY_REQUEST} ${CALENDAR_AUTOMATION_MEMORY_LIMIT} ${CALENDAR_AUTOMATION_CPU_REQUEST} ${CALENDAR_AUTOMATION_CPU_LIMIT} ${POLL_INTERVAL_SECONDS} ${CONFIG_CHECKSUM}' \
+envsubst '${NS_MAIL} ${NS_FILES} ${TENANT_NAME} ${FILES_HOST} ${NEXTCLOUD_ADMIN_USER} ${NEXTCLOUD_ADMIN_PASSWORD} ${STALWART_ADMIN_PASSWORD} ${CALENDAR_AUTOMATION_MEMORY_REQUEST} ${CALENDAR_AUTOMATION_MEMORY_LIMIT} ${CALENDAR_AUTOMATION_CPU_REQUEST} ${POLL_INTERVAL_SECONDS} ${CONFIG_CHECKSUM}' \
     < "$REPO_ROOT/apps/manifests/calendar-automation/deployment.yaml.tpl" | kubectl apply -f -
 print_success "Calendar Automation Deployment and Service applied"
 
