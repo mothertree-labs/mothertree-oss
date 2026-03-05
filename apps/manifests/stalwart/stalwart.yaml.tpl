@@ -378,7 +378,6 @@ spec:
             cpu: "${STALWART_CPU_REQUEST}"
           limits:
             memory: "${STALWART_MEMORY_LIMIT}"
-            cpu: "${STALWART_CPU_LIMIT}"
         livenessProbe:
           httpGet:
             path: /healthz/live

@@ -10,12 +10,11 @@ replicaCount: 1
 apiToken: "externally-managed"
 
 resources:
-  limits:
-    cpu: 100m
-    memory: 128Mi
   requests:
-    cpu: 10m
+    cpu: 50m
     memory: 64Mi
+  limits:
+    memory: 128Mi
 
 # defaultRules: true (chart default) provides all required LKE ports:
 #   - Kubelet health (10250, 10256 TCP from 192.168.128.0/17)

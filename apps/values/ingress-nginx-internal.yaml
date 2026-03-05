@@ -10,10 +10,9 @@ controller:
       https: 30443
   resources:
     requests:
-      cpu: 10m
+      cpu: 100m
       memory: 128Mi
     limits:
-      cpu: 200m
       memory: 256Mi
   config:
     # Basic nginx configuration for internal services

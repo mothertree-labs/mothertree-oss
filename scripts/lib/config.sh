@@ -302,7 +302,6 @@ _mt_load_scaling_config() {
     "STALWART_MEMORY_REQUEST=" + (.resources.stalwart.memory_request // "256Mi" | tostring | @sh) + "\n" +
     "STALWART_MEMORY_LIMIT=" + (.resources.stalwart.memory_limit // "1Gi" | tostring | @sh) + "\n" +
     "STALWART_CPU_REQUEST=" + (.resources.stalwart.cpu_request // "100m" | tostring | @sh) + "\n" +
-    "STALWART_CPU_LIMIT=" + (.resources.stalwart.cpu_limit // "500m" | tostring | @sh) + "\n" +
     "STALWART_STORAGE_SIZE=" + (.resources.stalwart.storage_size // "1Gi" | tostring | @sh) + "\n" +
     "STALWART_SMTPS_PORT=" + (.resources.stalwart.smtps_port // "" | tostring | @sh) + "\n" +
     "STALWART_SUBMISSION_PORT=" + (.resources.stalwart.submission_port // "" | tostring | @sh) + "\n" +
@@ -312,19 +311,16 @@ _mt_load_scaling_config() {
     "ROUNDCUBE_MEMORY_REQUEST=" + (.resources.roundcube.memory_request // "128Mi" | tostring | @sh) + "\n" +
     "ROUNDCUBE_MEMORY_LIMIT=" + (.resources.roundcube.memory_limit // "256Mi" | tostring | @sh) + "\n" +
     "ROUNDCUBE_CPU_REQUEST=" + (.resources.roundcube.cpu_request // "100m" | tostring | @sh) + "\n" +
-    "ROUNDCUBE_CPU_LIMIT=" + (.resources.roundcube.cpu_limit // "200m" | tostring | @sh) + "\n" +
     "KEYCLOAK_REPLICAS=" + (.resources.keycloak.replicas | tostring | @sh) + "\n" +
     "REDIS_REPLICAS=" + (.resources.redis.replicas | tostring | @sh) + "\n" +
     "SYNAPSE_REPLICAS=" + (.resources.synapse.replicas // 1 | tostring | @sh) + "\n" +
     "NEXTCLOUD_MIN_REPLICAS=" + (.resources.nextcloud.min_replicas | tostring | @sh) + "\n" +
     "NEXTCLOUD_MAX_REPLICAS=" + (.resources.nextcloud.max_replicas | tostring | @sh) + "\n" +
     "NEXTCLOUD_CPU_REQUEST=" + (.resources.nextcloud.cpu_request // "500m" | tostring | @sh) + "\n" +
-    "NEXTCLOUD_CPU_LIMIT=" + (.resources.nextcloud.cpu_limit // "2000m" | tostring | @sh) + "\n" +
     "NEXTCLOUD_HPA_SCALEDOWN_WINDOW=" + (.resources.nextcloud.hpa_scaledown_window // 300 | tostring | @sh) + "\n" +
     "EMAIL_PROBE_MEMORY_REQUEST=" + (.resources.email_probe.memory_request // "32Mi" | tostring | @sh) + "\n" +
     "EMAIL_PROBE_MEMORY_LIMIT=" + (.resources.email_probe.memory_limit // "64Mi" | tostring | @sh) + "\n" +
-    "EMAIL_PROBE_CPU_REQUEST=" + (.resources.email_probe.cpu_request // "10m" | tostring | @sh) + "\n" +
-    "EMAIL_PROBE_CPU_LIMIT=" + (.resources.email_probe.cpu_limit // "50m" | tostring | @sh)
+    "EMAIL_PROBE_CPU_REQUEST=" + (.resources.email_probe.cpu_request // "50m" | tostring | @sh)
   ' "$TENANT_CONFIG")"
 
   # Validate required scaling fields — fail fast instead of propagating 'null'
@@ -371,21 +367,21 @@ _mt_load_scaling_config() {
   export JVB_MIN_REPLICAS JVB_MAX_REPLICAS JVB_PORT
   export ROUNDCUBE_MIN_REPLICAS ROUNDCUBE_MAX_REPLICAS
   export ROUNDCUBE_MEMORY_REQUEST ROUNDCUBE_MEMORY_LIMIT
-  export ROUNDCUBE_CPU_REQUEST ROUNDCUBE_CPU_LIMIT
+  export ROUNDCUBE_CPU_REQUEST
   export ADMIN_PORTAL_MIN_REPLICAS ADMIN_PORTAL_MAX_REPLICAS
   export ACCOUNT_PORTAL_MIN_REPLICAS ACCOUNT_PORTAL_MAX_REPLICAS
   export SYNAPSE_ADMIN_MIN_REPLICAS SYNAPSE_ADMIN_MAX_REPLICAS
   export STALWART_MIN_REPLICAS STALWART_MAX_REPLICAS
   export STALWART_MEMORY_REQUEST STALWART_MEMORY_LIMIT
-  export STALWART_CPU_REQUEST STALWART_CPU_LIMIT STALWART_STORAGE_SIZE
+  export STALWART_CPU_REQUEST STALWART_STORAGE_SIZE
   export STALWART_SMTPS_PORT STALWART_SUBMISSION_PORT STALWART_IMAPS_PORT
   export STALWART_IMAPS_APP_PORT STALWART_SUBMISSION_APP_PORT
   export KEYCLOAK_REPLICAS REDIS_REPLICAS
   export SYNAPSE_REPLICAS
   export NEXTCLOUD_MIN_REPLICAS NEXTCLOUD_MAX_REPLICAS
-  export NEXTCLOUD_CPU_REQUEST NEXTCLOUD_CPU_LIMIT NEXTCLOUD_HPA_SCALEDOWN_WINDOW
+  export NEXTCLOUD_CPU_REQUEST NEXTCLOUD_HPA_SCALEDOWN_WINDOW
   export EMAIL_PROBE_MEMORY_REQUEST EMAIL_PROBE_MEMORY_LIMIT
-  export EMAIL_PROBE_CPU_REQUEST EMAIL_PROBE_CPU_LIMIT
+  export EMAIL_PROBE_CPU_REQUEST
 }
 
 # ---------------------------------------------------------------------------

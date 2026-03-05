@@ -7,10 +7,9 @@ role: Agent
 # Resource limits — top-level key for vector/vector chart
 resources:
   requests:
-    cpu: 40m
+    cpu: 50m
     memory: 64Mi
   limits:
-    cpu: 200m
     memory: 256Mi
 
 # Agent configuration

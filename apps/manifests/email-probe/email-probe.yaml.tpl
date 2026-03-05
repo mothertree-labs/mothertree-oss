@@ -11,7 +11,7 @@
 #   BOT_PASSWORD - Probe bot app password
 #   TARGET_EMAIL - External auto-reply address
 #   EMAIL_PROBE_MEMORY_REQUEST, EMAIL_PROBE_MEMORY_LIMIT
-#   EMAIL_PROBE_CPU_REQUEST, EMAIL_PROBE_CPU_LIMIT
+#   EMAIL_PROBE_CPU_REQUEST
 
 ---
 apiVersion: v1
@@ -97,7 +97,6 @@ spec:
             cpu: "${EMAIL_PROBE_CPU_REQUEST}"
           limits:
             memory: "${EMAIL_PROBE_MEMORY_LIMIT}"
-            cpu: "${EMAIL_PROBE_CPU_LIMIT}"
         livenessProbe:
           httpGet:
             path: /healthz

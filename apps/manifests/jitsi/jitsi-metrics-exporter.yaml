@@ -80,10 +80,9 @@ spec:
               key: TURN_SHARED_SECRET
         resources:
           requests:
-            cpu: 10m
+            cpu: 50m
             memory: 64Mi
           limits:
-            cpu: 100m
             memory: 128Mi
       volumes:
       - name: exporter-script

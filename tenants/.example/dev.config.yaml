@@ -109,7 +109,6 @@ resources:
     memory_request: 128Mi
     memory_limit: 256Mi
     cpu_request: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
-    cpu_limit: 200m
 
   # Admin Portal - stateless, scales with HPA
   admin_portal:
@@ -118,7 +117,6 @@ resources:
     memory_request: 64Mi
     memory_limit: 128Mi
     cpu_request: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
-    cpu_limit: 200m
 
   # Account Portal - stateless, scales with HPA
   account_portal:
@@ -127,7 +125,6 @@ resources:
     memory_request: 64Mi
     memory_limit: 128Mi
     cpu_request: 100m
-    cpu_limit: 200m
 
   # Synapse Admin - stateless, scales with HPA
   synapse_admin:
@@ -143,7 +140,6 @@ resources:
     memory_request: 128Mi
     memory_limit: 512Mi
     cpu_request: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
-    cpu_limit: 250m
     storage_size: 1Gi  # Local storage for config/cache
     # Unique ports per tenant for multi-tenant mail (like jvb_port pattern)
     smtps_port: 46500       # SMTP submission with implicit TLS (like 465)
@@ -162,7 +158,6 @@ resources:
     memory_request: 512Mi
     memory_limit: 1Gi
     cpu_request: 250m
-    cpu_limit: 500m
 
   # Nextcloud - HPA-enabled (emptyDir storage, no PVC constraint)
   nextcloud:
@@ -171,7 +166,6 @@ resources:
     memory_request: 256Mi
     memory_limit: 512Mi
     cpu_request: 500m
-    cpu_limit: 2000m
     hpa_scaledown_window: 300  # seconds; use 3600 to keep scaled up between CI runs
     storage_size: 5Gi
 

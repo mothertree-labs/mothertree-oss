@@ -7,8 +7,6 @@ resources:
   requests:
     cpu: 1000m
     memory: 2Gi
-  limits:
-    cpu: 1900m
 
 primary:
   priorityClassName: system-cluster-critical
@@ -16,8 +14,6 @@ primary:
     requests:
       cpu: 1000m
       memory: 2Gi
-    limits:
-      cpu: 1900m
   # PostgreSQL memory tuning — caps total memory to ~6.9GB worst case (all 200 connections active)
   # Normal load (~50 active): ~4.1GB. Leaves room for OS + other pods on 8GB node.
   extendedConfiguration: |
@@ -36,5 +32,3 @@ readReplicas:
     requests:
       cpu: 250m
       memory: 512Mi
-    limits:
-      cpu: 1000m
