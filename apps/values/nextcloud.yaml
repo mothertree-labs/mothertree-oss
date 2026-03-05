@@ -9,8 +9,15 @@ startupProbe:
   enabled: true
   initialDelaySeconds: 30
   periodSeconds: 10
-  timeoutSeconds: 5
+  timeoutSeconds: 15
   failureThreshold: 30
+
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 15
+  failureThreshold: 3
 
 # Use the chart's built-in HPA. This omits .spec.replicas from the Deployment
 # template entirely, avoiding Helm 4 SSA conflicts with kube-controller-manager

@@ -27,8 +27,10 @@ data:
     # Background process: periodically check backend connectivity
     check_backend() {
       while true; do
-        # Test backend API - we expect 200 for /api/v1.0/config/
-        if wget -q -O /dev/null --timeout=5 "${BACKEND_URL}/api/v1.0/config/"; then
+        # Test backend API liveness — use __lbheartbeat__ to avoid Django's
+        # SECURE_SSL_REDIRECT (which 301s to HTTPS, causing wget to open a second
+        # connection through the ingress, doubling worker consumption per check).
+        if wget -q -O /dev/null --timeout=5 "${BACKEND_URL}/__lbheartbeat__"; then
           echo "OK: Backend reachable" > "$HEALTH_DIR/healthz"
           echo "$(date -Iseconds) Backend check passed: ${BACKEND_URL}"
         else

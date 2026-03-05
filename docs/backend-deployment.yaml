@@ -71,7 +71,7 @@ spec:
               print("Patched settings.py with MediaMiddleware and custom storage backend")
               EOF
               python /app/patches/patch_invitation.py && \
-              exec gunicorn -c /usr/local/etc/gunicorn/impress.py --workers ${DOCS_GUNICORN_WORKERS} impress.wsgi:application
+              exec gunicorn -c /usr/local/etc/gunicorn/impress.py --workers ${DOCS_GUNICORN_WORKERS} --timeout 30 impress.wsgi:application
           ports:
           - containerPort: 8000
             name: http
@@ -135,14 +135,14 @@ spec:
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 10
-            timeoutSeconds: 5
+            timeoutSeconds: 15
             failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /__heartbeat__
               port: 8000
             periodSeconds: 15
-            timeoutSeconds: 10
+            timeoutSeconds: 15
             failureThreshold: 5
           readinessProbe:
             httpGet:
@@ -150,7 +150,7 @@ spec:
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 5
-            timeoutSeconds: 5
+            timeoutSeconds: 15
             failureThreshold: 3
           # Memory INCREASED based on actual usage (~385Mi observed)
           resources:
