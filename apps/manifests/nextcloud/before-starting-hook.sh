@@ -48,7 +48,7 @@ if [ -n "${GUEST_BRIDGE_API_URL:-}" ] && [ -n "${GUEST_BRIDGE_API_KEY:-}" ]; the
     php /var/www/html/occ config:system:set guest_bridge.api_url --value="$GUEST_BRIDGE_API_URL" 2>/dev/null || {
         echo "[before-starting] Warning: could not set guest_bridge.api_url"
     }
-    php /var/www/html/occ config:system:set guest_bridge.api_key --value="$GUEST_BRIDGE_API_KEY" 2>/dev/null || {
+    php /var/www/html/occ config:system:set guest_bridge.api_key --value="$GUEST_BRIDGE_API_KEY" >/dev/null 2>/dev/null || {
         echo "[before-starting] Warning: could not set guest_bridge.api_key"
     }
     echo "[before-starting] guest_bridge API configured"
