@@ -1,0 +1,17 @@
+{
+  "name": "mothertree-loadtest",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright-based load tests for Mothertree platform",
+  "scripts": {
+    "test": "playwright test --project=load",
+    "test:headed": "playwright test --project=load-headed",
+    "test:10": "playwright test --workers=10",
+    "test:5": "playwright test --workers=5",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "dotenv": "^16.4.7"
+  }
+}
