@@ -140,7 +140,7 @@ This catches the common mistake of copying a submodule file into the main repo f
 The Keycloak theme was renamed from `mothertree` to `platform`. Check for:
 - References to `mothertree-theme` or `themes/mothertree/` (should be `platform`)
 - CSS classes or HTML with hardcoded org-specific branding in theme files
-- FTL templates with hardcoded org names instead of `${realmDisplayName!"the platform"}`
+- FTL templates with hardcoded org names instead of `${realmName}` (email) or `${realm.displayName}` (login)
 - Theme `.properties` files with real domain URLs (should use `${PLACEHOLDER}` or be empty)
 
 ### CHECK 9: Sensitive Documentation (LOW)
@@ -159,7 +159,7 @@ When ANY of these files are modified, apply extra scrutiny:
 | `scripts/create_env` | No hardcoded domains, uses `yq` for tenant config, no real tenant names |
 | `apps/deploy-*.sh` | No hardcoded domains, uses env vars, no hardcoded domain fallbacks |
 | `apps/**/server.js` | No fallback domains, fails fast if `TENANT_DOMAIN` not set |
-| `apps/themes/**` | No org-specific branding, uses `realmDisplayName`, no real domain URLs |
+| `apps/themes/**` | No org-specific branding, uses `realmName`/`realm.displayName`, no real domain URLs |
 | `apps/manifests/**/*.tpl` | Uses `${VARIABLE}` substitution, no hardcoded domains |
 | `apps/helmfile.yaml.gotmpl` | No hardcoded domains in Go templates |
 | `apps/values/*.yaml` | No real domains, uses `requiredEnv` for sensitive values |
