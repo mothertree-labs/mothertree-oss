@@ -1148,7 +1148,15 @@ if kubectl get hpa nextcloud-hpa -n "$NS_FILES" &>/dev/null; then
     kubectl delete hpa nextcloud-hpa -n "$NS_FILES"
     print_success "Old custom HPA removed"
 fi
-print_success "Nextcloud HPA managed by chart (CPU 80%, min=${NEXTCLOUD_MIN_REPLICAS}, max=${NEXTCLOUD_MAX_REPLICAS})"
+
+# Patch the chart's HPA with scaleDown stabilization window.
+# The chart's HPA template (autoscaling/v1) doesn't support behavior config,
+# so we patch it post-deploy. This runs after every helm upgrade to ensure
+# the behavior is always applied (Helm would otherwise reset it).
+print_status "Patching HPA scaleDown stabilization window (${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}s)..."
+kubectl patch hpa nextcloud -n "$NS_FILES" --type merge -p \
+  "{\"spec\":{\"behavior\":{\"scaleDown\":{\"stabilizationWindowSeconds\":${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}}}}}"
+print_success "Nextcloud HPA managed by chart (CPU 80%, min=${NEXTCLOUD_MIN_REPLICAS}, max=${NEXTCLOUD_MAX_REPLICAS}, scaleDown window=${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}s)"
 
 # Migration notice: old PVC
 if [ -n "${PVC_EXISTS:-}" ]; then
