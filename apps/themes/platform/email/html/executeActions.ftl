@@ -50,7 +50,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><#if isRecoveryFlow>Recover Your ${realmDisplayName!"the platform"} Account<#elseif isPasswordReset>Reset Your Password<#else>Welcome to ${realmName}</#if></title>
+    <title><#if isRecoveryFlow>Recover Your ${realmName} Account<#elseif isPasswordReset>Reset Your Password<#else>Welcome to ${realmName}</#if></title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -167,7 +167,7 @@
     <div class="container">
         <div class="card">
             <div class="logo">
-                <h1>${realmDisplayName!"the platform"}</h1>
+                <h1>${realmName}</h1>
             </div>
             
             <#if isRecoveryFlow>
@@ -176,7 +176,7 @@
                 
                 <p>Hello ${user.firstName!"there"},</p>
                 
-                <p>You requested to recover access to your ${realmDisplayName!"the platform"} account. This email was sent to your recovery email address because you indicated you've lost your passkey.</p>
+                <p>You requested to recover access to your ${realmName} account. This email was sent to your recovery email address because you indicated you've lost your passkey.</p>
                 
                 <#if user.attributes?? && user.attributes.tenantEmail?? && attrVal(user.attributes.tenantEmail) != "">
                 <div class="email-display">
@@ -214,7 +214,7 @@
                 
                 <p>Hello ${user.firstName!"there"},</p>
                 
-                <p>We received a request to reset your password and recover access to your ${realmDisplayName!"the platform"} account. This email was sent to your recovery email address.</p>
+                <p>We received a request to reset your password and recover access to your ${realmName} account. This email was sent to your recovery email address.</p>
                 
                 <#if user.email??>
                 <div class="email-display">
@@ -257,11 +257,11 @@
                 
                 <p>Hello ${user.firstName!"there"},</p>
                 
-                <p>You've been invited to join ${realmDisplayName!"the platform"}. To complete your account setup, you'll need to register a passkey - a secure way to sign in using your device's biometrics or a security key.</p>
+                <p>You've been invited to join ${realmName}. To complete your account setup, you'll need to register a passkey - a secure way to sign in using your device's biometrics or a security key.</p>
                 
                 <#if user.attributes?? && user.attributes.tenantEmail?? && attrVal(user.attributes.tenantEmail) != "">
                 <div class="email-display">
-                    <div class="label">Your ${realmDisplayName!"the platform"} email will be</div>
+                    <div class="label">Your ${realmName} email will be</div>
                     <div class="email">${attrVal(user.attributes.tenantEmail)}</div>
                 </div>
                 </#if>

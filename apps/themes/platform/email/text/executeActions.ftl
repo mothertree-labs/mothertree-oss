@@ -43,11 +43,11 @@
     <#assign setupLink = link>
 </#if>
 <#if isRecoveryFlow>
-${realmDisplayName!"the platform"} - Account Recovery
+${realmName} - Account Recovery
 
 Hello ${user.firstName!"there"},
 
-You requested to recover access to your ${realmDisplayName!"the platform"} account. This email was sent to your recovery email address because you indicated you've lost your passkey.
+You requested to recover access to your ${realmName} account. This email was sent to your recovery email address because you indicated you've lost your passkey.
 
 <#if user.attributes?? && user.attributes.tenantEmail?? && attrVal(user.attributes.tenantEmail) != "">
 Account being recovered: ${attrVal(user.attributes.tenantEmail)}
@@ -70,11 +70,11 @@ Need help? Contact your administrator
 <#if properties.acceptableUsePolicyUrl?has_content>Acceptable Use Policy: ${properties.acceptableUsePolicyUrl}</#if>
 </#if>
 <#elseif isPasswordReset>
-${realmDisplayName!"the platform"} - Password Reset
+${realmName} - Password Reset
 
 Hello ${user.firstName!"there"},
 
-We received a request to reset your password and recover access to your ${realmDisplayName!"the platform"} account. This email was sent to your recovery email address.
+We received a request to reset your password and recover access to your ${realmName} account. This email was sent to your recovery email address.
 
 <#if user.email??>
 Recovery email address: ${user.email}
@@ -100,14 +100,14 @@ Need help? Contact your administrator
 <#if properties.acceptableUsePolicyUrl?has_content>Acceptable Use Policy: ${properties.acceptableUsePolicyUrl}</#if>
 </#if>
 <#else>
-Welcome to ${realmDisplayName!"the platform"}!
+Welcome to ${realmName}!
 
 Hello ${user.firstName!"there"},
 
-You've been invited to join ${realmDisplayName!"the platform"}. To complete your account setup, you'll need to register a passkey - a secure way to sign in using your device's biometrics or a security key.
+You've been invited to join ${realmName}. To complete your account setup, you'll need to register a passkey - a secure way to sign in using your device's biometrics or a security key.
 
 <#if user.attributes?? && user.attributes.tenantEmail?? && attrVal(user.attributes.tenantEmail) != "">
-Your ${realmDisplayName!"the platform"} email will be: ${attrVal(user.attributes.tenantEmail)}
+Your ${realmName} email will be: ${attrVal(user.attributes.tenantEmail)}
 </#if>
 
 Click the link below to set up your passkey:
