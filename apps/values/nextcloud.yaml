@@ -51,7 +51,7 @@ externalDatabase:
     usernameKey: db-username
     passwordKey: db-password
 
-# Resource limits
+# Resource requests/limits (cpu is overridden per-env via NEXTCLOUD_CPU_REQUEST)
 resources:
   requests:
     cpu: 500m
