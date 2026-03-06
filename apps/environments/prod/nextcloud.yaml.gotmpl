@@ -6,6 +6,11 @@ hpa:
   minPods: {{ env "NEXTCLOUD_MIN_REPLICAS" }}
   maxPods: {{ env "NEXTCLOUD_MAX_REPLICAS" }}
 
+# Resource requests from tenant config (overrides base values)
+resources:
+  requests:
+    cpu: '{{ env "NEXTCLOUD_CPU_REQUEST" }}'
+
 # Database configuration - tenant-specific database and user (required, no default)
 # Host varies based on PostgreSQL architecture (standalone vs replication)
 externalDatabase:
