@@ -41,6 +41,21 @@ php /var/www/html/occ app:enable sharebymail 2>/dev/null || {
 }
 
 # Defense-in-depth: enforce share security policies on public link shares
+# Configure guest_bridge API settings from env vars (injected from K8s secret).
+# occ config:system:set writes to per-pod config.php, so this MUST run on every pod.
+if [ -n "${GUEST_BRIDGE_API_URL:-}" ] && [ -n "${GUEST_BRIDGE_API_KEY:-}" ]; then
+    echo "[before-starting] Configuring guest_bridge API settings..."
+    php /var/www/html/occ config:system:set guest_bridge.api_url --value="$GUEST_BRIDGE_API_URL" 2>/dev/null || {
+        echo "[before-starting] Warning: could not set guest_bridge.api_url"
+    }
+    php /var/www/html/occ config:system:set guest_bridge.api_key --value="$GUEST_BRIDGE_API_KEY" 2>/dev/null || {
+        echo "[before-starting] Warning: could not set guest_bridge.api_key"
+    }
+    echo "[before-starting] guest_bridge API configured"
+else
+    echo "[before-starting] Warning: GUEST_BRIDGE_API_URL or GUEST_BRIDGE_API_KEY not set, guest provisioning disabled"
+fi
+
 echo "[before-starting] Enforcing share security policies..."
 php /var/www/html/occ config:app:set core shareapi_enforce_links_password --value='yes' 2>/dev/null || true
 php /var/www/html/occ config:app:set core shareapi_default_expire_date --value='yes' 2>/dev/null || true

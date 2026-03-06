@@ -83,6 +83,20 @@ nextcloud:
   extraEnv:
     - name: NEXTCLOUD_INIT_HTACCESS
       value: "true"
+    # guest_bridge config — injected from secret so every pod has it on startup.
+    # The before-starting hook reads these and writes to per-pod config.php.
+    - name: GUEST_BRIDGE_API_URL
+      valueFrom:
+        secretKeyRef:
+          name: nextcloud-guest-bridge
+          key: api-url
+          optional: true
+    - name: GUEST_BRIDGE_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: nextcloud-guest-bridge
+          key: api-key
+          optional: true
   # Custom config.php settings
   configs:
     # Disable default skeleton files for new users (empty filesystem)
