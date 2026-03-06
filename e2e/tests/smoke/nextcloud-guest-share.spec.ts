@@ -257,7 +257,7 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
     }
   });
 
-  test('guest_bridge and sharebymail apps are both enabled', async ({
+  test('guest_bridge and sharebymail apps are both enabled and configured', async ({
     memberPage: page,
   }) => {
     await loginToNextcloud(page);
@@ -306,6 +306,20 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
     expect(
       passwordEnforced,
       'Password enforcement must remain enabled alongside sharebymail.',
+    ).toBe(true);
+
+    // guest_bridge must report configured: true (API URL + key are set).
+    // This catches the persistence bug where config was lost on pod restart.
+    const guestBridge = capabilities?.guest_bridge;
+    expect(
+      guestBridge?.enabled,
+      'guest_bridge app must be enabled (provides guest provisioning for email shares).',
+    ).toBe(true);
+    expect(
+      guestBridge?.configured,
+      'guest_bridge must be configured (api_url + api_key set). ' +
+        'If false, the before-starting hook failed to read GUEST_BRIDGE_API_URL/GUEST_BRIDGE_API_KEY ' +
+        'from the nextcloud-guest-bridge K8s secret. Check that the secret exists in the files namespace.',
     ).toBe(true);
   });
 });
