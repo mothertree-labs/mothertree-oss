@@ -53,13 +53,19 @@ class ShareCreatedListener implements IEventListener {
 			return;
 		}
 
+		// Suppress sharebymail's notification email immediately.
+		// ShareManager checks $share->getMailSend() AFTER dispatching this event,
+		// so setting it to false here prevents the unauthenticated link email.
+		// The guest receives a passkey setup email from Account Portal instead.
+		$share->setMailSend(false);
+
 		$email = $share->getSharedWith();
 		if (empty($email)) {
 			return;
 		}
 
 		$this->logger->info(
-			'Guest bridge: email share created for {email}',
+			'Guest bridge: email share created for {email}, suppressed sharebymail notification',
 			['app' => 'guest_bridge', 'email' => $email]
 		);
 
