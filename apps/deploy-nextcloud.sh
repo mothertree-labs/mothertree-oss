@@ -410,6 +410,26 @@ else
 fi
 rm -rf "$CUSTOM_APPS_STAGING"
 
+# Step 5e.1: Create guest_bridge secret (API URL + key) in files namespace
+# The before-starting hook reads these as env vars and writes to per-pod config.php.
+# This replaces the old approach of running occ config:system:set on a single pod.
+if [ -d "$REPO_ROOT/apps/nextcloud-guest-bridge" ]; then
+    GUEST_BRIDGE_API_URL="http://account-portal.${NS_ADMIN}.svc.cluster.local/api/provision-guest"
+    GUEST_API_KEY=$(kubectl get secret account-portal-secrets -n "$NS_ADMIN" -o jsonpath='{.data.guest-provisioning-api-key}' 2>/dev/null | base64 -d || echo "")
+    if [ -n "$GUEST_API_KEY" ]; then
+        kubectl create secret generic nextcloud-guest-bridge \
+            --namespace "$NS_FILES" \
+            --from-literal=api-url="$GUEST_BRIDGE_API_URL" \
+            --from-literal=api-key="$GUEST_API_KEY" \
+            --dry-run=client -o yaml | kubectl apply -f -
+        print_success "guest_bridge secret created/updated (API: $GUEST_BRIDGE_API_URL)"
+    else
+        print_warning "Guest provisioning API key not found in account-portal-secrets"
+        print_warning "guest_bridge will not provision guests until API key is configured"
+        print_warning "Add 'guest_provisioning_api_key' to tenant secrets under 'account_portal' section"
+    fi
+fi
+
 # Step 5b: Create before-starting hook ConfigMap
 # This hook runs on every pod start to enforce OIDC-only login.
 # Because /var/www/html is an emptyDir, pod restarts trigger a fresh Nextcloud
@@ -904,46 +924,26 @@ else
     print_status "Skipping jitsi_calendar (calendar not enabled or JITSI_HOST not set)"
 fi
 
-# Step 9b.1: Enable and configure guest_bridge app
+# Step 9b.1: Verify guest_bridge configuration
+# App enabling and API config are handled by the before-starting hook (runs on every pod).
+# The hook reads GUEST_BRIDGE_API_URL and GUEST_BRIDGE_API_KEY from the K8s secret
+# (created in step 5e.1) and writes to per-pod config.php via occ config:system:set.
+# Here we just verify connectivity from any running pod.
 if [ -d "$REPO_ROOT/apps/nextcloud-guest-bridge" ]; then
     NEXTCLOUD_POD=$(_get_nc_pod)
     if [ -n "$NEXTCLOUD_POD" ]; then
-        print_status "Enabling guest_bridge app..."
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ app:enable guest_bridge" 2>/dev/null || true
-
-        # Configure guest_bridge API settings
-        # Use internal K8s service URL to avoid PROXY protocol issues on external ingress
-        GUEST_BRIDGE_API_URL="http://account-portal.${NS_ADMIN}.svc.cluster.local/api/provision-guest"
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set guest_bridge.api_url --value='$GUEST_BRIDGE_API_URL'"
-
-        # Get the guest provisioning API key from the account portal secret
-        GUEST_API_KEY=$(kubectl get secret account-portal-secrets -n "$NS_ADMIN" -o jsonpath='{.data.guest-provisioning-api-key}' 2>/dev/null | base64 -d || echo "")
-        if [ -n "$GUEST_API_KEY" ]; then
-            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- su -s /bin/sh www-data -c "php occ config:system:set guest_bridge.api_key --value='$GUEST_API_KEY'"
-            print_success "guest_bridge app enabled and configured (API: $GUEST_BRIDGE_API_URL, sharebymail notifications suppressed)"
-
-            # Verify guest bridge can reach account portal internally
-            print_status "Verifying guest_bridge connectivity to account portal..."
-            HEALTH_CHECK=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
-                curl -sf -o /dev/null -w "%{http_code}" \
-                --connect-timeout 5 --max-time 10 \
-                "http://account-portal.${NS_ADMIN}.svc.cluster.local/health" 2>/dev/null || echo "000")
-            if [ "$HEALTH_CHECK" = "200" ]; then
-                print_success "guest_bridge → account portal connectivity verified"
-            else
-                print_warning "guest_bridge cannot reach account portal (HTTP $HEALTH_CHECK)"
-                print_warning "Guest provisioning may fail — check network policies and account-portal deployment"
-            fi
+        print_status "Verifying guest_bridge connectivity to account portal..."
+        HEALTH_CHECK=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- \
+            curl -sf -o /dev/null -w "%{http_code}" \
+            --connect-timeout 5 --max-time 10 \
+            "http://account-portal.${NS_ADMIN}.svc.cluster.local/health" 2>/dev/null || echo "000")
+        if [ "$HEALTH_CHECK" = "200" ]; then
+            print_success "guest_bridge → account portal connectivity verified"
         else
-            print_warning "Guest provisioning API key not found in account-portal-secrets"
-            print_warning "guest_bridge app enabled but will not provision guests until API key is configured"
-            print_warning "Add 'guest_provisioning_api_key' to tenant secrets under 'account_portal' section"
+            print_warning "guest_bridge cannot reach account portal (HTTP $HEALTH_CHECK)"
+            print_warning "Guest provisioning may fail — check network policies and account-portal deployment"
         fi
-    else
-        print_warning "Nextcloud pod not found, skipping guest_bridge configuration"
     fi
-else
-    print_status "Skipping guest_bridge (app not found)"
 fi
 
 # Step 9c: Deploy notify_push (Client Push) — replaces browser polling with WebSocket push
