@@ -147,6 +147,7 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
       // This requires the sharebymail app to be enabled (provides the
       // TYPE_EMAIL share provider). With sharebymail disabled, this
       // returns HTTP 400 or 403 because no provider exists for shareType=4.
+      // A password is required because shareapi_enforce_links_password=yes.
       const result = await ocsApiCall(
         page,
         'POST',
@@ -155,6 +156,7 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
           path: `/${testFileName}`,
           shareType: 4, // IShare::TYPE_EMAIL
           shareWith: guestEmail,
+          password: 'E2eGuestTest!2026',
         },
       );
 
@@ -203,7 +205,7 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
     let shareId: string | undefined;
 
     try {
-      // Create the email share
+      // Create the email share (password required by shareapi_enforce_links_password)
       const result = await ocsApiCall(
         page,
         'POST',
@@ -212,6 +214,7 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
           path: `/${testFileName}`,
           shareType: 4,
           shareWith: guestEmail,
+          password: 'E2eGuestTest!2026',
         },
       );
 
@@ -283,21 +286,26 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
     expect(capabilities).toBeTruthy();
 
     // sharebymail must be enabled (provides the TYPE_EMAIL share provider
-    // that guest_bridge depends on)
-    const shareByMailEnabled =
-      capabilities?.files_sharing?.sharebymail?.enabled ?? false;
+    // that guest_bridge depends on). When the app is enabled, the
+    // files_sharing.sharebymail key is present in capabilities.
+    // The `enabled` field reflects shareApiAllowLinks(), not the app state.
+    const shareByMailPresent =
+      capabilities?.files_sharing?.sharebymail !== undefined;
     expect(
-      shareByMailEnabled,
-      'sharebymail must be ENABLED to provide the TYPE_EMAIL share provider for guest_bridge. ' +
+      shareByMailPresent,
+      'sharebymail capability must be present (app enabled) to provide TYPE_EMAIL share provider for guest_bridge. ' +
         'Without it, email shares cannot be created at all.',
     ).toBe(true);
 
-    // Password enforcement must still be active (defense-in-depth for email shares)
+    // Password enforcement must still be active (defense-in-depth for email shares).
+    // When sharebymail is enabled, it reports its own password enforcement status.
     const passwordEnforced =
-      capabilities?.files_sharing?.public?.password?.enforced ?? false;
+      capabilities?.files_sharing?.sharebymail?.password?.enforced ??
+      capabilities?.files_sharing?.public?.password?.enforced ??
+      false;
     expect(
       passwordEnforced,
-      'Public link password enforcement must remain enabled alongside sharebymail.',
+      'Password enforcement must remain enabled alongside sharebymail.',
     ).toBe(true);
   });
 });
