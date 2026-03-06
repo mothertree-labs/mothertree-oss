@@ -6,6 +6,7 @@ _Build status:_
 
 Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Element (web client), Docs (collaborative editing), Nextcloud (files), Jitsi (video conferencing), and email (Stalwart + Roundcube) per tenant — with shared infrastructure for auth (Keycloak), database (PostgreSQL), monitoring (Prometheus/Grafana), and ingress (NGINX).
 
+
 ## Architecture
 
 ```
