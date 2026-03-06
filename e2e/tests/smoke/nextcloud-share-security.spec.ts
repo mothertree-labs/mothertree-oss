@@ -66,18 +66,21 @@ async function fetchCapabilities(page: Page): Promise<Record<string, any>> {
  */
 test.describe('Smoke — Nextcloud Share Security', () => {
 
-  test('sharebymail is disabled', async ({ memberPage: page }) => {
+  test('sharebymail is enabled (required by guest_bridge for TYPE_EMAIL shares)', async ({ memberPage: page }) => {
     const caps = await fetchCapabilities(page);
 
-    // When sharebymail is disabled, the files_sharing.sharebymail capability
-    // is either absent or has enabled=false
+    // sharebymail must be ENABLED to provide the TYPE_EMAIL share provider.
+    // Without it, email shares cannot be created and guest_bridge never fires.
+    // Security is maintained by: guest_bridge suppresses sharebymail's notification
+    // emails (no unauthenticated links sent), and password enforcement remains active.
     const shareByMailEnabled = caps?.files_sharing?.sharebymail?.enabled ?? false;
 
     expect(
       shareByMailEnabled,
-      'sharebymail must be DISABLED to prevent unauthenticated public links via email shares (Issue #119). ' +
-      'Fix: run "php occ app:disable sharebymail" or redeploy Nextcloud.'
-    ).toBe(false);
+      'sharebymail must be ENABLED to provide the TYPE_EMAIL share provider for guest_bridge. ' +
+      'Email share security is handled by guest_bridge (suppresses unauthenticated link emails) ' +
+      'and password enforcement (shareapi_enforce_links_password=yes).'
+    ).toBe(true);
   });
 
   test('public link password enforcement is enabled', async ({ memberPage: page }) => {
