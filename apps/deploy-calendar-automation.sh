@@ -208,6 +208,15 @@ else
             sh -c "echo '' | php occ user:auth-tokens:add '$user_email'" 2>/dev/null \
             | grep -A1 "app password:" | tail -1 | tr -d '[:space:]')
         if [ -n "$APP_PASS" ]; then
+            # Rename the token from default "cli" to "calendar-automation" for clarity
+            # (occ user:auth-tokens:add hardcodes the name "cli" with no override option)
+            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+                env NC_TOKEN_USER="$user_email" php -r '
+define("OC_CONSOLE", 1);
+require "/var/www/html/lib/base.php";
+$db = \OC::$server->getDatabaseConnection();
+$db->executeStatement("UPDATE oc_authtoken SET name = ? WHERE uid = ? AND name = ?", ["calendar-automation", getenv("NC_TOKEN_USER"), "cli"]);
+' 2>/dev/null || true
             # Build JSON incrementally using jq
             CALDAV_TOKENS=$(echo "$CALDAV_TOKENS" | jq --arg k "$user_email" --arg v "$APP_PASS" '. + {($k): $v}')
             TOKEN_COUNT=$((TOKEN_COUNT + 1))
