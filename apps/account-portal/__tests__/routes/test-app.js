@@ -252,25 +252,33 @@ function createTestApp(options = {}) {
   }
 
   app.get('/guest-landing', async (req, res) => {
-    const { email, doc } = req.query;
-    if (!email || !doc) {
+    const { email, doc, share } = req.query;
+    if (!email || (!doc && !share)) {
       return res.redirect('/register');
     }
     try {
       const existingUser = await keycloakApi.findUserByEmail(email.toLowerCase());
       if (existingUser) {
+        if (share) {
+          const filesHost = (process.env.BASE_URL || '').replace('account.', 'files.');
+          return res.redirect(`${filesHost}/s/${encodeURIComponent(share)}`);
+        }
         const docsHost = (process.env.BASE_URL || '').replace('account.', 'docs.');
         return res.redirect(`${docsHost}/docs/${encodeURIComponent(doc)}/`);
       }
     } catch (err) {
       // fall through
     }
-    res.redirect(`/register?email=${encodeURIComponent(email)}&doc=${encodeURIComponent(doc)}`);
+    const params = new URLSearchParams({ email });
+    if (doc) params.set('doc', doc);
+    if (share) params.set('share', share);
+    res.redirect(`/register?${params.toString()}`);
   });
 
   app.get('/register', (req, res) => {
     const email = req.query.email || '';
     const doc = req.query.doc || '';
+    const share = req.query.share || '';
     let maskedEmail = '';
     if (email) {
       const [local, domain] = email.split('@');
@@ -291,6 +299,7 @@ function createTestApp(options = {}) {
       email,
       maskedEmail,
       doc,
+      share,
     });
   });
 
@@ -320,10 +329,12 @@ function createTestApp(options = {}) {
           error: 'An account with this email already exists. Try signing in instead.'
         });
       }
-      const { doc } = req.body;
+      const { doc, share } = req.body;
       let redirectAfterSetup = process.env.BASE_URL || '';
       if (doc) {
         redirectAfterSetup = `${process.env.BASE_URL}/guest-complete?doc=${encodeURIComponent(doc)}`;
+      } else if (share) {
+        redirectAfterSetup = `${process.env.BASE_URL}/guest-complete?share=${encodeURIComponent(share)}`;
       }
       const result = await keycloakApi.createGuestUser({
         email: email.toLowerCase(),
@@ -363,7 +374,11 @@ function createTestApp(options = {}) {
 
   // Guest complete
   app.get('/guest-complete', (req, res) => {
-    const { doc } = req.query;
+    const { doc, share } = req.query;
+    if (share) {
+      const filesHost = (process.env.BASE_URL || '').replace('account.', 'files.');
+      return res.redirect(`${filesHost}/s/${encodeURIComponent(share)}`);
+    }
     if (doc) {
       const docsHost = (process.env.BASE_URL || '').replace('account.', 'docs.');
       return res.redirect(`${docsHost}/docs/${encodeURIComponent(doc)}/`);

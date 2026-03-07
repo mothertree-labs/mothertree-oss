@@ -54,6 +54,7 @@
       <form id="registerForm" class="space-y-4">
         <input type="hidden" id="email" name="email" value="<%= email %>">
         <input type="hidden" id="doc" name="doc" value="<%= doc %>">
+        <input type="hidden" id="share" name="share" value="<%= share %>">
 
         <div class="grid grid-cols-2 gap-4">
           <div>
@@ -165,6 +166,7 @@
       var firstName = document.getElementById('firstName').value.trim();
       var lastName = document.getElementById('lastName').value.trim();
       var doc = document.getElementById('doc').value;
+      var share = document.getElementById('share').value;
 
       if (!email) {
         errorMessage.textContent = 'Email address is required';
@@ -197,7 +199,7 @@
         var response = await fetch('/api/register-guest', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: email, firstName: firstName, lastName: lastName, doc: doc }),
+          body: JSON.stringify({ email: email, firstName: firstName, lastName: lastName, doc: doc, share: share }),
         });
 
         var data = await response.json();

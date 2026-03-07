@@ -672,9 +672,13 @@ function checkGuestRateLimit(ip) {
   return true;
 }
 
-// Guest complete - redirect to the document after passkey registration
+// Guest complete - redirect to the document/file after passkey registration
 app.get('/guest-complete', (req, res) => {
-  const { doc } = req.query;
+  const { doc, share } = req.query;
+  if (share) {
+    const filesHost = (process.env.BASE_URL || '').replace('account.', 'files.');
+    return res.redirect(`${filesHost}/s/${encodeURIComponent(share)}`);
+  }
   if (doc) {
     const docsHost = (process.env.BASE_URL || '').replace('account.', 'docs.');
     return res.redirect(`${docsHost}/docs/${encodeURIComponent(doc)}/`);
@@ -686,15 +690,19 @@ app.get('/guest-complete', (req, res) => {
 
 // Guest landing - smart redirect based on whether user exists
 app.get('/guest-landing', async (req, res) => {
-  const { email, doc } = req.query;
+  const { email, doc, share } = req.query;
 
-  if (!email || !doc) {
+  if (!email || (!doc && !share)) {
     return res.redirect('/register');
   }
 
   try {
     const existingUser = await keycloakApi.findUserByEmail(email.toLowerCase());
     if (existingUser) {
+      if (share) {
+        const filesHost = (process.env.BASE_URL || '').replace('account.', 'files.');
+        return res.redirect(`${filesHost}/s/${encodeURIComponent(share)}`);
+      }
       // User exists - send them to the doc (which triggers Keycloak login)
       const docsHost = (process.env.BASE_URL || '').replace('account.', 'docs.');
       return res.redirect(`${docsHost}/docs/${encodeURIComponent(doc)}/`);
@@ -704,12 +712,16 @@ app.get('/guest-landing', async (req, res) => {
   }
 
   // User doesn't exist - send them to registration
-  res.redirect(`/register?email=${encodeURIComponent(email)}&doc=${encodeURIComponent(doc)}`);
+  const params = new URLSearchParams({ email });
+  if (doc) params.set('doc', doc);
+  if (share) params.set('share', share);
+  res.redirect(`/register?${params.toString()}`);
 });
 
 app.get('/register', (req, res) => {
   const email = req.query.email || '';
   const doc = req.query.doc || '';
+  const share = req.query.share || '';
 
   // Mask email: show first 2 chars of local part + *** + @ + first 2 chars of domain + ***
   let maskedEmail = '';
@@ -733,6 +745,7 @@ app.get('/register', (req, res) => {
     email,
     maskedEmail,
     doc,
+    share,
   });
 });
 
@@ -771,12 +784,14 @@ app.post('/api/register-guest', verifyOrigin, async (req, res) => {
       });
     }
 
-    const { doc } = req.body;
+    const { doc, share } = req.body;
 
     // Build the redirect URL - must be within account portal domain (Keycloak redirect_uri validation)
     let redirectAfterSetup = process.env.BASE_URL || '';
     if (doc) {
       redirectAfterSetup = `${process.env.BASE_URL}/guest-complete?doc=${encodeURIComponent(doc)}`;
+    } else if (share) {
+      redirectAfterSetup = `${process.env.BASE_URL}/guest-complete?share=${encodeURIComponent(share)}`;
     }
 
     // Create the guest user
@@ -864,7 +879,7 @@ app.post('/api/provision-guest', async (req, res) => {
   }
 
   try {
-    const { email, firstName, lastName, redirectUri } = req.body;
+    const { email, firstName, lastName, redirectUri, shareContext } = req.body;
 
     if (!email) {
       return res.status(400).json({ success: false, error: 'Email is required' });
@@ -898,9 +913,31 @@ app.post('/api/provision-guest', async (req, res) => {
       firstName: (firstName || '').trim() || undefined,
       lastName: (lastName || '').trim() || undefined,
       redirectUri: redirectUri || undefined,
+      skipEmail: !!shareContext,  // We'll send our own contextual email
     });
 
     console.log(`[PROVISION-GUEST] Created guest user: ${email} (${result.userId})`);
+
+    // Send contextual invite email when share context is provided
+    if (shareContext && shareContext.shareToken) {
+      try {
+        const baseUrl = process.env.BASE_URL || '';
+        const guestLandingUrl = `${baseUrl}/guest-landing?email=${encodeURIComponent(email)}&share=${encodeURIComponent(shareContext.shareToken)}`;
+        const mailer = require('./api/mailer');
+        await mailer.sendShareInviteEmail({
+          to: email,
+          sharerName: shareContext.sharerName || 'Someone',
+          documentName: shareContext.documentName || 'a file',
+          guestLandingUrl,
+          brandName: process.env.TENANT_DISPLAY_NAME || 'Mothertree',
+        });
+        console.log(`[PROVISION-GUEST] Sent share invite email to ${email}`);
+      } catch (emailErr) {
+        console.error(`[PROVISION-GUEST] Failed to send invite email:`, emailErr.message);
+        // Non-fatal — user is created, they can be re-invited
+      }
+    }
+
     res.json({ success: true, userId: result.userId });
   } catch (error) {
     console.error('[PROVISION-GUEST] Error:', error.message);

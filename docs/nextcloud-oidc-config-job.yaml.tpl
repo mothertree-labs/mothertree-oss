@@ -302,20 +302,26 @@ spec:
               nc_exec su -s /bin/sh www-data -c "php occ app:enable guest_bridge" 2>/dev/null || true
               echo "Guest bridge app enabled (API config set by deploy-nextcloud.sh)"
 
-              # === Share Security Policies (Issue #119) ===
-              # Disable sharebymail to prevent unauthenticated public links when sharing
-              # with external email addresses. sharebymail sends a token-based URL that
-              # grants access without OIDC authentication, bypassing Keycloak identity.
-              # guest_bridge remains installed but dormant (no TYPE_EMAIL events fire).
-              echo "Disabling sharebymail app (prevents unauthenticated email share links)..."
-              nc_exec su -s /bin/sh www-data -c "php occ app:disable sharebymail" 2>/dev/null || true
+              # === Share Security: sharebymail + guest_bridge (Issue #119, PR #155) ===
+              # sharebymail MUST be enabled — it's the only provider for TYPE_EMAIL shares.
+              # Security is maintained by guest_bridge, which suppresses sharebymail's
+              # notification emails (no unauthenticated public links are sent). Instead,
+              # guests receive contextual invite emails from Account Portal.
+              echo "Enabling sharebymail app (required by guest_bridge for TYPE_EMAIL shares)..."
+              nc_exec su -s /bin/sh www-data -c "php occ app:enable sharebymail" 2>/dev/null || true
 
-              # Defense-in-depth: enforce security policies on public link shares (TYPE_LINK)
+              # Share security policies
               echo "Configuring share security policies..."
-              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_links_password --value='yes'"
+              # shareapi_allow_links must be 'yes' — TYPE_EMAIL shares (sharebymail) are
+              # internally link-based and fail with 404 when links are disabled.
+              # Security is handled by guest_bridge (intercepts shares, provisions guests via passkeys).
+              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_allow_links --value='yes'"
+              # No password enforcement needed (email shares use passkeys via guest_bridge)
+              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_links_password --value='no'"
+              # Suggest 30-day expiry by default but don't enforce it
               nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_default_expire_date --value='yes'"
               nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_expire_after_n_days --value='30'"
-              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_expire_date --value='yes'"
+              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_expire_date --value='no'"
               nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_default_permissions --value='1'"
               echo "Share security policies configured"
 
