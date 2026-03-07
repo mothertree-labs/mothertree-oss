@@ -561,7 +561,7 @@ async function removeRealmRole(userId, roleName) {
  * - Sets userType attribute to 'guest'
  * - Requires email verification + passkey registration
  */
-async function createGuestUser({ email, firstName, lastName, redirectUri }) {
+async function createGuestUser({ email, firstName, lastName, redirectUri, skipEmail }) {
   const token = await getServiceToken();
   const usersUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users`;
 
@@ -647,29 +647,34 @@ async function createGuestUser({ email, firstName, lastName, redirectUri }) {
   }
 
   // Send execute-actions-email for verification + passkey registration
-  const baseUrl = process.env.BASE_URL;
-  const finalRedirect = redirectUri || baseUrl;
-  const clientId = process.env.KEYCLOAK_CLIENT_ID || 'account-portal';
-  const executeActionsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/execute-actions-email`;
+  // (skipped when caller provides shareContext and sends its own contextual email)
+  if (!skipEmail) {
+    const baseUrl = process.env.BASE_URL;
+    const finalRedirect = redirectUri || baseUrl;
+    const clientId = process.env.KEYCLOAK_CLIENT_ID || 'account-portal';
+    const executeActionsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/execute-actions-email`;
 
-  const emailResponse = await fetch(
-    `${executeActionsUrl}?lifespan=604800&redirect_uri=${encodeURIComponent(finalRedirect)}&client_id=${clientId}`,
-    {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(['VERIFY_EMAIL', 'webauthn-register-passwordless']),
+    const emailResponse = await fetch(
+      `${executeActionsUrl}?lifespan=604800&redirect_uri=${encodeURIComponent(finalRedirect)}&client_id=${clientId}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(['VERIFY_EMAIL', 'webauthn-register-passwordless']),
+      }
+    );
+
+    if (!emailResponse.ok) {
+      const error = await emailResponse.text();
+      console.error('Failed to send guest registration email:', error);
+      // Don't throw - user is created, they can recover later
+    } else {
+      console.log('Guest registration email sent successfully');
     }
-  );
-
-  if (!emailResponse.ok) {
-    const error = await emailResponse.text();
-    console.error('Failed to send guest registration email:', error);
-    // Don't throw - user is created, they can recover later
   } else {
-    console.log('Guest registration email sent successfully');
+    console.log('Skipping Keycloak execute-actions-email (caller will send contextual email)');
   }
 
   return { userId };

@@ -147,7 +147,7 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
       // This requires the sharebymail app to be enabled (provides the
       // TYPE_EMAIL share provider). With sharebymail disabled, this
       // returns HTTP 400 or 403 because no provider exists for shareType=4.
-      // A password is required because shareapi_enforce_links_password=yes.
+      // No password needed — not enforced for email shares (guests use passkeys).
       const result = await ocsApiCall(
         page,
         'POST',
@@ -156,7 +156,6 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
           path: `/${testFileName}`,
           shareType: 4, // IShare::TYPE_EMAIL
           shareWith: guestEmail,
-          password: 'E2eGuestTest!2026',
         },
       );
 
@@ -205,7 +204,7 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
     let shareId: string | undefined;
 
     try {
-      // Create the email share (password required by shareapi_enforce_links_password)
+      // Create the email share (no password — not enforced, guests use passkeys)
       const result = await ocsApiCall(
         page,
         'POST',
@@ -214,7 +213,6 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
           path: `/${testFileName}`,
           shareType: 4,
           shareWith: guestEmail,
-          password: 'E2eGuestTest!2026',
         },
       );
 
@@ -297,16 +295,14 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
         'Without it, email shares cannot be created at all.',
     ).toBe(true);
 
-    // Password enforcement must still be active (defense-in-depth for email shares).
-    // When sharebymail is enabled, it reports its own password enforcement status.
+    // Password enforcement should NOT be active (guests authenticate via OIDC/passkeys,
+    // not passwords). Public link shares are disabled entirely.
     const passwordEnforced =
-      capabilities?.files_sharing?.sharebymail?.password?.enforced ??
-      capabilities?.files_sharing?.public?.password?.enforced ??
-      false;
+      capabilities?.files_sharing?.public?.password?.enforced ?? false;
     expect(
       passwordEnforced,
-      'Password enforcement must remain enabled alongside sharebymail.',
-    ).toBe(true);
+      'Password enforcement should be disabled (guests use passkeys, public links are disabled).',
+    ).toBe(false);
 
     // guest_bridge must report configured: true (API URL + key are set).
     // This catches the persistence bug where config was lost on pod restart.
@@ -321,5 +317,60 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
         'If false, the before-starting hook failed to read GUEST_BRIDGE_API_URL/GUEST_BRIDGE_API_KEY ' +
         'from the nextcloud-guest-bridge K8s secret. Check that the secret exists in the files namespace.',
     ).toBe(true);
+  });
+
+  test('email share includes a share token for contextual invite emails', async ({
+    memberPage: page,
+  }) => {
+    await loginToNextcloud(page);
+
+    const testFileName = `e2e-share-context-${Date.now()}.txt`;
+    const guestEmail = `e2e-context-${Date.now()}@external-test.example`;
+    const deleteFile = await uploadTestFile(page, testFileName);
+
+    let shareId: string | undefined;
+
+    try {
+      // Create the email share
+      const result = await ocsApiCall(
+        page,
+        'POST',
+        '/apps/files_sharing/api/v1/shares',
+        {
+          path: `/${testFileName}`,
+          shareType: 4,
+          shareWith: guestEmail,
+        },
+      );
+
+      if (result.status !== 200 || result.body?.ocs?.meta?.statuscode !== 200) {
+        test.skip(
+          true,
+          'Share creation failed (sharebymail likely disabled), skipping context check',
+        );
+        return;
+      }
+
+      shareId = result.body?.ocs?.data?.id;
+      const shareToken = result.body?.ocs?.data?.token;
+
+      // The share must include a token that can be used in the invite URL
+      // Account Portal uses this token to redirect guests to /s/<token>
+      expect(
+        shareToken,
+        'Email share must include a token for the contextual invite email URL.',
+      ).toBeTruthy();
+      expect(typeof shareToken).toBe('string');
+      expect(shareToken.length).toBeGreaterThan(0);
+    } finally {
+      if (shareId) {
+        await ocsApiCall(
+          page,
+          'DELETE',
+          `/apps/files_sharing/api/v1/shares/${shareId}`,
+        ).catch(() => {});
+      }
+      await deleteFile();
+    }
   });
 });

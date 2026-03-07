@@ -80,7 +80,7 @@ class ShareCreatedListener implements IEventListener {
 		}
 
 		// Call the account portal API to provision a guest user
-		$this->provisionGuestUser($email);
+		$this->provisionGuestUser($email, $share);
 	}
 
 	/**
@@ -102,7 +102,7 @@ class ShareCreatedListener implements IEventListener {
 	 * Call the account portal API to create a guest user in Keycloak.
 	 * This is fire-and-forget — failures are logged but don't block the share.
 	 */
-	private function provisionGuestUser(string $email): void {
+	private function provisionGuestUser(string $email, IShare $share): void {
 		$apiUrl = $this->config->getSystemValueString('guest_bridge.api_url', '');
 		$apiKey = $this->config->getSystemValueString('guest_bridge.api_key', '');
 
@@ -114,10 +114,20 @@ class ShareCreatedListener implements IEventListener {
 			return;
 		}
 
+		$sharerUid = $share->getSharedBy();
+		$sharerUser = $this->userManager->get($sharerUid);
+		$sharerName = $sharerUser ? $sharerUser->getDisplayName() : $sharerUid;
+
 		$payload = json_encode([
 			'email' => $email,
 			'firstName' => '',
 			'lastName' => '',
+			'shareContext' => [
+				'type' => 'file',
+				'documentName' => $share->getNode()->getName(),
+				'sharerName' => $sharerName,
+				'shareToken' => $share->getToken(),
+			],
 		]);
 
 		$ch = curl_init($apiUrl);

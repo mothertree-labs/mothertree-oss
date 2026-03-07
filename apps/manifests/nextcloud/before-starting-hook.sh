@@ -40,7 +40,6 @@ php /var/www/html/occ app:enable sharebymail 2>/dev/null || {
     echo "[before-starting] Warning: could not enable sharebymail"
 }
 
-# Defense-in-depth: enforce share security policies on public link shares
 # Configure guest_bridge API settings from env vars (injected from K8s secret).
 # occ config:system:set writes to per-pod config.php, so this MUST run on every pod.
 if [ -n "${GUEST_BRIDGE_API_URL:-}" ] && [ -n "${GUEST_BRIDGE_API_KEY:-}" ]; then
@@ -56,11 +55,16 @@ else
     echo "[before-starting] Warning: GUEST_BRIDGE_API_URL or GUEST_BRIDGE_API_KEY not set, guest provisioning disabled"
 fi
 
-echo "[before-starting] Enforcing share security policies..."
-php /var/www/html/occ config:app:set core shareapi_enforce_links_password --value='yes' 2>/dev/null || true
+echo "[before-starting] Configuring share security policies..."
+# Disable public link shares — all external sharing goes through email + guest_bridge
+# (guests authenticate via OIDC/passkeys, no anonymous access)
+php /var/www/html/occ config:app:set core shareapi_allow_links --value='no' 2>/dev/null || true
+# No password enforcement needed (public links disabled, email shares use passkeys)
+php /var/www/html/occ config:app:set core shareapi_enforce_links_password --value='no' 2>/dev/null || true
+# Suggest 30-day expiry by default but don't enforce it
 php /var/www/html/occ config:app:set core shareapi_default_expire_date --value='yes' 2>/dev/null || true
 php /var/www/html/occ config:app:set core shareapi_expire_after_n_days --value='30' 2>/dev/null || true
-php /var/www/html/occ config:app:set core shareapi_enforce_expire_date --value='yes' 2>/dev/null || true
+php /var/www/html/occ config:app:set core shareapi_enforce_expire_date --value='no' 2>/dev/null || true
 php /var/www/html/occ config:app:set core shareapi_default_permissions --value='1' 2>/dev/null || true
 
 # Install OIDC health check script (exec readiness probe uses this via CLI)

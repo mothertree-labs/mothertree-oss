@@ -84,27 +84,27 @@ test.describe('Smoke — Nextcloud Share Security', () => {
     ).toBe(true);
   });
 
-  test('public link password enforcement is enabled', async ({ memberPage: page }) => {
+  test('public link shares are disabled (all external sharing via email + guest_bridge)', async ({ memberPage: page }) => {
+    // With shareapi_allow_links=no, the public.enabled capability should be false
     const caps = await fetchCapabilities(page);
-
-    const passwordEnforced = caps?.files_sharing?.public?.password?.enforced ?? false;
-
+    const publicLinksEnabled = caps?.files_sharing?.public?.enabled;
     expect(
-      passwordEnforced,
-      'Public link password enforcement must be enabled (shareapi_enforce_links_password=yes). ' +
-      'Fix: run "php occ config:app:set core shareapi_enforce_links_password --value=yes" or redeploy Nextcloud.'
-    ).toBe(true);
+      publicLinksEnabled,
+      'Public link shares must be disabled (shareapi_allow_links=no). ' +
+      'All external sharing should go through email + guest_bridge with OIDC/passkey authentication. ' +
+      'Fix: run "php occ config:app:set core shareapi_allow_links --value=no" or redeploy Nextcloud.'
+    ).toBe(false);
   });
 
-  test('public link expiration is enforced', async ({ memberPage: page }) => {
+  test('share expiration defaults to 30 days but is not enforced', async ({ memberPage: page }) => {
     const caps = await fetchCapabilities(page);
-
-    const expirationEnforced = caps?.files_sharing?.public?.expire_date?.enforced ?? false;
-
+    // Expiry should be suggested (default) but not enforced
+    const enforced = caps?.files_sharing?.public?.expire_date?.enforced ?? false;
     expect(
-      expirationEnforced,
-      'Public link expiration enforcement must be enabled (shareapi_enforce_expire_date=yes). ' +
-      'Fix: run "php occ config:app:set core shareapi_enforce_expire_date --value=yes" or redeploy Nextcloud.'
-    ).toBe(true);
+      enforced,
+      'Public link expiration must NOT be enforced (shareapi_enforce_expire_date=no). ' +
+      'Expiry is suggested by default but users should not be forced to set one. ' +
+      'Fix: run "php occ config:app:set core shareapi_enforce_expire_date --value=no" or redeploy Nextcloud.'
+    ).toBe(false);
   });
 });

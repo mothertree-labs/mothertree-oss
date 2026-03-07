@@ -306,16 +306,21 @@ spec:
               # sharebymail MUST be enabled — it's the only provider for TYPE_EMAIL shares.
               # Security is maintained by guest_bridge, which suppresses sharebymail's
               # notification emails (no unauthenticated public links are sent). Instead,
-              # guests receive passkey setup emails from Account Portal.
+              # guests receive contextual invite emails from Account Portal.
               echo "Enabling sharebymail app (required by guest_bridge for TYPE_EMAIL shares)..."
               nc_exec su -s /bin/sh www-data -c "php occ app:enable sharebymail" 2>/dev/null || true
 
-              # Defense-in-depth: enforce security policies on public link shares (TYPE_LINK)
+              # Share security policies: disable public links, use email + guest_bridge for external sharing
               echo "Configuring share security policies..."
-              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_links_password --value='yes'"
+              # Disable public link shares — all external sharing goes through email + guest_bridge
+              # (guests authenticate via OIDC/passkeys, no anonymous access)
+              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_allow_links --value='no'"
+              # No password enforcement needed (public links disabled, email shares use passkeys)
+              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_links_password --value='no'"
+              # Suggest 30-day expiry by default but don't enforce it
               nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_default_expire_date --value='yes'"
               nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_expire_after_n_days --value='30'"
-              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_expire_date --value='yes'"
+              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_expire_date --value='no'"
               nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_default_permissions --value='1'"
               echo "Share security policies configured"
 
