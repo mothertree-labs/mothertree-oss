@@ -41,27 +41,6 @@ nextcloud:
         'overwrite.cli.url' => 'https://{{ env "FILES_HOST" }}',
         'htaccess.RewriteBase' => '/',
       );
-    # SMTP for calendar invitation emails and notifications.
-    # Must be in a ConfigMap-backed config file (not set via occ) so the
-    # settings are consistent across all pods and survive restarts.
-    smtp.config.php: |-
-      <?php
-      $CONFIG = array (
-        'mail_smtpmode' => 'smtp',
-        'mail_smtphost' => 'postfix-internal.infra-mail.svc.cluster.local',
-        'mail_smtpport' => 587,
-        'mail_smtpsecure' => '',
-        'mail_smtpauth' => false,
-        'mail_from_address' => 'calendar',
-        'mail_domain' => '{{ requiredEnv "SMTP_DOMAIN" }}',
-        'mail_smtpstreamoptions' => array(
-          'ssl' => array(
-            'verify_peer' => false,
-            'verify_peer_name' => false,
-            'allow_self_signed' => true,
-          ),
-        ),
-      );
   trustedDomains:
     - '{{ env "FILES_HOST" }}'
     - '{{ env "CALENDAR_HOST" }}'

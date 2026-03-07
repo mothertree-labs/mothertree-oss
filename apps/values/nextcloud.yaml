@@ -83,6 +83,14 @@ nextcloud:
   extraEnv:
     - name: NEXTCLOUD_INIT_HTACCESS
       value: "true"
+    # SMTP domain for calendar invitation emails (smtp.config.php reads this via getenv).
+    # ConfigMap created by deploy-nextcloud.sh with the tenant-specific SMTP_DOMAIN.
+    - name: SMTP_DOMAIN
+      valueFrom:
+        configMapKeyRef:
+          name: nextcloud-smtp
+          key: smtp-domain
+          optional: true
     # guest_bridge config — injected from secret so every pod has it on startup.
     # The before-starting hook reads these and writes to per-pod config.php.
     - name: GUEST_BRIDGE_API_URL
@@ -116,6 +124,28 @@ nextcloud:
       <?php
       $CONFIG = array (
         'allow_local_remote_servers' => true,
+      );
+    # SMTP for calendar invitation emails and notifications.
+    # Must be in a ConfigMap-backed config file (not set via occ) so the
+    # settings are consistent across all pods and survive restarts.
+    # mail_domain reads SMTP_DOMAIN env var at runtime (set per-tenant in env values).
+    smtp.config.php: |-
+      <?php
+      $CONFIG = array (
+        'mail_smtpmode' => 'smtp',
+        'mail_smtphost' => 'postfix-internal.infra-mail.svc.cluster.local',
+        'mail_smtpport' => 587,
+        'mail_smtpsecure' => '',
+        'mail_smtpauth' => false,
+        'mail_from_address' => 'calendar',
+        'mail_domain' => getenv('SMTP_DOMAIN') ?: '',
+        'mail_smtpstreamoptions' => array(
+          'ssl' => array(
+            'verify_peer' => false,
+            'verify_peer_name' => false,
+            'allow_self_signed' => true,
+          ),
+        ),
       );
 
   # PHP ini overrides (mounted into /usr/local/etc/php/conf.d/)

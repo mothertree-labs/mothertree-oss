@@ -221,6 +221,16 @@ if ! poll_pod_ready "$NS_FILES" "app=redis" 60 5; then
 fi
 print_success "Redis deployed to $NS_FILES"
 
+# Step 4d: Create SMTP ConfigMap for calendar invitation emails
+# The smtp.config.php in the Helm values reads SMTP_DOMAIN from the container env.
+# This ConfigMap provides the tenant-specific value to all pods consistently.
+print_status "Creating SMTP configuration..."
+kubectl create configmap nextcloud-smtp \
+    --namespace "$NS_FILES" \
+    --from-literal=smtp-domain="$SMTP_DOMAIN" \
+    --dry-run=client -o yaml | kubectl apply -f -
+print_success "SMTP ConfigMap created/updated (domain: $SMTP_DOMAIN)"
+
 # Step 5: Run Nextcloud database initialization job (in files namespace where secrets are accessible)
 print_status "Running Nextcloud database initialization..."
 
