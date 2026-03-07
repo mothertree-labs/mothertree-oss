@@ -1,9 +1,10 @@
 const nodemailer = require('nodemailer');
 
-// In-cluster SMTP (Postfix uses self-signed certs). Do NOT point SMTP_HOST
-// at an external server without also setting SMTP_TLS_REJECT_UNAUTHORIZED=true.
+// In-cluster SMTP relay for sending emails. Uses SMTP_RELAY_HOST (not SMTP_HOST,
+// which is the external hostname for user-facing display like mail client config).
+// Defaults to the in-cluster Postfix service. Postfix uses self-signed certs.
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'postfix-internal.infra-mail.svc.cluster.local',
+  host: process.env.SMTP_RELAY_HOST || 'postfix-internal.infra-mail.svc.cluster.local',
   port: parseInt(process.env.SMTP_PORT || '587', 10),
   secure: false,
   tls: { rejectUnauthorized: process.env.SMTP_TLS_REJECT_UNAUTHORIZED === 'true' },
