@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-03-07
+
+### Added
+- Playwright-based load tests for concurrent browser simulation (#153)
+
+### Changed
+- Nextcloud CPU requests configurable through tenant config (#158)
+
+### Fixed
+- Calendar invitation emails failing on multi-pod Nextcloud (#163)
+- OIDC config job overriding sharebymail enable (#159)
+- HPA field manager conflict between Helm SSA and kubectl patch (#160)
+- Guest bridge config not persistent across pod restarts (#157)
+- Nextcloud HPA scaleDown stabilization window not applied post-deploy (#156)
+- Email sharing: re-enabled sharebymail with guest_bridge suppression (#155)
+- Invite emails showing "the platform" instead of realm name (#154)
+
 ## [0.9.1] - 2026-03-05
 
 ### Fixed
