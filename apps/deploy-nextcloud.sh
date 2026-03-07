@@ -497,6 +497,17 @@ else
 fi
 
 # Step 6: Deploy Nextcloud via helmfile
+# Pre-upgrade: resolve HPA field manager conflict if present.
+# The post-deploy HPA behavior patch previously used client-side merge patch
+# (kubectl patch --type merge), which sets the field manager to "kubectl-patch"
+# via autoscaling/v2. This conflicts with Helm's SSA Apply via autoscaling/v1
+# on .spec.maxReplicas. Delete the HPA so Helm can recreate it cleanly.
+if kubectl get hpa nextcloud -n "$NS_FILES" --show-managed-fields \
+    -o jsonpath='{.metadata.managedFields[*].manager}' 2>/dev/null | grep -q kubectl-patch; then
+    print_status "Removing HPA with field manager conflict (Helm will recreate)..."
+    kubectl delete hpa nextcloud -n "$NS_FILES"
+fi
+
 print_status "Deploying Nextcloud via helmfile..."
 pushd "$REPO_ROOT/apps" >/dev/null
   # Use sync instead of apply to skip slow diff operation
@@ -1151,11 +1162,27 @@ fi
 
 # Patch the chart's HPA with scaleDown stabilization window.
 # The chart's HPA template (autoscaling/v1) doesn't support behavior config,
-# so we patch it post-deploy. This runs after every helm upgrade to ensure
-# the behavior is always applied (Helm would otherwise reset it).
+# so we patch it post-deploy via server-side apply with a dedicated field manager.
+# Using SSA (Apply operation) instead of kubectl patch (Update operation) avoids
+# field manager conflicts with Helm's SSA on .spec.maxReplicas.
 print_status "Patching HPA scaleDown stabilization window (${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}s)..."
-kubectl patch hpa nextcloud -n "$NS_FILES" --type merge -p \
-  "{\"spec\":{\"behavior\":{\"scaleDown\":{\"stabilizationWindowSeconds\":${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}}}}}"
+kubectl apply --server-side --field-manager=nextcloud-hpa-behavior --force-conflicts -f - <<EOF
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nextcloud
+  namespace: ${NS_FILES}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nextcloud
+  minReplicas: ${NEXTCLOUD_MIN_REPLICAS}
+  maxReplicas: ${NEXTCLOUD_MAX_REPLICAS}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: ${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}
+EOF
 print_success "Nextcloud HPA managed by chart (CPU 80%, min=${NEXTCLOUD_MIN_REPLICAS}, max=${NEXTCLOUD_MAX_REPLICAS}, scaleDown window=${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}s)"
 
 # Migration notice: old PVC
