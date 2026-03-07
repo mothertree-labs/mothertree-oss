@@ -99,6 +99,35 @@ test.describe('Smoke — Nextcloud Share Security', () => {
     ).toBe(false);
   });
 
+  test('federated (server-to-server) sharing is disabled', async ({ memberPage: page }) => {
+    const caps = await fetchCapabilities(page);
+
+    // Federation outgoing must be disabled. When enabled (the default),
+    // the sharing UI offers both "Email" (TYPE_EMAIL=4) and "Federated"
+    // (TYPE_REMOTE=6) options for user@domain inputs. If the user picks
+    // federated, the share bypasses guest_bridge entirely and fails with
+    // "could not find user@domain". This was the root cause of repeated
+    // sharing failures across PRs #155, #157, #159, #163.
+    //
+    // federatedfilesharing is an always-enabled core app and CANNOT be
+    // disabled. Instead, federation is controlled via files_sharing config:
+    //   outgoing_server2server_share_enabled = no
+    //   incoming_server2server_share_enabled = no
+    const federationOutgoing = caps?.files_sharing?.federation?.outgoing ?? true;
+    const federationIncoming = caps?.files_sharing?.federation?.incoming ?? true;
+    expect(
+      federationOutgoing,
+      'Outgoing federated sharing must be disabled (outgoing_server2server_share_enabled=no). ' +
+      'When enabled, the sharing UI offers federated share options that bypass guest_bridge. ' +
+      'Fix: run "php occ config:app:set files_sharing outgoing_server2server_share_enabled --value=no" or redeploy Nextcloud.'
+    ).toBe(false);
+    expect(
+      federationIncoming,
+      'Incoming federated sharing must be disabled (incoming_server2server_share_enabled=no). ' +
+      'Fix: run "php occ config:app:set files_sharing incoming_server2server_share_enabled --value=no" or redeploy Nextcloud.'
+    ).toBe(false);
+  });
+
   test('share expiration defaults to 30 days but is not enforced', async ({ memberPage: page }) => {
     const caps = await fetchCapabilities(page);
     // Expiry should be suggested (default) but not enforced

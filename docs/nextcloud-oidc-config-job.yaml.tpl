@@ -313,7 +313,18 @@ spec:
               nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_expire_after_n_days --value='30'"
               nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_expire_date --value='no'"
               nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_default_permissions --value='1'"
-              echo "Share security policies configured"
+
+              # Disable server-to-server (federated) sharing (PR #155/#157/#159/#163 root cause).
+              # federatedfilesharing is always-enabled and cannot be disabled via app:disable.
+              # When federation is enabled (the default), the sharing UI offers both "Email"
+              # (TYPE_EMAIL=4) and "Federated" (TYPE_REMOTE=6) for user@domain inputs. If the
+              # user picks federated, the share bypasses guest_bridge and fails. Setting these
+              # to 'no' removes federated options from the UI.
+              nc_exec su -s /bin/sh www-data -c "php occ config:app:set files_sharing outgoing_server2server_share_enabled --value='no'"
+              nc_exec su -s /bin/sh www-data -c "php occ config:app:set files_sharing incoming_server2server_share_enabled --value='no'"
+              nc_exec su -s /bin/sh www-data -c "php occ config:app:set files_sharing outgoing_server2server_group_share_enabled --value='no'"
+              nc_exec su -s /bin/sh www-data -c "php occ config:app:set files_sharing incoming_server2server_group_share_enabled --value='no'"
+              echo "Share security policies configured (federation disabled)"
 
               # Set default app to Files (skip dashboard splash screen)
               echo "Setting default app to Files..."

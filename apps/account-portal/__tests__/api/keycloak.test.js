@@ -17,6 +17,7 @@ process.env.BASE_URL = 'https://account.test.example.com';
 process.env.WEBMAIL_HOST = 'webmail.test.example.com';
 process.env.TENANT_DOMAIN = 'example.com';
 process.env.SMTP_HOST = 'smtp.test';
+process.env.SMTP_RELAY_HOST = 'smtp.test';
 process.env.SMTP_PORT = '587';
 process.env.SMTP_FROM = 'noreply@example.com';
 process.env.SMTP_FROM_NAME = 'TestTree';

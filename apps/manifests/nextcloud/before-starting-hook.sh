@@ -68,6 +68,19 @@ php /var/www/html/occ config:app:set core shareapi_expire_after_n_days --value='
 php /var/www/html/occ config:app:set core shareapi_enforce_expire_date --value='no' 2>/dev/null || true
 php /var/www/html/occ config:app:set core shareapi_default_permissions --value='1' 2>/dev/null || true
 
+# Disable server-to-server (federated) sharing. federatedfilesharing is an always-enabled
+# core app that cannot be disabled via app:disable. When federation is enabled (the default),
+# the sharing UI offers BOTH "Email" (TYPE_EMAIL=4) and "Federated" (TYPE_REMOTE=6) options
+# for user@domain inputs. If the user picks federated (or the UI defaults to it for certain
+# inputs), the share bypasses guest_bridge entirely and fails with "could not find user@domain".
+# This was the root cause of repeated sharing failures (PRs #155, #157, #159, #163).
+# Setting these to 'no' removes federated options from the UI so all external sharing goes
+# through the email/guest_bridge pipeline.
+php /var/www/html/occ config:app:set files_sharing outgoing_server2server_share_enabled --value='no' 2>/dev/null || true
+php /var/www/html/occ config:app:set files_sharing incoming_server2server_share_enabled --value='no' 2>/dev/null || true
+php /var/www/html/occ config:app:set files_sharing outgoing_server2server_group_share_enabled --value='no' 2>/dev/null || true
+php /var/www/html/occ config:app:set files_sharing incoming_server2server_group_share_enabled --value='no' 2>/dev/null || true
+
 # Install OIDC health check script (exec readiness probe uses this via CLI)
 cp /docker-entrypoint-hooks.d/before-starting/oidc-health.php /var/www/html/oidc-health.php 2>/dev/null || true
 
