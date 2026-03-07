@@ -21,6 +21,8 @@ externalDatabase:
 # Hostname and S3 Object Storage
 nextcloud:
   host: '{{ env "FILES_HOST" }}'
+  mail:
+    domain: '{{ env "SMTP_DOMAIN" }}'
   configs:
     # Pretty URLs: overwrite.cli.url enables Apache .htaccess front-controller
     # rewrites (e.g. /apps/files → index.php). Without this, Apache returns 403

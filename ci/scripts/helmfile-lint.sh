@@ -19,6 +19,7 @@ export NS_JITSI="tn-lint-jitsi"
 export NEXTCLOUD_DB_NAME="lint_nextcloud"
 export TENANT_DB_USER="lint_user"
 export ALERTMANAGER_EMAIL_TO="lint@example.com"
+export SMTP_DOMAIN="example.com"
 
 helmfile -e dev lint
 echo "Helmfile lint passed"

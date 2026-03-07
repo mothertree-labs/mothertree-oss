@@ -200,20 +200,10 @@ spec:
                 echo "Jitsi Calendar integration enabled (host: https://$JITSI_HOST)"
               fi
               
-              # Configure email/SMTP for calendar invitations and notifications
-              echo "Configuring email settings for calendar invitations..."
-              nc_exec su -s /bin/sh www-data -c "php occ config:system:set mail_smtpmode --value='smtp'"
-              nc_exec su -s /bin/sh www-data -c "php occ config:system:set mail_smtphost --value='postfix-internal.infra-mail.svc.cluster.local'"
-              nc_exec su -s /bin/sh www-data -c "php occ config:system:set mail_smtpport --value='587'"
-              nc_exec su -s /bin/sh www-data -c "php occ config:system:set mail_smtpsecure --value=''"
-              nc_exec su -s /bin/sh www-data -c "php occ config:system:set mail_smtpauth --value='0'"
-              nc_exec su -s /bin/sh www-data -c "php occ config:system:set mail_from_address --value='calendar'"
-              nc_exec su -s /bin/sh www-data -c "php occ config:system:set mail_domain --value='$SMTP_DOMAIN'"
-              # Disable TLS certificate verification for internal cluster SMTP (Postfix uses self-signed/internal certs)
-              nc_exec su -s /bin/sh www-data -c "php occ config:system:set mail_smtpstreamoptions ssl verify_peer --type=boolean --value=false"
-              nc_exec su -s /bin/sh www-data -c "php occ config:system:set mail_smtpstreamoptions ssl verify_peer_name --type=boolean --value=false"
-              nc_exec su -s /bin/sh www-data -c "php occ config:system:set mail_smtpstreamoptions ssl allow_self_signed --type=boolean --value=true"
-              echo "Email configured: calendar@$SMTP_DOMAIN via postfix-internal.infra-mail.svc.cluster.local:587"
+              # SMTP configuration for calendar invitations and notifications is now
+              # handled via smtp.config.php in the Helm ConfigMap (see nextcloud.yaml.gotmpl).
+              # This ensures all pods have consistent SMTP settings that survive restarts.
+              echo "SMTP: configured via ConfigMap (calendar@$SMTP_DOMAIN → postfix-internal:587)"
               
               # Collabora Online (richdocuments) — enable or disable based on office feature flag
               if [ "$OFFICE_ENABLED" = "true" ]; then
