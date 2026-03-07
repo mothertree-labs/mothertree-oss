@@ -84,15 +84,18 @@ test.describe('Smoke — Nextcloud Share Security', () => {
     ).toBe(true);
   });
 
-  test('public link shares are disabled (all external sharing via email + guest_bridge)', async ({ memberPage: page }) => {
-    // With shareapi_allow_links=no, the public.enabled capability should be false
+  test('link share password enforcement is disabled (guests use passkeys via guest_bridge)', async ({ memberPage: page }) => {
+    // shareapi_allow_links must be 'yes' because TYPE_EMAIL shares are internally
+    // link-based and fail with 404 when links are disabled.
+    // Security is handled by guest_bridge (intercepts shares, provisions guests via passkeys).
+    // Password enforcement must be off so users aren't forced to set passwords on email shares.
     const caps = await fetchCapabilities(page);
-    const publicLinksEnabled = caps?.files_sharing?.public?.enabled;
+    const passwordEnforced = caps?.files_sharing?.public?.password?.enforced ?? false;
     expect(
-      publicLinksEnabled,
-      'Public link shares must be disabled (shareapi_allow_links=no). ' +
-      'All external sharing should go through email + guest_bridge with OIDC/passkey authentication. ' +
-      'Fix: run "php occ config:app:set core shareapi_allow_links --value=no" or redeploy Nextcloud.'
+      passwordEnforced,
+      'Link share password enforcement must be disabled (shareapi_enforce_links_password=no). ' +
+      'Email shares use passkey authentication via guest_bridge, not passwords. ' +
+      'Fix: run "php occ config:app:set core shareapi_enforce_links_password --value=no" or redeploy Nextcloud.'
     ).toBe(false);
   });
 

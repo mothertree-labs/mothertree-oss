@@ -56,10 +56,11 @@ else
 fi
 
 echo "[before-starting] Configuring share security policies..."
-# Disable public link shares — all external sharing goes through email + guest_bridge
-# (guests authenticate via OIDC/passkeys, no anonymous access)
-php /var/www/html/occ config:app:set core shareapi_allow_links --value='no' 2>/dev/null || true
-# No password enforcement needed (public links disabled, email shares use passkeys)
+# shareapi_allow_links must be 'yes' — Nextcloud's TYPE_EMAIL shares (sharebymail)
+# are internally link-based and fail with 404 when links are disabled.
+# Security is handled by guest_bridge (intercepts shares, provisions guests via passkeys).
+php /var/www/html/occ config:app:set core shareapi_allow_links --value='yes' 2>/dev/null || true
+# No password enforcement needed (email shares use passkeys via guest_bridge)
 php /var/www/html/occ config:app:set core shareapi_enforce_links_password --value='no' 2>/dev/null || true
 # Suggest 30-day expiry by default but don't enforce it
 php /var/www/html/occ config:app:set core shareapi_default_expire_date --value='yes' 2>/dev/null || true
