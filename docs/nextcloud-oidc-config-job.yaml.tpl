@@ -310,12 +310,13 @@ spec:
               echo "Enabling sharebymail app (required by guest_bridge for TYPE_EMAIL shares)..."
               nc_exec su -s /bin/sh www-data -c "php occ app:enable sharebymail" 2>/dev/null || true
 
-              # Share security policies: disable public links, use email + guest_bridge for external sharing
+              # Share security policies
               echo "Configuring share security policies..."
-              # Disable public link shares — all external sharing goes through email + guest_bridge
-              # (guests authenticate via OIDC/passkeys, no anonymous access)
-              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_allow_links --value='no'"
-              # No password enforcement needed (public links disabled, email shares use passkeys)
+              # shareapi_allow_links must be 'yes' — TYPE_EMAIL shares (sharebymail) are
+              # internally link-based and fail with 404 when links are disabled.
+              # Security is handled by guest_bridge (intercepts shares, provisions guests via passkeys).
+              nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_allow_links --value='yes'"
+              # No password enforcement needed (email shares use passkeys via guest_bridge)
               nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_enforce_links_password --value='no'"
               # Suggest 30-day expiry by default but don't enforce it
               nc_exec su -s /bin/sh www-data -c "php occ config:app:set core shareapi_default_expire_date --value='yes'"
