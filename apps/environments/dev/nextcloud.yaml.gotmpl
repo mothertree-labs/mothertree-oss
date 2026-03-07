@@ -53,7 +53,7 @@ nextcloud:
         'mail_smtpsecure' => '',
         'mail_smtpauth' => false,
         'mail_from_address' => 'calendar',
-        'mail_domain' => '{{ env "SMTP_DOMAIN" }}',
+        'mail_domain' => '{{ requiredEnv "SMTP_DOMAIN" }}',
         'mail_smtpstreamoptions' => array(
           'ssl' => array(
             'verify_peer' => false,
