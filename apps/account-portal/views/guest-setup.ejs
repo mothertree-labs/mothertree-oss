@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= title %> - MotherTree</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/css/tailwind.css">
+</head>
+<body class="bg-white min-h-screen flex items-center justify-center p-8">
+  <div class="bg-cream rounded-xl shadow-lg p-8 max-w-md w-full">
+    <div class="text-center mb-6">
+      <h1 class="text-3xl text-sage mb-2">MotherTree</h1>
+      <p class="text-warm-gray">Account Setup</p>
+    </div>
+
+    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+      <div class="flex items-center mb-2">
+        <svg class="w-5 h-5 text-blue-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+        </svg>
+        <span class="text-blue-800 font-medium">Check your email</span>
+      </div>
+      <p class="text-blue-700 text-sm">
+        We've sent a setup link to <strong><%= maskedEmail %></strong>.
+        Click the link in that email to verify your address and set up your passkey.
+        Once complete, you'll be taken to the shared file.
+      </p>
+    </div>
+
+    <p class="text-warm-gray text-sm text-center">
+      Didn't receive the email? Check your spam folder, or
+      <a href="" id="resendLink" class="text-sage hover:text-sage-dark">click here to resend</a>.
+    </p>
+  </div>
+
+  <script>
+    document.getElementById('resendLink').href = window.location.href;
+  </script>
+</body>
+</html>

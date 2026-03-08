@@ -680,6 +680,36 @@ async function createGuestUser({ email, firstName, lastName, redirectUri, skipEm
   return { userId };
 }
 
+/**
+ * Send Keycloak execute-actions-email for a user (verify email + register passkey).
+ * Used when a provisioned guest clicks a share invite link and still needs to set up.
+ */
+async function sendExecuteActionsEmail(userId, redirectUri) {
+  validateUserId(userId);
+  const token = await getServiceToken();
+  const baseUrl = process.env.BASE_URL;
+  const finalRedirect = redirectUri || baseUrl;
+  const clientId = process.env.KEYCLOAK_CLIENT_ID || 'account-portal';
+  const executeActionsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/execute-actions-email`;
+
+  const response = await fetch(
+    `${executeActionsUrl}?lifespan=604800&redirect_uri=${encodeURIComponent(finalRedirect)}&client_id=${clientId}`,
+    {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(['VERIFY_EMAIL', 'webauthn-register-passwordless']),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to send execute-actions-email: ${error}`);
+  }
+}
+
 module.exports = {
   swapToTenantEmailIfNeeded,
   ensurePasskeyFirst,
@@ -687,6 +717,7 @@ module.exports = {
   createGuestUser,
   findUserByEmail,
   sendNotificationEmail,
+  sendExecuteActionsEmail,
   assignRealmRole,
   removeRealmRole,
 };
