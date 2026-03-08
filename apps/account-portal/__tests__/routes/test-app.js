@@ -259,6 +259,40 @@ function createTestApp(options = {}) {
     try {
       const existingUser = await keycloakApi.findUserByEmail(email.toLowerCase());
       if (existingUser) {
+        const needsSetup = existingUser.requiredActions && existingUser.requiredActions.length > 0;
+
+        if (needsSetup) {
+          const baseUrl = process.env.BASE_URL || '';
+          let redirectAfterSetup = baseUrl;
+          if (share) {
+            redirectAfterSetup = `${baseUrl}/guest-complete?share=${encodeURIComponent(share)}`;
+          } else if (doc) {
+            redirectAfterSetup = `${baseUrl}/guest-complete?doc=${encodeURIComponent(doc)}`;
+          }
+
+          try {
+            await keycloakApi.sendExecuteActionsEmail(existingUser.id, redirectAfterSetup);
+          } catch (emailErr) {
+            // non-fatal
+          }
+
+          const [local, domain] = email.split('@');
+          let maskedEmail = email;
+          if (local && domain) {
+            const localMask = local.length > 2 ? local.slice(0, 2) + '***' : local + '***';
+            const domainParts = domain.split('.');
+            const domainMask = domainParts[0].length > 2
+              ? domainParts[0].slice(0, 2) + '***.' + domainParts.slice(1).join('.')
+              : domainParts[0] + '***.' + domainParts.slice(1).join('.');
+            maskedEmail = localMask + '@' + domainMask;
+          }
+
+          return res.render('guest-setup', {
+            title: 'Complete Your Account Setup',
+            maskedEmail,
+          });
+        }
+
         if (share) {
           const filesHost = (process.env.BASE_URL || '').replace('account.', 'files.');
           return res.redirect(`${filesHost}/s/${encodeURIComponent(share)}`);

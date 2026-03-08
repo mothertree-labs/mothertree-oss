@@ -161,9 +161,9 @@ describe('GET /guest-landing', () => {
     expect(res.headers.location).toBe('/register');
   });
 
-  it('redirects to docs when user exists', async () => {
+  it('redirects to docs when user exists and is fully set up', async () => {
     const mockKeycloakApi = {
-      findUserByEmail: jest.fn().mockResolvedValue({ id: 'user-1' }),
+      findUserByEmail: jest.fn().mockResolvedValue({ id: 'user-1', requiredActions: [] }),
       initiateAccountRecovery: jest.fn(),
       createGuestUser: jest.fn(),
     };
@@ -174,6 +174,45 @@ describe('GET /guest-landing', () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.location).toContain('/docs/test-doc/');
+  });
+
+  it('renders guest-setup page when user exists but needs passkey setup', async () => {
+    const mockKeycloakApi = {
+      findUserByEmail: jest.fn().mockResolvedValue({
+        id: 'user-1',
+        requiredActions: ['VERIFY_EMAIL', 'webauthn-register-passwordless'],
+      }),
+      sendExecuteActionsEmail: jest.fn().mockResolvedValue(undefined),
+      initiateAccountRecovery: jest.fn(),
+      createGuestUser: jest.fn(),
+    };
+
+    const app = createTestApp({ mockKeycloakApi });
+    const res = await request(app)
+      .get('/guest-landing?email=alice@gmail.com&share=abc123');
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Check your email');
+    expect(res.text).toContain('al***@gm***.com');
+    expect(mockKeycloakApi.sendExecuteActionsEmail).toHaveBeenCalledWith(
+      'user-1',
+      expect.stringContaining('guest-complete?share=abc123')
+    );
+  });
+
+  it('redirects to files when user exists with share and no required actions', async () => {
+    const mockKeycloakApi = {
+      findUserByEmail: jest.fn().mockResolvedValue({ id: 'user-1', requiredActions: [] }),
+      initiateAccountRecovery: jest.fn(),
+      createGuestUser: jest.fn(),
+    };
+
+    const app = createTestApp({ mockKeycloakApi });
+    const res = await request(app)
+      .get('/guest-landing?email=alice@gmail.com&share=abc123');
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain('/s/abc123');
   });
 
   it('redirects to /register when user does not exist', async () => {

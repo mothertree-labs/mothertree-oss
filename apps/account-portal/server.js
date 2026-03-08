@@ -688,7 +688,7 @@ app.get('/guest-complete', (req, res) => {
   res.redirect(docsHost || '/');
 });
 
-// Guest landing - smart redirect based on whether user exists
+// Guest landing - smart redirect based on whether user exists and is set up
 app.get('/guest-landing', async (req, res) => {
   const { email, doc, share } = req.query;
 
@@ -699,11 +699,49 @@ app.get('/guest-landing', async (req, res) => {
   try {
     const existingUser = await keycloakApi.findUserByEmail(email.toLowerCase());
     if (existingUser) {
+      const needsSetup = existingUser.requiredActions && existingUser.requiredActions.length > 0;
+
+      if (needsSetup) {
+        // User was provisioned but hasn't completed passkey setup yet.
+        // Send Keycloak setup email and show instructions page.
+        const baseUrl = process.env.BASE_URL || '';
+        let redirectAfterSetup = baseUrl;
+        if (share) {
+          redirectAfterSetup = `${baseUrl}/guest-complete?share=${encodeURIComponent(share)}`;
+        } else if (doc) {
+          redirectAfterSetup = `${baseUrl}/guest-complete?doc=${encodeURIComponent(doc)}`;
+        }
+
+        try {
+          await keycloakApi.sendExecuteActionsEmail(existingUser.id, redirectAfterSetup);
+          console.log(`[GUEST-LANDING] Sent setup email for ${email}`);
+        } catch (emailErr) {
+          console.error(`[GUEST-LANDING] Failed to send setup email:`, emailErr.message);
+        }
+
+        // Mask email for display
+        const [local, domain] = email.split('@');
+        let maskedEmail = email;
+        if (local && domain) {
+          const localMask = local.length > 2 ? local.slice(0, 2) + '***' : local + '***';
+          const domainParts = domain.split('.');
+          const domainMask = domainParts[0].length > 2
+            ? domainParts[0].slice(0, 2) + '***.' + domainParts.slice(1).join('.')
+            : domainParts[0] + '***.' + domainParts.slice(1).join('.');
+          maskedEmail = localMask + '@' + domainMask;
+        }
+
+        return res.render('guest-setup', {
+          title: 'Complete Your Account Setup',
+          maskedEmail,
+        });
+      }
+
+      // User is fully set up - redirect to the shared resource
       if (share) {
         const filesHost = (process.env.BASE_URL || '').replace('account.', 'files.');
         return res.redirect(`${filesHost}/s/${encodeURIComponent(share)}`);
       }
-      // User exists - send them to the doc (which triggers Keycloak login)
       const docsHost = (process.env.BASE_URL || '').replace('account.', 'docs.');
       return res.redirect(`${docsHost}/docs/${encodeURIComponent(doc)}/`);
     }
