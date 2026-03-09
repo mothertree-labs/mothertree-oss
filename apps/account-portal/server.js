@@ -672,16 +672,20 @@ function checkGuestRateLimit(ip) {
   return true;
 }
 
-// Guest complete - redirect to the document/file after passkey registration
+// Guest complete - redirect to the document/file after passkey registration.
+// Redirects through OIDC login so the guest arrives authenticated in Nextcloud/Docs,
+// avoiding the redundant name prompt on share pages (Issue #167).
 app.get('/guest-complete', (req, res) => {
   const { doc, share } = req.query;
   if (share) {
     const filesHost = (process.env.BASE_URL || '').replace('account.', 'files.');
-    return res.redirect(`${filesHost}/s/${encodeURIComponent(share)}`);
+    const shareUrl = `/s/${encodeURIComponent(share)}`;
+    return res.redirect(`${filesHost}/login?redirect_url=${encodeURIComponent(shareUrl)}`);
   }
   if (doc) {
     const docsHost = (process.env.BASE_URL || '').replace('account.', 'docs.');
-    return res.redirect(`${docsHost}/docs/${encodeURIComponent(doc)}/`);
+    const docUrl = `/docs/${encodeURIComponent(doc)}/`;
+    return res.redirect(`${docsHost}/login?redirect_url=${encodeURIComponent(docUrl)}`);
   }
   // Fallback: go to the main docs page
   const docsHost = (process.env.BASE_URL || '').replace('account.', 'docs.');
@@ -737,13 +741,16 @@ app.get('/guest-landing', async (req, res) => {
         });
       }
 
-      // User is fully set up - redirect to the shared resource
+      // User is fully set up - redirect through OIDC login so they arrive
+      // authenticated, avoiding the redundant name prompt (Issue #167).
       if (share) {
         const filesHost = (process.env.BASE_URL || '').replace('account.', 'files.');
-        return res.redirect(`${filesHost}/s/${encodeURIComponent(share)}`);
+        const shareUrl = `/s/${encodeURIComponent(share)}`;
+        return res.redirect(`${filesHost}/login?redirect_url=${encodeURIComponent(shareUrl)}`);
       }
       const docsHost = (process.env.BASE_URL || '').replace('account.', 'docs.');
-      return res.redirect(`${docsHost}/docs/${encodeURIComponent(doc)}/`);
+      const docUrl = `/docs/${encodeURIComponent(doc)}/`;
+      return res.redirect(`${docsHost}/login?redirect_url=${encodeURIComponent(docUrl)}`);
     }
   } catch (err) {
     console.error('Guest landing lookup error:', err.message);
