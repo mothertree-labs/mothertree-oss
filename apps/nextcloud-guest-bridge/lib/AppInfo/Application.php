@@ -8,6 +8,8 @@ use OCP\AppFramework\Bootstrap\IBootstrap;
 use OCP\AppFramework\Bootstrap\IRegistrationContext;
 use OCA\GuestBridge\Capabilities;
 use OCA\GuestBridge\Listener\ShareCreatedListener;
+use OCA\GuestBridge\Search\MailSharePlugin;
+use OCP\Collaboration\Collaborators\ISearch;
 use OCP\Share\Events\ShareCreatedEvent;
 
 class Application extends App implements IBootstrap {
@@ -23,5 +25,12 @@ class Application extends App implements IBootstrap {
 	}
 
 	public function boot(IBootContext $context): void {
+		$server = $context->getServerContainer();
+		/** @var ISearch $collaboratorSearch */
+		$collaboratorSearch = $server->get(ISearch::class);
+		$collaboratorSearch->registerPlugin([
+			'shareType' => 'SHARE_TYPE_EMAIL',
+			'class' => MailSharePlugin::class,
+		]);
 	}
 }
