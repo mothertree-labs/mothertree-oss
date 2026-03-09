@@ -941,7 +941,26 @@ app.post('/api/provision-guest', async (req, res) => {
     // Check if user already exists
     const existingUser = await keycloakApi.findUserByEmail(email.toLowerCase());
     if (existingUser) {
-      // User already exists — return success with their ID (idempotent)
+      // User already exists — send share notification email if share context provided.
+      // Without this, existing users get no notification when shared with via email
+      // (sharebymail's email is suppressed by guest_bridge, and there's no other path).
+      if (shareContext && shareContext.shareToken) {
+        try {
+          const baseUrl = process.env.BASE_URL || '';
+          const guestLandingUrl = `${baseUrl}/guest-landing?email=${encodeURIComponent(email)}&share=${encodeURIComponent(shareContext.shareToken)}`;
+          const mailer = require('./api/mailer');
+          await mailer.sendShareInviteEmail({
+            to: email,
+            sharerName: shareContext.sharerName || 'Someone',
+            documentName: shareContext.documentName || 'a file',
+            guestLandingUrl,
+            brandName: process.env.TENANT_DISPLAY_NAME || 'Mothertree',
+          });
+          console.log(`[PROVISION-GUEST] Sent share invite email to existing user ${email}`);
+        } catch (emailErr) {
+          console.error(`[PROVISION-GUEST] Failed to send invite email to existing user:`, emailErr.message);
+        }
+      }
       return res.json({ success: true, userId: existingUser.id, existing: true });
     }
 

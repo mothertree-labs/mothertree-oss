@@ -15,10 +15,11 @@ use Psr\Log\LoggerInterface;
  * a file/folder is shared with an external email address.
  *
  * When a share of type TYPE_EMAIL (4) is created:
- * 1. Check if a user with that email already exists in Nextcloud
- * 2. If not, call the account portal API to create a guest user in Keycloak
- * 3. The guest receives an email with passkey setup link
- * 4. After setup, they log in via OIDC and the share resolves to their user
+ * 1. Suppress sharebymail's unauthenticated link email
+ * 2. Call the account portal API to provision/notify the user
+ *    - New users: creates Keycloak account + sends passkey setup email
+ *    - Existing users: sends share notification email (Issue #168)
+ * 3. After setup, they log in via OIDC and the share resolves to their user
  *
  * Does NOT interfere with:
  * - TYPE_LINK (3) — public links still work normally
@@ -69,33 +70,13 @@ class ShareCreatedListener implements IEventListener {
 			['app' => 'guest_bridge', 'email' => $email]
 		);
 
-		// Check if a user with this email already exists in Nextcloud
-		// (they may have already been provisioned or logged in via OIDC)
-		if ($this->userExistsByEmail($email)) {
-			$this->logger->info(
-				'Guest bridge: user already exists for {email}, skipping provisioning',
-				['app' => 'guest_bridge', 'email' => $email]
-			);
-			return;
-		}
-
-		// Call the account portal API to provision a guest user
+		// Always call the account portal API, even for existing users.
+		// For new users: creates the Keycloak account and sends a setup email.
+		// For existing users: sends a share notification email so they know
+		// a file was shared with them (Issue #168). Without this, existing
+		// users receive no notification because setMailSend(false) above
+		// suppresses sharebymail's email, and there's no other notification path.
 		$this->provisionGuestUser($email, $share);
-	}
-
-	/**
-	 * Check if a user with the given email already exists.
-	 * Searches by user ID (email is used as uid in OIDC mapping) and by email attribute.
-	 */
-	private function userExistsByEmail(string $email): bool {
-		// Check if user ID matches the email (OIDC uses email as uid)
-		if ($this->userManager->userExists($email)) {
-			return true;
-		}
-
-		// Search by email attribute
-		$users = $this->userManager->getByEmail($email);
-		return !empty($users);
 	}
 
 	/**
