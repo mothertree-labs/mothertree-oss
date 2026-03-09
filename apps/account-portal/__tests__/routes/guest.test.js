@@ -161,7 +161,7 @@ describe('GET /guest-landing', () => {
     expect(res.headers.location).toBe('/register');
   });
 
-  it('redirects to docs when user exists and is fully set up', async () => {
+  it('redirects through OIDC login to docs when user exists and is fully set up', async () => {
     const mockKeycloakApi = {
       findUserByEmail: jest.fn().mockResolvedValue({ id: 'user-1', requiredActions: [] }),
       initiateAccountRecovery: jest.fn(),
@@ -173,7 +173,8 @@ describe('GET /guest-landing', () => {
       .get('/guest-landing?email=alice@gmail.com&doc=test-doc');
 
     expect(res.status).toBe(302);
-    expect(res.headers.location).toContain('/docs/test-doc/');
+    expect(res.headers.location).toContain('/login?redirect_url=');
+    expect(res.headers.location).toContain(encodeURIComponent('/docs/test-doc/'));
   });
 
   it('renders guest-setup page when user exists but needs passkey setup', async () => {
@@ -200,7 +201,7 @@ describe('GET /guest-landing', () => {
     );
   });
 
-  it('redirects to files when user exists with share and no required actions', async () => {
+  it('redirects through OIDC login to files when user exists with share and no required actions', async () => {
     const mockKeycloakApi = {
       findUserByEmail: jest.fn().mockResolvedValue({ id: 'user-1', requiredActions: [] }),
       initiateAccountRecovery: jest.fn(),
@@ -212,7 +213,8 @@ describe('GET /guest-landing', () => {
       .get('/guest-landing?email=alice@gmail.com&share=abc123');
 
     expect(res.status).toBe(302);
-    expect(res.headers.location).toContain('/s/abc123');
+    expect(res.headers.location).toContain('/login?redirect_url=');
+    expect(res.headers.location).toContain(encodeURIComponent('/s/abc123'));
   });
 
   it('redirects to /register when user does not exist', async () => {
@@ -331,16 +333,27 @@ describe('GET /beginSetup', () => {
 });
 
 describe('GET /guest-complete', () => {
-  it('redirects to docs host with doc parameter', async () => {
+  it('redirects through OIDC login to docs host with doc parameter', async () => {
     const app = createTestApp();
     const res = await request(app).get('/guest-complete?doc=my-doc');
 
     expect(res.status).toBe(302);
-    expect(res.headers.location).toContain('/docs/my-doc/');
     expect(res.headers.location).toContain('docs.test.example.com');
+    expect(res.headers.location).toContain('/login?redirect_url=');
+    expect(res.headers.location).toContain(encodeURIComponent('/docs/my-doc/'));
   });
 
-  it('redirects to docs host root without doc parameter', async () => {
+  it('redirects through OIDC login to files host with share parameter', async () => {
+    const app = createTestApp();
+    const res = await request(app).get('/guest-complete?share=abc123');
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain('files.test.example.com');
+    expect(res.headers.location).toContain('/login?redirect_url=');
+    expect(res.headers.location).toContain(encodeURIComponent('/s/abc123'));
+  });
+
+  it('redirects to docs host root without doc or share parameter', async () => {
     const app = createTestApp();
     const res = await request(app).get('/guest-complete');
 

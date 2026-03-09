@@ -295,10 +295,12 @@ function createTestApp(options = {}) {
 
         if (share) {
           const filesHost = (process.env.BASE_URL || '').replace('account.', 'files.');
-          return res.redirect(`${filesHost}/s/${encodeURIComponent(share)}`);
+          const shareUrl = `/s/${encodeURIComponent(share)}`;
+          return res.redirect(`${filesHost}/login?redirect_url=${encodeURIComponent(shareUrl)}`);
         }
         const docsHost = (process.env.BASE_URL || '').replace('account.', 'docs.');
-        return res.redirect(`${docsHost}/docs/${encodeURIComponent(doc)}/`);
+        const docUrl = `/docs/${encodeURIComponent(doc)}/`;
+        return res.redirect(`${docsHost}/login?redirect_url=${encodeURIComponent(docUrl)}`);
       }
     } catch (err) {
       // fall through
@@ -406,16 +408,18 @@ function createTestApp(options = {}) {
     res.redirect(302, next);
   });
 
-  // Guest complete
+  // Guest complete — redirect through OIDC login (Issue #167)
   app.get('/guest-complete', (req, res) => {
     const { doc, share } = req.query;
     if (share) {
       const filesHost = (process.env.BASE_URL || '').replace('account.', 'files.');
-      return res.redirect(`${filesHost}/s/${encodeURIComponent(share)}`);
+      const shareUrl = `/s/${encodeURIComponent(share)}`;
+      return res.redirect(`${filesHost}/login?redirect_url=${encodeURIComponent(shareUrl)}`);
     }
     if (doc) {
       const docsHost = (process.env.BASE_URL || '').replace('account.', 'docs.');
-      return res.redirect(`${docsHost}/docs/${encodeURIComponent(doc)}/`);
+      const docUrl = `/docs/${encodeURIComponent(doc)}/`;
+      return res.redirect(`${docsHost}/login?redirect_url=${encodeURIComponent(docUrl)}`);
     }
     const docsHost = (process.env.BASE_URL || '').replace('account.', 'docs.');
     res.redirect(docsHost || '/');
