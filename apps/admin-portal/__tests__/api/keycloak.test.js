@@ -348,6 +348,8 @@ describe('listUsers', () => {
     const userId2 = 'ffffffff-1111-2222-3333-444444444444';
 
     fetchMock.mockResolvedValueOnce(mockResponse({ access_token: 'tok', expires_in: 300 }));
+    // GET users/count
+    fetchMock.mockResolvedValueOnce(mockResponse(2));
     // GET users list
     fetchMock.mockResolvedValueOnce(mockResponse([
       {
