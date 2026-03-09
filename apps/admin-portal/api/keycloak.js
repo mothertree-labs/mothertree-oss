@@ -295,7 +295,8 @@ async function listUsers() {
   }
 
   const totalUsers = await countResponse.json();
-  const usersUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?max=${totalUsers}`;
+  const max = Math.min(Number.isInteger(totalUsers) && totalUsers > 0 ? totalUsers : 100, 10000);
+  const usersUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?max=${max}`;
 
   const response = await fetch(usersUrl, {
     headers: { 'Authorization': `Bearer ${token}` },
