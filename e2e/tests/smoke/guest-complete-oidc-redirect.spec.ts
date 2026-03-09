@@ -88,20 +88,18 @@ async function uploadTestFile(
   };
 }
 
-/**
- * Regression tests for Issue #167: Guest asked for name twice.
- *
- * After completing passkey setup in Keycloak, /guest-complete used to redirect
- * guests directly to the unauthenticated share URL (files.*/s/{token}), which
- * caused Nextcloud to show a redundant name prompt.
- *
- * The fix redirects through Nextcloud's OIDC login flow instead, so the guest
- * arrives authenticated and Nextcloud already knows their name.
- *
- * These tests verify:
- * 1. /guest-complete redirects through /login (not directly to /s/{token})
- * 2. /guest-landing for set-up users also redirects through /login
- */
+// Regression tests for Issue #167: Guest asked for name twice.
+//
+// After completing passkey setup in Keycloak, /guest-complete used to redirect
+// guests directly to the unauthenticated share URL, which caused Nextcloud to
+// show a redundant name prompt.
+//
+// The fix redirects through Nextcloud's OIDC login flow instead, so the guest
+// arrives authenticated and Nextcloud already knows their name.
+//
+// These tests verify:
+// 1. /guest-complete redirects through /login (not directly to /s/{token})
+// 2. /guest-landing for set-up users also redirects through /login
 test.describe('Smoke — Guest Complete OIDC Redirect (Issue #167)', () => {
   test.setTimeout(90_000);
 
