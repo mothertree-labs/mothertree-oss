@@ -283,7 +283,20 @@ async function sendInvitationEmail(userId) {
  */
 async function listUsers() {
   const token = await getServiceToken();
-  const usersUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?max=100`;
+
+  // Fetch actual user count first so we never silently truncate the list
+  const countUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/count`;
+  const countResponse = await fetch(countUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  if (!countResponse.ok) {
+    throw new Error(`Failed to get user count: ${countResponse.status}`);
+  }
+
+  const totalUsers = await countResponse.json();
+  const max = Math.min(Number.isInteger(totalUsers) && totalUsers > 0 ? totalUsers : 100, 10000);
+  const usersUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?max=${max}`;
 
   const response = await fetch(usersUrl, {
     headers: { 'Authorization': `Bearer ${token}` },
