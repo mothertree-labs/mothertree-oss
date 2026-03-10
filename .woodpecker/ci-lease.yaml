@@ -14,17 +14,23 @@ steps:
     image: bash
     environment:
       CI: "true"
-      E2E_MOTHERTREE_BASE_DOMAIN:
-        from_secret: e2e_mothertree_base_domain
-      E2E_MOTHERTREE_KC_REALM:
-        from_secret: e2e_mothertree_kc_realm
-      E2E_MOTHERTREE_KC_CLIENT_SECRET:
-        from_secret: e2e_mothertree_kc_client_secret
-      E2E_INNBA_BASE_DOMAIN:
-        from_secret: e2e_innba_base_domain
-      E2E_INNBA_KC_REALM:
-        from_secret: e2e_innba_kc_realm
-      E2E_INNBA_KC_CLIENT_SECRET:
-        from_secret: e2e_innba_kc_client_secret
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL1_KC_REALM:
+        from_secret: e2e_pool1_kc_realm
+      E2E_POOL1_KC_CLIENT_SECRET:
+        from_secret: e2e_pool1_kc_client_secret
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+      E2E_POOL2_KC_REALM:
+        from_secret: e2e_pool2_kc_realm
+      E2E_POOL2_KC_CLIENT_SECRET:
+        from_secret: e2e_pool2_kc_client_secret
     commands:
       - ci/scripts/ci-lease-tenant.sh

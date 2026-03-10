@@ -1,40 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Release the tenant lease and clean up pipeline-scoped test users.
+# Release the pool lease and clean up pipeline-scoped test users.
 # This runs as the final pipeline step (on both success and failure).
 
 : "${CI_PIPELINE_NUMBER:?CI_PIPELINE_NUMBER is required}"
+: "${CI_VALKEY_PASSWORD:?CI_VALKEY_PASSWORD is required}"
 
 # Ensure a Redis-compatible CLI is available (Alpine containers need redis installed)
 if ! command -v valkey-cli &>/dev/null && ! command -v redis-cli &>/dev/null; then
   apk add --no-cache redis > /dev/null 2>&1 || true
 fi
-VALKEY="${VALKEY_CLI:-$(command -v valkey-cli 2>/dev/null || command -v redis-cli)} -h valkey"
+_CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
+# shellcheck disable=SC2086
+vcli() { $_CLI -h valkey -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
 
 echo "--- CI Tenant Release (pipeline #${CI_PIPELINE_NUMBER})"
 
-# ── Look up leased tenant ────────────────────────────────────────
-TENANT=$($VALKEY GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || true)
+# ── Look up leased pool slot ─────────────────────────────────────
+POOL=$(vcli GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || true)
 
-if [[ -z "$TENANT" ]]; then
-  echo "No tenant lease found for pipeline #${CI_PIPELINE_NUMBER} — nothing to release"
+if [[ -z "$POOL" ]]; then
+  echo "No pool lease found for pipeline #${CI_PIPELINE_NUMBER} — nothing to release"
   exit 0
 fi
 
-LEASE_KEY="ci-tenant-dev-${TENANT}"
+LEASE_KEY="ci-lease-${POOL}"
 BUILD_KEY="ci-build-${CI_PIPELINE_NUMBER}"
 
-echo "Tenant: ${TENANT}"
+echo "Pool slot: ${POOL}"
 
-# ── Resolve tenant-specific env vars for Keycloak cleanup ────────
-TENANT_KEY=$(echo "$TENANT" | tr '[:lower:]-' '[:upper:]_')
+# ── Resolve pool-specific env vars for Keycloak cleanup ──────────
+POOL_KEY=$(echo "$POOL" | tr '[:lower:]-' '[:upper:]_')
 
 resolve_var() {
   local standard="$1"
   local suffix="${standard#E2E_}"
-  local tenant_var="E2E_${TENANT_KEY}_${suffix}"
-  echo "${!tenant_var:-}"
+  local pool_var="E2E_${POOL_KEY}_${suffix}"
+  echo "${!pool_var:-}"
 }
 
 E2E_BASE_DOMAIN=$(resolve_var E2E_BASE_DOMAIN)
@@ -64,7 +67,7 @@ if [[ -n "$E2E_BASE_DOMAIN" && -n "$E2E_KC_REALM" && -n "$E2E_KC_CLIENT_SECRET" 
   else
     # List and delete pipeline-scoped users
     USERS_TO_DELETE=$(curl -sf --connect-timeout 10 --max-time 30 \
-      "${KEYCLOAK_URL}/admin/realms/${REALM}/users?max=10000" \
+      "${KEYCLOAK_URL}/admin/realms/${REALM}/users?search=e2e-${CI_PIPELINE_NUMBER}-&max=100" \
       -H "Authorization: Bearer $TOKEN" \
       | PREFIX="$PREFIX" python3 -c "
 import json, sys, os
@@ -104,15 +107,15 @@ fi
 
 # ── Release Valkey lease ─────────────────────────────────────────
 # Only release if we still own it (avoid releasing a re-leased key)
-HOLDER=$($VALKEY GET "$LEASE_KEY" 2>/dev/null || true)
+HOLDER=$(vcli GET "$LEASE_KEY" 2>/dev/null || true)
 if [[ "$HOLDER" == "$CI_PIPELINE_NUMBER" ]]; then
-  $VALKEY DEL "$LEASE_KEY" > /dev/null
+  vcli DEL "$LEASE_KEY" > /dev/null
   echo "Released lease: ${LEASE_KEY}"
 else
   echo "Lease ${LEASE_KEY} held by pipeline #${HOLDER} — not releasing"
 fi
 
-$VALKEY DEL "$BUILD_KEY" > /dev/null
+vcli DEL "$BUILD_KEY" > /dev/null
 echo "Cleaned up: ${BUILD_KEY}"
 
 echo ""

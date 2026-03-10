@@ -3,83 +3,86 @@ set -euo pipefail
 
 # Acquire a tenant lease from Valkey for parallel CI runs.
 #
-# Iterates through available tenants, attempting an atomic SET NX EX
-# on each tenant's lease key. On success, writes a reverse-lookup key
-# (ci-build-<pipeline> → tenant) so downstream steps can resolve their
-# tenant with a single GET.
+# Iterates through available pool slots, attempting an atomic SET NX EX
+# on each slot's lease key. On success, writes a reverse-lookup key
+# (ci-build-<pipeline> → pool ID) so downstream steps can resolve their
+# tenant config with a single GET.
 #
 # After acquiring the lease, creates pipeline-scoped test users in
 # Keycloak so E2E tests have fresh, isolated accounts.
 #
-# Retries every 60s for up to 10 minutes if all tenants are occupied.
+# Retries every 60s for up to 10 minutes if all slots are occupied.
 
 : "${CI_PIPELINE_NUMBER:?CI_PIPELINE_NUMBER is required}"
+: "${CI_VALKEY_PASSWORD:?CI_VALKEY_PASSWORD is required}"
 
 # Ensure a Redis-compatible CLI is available (Alpine containers need redis installed)
 if ! command -v valkey-cli &>/dev/null && ! command -v redis-cli &>/dev/null; then
   apk add --no-cache redis > /dev/null 2>&1 || true
 fi
-VALKEY="${VALKEY_CLI:-$(command -v valkey-cli 2>/dev/null || command -v redis-cli)} -h valkey"
+_CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
+# shellcheck disable=SC2086
+vcli() { $_CLI -h valkey -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
 
 LEASE_TTL=600  # 10 minutes
 RETRY_INTERVAL=60
 MAX_WAIT=600
 
-# ── Tenant pool (add new tenants here) ───────────────────────────
-TENANTS=(mothertree innba)
+# ── Pool slots (add new slots here when onboarding tenants) ──────
+POOLS=(pool1 pool2)
 
 echo "--- CI Tenant Lease (pipeline #${CI_PIPELINE_NUMBER})"
-echo "Pool: ${TENANTS[*]} | TTL: ${LEASE_TTL}s"
+echo "Pool slots: ${POOLS[*]} | TTL: ${LEASE_TTL}s"
 
 # ── Acquire lease ────────────────────────────────────────────────
-LEASED_TENANT=""
+LEASED_POOL=""
 ELAPSED=0
 
-while [[ -z "$LEASED_TENANT" ]]; do
-  for tenant in "${TENANTS[@]}"; do
-    KEY="ci-tenant-dev-${tenant}"
+while [[ -z "$LEASED_POOL" ]]; do
+  for pool in "${POOLS[@]}"; do
+    KEY="ci-lease-${pool}"
     # SET NX EX: atomic "create if not exists" with TTL
-    RESULT=$($VALKEY SET "$KEY" "$CI_PIPELINE_NUMBER" NX EX "$LEASE_TTL" 2>/dev/null || true)
+    RESULT=$(vcli SET "$KEY" "$CI_PIPELINE_NUMBER" NX EX "$LEASE_TTL" 2>/dev/null || true)
     if [[ "$RESULT" == "OK" ]]; then
-      LEASED_TENANT="$tenant"
-      echo "Leased tenant: ${tenant}"
+      LEASED_POOL="$pool"
+      echo "Leased pool slot: ${pool}"
       break
     else
-      HOLDER=$($VALKEY GET "$KEY" 2>/dev/null || echo "unknown")
-      echo "  ${tenant}: occupied by pipeline #${HOLDER}"
+      HOLDER=$(vcli GET "$KEY" 2>/dev/null || echo "unknown")
+      echo "  ${pool}: occupied by pipeline #${HOLDER}"
     fi
   done
 
-  if [[ -z "$LEASED_TENANT" ]]; then
+  if [[ -z "$LEASED_POOL" ]]; then
     if (( ELAPSED >= MAX_WAIT )); then
-      echo "ERROR: Could not lease any tenant after ${MAX_WAIT}s — all occupied"
+      echo "ERROR: Could not lease any pool slot after ${MAX_WAIT}s — all occupied"
       exit 1
     fi
-    echo "All tenants occupied. Retrying in ${RETRY_INTERVAL}s... (${ELAPSED}/${MAX_WAIT}s)"
+    echo "All slots occupied. Retrying in ${RETRY_INTERVAL}s... (${ELAPSED}/${MAX_WAIT}s)"
     sleep "$RETRY_INTERVAL"
     ELAPSED=$(( ELAPSED + RETRY_INTERVAL ))
   fi
 done
 
-# Write reverse-lookup key so downstream steps can find their tenant
-$VALKEY SET "ci-build-${CI_PIPELINE_NUMBER}" "$LEASED_TENANT" EX "$LEASE_TTL" > /dev/null
+# Write reverse-lookup key so downstream steps can find their pool slot
+vcli SET "ci-build-${CI_PIPELINE_NUMBER}" "$LEASED_POOL" EX "$LEASE_TTL" > /dev/null
 
-echo "Reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → ${LEASED_TENANT}"
+echo "Reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → ${LEASED_POOL}"
 
-# ── Resolve tenant-specific env vars ─────────────────────────────
-TENANT_KEY=$(echo "$LEASED_TENANT" | tr '[:lower:]-' '[:upper:]_')
+# ── Resolve pool-specific env vars ───────────────────────────────
+POOL_KEY=$(echo "$LEASED_POOL" | tr '[:lower:]-' '[:upper:]_')
 
 resolve_var() {
   local standard="$1"
   local suffix="${standard#E2E_}"
-  local tenant_var="E2E_${TENANT_KEY}_${suffix}"
-  local value="${!tenant_var:-}"
+  local pool_var="E2E_${POOL_KEY}_${suffix}"
+  local value="${!pool_var:-}"
   if [[ -n "$value" ]]; then
     export "$standard"="$value"
   fi
 }
 
-export E2E_TENANT="$LEASED_TENANT"
+resolve_var E2E_TENANT
 resolve_var E2E_BASE_DOMAIN
 resolve_var E2E_KC_REALM
 resolve_var E2E_KC_CLIENT_SECRET
@@ -133,34 +136,34 @@ create_user() {
 
   echo -n "  Creating ${username}... "
 
-  # Create user
+  # Build JSON payload safely via environment variables
   local http_code
-  http_code=$(curl -s -w "%{http_code}" -o /tmp/ci-create-user.json -X POST \
-    "${KEYCLOAK_URL}/admin/realms/${REALM}/users" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$(python3 -c "
-import json
+  http_code=$(CI_USER="$username" CI_EMAIL="$email" CI_PASS="$password" python3 -c "
+import json, os
 print(json.dumps({
-  'username': '${username}',
-  'email': '${email}',
+  'username': os.environ['CI_USER'],
+  'email': os.environ['CI_EMAIL'],
   'emailVerified': True,
   'enabled': True,
-  'firstName': '${username}',
+  'firstName': os.environ['CI_USER'],
   'lastName': 'Test',
   'attributes': {
     'userType': ['member'],
-    'recoveryEmail': ['${email}'],
-    'tenantEmail': ['${email}']
+    'recoveryEmail': [os.environ['CI_EMAIL']],
+    'tenantEmail': [os.environ['CI_EMAIL']]
   },
   'requiredActions': [],
   'credentials': [{
     'type': 'password',
-    'value': '${password}',
+    'value': os.environ['CI_PASS'],
     'temporary': False
   }]
 }))
-")")
+" | curl -s -w "%{http_code}" -o /tmp/ci-create-user.json -X POST \
+    "${KEYCLOAK_URL}/admin/realms/${REALM}/users" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d @-)
 
   if [[ "$http_code" == "201" ]]; then
     echo "created"
@@ -222,6 +225,7 @@ done
 
 echo ""
 echo "Tenant lease acquired and test users created."
-echo "  Tenant: ${LEASED_TENANT}"
+echo "  Pool slot: ${LEASED_POOL}"
+echo "  Tenant: ${E2E_TENANT:-unknown}"
 echo "  Pipeline: ${CI_PIPELINE_NUMBER}"
 echo "  Lease TTL: ${LEASE_TTL}s"

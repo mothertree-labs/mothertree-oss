@@ -19,27 +19,33 @@ steps:
     environment:
       E2E_SHARD: "9/10"
       CI: "true"
-      # Per-tenant secrets — ci-resolve-tenant.sh maps the right ones
-      E2E_MOTHERTREE_BASE_DOMAIN:
-        from_secret: e2e_mothertree_base_domain
-      E2E_MOTHERTREE_STALWART_ADMIN_PASSWORD:
-        from_secret: e2e_mothertree_stalwart_admin_password
-      E2E_MOTHERTREE_STALWART_IMAP_HOST:
-        from_secret: e2e_mothertree_stalwart_imap_host
-      E2E_MOTHERTREE_STALWART_IMAP_PORT:
-        from_secret: e2e_mothertree_stalwart_imap_port
-      E2E_MOTHERTREE_ECHO_GROUP_ADDRESS:
-        from_secret: e2e_mothertree_echo_group_address
-      E2E_INNBA_BASE_DOMAIN:
-        from_secret: e2e_innba_base_domain
-      E2E_INNBA_STALWART_ADMIN_PASSWORD:
-        from_secret: e2e_innba_stalwart_admin_password
-      E2E_INNBA_STALWART_IMAP_HOST:
-        from_secret: e2e_innba_stalwart_imap_host
-      E2E_INNBA_STALWART_IMAP_PORT:
-        from_secret: e2e_innba_stalwart_imap_port
-      E2E_INNBA_ECHO_GROUP_ADDRESS:
-        from_secret: e2e_innba_echo_group_address
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      # Per-pool secrets — ci-resolve-tenant.sh maps the right ones
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL1_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool1_stalwart_admin_password
+      E2E_POOL1_STALWART_IMAP_HOST:
+        from_secret: e2e_pool1_stalwart_imap_host
+      E2E_POOL1_STALWART_IMAP_PORT:
+        from_secret: e2e_pool1_stalwart_imap_port
+      E2E_POOL1_ECHO_GROUP_ADDRESS:
+        from_secret: e2e_pool1_echo_group_address
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+      E2E_POOL2_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool2_stalwart_admin_password
+      E2E_POOL2_STALWART_IMAP_HOST:
+        from_secret: e2e_pool2_stalwart_imap_host
+      E2E_POOL2_STALWART_IMAP_PORT:
+        from_secret: e2e_pool2_stalwart_imap_port
+      E2E_POOL2_ECHO_GROUP_ADDRESS:
+        from_secret: e2e_pool2_echo_group_address
     commands:
       - ci/scripts/e2e-playwright.sh
       - ci/scripts/ci-renew-lease.sh

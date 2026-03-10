@@ -326,19 +326,22 @@
           --network ci-shared \
           --restart unless-stopped \
           valkey/valkey:8-alpine \
-          valkey-server --save "" --appendonly no --maxmemory 16mb --maxmemory-policy allkeys-lru
+          valkey-server --save "" --appendonly no --maxmemory 16mb --maxmemory-policy allkeys-lru \
+            --requirepass "{{ valkey_password }}"
       register: valkey_result
       changed_when: true
+      no_log: true
 
     - name: Wait for Valkey to be ready
       ansible.builtin.shell: |
         for i in $(seq 1 10); do
-          docker exec valkey valkey-cli ping && exit 0
+          docker exec valkey valkey-cli -a "{{ valkey_password }}" ping 2>/dev/null && exit 0
           sleep 1
         done
         exit 1
       register: valkey_ping
       changed_when: false
+      no_log: true
 
     # ── SSH Deploy Keys ────────────────────────────────────────────
     - name: Create woodpecker .ssh directory
