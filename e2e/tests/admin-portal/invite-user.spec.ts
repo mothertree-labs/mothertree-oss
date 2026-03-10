@@ -1,6 +1,7 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { selectors } from '../../helpers/selectors';
 import { TEST_USERS } from '../../helpers/test-users';
+import { e2ePrefix } from '../../helpers/e2e-prefix';
 
 test.describe('Admin Portal — Invite User', () => {
   // The adminPage fixture already authenticates and navigates to admin portal.
@@ -8,7 +9,7 @@ test.describe('Admin Portal — Invite User', () => {
   test('successfully invites a new user', async ({ adminPage: page }) => {
     const ap = selectors.adminPortal;
     const uniqueId = `${Date.now()}`;
-    const uniqueUsername = `e2e-invite-${uniqueId}`;
+    const uniqueUsername = `${e2ePrefix('invite')}-${uniqueId}`;
     const uniqueFirstName = `E2ETest${uniqueId}`;
     let invitedUserId: string | null = null;
 
@@ -17,7 +18,7 @@ test.describe('Admin Portal — Invite User', () => {
       await page.fill(ap.lastNameInput, 'Invited');
       await page.fill(ap.emailUsernameInput, uniqueUsername);
       // Use unique recovery email to avoid 409 conflicts with stale users
-      await page.fill(ap.recoveryEmailInput, `e2e-test-${uniqueId}@example.com`);
+      await page.fill(ap.recoveryEmailInput, `${e2ePrefix('test')}-${uniqueId}@example.com`);
 
       // Submit invite — the API creates Keycloak + Stalwart + Matrix accounts (slow)
       // Intercept the response to capture the userId for reliable cleanup
@@ -80,7 +81,7 @@ test.describe('Admin Portal — Invite User', () => {
   test('cleanup via delete button removes the user from the list', async ({ adminPage: page }) => {
     const ap = selectors.adminPortal;
     const uniqueId = `${Date.now()}`;
-    const uniqueUsername = `e2e-invite-${uniqueId}`;
+    const uniqueUsername = `${e2ePrefix('invite')}-${uniqueId}`;
     const uniqueFirstName = `E2ECleanup${uniqueId}`;
     let invitedUserId: string | null = null;
 
@@ -89,7 +90,7 @@ test.describe('Admin Portal — Invite User', () => {
       await page.fill(ap.firstNameInput, uniqueFirstName);
       await page.fill(ap.lastNameInput, 'Cleanup');
       await page.fill(ap.emailUsernameInput, uniqueUsername);
-      await page.fill(ap.recoveryEmailInput, `e2e-cleanup-${uniqueId}@example.com`);
+      await page.fill(ap.recoveryEmailInput, `${e2ePrefix('cleanup')}-${uniqueId}@example.com`);
 
       const responsePromise = page.waitForResponse((r) => r.url().includes('/api/invite') && r.request().method() === 'POST');
       await page.click(ap.inviteSubmitBtn);
@@ -136,37 +137,18 @@ test.describe('Admin Portal — Invite User', () => {
     }
   });
 
-  test('user count stays below 200 (stale user accumulation check)', async ({ adminPage: page }) => {
-    // Self-healing canary: clean up stale e2e test users from previous runs
-    // that failed to clean up (e.g. CI timeouts), then assert the count.
-    // Match on both email prefix and firstName patterns set by the tests above.
-    const users = await page.evaluate(() => fetch('/api/users').then((r) => r.json()));
-    const allUsers: Array<{ id: string; email: string; firstName: string }> = Array.isArray(users) ? users : [];
-
-    const staleUsers = allUsers.filter((u) => {
-      const emailMatch = u.email && /^e2e-(invite|cleanup)-\d+/.test(u.email);
-      const nameMatch = u.firstName && /^E2E(Test|Cleanup)\d+$/.test(u.firstName);
-      return emailMatch || nameMatch;
-    });
-
-    if (staleUsers.length > 0) {
-      // eslint-disable-next-line no-console
-      console.log(`  [canary] Cleaning up ${staleUsers.length} stale e2e test users`);
-      await page.evaluate(async (ids: string[]) => {
-        for (const id of ids) {
-          await fetch(`/api/users/${id}`, { method: 'DELETE' }).catch(() => {});
-        }
-      }, staleUsers.map((u) => u.id));
-    }
-
-    // Re-check count after cleanup
-    const refreshed = await page.evaluate(() => fetch('/api/users').then((r) => r.json()));
-    const userCount = Array.isArray(refreshed) ? refreshed.length : 0;
+  test('user count stays below 50 (stale user accumulation check)', async ({ adminPage: page }) => {
+    // Canary: detects if the e2e-cleanup pipeline step is failing to
+    // remove ephemeral test users from Keycloak. The dev realm should
+    // have ~11 permanent users (real + e2e fixtures). If this grows
+    // past 50, something is leaking users.
+    const response = await page.evaluate(() => fetch('/api/users').then((r) => r.json()));
+    const userCount = Array.isArray(response) ? response.length : 0;
 
     expect(
       userCount,
-      `User count is ${userCount} after cleaning ${staleUsers.length} stale users — ` +
-        'users are accumulating beyond expected levels.',
-    ).toBeLessThan(200);
+      `User count is ${userCount} — ephemeral test users are accumulating. ` +
+        'Check that the e2e-cleanup pipeline step is running and has valid Keycloak credentials.',
+    ).toBeLessThan(50);
   });
 });

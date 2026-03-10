@@ -3,6 +3,7 @@ import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
 import { Page } from '@playwright/test';
 import { handleNextcloudLogin, waitForNextcloudReady } from '../../helpers/nextcloud';
+import { e2ePrefix } from '../../helpers/e2e-prefix';
 
 async function loginToNextcloud(page: Page): Promise<void> {
   await page.goto(`${urls.files}/apps/files/`);
@@ -181,9 +182,9 @@ test.describe('Smoke — Nextcloud Share With Existing Email', () => {
     await loginToNextcloud(page);
 
     const ts = Date.now();
-    const fileA = `e2e-reshare-a-${ts}.txt`;
-    const fileB = `e2e-reshare-b-${ts}.txt`;
-    const guestEmail = `e2e-reshare-${ts}@external-test.example`;
+    const fileA = `${e2ePrefix('reshare')}-a-${ts}.txt`;
+    const fileB = `${e2ePrefix('reshare')}-b-${ts}.txt`;
+    const guestEmail = `${e2ePrefix('reshare')}-${ts}@external-test.example`;
 
     const deleteFileA = await uploadTestFile(page, fileA);
     const deleteFileB = await uploadTestFile(page, fileB);
