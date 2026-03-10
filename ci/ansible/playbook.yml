@@ -311,19 +311,14 @@
         mode: "0755"
 
     # ── Valkey (Redis-compatible KV store for CI tenant leasing) ────
-    # Runs as a Docker container on the ci-shared network.
-    # Pipeline steps also use ci-shared (via WOODPECKER_BACKEND_DOCKER_NETWORK)
-    # so they can reach Valkey by container name: valkey-cli -h valkey.
-    - name: Create ci-shared Docker network
-      ansible.builtin.shell: docker network create ci-shared 2>/dev/null || true
-      changed_when: false
-
-    - name: Run Valkey container on ci-shared network
+    # Runs as a Docker container with port 6379 bound to localhost only.
+    # Pipeline steps (local backend) connect via redis-cli -h 127.0.0.1.
+    - name: Run Valkey container with localhost port binding
       ansible.builtin.shell: |
         docker rm -f valkey 2>/dev/null || true
         docker run -d \
           --name valkey \
-          --network ci-shared \
+          -p 127.0.0.1:6379:6379 \
           --restart unless-stopped \
           valkey/valkey:8-alpine \
           valkey-server --save "" --appendonly no --maxmemory 16mb --maxmemory-policy allkeys-lru \
@@ -335,7 +330,7 @@
     - name: Wait for Valkey to be ready
       ansible.builtin.shell: |
         for i in $(seq 1 10); do
-          docker exec valkey valkey-cli -a "{{ valkey_password }}" ping 2>/dev/null && exit 0
+          redis-cli -h 127.0.0.1 -a "{{ valkey_password }}" --no-auth-warning ping 2>/dev/null && exit 0
           sleep 1
         done
         exit 1

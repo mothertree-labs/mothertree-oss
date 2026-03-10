@@ -7,13 +7,10 @@ set -euo pipefail
 : "${CI_PIPELINE_NUMBER:?CI_PIPELINE_NUMBER is required}"
 : "${CI_VALKEY_PASSWORD:?CI_VALKEY_PASSWORD is required}"
 
-# Ensure a Redis-compatible CLI is available (Alpine containers need redis installed)
-if ! command -v valkey-cli &>/dev/null && ! command -v redis-cli &>/dev/null; then
-  apk add --no-cache redis > /dev/null 2>&1 || true
-fi
+# Redis-compatible CLI (redis-tools installed on the CI host via Ansible)
 _CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
 # shellcheck disable=SC2086
-vcli() { $_CLI -h valkey -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
+vcli() { $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
 
 LEASE_TTL=600  # 10 minutes
 
