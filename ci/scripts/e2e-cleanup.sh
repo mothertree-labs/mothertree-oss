@@ -65,10 +65,10 @@ while IFS=$'\t' read -r uid desc; do
     "${KEYCLOAK_URL}/admin/realms/${REALM}/users/${uid}" \
     -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1; then
     echo "  Deleted: $desc"
-    ((DELETED++))
+    DELETED=$(( DELETED + 1 ))
   else
     echo "  Failed:  $desc"
-    ((FAILED++))
+    FAILED=$(( FAILED + 1 ))
   fi
 done <<< "$USERS_TO_DELETE"
 
