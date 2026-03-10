@@ -30,10 +30,8 @@ steps:
       CI: "true"
       E2E_BASE_DOMAIN:
         from_secret: e2e_base_domain
-      E2E_TENANT:
-        from_secret: e2e_tenant
-      E2E_KC_CLIENT_ID:
-        from_secret: e2e_kc_client_id
+      E2E_KC_REALM:
+        from_secret: e2e_kc_realm
       E2E_KC_CLIENT_SECRET:
         from_secret: e2e_kc_client_secret
     commands:
