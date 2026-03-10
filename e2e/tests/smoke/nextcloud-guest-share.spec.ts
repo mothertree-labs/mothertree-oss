@@ -2,6 +2,7 @@ import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { Page } from '@playwright/test';
 import { handleNextcloudLogin, waitForNextcloudReady } from '../../helpers/nextcloud';
+import { e2ePrefix } from '../../helpers/e2e-prefix';
 
 /**
  * Helper: login to Nextcloud and wait for readiness.
@@ -136,8 +137,9 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
   }) => {
     await loginToNextcloud(page);
 
-    const testFileName = `e2e-guest-share-${Date.now()}.txt`;
-    const guestEmail = `e2e-guest-${Date.now()}@external-test.example`;
+    const ts = Date.now();
+    const testFileName = `${e2ePrefix('guest')}-share-${ts}.txt`;
+    const guestEmail = `${e2ePrefix('guest')}-${ts}@external-test.example`;
     const deleteFile = await uploadTestFile(page, testFileName);
 
     let shareId: string | undefined;
@@ -197,8 +199,9 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
   }) => {
     await loginToNextcloud(page);
 
-    const testFileName = `e2e-guest-bridge-${Date.now()}.txt`;
-    const guestEmail = `e2e-bridge-${Date.now()}@external-test.example`;
+    const ts = Date.now();
+    const testFileName = `${e2ePrefix('bridge')}-${ts}.txt`;
+    const guestEmail = `${e2ePrefix('bridge')}-${ts}@external-test.example`;
     const deleteFile = await uploadTestFile(page, testFileName);
 
     let shareId: string | undefined;
@@ -324,8 +327,9 @@ test.describe('Smoke — Nextcloud Guest Sharing', () => {
   }) => {
     await loginToNextcloud(page);
 
-    const testFileName = `e2e-share-context-${Date.now()}.txt`;
-    const guestEmail = `e2e-context-${Date.now()}@external-test.example`;
+    const ts = Date.now();
+    const testFileName = `${e2ePrefix('context')}-${ts}.txt`;
+    const guestEmail = `${e2ePrefix('context')}-${ts}@external-test.example`;
     const deleteFile = await uploadTestFile(page, testFileName);
 
     let shareId: string | undefined;

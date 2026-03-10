@@ -3,6 +3,7 @@ import { test as base } from '@playwright/test';
 import { urls } from '../../helpers/urls';
 import { Page } from '@playwright/test';
 import { handleNextcloudLogin, waitForNextcloudReady } from '../../helpers/nextcloud';
+import { e2ePrefix } from '../../helpers/e2e-prefix';
 
 async function loginToNextcloud(page: Page): Promise<void> {
   await page.goto(`${urls.files}/apps/files/`);
@@ -118,7 +119,7 @@ test.describe('Smoke — Account Portal Guest Landing', () => {
       ignoreHTTPSErrors: true,
     });
     const page = await unauthContext.newPage();
-    const fakeEmail = `nonexistent-${Date.now()}@external-test.example`;
+    const fakeEmail = `${e2ePrefix('fake')}-${Date.now()}@external-test.example`;
 
     try {
       await page.goto(
@@ -141,8 +142,9 @@ test.describe('Smoke — Account Portal Guest Landing', () => {
     // Step 1: Login to Nextcloud and create an email share
     await loginToNextcloud(memberPage);
 
-    const testFileName = `e2e-guest-landing-${Date.now()}.txt`;
-    const guestEmail = `e2e-landing-${Date.now()}@external-test.example`;
+    const ts = Date.now();
+    const testFileName = `${e2ePrefix('landing')}-${ts}.txt`;
+    const guestEmail = `${e2ePrefix('landing')}-${ts}@external-test.example`;
     const deleteFile = await uploadTestFile(memberPage, testFileName);
 
     let shareId: string | undefined;

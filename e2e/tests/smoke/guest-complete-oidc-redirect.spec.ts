@@ -2,6 +2,7 @@ import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { Page } from '@playwright/test';
 import { handleNextcloudLogin, waitForNextcloudReady } from '../../helpers/nextcloud';
+import { e2ePrefix } from '../../helpers/e2e-prefix';
 
 async function loginToNextcloud(page: Page): Promise<void> {
   await page.goto(`${urls.files}/apps/files/`);
@@ -110,8 +111,9 @@ test.describe('Smoke — Guest Complete OIDC Redirect (Issue #167)', () => {
     // Step 1: Login to Nextcloud and create an email share to get a real token
     await loginToNextcloud(memberPage);
 
-    const testFileName = `e2e-oidc-redirect-${Date.now()}.txt`;
-    const guestEmail = `e2e-oidc-${Date.now()}@external-test.example`;
+    const ts = Date.now();
+    const testFileName = `${e2ePrefix('oidc')}-redirect-${ts}.txt`;
+    const guestEmail = `${e2ePrefix('oidc')}-${ts}@external-test.example`;
     const deleteFile = await uploadTestFile(memberPage, testFileName);
 
     let shareId: string | undefined;
@@ -201,8 +203,9 @@ test.describe('Smoke — Guest Complete OIDC Redirect (Issue #167)', () => {
     // Step 1: Login to Nextcloud and create an email share
     await loginToNextcloud(memberPage);
 
-    const testFileName = `e2e-landing-oidc-${Date.now()}.txt`;
-    const guestEmail = `e2e-landing-oidc-${Date.now()}@external-test.example`;
+    const ts = Date.now();
+    const testFileName = `${e2ePrefix('landing-oidc')}-${ts}.txt`;
+    const guestEmail = `${e2ePrefix('landing-oidc')}-${ts}@external-test.example`;
     const deleteFile = await uploadTestFile(memberPage, testFileName);
 
     let shareId: string | undefined;

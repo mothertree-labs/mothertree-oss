@@ -46,7 +46,10 @@ export default async function globalSetup(): Promise<void> {
 
   console.log('  [setup] Local run — managing test users via Keycloak admin API...\n');
 
-  // Clean up stale e2e-invite-* users from previous failed test runs
+  // Clean up stale ephemeral e2e users from previous failed test runs.
+  // Matches e2e-l*-* (local prefix pattern) and e2e-invite-* (legacy).
+  // Permanent fixtures (e2e-admin, e2e-member, etc.) are excluded.
+  const PERMANENT_USERS = new Set(LOCAL_USERS.map((u) => u.username));
   try {
     const listOutput = run(
       `${SCRIPT} -e dev -t ${TENANT} list`,
@@ -54,7 +57,7 @@ export default async function globalSetup(): Promise<void> {
     const staleUsers = listOutput
       .split('\n')
       .map((line) => line.trim().split(/\s+/)[0])
-      .filter((username) => username?.startsWith('e2e-invite-'));
+      .filter((username) => username?.startsWith('e2e-') && !PERMANENT_USERS.has(username));
     for (const staleUser of staleUsers) {
       try {
         run(`${SCRIPT} -e dev -t ${TENANT} delete ${staleUser}`);
