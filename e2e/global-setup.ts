@@ -37,10 +37,11 @@ export default async function globalSetup(): Promise<void> {
   }
   fs.mkdirSync(authDir, { recursive: true });
 
-  // In CI, test users are pre-created and permanent — no Keycloak admin access needed.
+  // In CI, pipeline-scoped test users are created by ci-lease-tenant.sh via the
+  // Keycloak API — no further user management needed here.
   // Locally, create/reset users via dev-test-users.sh (requires kubectl port-forward).
   if (IS_CI) {
-    console.log('  [setup] CI detected — skipping user management (users are pre-provisioned)\n');
+    console.log('  [setup] CI detected — users created by ci-lease-tenant.sh\n');
     return;
   }
 

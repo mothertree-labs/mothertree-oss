@@ -3,6 +3,11 @@ set -euo pipefail
 
 echo "--- :playwright: E2E Browser Tests"
 
+# Resolve tenant from Valkey lease (sets E2E_BASE_DOMAIN, E2E_TENANT, etc.)
+if [[ "${CI:-}" == "true" ]]; then
+  source ci/scripts/ci-resolve-tenant.sh
+fi
+
 # Requires E2E_BASE_DOMAIN and E2E_TENANT to be set in the CI environment.
 # These are non-secret config values pointing to the dev environment.
 if [[ -z "${E2E_BASE_DOMAIN:-}" || -z "${E2E_TENANT:-}" ]]; then

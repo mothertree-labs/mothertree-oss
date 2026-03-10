@@ -2,14 +2,18 @@
  * Test user credentials for E2E tests.
  *
  * CI and local runs use DIFFERENT users to avoid conflicts:
- * - CI: e2e-admin, e2e-member, e2e-mailrt, e2e-mailrcv (permanent, never deleted)
- * - Local: e2e-local-admin, e2e-local-member, e2e-local-mailrt, e2e-local-mailrcv (transient, created/deleted per run)
+ * - CI: e2e-<pipeline>-admin, e2e-<pipeline>-member, etc. (pipeline-scoped, created/deleted per build)
+ * - Local: e2e-local-admin, e2e-local-member, etc. (transient, created/deleted per run)
  *
+ * The CI pipeline number is included in the prefix to isolate parallel builds.
  * Passwords are the same for both — only the username prefix differs.
  */
 
 const baseDomain = process.env.E2E_BASE_DOMAIN || 'dev.example.com';
-const prefix = process.env.CI ? 'e2e' : 'e2e-local';
+const pipelineNum = process.env.CI_PIPELINE_NUMBER || '';
+const prefix = process.env.CI
+  ? (pipelineNum ? `e2e-${pipelineNum}` : 'e2e')
+  : 'e2e-local';
 
 export const TEST_USERS = {
   admin: {

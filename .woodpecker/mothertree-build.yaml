@@ -11,6 +11,7 @@ depends_on:
   - e2e-shard-8
   - e2e-shard-9
   - e2e-shard-10
+  - ci-release
 
 when:
   - event: pull_request
