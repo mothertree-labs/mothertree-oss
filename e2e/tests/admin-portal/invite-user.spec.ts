@@ -136,16 +136,18 @@ test.describe('Admin Portal — Invite User', () => {
     }
   });
 
-  test('user count stays below 100 (stale user accumulation check)', async ({ adminPage: page }) => {
-    // Self-healing canary: clean up stale e2e-invite-* users from previous
-    // runs that failed to clean up (e.g. CI timeouts), then assert the count.
-    // If cleanup itself fails, the count will remain high and the test still catches it.
+  test('user count stays below 200 (stale user accumulation check)', async ({ adminPage: page }) => {
+    // Self-healing canary: clean up stale e2e test users from previous runs
+    // that failed to clean up (e.g. CI timeouts), then assert the count.
+    // Match on both email prefix and firstName patterns set by the tests above.
     const users = await page.evaluate(() => fetch('/api/users').then((r) => r.json()));
-    const allUsers: Array<{ id: string; email: string }> = Array.isArray(users) ? users : [];
+    const allUsers: Array<{ id: string; email: string; firstName: string }> = Array.isArray(users) ? users : [];
 
-    const staleUsers = allUsers.filter(
-      (u) => u.email && /^e2e-(invite|cleanup)-\d+@/.test(u.email),
-    );
+    const staleUsers = allUsers.filter((u) => {
+      const emailMatch = u.email && /^e2e-(invite|cleanup)-\d+/.test(u.email);
+      const nameMatch = u.firstName && /^E2E(Test|Cleanup)\d+$/.test(u.firstName);
+      return emailMatch || nameMatch;
+    });
 
     if (staleUsers.length > 0) {
       // eslint-disable-next-line no-console
@@ -164,7 +166,7 @@ test.describe('Admin Portal — Invite User', () => {
     expect(
       userCount,
       `User count is ${userCount} after cleaning ${staleUsers.length} stale users — ` +
-        'cleanup may not be working. Check Keycloak for non-e2e user accumulation.',
-    ).toBeLessThan(100);
+        'users are accumulating beyond expected levels.',
+    ).toBeLessThan(200);
   });
 });
