@@ -35,7 +35,10 @@ test.describe('SSO — Cross-App Single Sign-On', () => {
     await newContext.close();
   });
 
-  test('login to account portal enables SSO to Roundcube', async ({ memberPage: page }) => {
+  // Uses emailTestPage (fixed user with persistent Stalwart mail principal)
+  // because pipeline-scoped users may not have Stalwart principals yet,
+  // causing OAUTHBEARER auth to fail during the Roundcube OIDC flow.
+  test('login to account portal enables SSO to Roundcube', async ({ emailTestPage: page }) => {
     const ROUNDCUBE_INBOX = '#messagelist, #mailboxlist, .mailbox-list, button:has-text("Compose")';
 
     // Try the OIDC flow with a retry — the first attempt may catch Keycloak mid-redirect

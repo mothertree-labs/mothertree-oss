@@ -83,8 +83,6 @@ resolve_var E2E_TENANT
 resolve_var E2E_BASE_DOMAIN
 resolve_var E2E_KC_REALM
 resolve_var E2E_KC_CLIENT_SECRET
-resolve_var E2E_STALWART_ADMIN_PASSWORD
-
 if [[ -z "${E2E_BASE_DOMAIN:-}" ]]; then
   echo "WARNING: E2E_BASE_DOMAIN not resolved — skipping user creation"
   exit 0
@@ -235,85 +233,6 @@ for user_spec in "${FIXED_USERS[@]}"; do
   IFS=: read -r username password is_admin <<< "$user_spec"
   create_user "$username" "$password" "$is_admin"
 done
-
-# ── Pre-provision Stalwart mail principals ─────────────────────────
-# Pipeline-scoped users are brand new each build. Stalwart's OIDC
-# directory auto-provisions principals on first OAUTHBEARER login,
-# but Roundcube SSO may fail if the principal doesn't exist yet.
-# Pre-create them via the /api/principal/deploy endpoint (works even
-# with storage.directory = "oidc").
-ensure_stalwart_principal() {
-  local username="$1"
-  local email="${username}@${EMAIL_DOMAIN}"
-
-  echo -n "  Provisioning ${username}... "
-
-  local stalwart_url="https://mail.${E2E_BASE_DOMAIN}"
-  local admin_auth
-  admin_auth="Basic $(printf 'admin:%s' "$E2E_STALWART_ADMIN_PASSWORD" | base64)"
-
-  local payload
-  payload=$(CI_USER="$username" CI_EMAIL="$email" python3 -c "
-import json, os
-print(json.dumps({
-  'type': 'individual',
-  'name': os.environ['CI_USER'],
-  'emails': [os.environ['CI_EMAIL']],
-  'description': os.environ['CI_USER'] + ' (E2E test user)',
-  'roles': ['user'],
-  'secrets': []
-}))
-")
-
-  local response http_code
-  response=$(echo "$payload" | curl -sS -k --connect-timeout 10 --max-time 15 \
-    -w '\n%{http_code}' -X POST \
-    "${stalwart_url}/api/principal/deploy" \
-    -H "Authorization: $admin_auth" \
-    -H "Content-Type: application/json" \
-    -d @- 2>&1 || true)
-
-  # Extract HTTP status code from last line
-  http_code=$(echo "$response" | tail -1)
-  response=$(echo "$response" | sed '$d')
-
-  # Parse response for Stalwart API errors (all responses return HTTP 200)
-  local error
-  error=$(echo "$response" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null || true)
-
-  if [[ -z "$error" && "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-    echo "created"
-  elif [[ "$error" == "fieldAlreadyExists" ]]; then
-    echo "already exists"
-  else
-    echo "failed (HTTP $http_code: ${response:0:200})"
-  fi
-}
-
-if [[ -n "${E2E_STALWART_ADMIN_PASSWORD:-}" ]]; then
-  echo ""
-  echo "--- Pre-provisioning Stalwart mail principals"
-  echo "  Stalwart URL: https://mail.${E2E_BASE_DOMAIN}"
-  echo "  DNS check: $(getent hosts "mail.${E2E_BASE_DOMAIN}" 2>/dev/null | head -1 || echo 'resolution failed')"
-  for user_spec in "${PIPELINE_USERS[@]}"; do
-    IFS=: read -r suffix _password _is_admin <<< "$user_spec"
-    ensure_stalwart_principal "${PREFIX}-${suffix}"
-  done
-  for user_spec in "${FIXED_USERS[@]}"; do
-    IFS=: read -r username _password _is_admin <<< "$user_spec"
-    ensure_stalwart_principal "$username"
-  done
-
-  # Reload config so Stalwart picks up new principals immediately
-  curl -s --connect-timeout 10 --max-time 10 \
-    "https://mail.${E2E_BASE_DOMAIN}/api/reload" \
-    -H "Authorization: Basic $(printf 'admin:%s' "$E2E_STALWART_ADMIN_PASSWORD" | base64)" \
-    > /dev/null 2>&1 || true
-  echo "  Config reloaded"
-else
-  echo ""
-  echo "WARNING: STALWART_ADMIN_PASSWORD not set — skipping principal provisioning"
-fi
 
 echo ""
 echo "Tenant lease acquired and test users created."

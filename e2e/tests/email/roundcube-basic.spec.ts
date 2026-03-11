@@ -52,17 +52,20 @@ async function navigateToRoundcube(
   }
 }
 
+// Uses emailTestPage (fixed user with persistent Stalwart mail principal)
+// because pipeline-scoped users may not have Stalwart principals yet,
+// causing OAUTHBEARER auth to fail during the Roundcube OIDC flow.
 test.describe('Email — Roundcube Basic', () => {
-  test('SSO login to Roundcube loads inbox', async ({ memberPage: page }) => {
-    await navigateToRoundcube(page, TEST_USERS.member.username, TEST_USERS.member.password);
+  test('SSO login to Roundcube loads inbox', async ({ emailTestPage: page }) => {
+    await navigateToRoundcube(page, TEST_USERS.emailTest.username, TEST_USERS.emailTest.password);
 
     await expect(
       page.locator(ROUNDCUBE_INBOX).first(),
     ).toBeVisible({ timeout: 30_000 });
   });
 
-  test('keyboard shortcuts plugin is active', async ({ memberPage: page }) => {
-    await navigateToRoundcube(page, TEST_USERS.member.username, TEST_USERS.member.password);
+  test('keyboard shortcuts plugin is active', async ({ emailTestPage: page }) => {
+    await navigateToRoundcube(page, TEST_USERS.emailTest.username, TEST_USERS.emailTest.password);
 
     // The keyboard_shortcuts plugin injects a link with id "keyboard_shortcuts_link"
     await expect(page.locator('#keyboard_shortcuts_link')).toBeAttached({ timeout: 10_000 });
@@ -80,8 +83,8 @@ test.describe('Email — Roundcube Basic', () => {
     expect(dialogText).toContain('Reply');
   });
 
-  test('can open compose form', async ({ memberPage: page }) => {
-    await navigateToRoundcube(page, TEST_USERS.member.username, TEST_USERS.member.password);
+  test('can open compose form', async ({ emailTestPage: page }) => {
+    await navigateToRoundcube(page, TEST_USERS.emailTest.username, TEST_USERS.emailTest.password);
 
     // Click compose button
     await page.locator('button:has-text("Compose"), a.compose, [data-command="compose"]').first().click();
