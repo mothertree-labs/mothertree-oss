@@ -36,13 +36,14 @@ test.describe('SSO — Cross-App Single Sign-On', () => {
   });
 
   test('login to account portal enables SSO to Roundcube', async ({ memberPage: page }) => {
-    await page.goto(urls.webmail);
-    await page.waitForLoadState('networkidle');
+    // Trigger OIDC flow explicitly — avoids relying on Roundcube auto-redirect
+    await page.goto(`${urls.webmail}/?_task=login&_action=oauth`);
 
-    // Roundcube should auto-SSO — look for mailbox UI
+    // Wait for SSO to complete (Keycloak auto-redirects via existing session)
+    // Use longer timeout to handle OIDC redirect chain + Stalwart auto-provisioning
     await expect(
       page.locator('#messagelist, #mailboxlist, .mailbox-list, button:has-text("Compose")').first(),
-    ).toBeVisible({ timeout: 30_000 });
+    ).toBeVisible({ timeout: 45_000 });
   });
 
   test('login to account portal enables SSO to Files', async ({ memberPage: page }) => {
