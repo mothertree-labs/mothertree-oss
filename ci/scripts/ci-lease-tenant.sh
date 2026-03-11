@@ -118,17 +118,25 @@ fi
 
 EMAIL_DOMAIN="${E2E_BASE_DOMAIN}"
 
-# User definitions: name_suffix password is_admin
-USERS=(
+# Pipeline-scoped users: created per build, cleaned up on release.
+# These are isolated per pipeline to allow parallel builds.
+PIPELINE_USERS=(
   "admin:e2e-testpass-admin:true"
   "member:e2e-testpass-member:false"
-  "mailrt:e2e-testpass-mailrt:false"
-  "mailrcv:e2e-testpass-mailrcv:false"
+)
+
+# Fixed (persistent) mail users: NOT pipeline-scoped.
+# These must be permanent because:
+# - Echo group membership requires known, pre-existing addresses
+# - IMAP master-user auth requires pre-existing Stalwart mail principals
+# - The pool lease system ensures single-tenancy, so fixed users are safe
+FIXED_USERS=(
+  "e2e-mailrt:e2e-testpass-mailrt:false"
+  "e2e-mailrcv:e2e-testpass-mailrcv:false"
 )
 
 create_user() {
-  local suffix="$1" password="$2" is_admin="$3"
-  local username="${PREFIX}-${suffix}"
+  local username="$1" password="$2" is_admin="$3"
   local email="${username}@${EMAIL_DOMAIN}"
 
   echo -n "  Creating ${username}... "
@@ -215,9 +223,16 @@ print(json.dumps({
   fi
 }
 
-for user_spec in "${USERS[@]}"; do
+# Create pipeline-scoped users (ephemeral, cleaned up on release)
+for user_spec in "${PIPELINE_USERS[@]}"; do
   IFS=: read -r suffix password is_admin <<< "$user_spec"
-  create_user "$suffix" "$password" "$is_admin"
+  create_user "${PREFIX}-${suffix}" "$password" "$is_admin"
+done
+
+# Ensure fixed mail users exist (persistent, NOT cleaned up on release)
+for user_spec in "${FIXED_USERS[@]}"; do
+  IFS=: read -r username password is_admin <<< "$user_spec"
+  create_user "$username" "$password" "$is_admin"
 done
 
 echo ""
