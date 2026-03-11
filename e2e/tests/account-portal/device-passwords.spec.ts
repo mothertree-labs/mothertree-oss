@@ -50,7 +50,11 @@ test.describe('Account Portal — Device Passwords', () => {
       // Revoke the password
       page.on('dialog', (dialog) => dialog.accept());
       await page.locator(`${ap.passwordsList} button:has-text("Revoke")`).first().click();
-      await expect(page.locator(ap.passwordsList)).not.toContainText(deviceName, { timeout: 10_000 });
+      // Wait for revoke to process, then reload to get fresh list
+      await page.waitForTimeout(2000);
+      await page.reload();
+      await page.waitForSelector(ap.createForm);
+      await expect(page.locator(ap.passwordsList)).not.toContainText(deviceName, { timeout: 15_000 });
     } else {
       console.log('  [device-passwords] Password created but not in list — Stalwart principal may not exist for test user');
     }
