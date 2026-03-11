@@ -129,9 +129,14 @@ envsubst < "$REPO_ROOT/apps/manifests/account-portal/ingress.yaml.tpl" | kubectl
 # Apply deployment
 envsubst < "$REPO_ROOT/apps/manifests/account-portal/deployment.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
 
-# Deploy HPA for account-portal auto-scaling
-envsubst < "$REPO_ROOT/apps/manifests/account-portal/account-portal-hpa.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
-print_status "Account Portal HPA deployed (CPU 80% threshold)"
+# Deploy HPA for account-portal auto-scaling (only if min != max replicas)
+if [ "$ACCOUNT_PORTAL_MIN_REPLICAS" != "$ACCOUNT_PORTAL_MAX_REPLICAS" ]; then
+  envsubst < "$REPO_ROOT/apps/manifests/account-portal/account-portal-hpa.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+  print_status "Account Portal HPA deployed (CPU 80% threshold)"
+else
+  kubectl delete hpa account-portal-hpa -n "$NS_ADMIN" --ignore-not-found >/dev/null 2>&1
+  print_status "Account Portal: fixed replicas ($ACCOUNT_PORTAL_MIN_REPLICAS), HPA removed"
+fi
 
 # Restart to pick up any secret or image changes
 print_status "Restarting Account Portal deployment..."

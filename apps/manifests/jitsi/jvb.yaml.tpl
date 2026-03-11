@@ -238,11 +238,11 @@ spec:
           httpGet:
             path: /about/health
             port: 8080
-        # Memory tuned based on actual usage (~250Mi observed idle)
+        # Memory tuned based on actual usage (~210Mi observed idle)
         resources:
           requests:
             cpu: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
-            memory: 300Mi
+            memory: 256Mi
           limits:
             memory: 2Gi
       volumes:

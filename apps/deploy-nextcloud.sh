@@ -1152,7 +1152,7 @@ else
     print_warning "Grafana dashboard configmap not found, skipping"
 fi
 
-# Step 11: HPA managed by chart (hpa.enabled=true in values)
+# Step 11: HPA management
 # Clean up the old custom HPA if it exists from a previous deploy
 if kubectl get hpa nextcloud-hpa -n "$NS_FILES" &>/dev/null; then
     print_status "Removing old custom HPA (now managed by chart)..."
@@ -1160,13 +1160,13 @@ if kubectl get hpa nextcloud-hpa -n "$NS_FILES" &>/dev/null; then
     print_success "Old custom HPA removed"
 fi
 
-# Patch the chart's HPA with scaleDown stabilization window.
-# The chart's HPA template (autoscaling/v1) doesn't support behavior config,
-# so we patch it post-deploy via server-side apply with a dedicated field manager.
-# Using SSA (Apply operation) instead of kubectl patch (Update operation) avoids
-# field manager conflicts with Helm's SSA on .spec.maxReplicas.
-print_status "Patching HPA scaleDown stabilization window (${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}s)..."
-kubectl apply --server-side --field-manager=nextcloud-hpa-behavior --force-conflicts -f - <<EOF
+if [ "$NEXTCLOUD_MIN_REPLICAS" != "$NEXTCLOUD_MAX_REPLICAS" ]; then
+    # HPA managed by chart (hpa.enabled=true in values)
+    # Patch the chart's HPA with scaleDown stabilization window.
+    # The chart's HPA template (autoscaling/v1) doesn't support behavior config,
+    # so we patch it post-deploy via server-side apply with a dedicated field manager.
+    print_status "Patching HPA scaleDown stabilization window (${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}s)..."
+    kubectl apply --server-side --field-manager=nextcloud-hpa-behavior --force-conflicts -f - <<EOF
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -1183,7 +1183,12 @@ spec:
     scaleDown:
       stabilizationWindowSeconds: ${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}
 EOF
-print_success "Nextcloud HPA managed by chart (CPU 80%, min=${NEXTCLOUD_MIN_REPLICAS}, max=${NEXTCLOUD_MAX_REPLICAS}, scaleDown window=${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}s)"
+    print_success "Nextcloud HPA managed by chart (CPU 80%, min=${NEXTCLOUD_MIN_REPLICAS}, max=${NEXTCLOUD_MAX_REPLICAS}, scaleDown window=${NEXTCLOUD_HPA_SCALEDOWN_WINDOW}s)"
+else
+    # Fixed replicas — remove any chart-created HPA
+    kubectl delete hpa nextcloud -n "$NS_FILES" --ignore-not-found >/dev/null 2>&1
+    print_status "Nextcloud: fixed replicas ($NEXTCLOUD_MIN_REPLICAS), HPA removed"
+fi
 
 # Migration notice: old PVC
 if [ -n "${PVC_EXISTS:-}" ]; then

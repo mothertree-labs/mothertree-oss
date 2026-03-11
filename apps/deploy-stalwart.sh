@@ -223,10 +223,15 @@ print_status "Applying Stalwart manifests..."
 envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" | kubectl apply -f -
 print_success "Stalwart Deployment and Service applied"
 
-# Deploy HorizontalPodAutoscaler (HPA) for auto-scaling
-print_status "Deploying HPA for Stalwart..."
-envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-hpa.yaml.tpl" | kubectl apply -f -
-print_success "Stalwart HPA deployed (CPU 80% threshold)"
+# Deploy HorizontalPodAutoscaler (HPA) for auto-scaling (only if min != max replicas)
+if [ "$STALWART_MIN_REPLICAS" != "$STALWART_MAX_REPLICAS" ]; then
+  print_status "Deploying HPA for Stalwart..."
+  envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-hpa.yaml.tpl" | kubectl apply -f -
+  print_success "Stalwart HPA deployed (CPU 80% threshold)"
+else
+  kubectl delete hpa stalwart-hpa -n "$NS_MAIL" --ignore-not-found >/dev/null 2>&1
+  print_status "Stalwart: fixed replicas ($STALWART_MIN_REPLICAS), HPA removed"
+fi
 
 # Apply public ingress for webmail
 envsubst < "$REPO_ROOT/apps/manifests/stalwart/ingress.yaml.tpl" | kubectl apply -f -

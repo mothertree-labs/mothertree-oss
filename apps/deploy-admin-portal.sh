@@ -175,9 +175,14 @@ envsubst < "$REPO_ROOT/apps/manifests/admin-portal/ingress.yaml.tpl" | kubectl a
 # Apply deployment
 envsubst < "$REPO_ROOT/apps/manifests/admin-portal/deployment.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
 
-# Deploy HPA for admin-portal auto-scaling
-envsubst < "$REPO_ROOT/apps/manifests/admin-portal/admin-portal-hpa.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
-print_status "Admin Portal HPA deployed (CPU 80% threshold)"
+# Deploy HPA for admin-portal auto-scaling (only if min != max replicas)
+if [ "$ADMIN_PORTAL_MIN_REPLICAS" != "$ADMIN_PORTAL_MAX_REPLICAS" ]; then
+  envsubst < "$REPO_ROOT/apps/manifests/admin-portal/admin-portal-hpa.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+  print_status "Admin Portal HPA deployed (CPU 80% threshold)"
+else
+  kubectl delete hpa admin-portal-hpa -n "$NS_ADMIN" --ignore-not-found >/dev/null 2>&1
+  print_status "Admin Portal: fixed replicas ($ADMIN_PORTAL_MIN_REPLICAS), HPA removed"
+fi
 
 # Restart ALL secret consumers together to ensure password consistency.
 print_status "Restarting Redis and Admin Portal to pick up secrets..."

@@ -152,11 +152,11 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 15
             failureThreshold: 3
-          # Memory INCREASED based on actual usage (~385Mi observed)
+          # Memory tuned: actual usage ~375Mi steady state
           resources:
             requests:
               cpu: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
-              memory: 512Mi
+              memory: 400Mi
             limits:
               memory: 1Gi
           securityContext:
