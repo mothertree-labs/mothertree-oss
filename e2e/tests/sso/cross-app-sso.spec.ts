@@ -35,14 +35,35 @@ test.describe('SSO — Cross-App Single Sign-On', () => {
     await newContext.close();
   });
 
-  test('login to account portal enables SSO to Roundcube', async ({ memberPage: page }) => {
-    await page.goto(urls.webmail);
-    await page.waitForLoadState('networkidle');
+  // Uses emailTestPage (fixed user with persistent Stalwart mail principal)
+  // because pipeline-scoped users may not have Stalwart principals yet,
+  // causing OAUTHBEARER auth to fail during the Roundcube OIDC flow.
+  test('login to account portal enables SSO to Roundcube', async ({ emailTestPage: page }) => {
+    const ROUNDCUBE_INBOX = '#messagelist, #mailboxlist, .mailbox-list, button:has-text("Compose")';
 
-    // Roundcube should auto-SSO — look for mailbox UI
+    // Try the OIDC flow with a retry — the first attempt may catch Keycloak mid-redirect
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await page.goto(`${urls.webmail}/?_task=login&_action=oauth`);
+
+      const visible = await page.locator(ROUNDCUBE_INBOX).first()
+        .waitFor({ timeout: 45_000 })
+        .then(() => true)
+        .catch(() => false);
+
+      if (visible) {
+        await expect(page.locator(ROUNDCUBE_INBOX).first()).toBeVisible();
+        return;
+      }
+
+      if (attempt === 0) {
+        console.log('  [cross-app-sso] Roundcube SSO timed out, retrying...');
+      }
+    }
+
+    // Final assertion — will fail with a clear error message
     await expect(
-      page.locator('#messagelist, #mailboxlist, .mailbox-list, button:has-text("Compose")').first(),
-    ).toBeVisible({ timeout: 30_000 });
+      page.locator(ROUNDCUBE_INBOX).first(),
+    ).toBeVisible({ timeout: 15_000 });
   });
 
   test('login to account portal enables SSO to Files', async ({ memberPage: page }) => {

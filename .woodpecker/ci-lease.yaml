@@ -1,0 +1,36 @@
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+
+clone:
+  - name: clone
+    image: woodpeckerci/plugin-git
+    settings:
+      recursive: false
+
+steps:
+  - name: lease-tenant
+    image: bash
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL1_KC_REALM:
+        from_secret: e2e_pool1_kc_realm
+      E2E_POOL1_KC_CLIENT_SECRET:
+        from_secret: e2e_pool1_kc_client_secret
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+      E2E_POOL2_KC_REALM:
+        from_secret: e2e_pool2_kc_realm
+      E2E_POOL2_KC_CLIENT_SECRET:
+        from_secret: e2e_pool2_kc_client_secret
+    commands:
+      - ci/scripts/ci-lease-tenant.sh

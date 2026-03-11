@@ -148,10 +148,12 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
     }
   });
 
+  // Uses emailTest (fixed user with persistent Stalwart principal) as
+  // organizer because IMAP master-user auth requires the principal to exist.
   test('incoming external REPLY updates attendee PARTSTAT in organizer CalDAV', async ({
-    memberPage,
+    emailTestPage,
   }) => {
-    const organizer = TEST_USERS.member;
+    const organizer = TEST_USERS.emailTest;
     const timestamp = Date.now();
     const uid = `e2e-ext-reply-${timestamp}`;
     const summary = `E2E External Reply ${timestamp}`;
@@ -163,7 +165,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
 
     try {
       // Navigate organizer to calendar (establishes OIDC session for CalDAV)
-      organizerNcId = await loginToCalendar(memberPage, organizer);
+      organizerNcId = await loginToCalendar(emailTestPage, organizer);
       console.log(`Nextcloud user ID for organizer: ${organizerNcId}`);
 
       // Seed event in organizer's calendar via CalDAV PUT
@@ -182,10 +184,10 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
         dtend,
       });
 
-      await caldavPut(memberPage, organizerNcId, uid, seedIcal);
+      await caldavPut(emailTestPage, organizerNcId, uid, seedIcal);
 
       // Verify seed exists
-      const seeded = await caldavGet(memberPage, organizerNcId, uid);
+      const seeded = await caldavGet(emailTestPage, organizerNcId, uid);
       expect(seeded, 'Seeded event should exist in CalDAV').toBeTruthy();
 
       // Craft iTIP REPLY — external attendee accepts
@@ -218,7 +220,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
 
       // Poll CalDAV for PARTSTAT to update to ACCEPTED
       const updatedIcal = await pollForPartstat(
-        memberPage,
+        emailTestPage,
         organizerNcId,
         summary,
         externalAttendee,
@@ -229,7 +231,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
       expect(updatedIcal).toBeTruthy();
     } finally {
       if (organizerNcId) {
-        await caldavDelete(memberPage, organizerNcId, uid).catch((e) =>
+        await caldavDelete(emailTestPage, organizerNcId, uid).catch((e) =>
           console.warn('Cleanup: failed to delete event:', e.message),
         );
       }
@@ -307,10 +309,12 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
     expect(afterCancel, 'Event should be deleted after CANCEL').toBeNull();
   });
 
+  // Uses emailTest (fixed user with persistent Stalwart principal) as
+  // organizer because IMAP master-user auth requires the principal to exist.
   test('REPLY updates PARTSTAT even when CalDAV filename differs from event UID', async ({
-    memberPage,
+    emailTestPage,
   }) => {
-    const organizer = TEST_USERS.member;
+    const organizer = TEST_USERS.emailTest;
     const timestamp = Date.now();
     const uid = `e2e-ext-reply-fname-${timestamp}`;
     const summary = `E2E Reply Filename Mismatch ${timestamp}`;
@@ -325,7 +329,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
     let organizerNcId = '';
 
     try {
-      organizerNcId = await loginToCalendar(memberPage, organizer);
+      organizerNcId = await loginToCalendar(emailTestPage, organizer);
       console.log(`Nextcloud user ID for organizer: ${organizerNcId}`);
 
       // Seed event with a DIFFERENT filename than the VEVENT UID
@@ -345,7 +349,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
       });
 
       await caldavPutWithFilename(
-        memberPage,
+        emailTestPage,
         organizerNcId,
         caldavFilename,
         seedIcal,
@@ -353,7 +357,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
 
       // Verify seed exists via REPORT (not direct GET by UID)
       const seeded = await pollForEvent(
-        memberPage,
+        emailTestPage,
         organizerNcId,
         summary,
         10_000,
@@ -389,7 +393,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
 
       // Poll CalDAV for PARTSTAT to update to ACCEPTED
       const updatedIcal = await pollForPartstat(
-        memberPage,
+        emailTestPage,
         organizerNcId,
         summary,
         externalAttendee,
@@ -401,7 +405,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
     } finally {
       if (organizerNcId) {
         await caldavDeleteByFilename(
-          memberPage,
+          emailTestPage,
           organizerNcId,
           caldavFilename,
         ).catch((e) =>

@@ -2,14 +2,20 @@
  * Test user credentials for E2E tests.
  *
  * CI and local runs use DIFFERENT users to avoid conflicts:
- * - CI: e2e-admin, e2e-member, e2e-mailrt, e2e-mailrcv (permanent, never deleted)
- * - Local: e2e-local-admin, e2e-local-member, e2e-local-mailrt, e2e-local-mailrcv (transient, created/deleted per run)
+ * - CI: e2e-<pipeline>-admin, e2e-<pipeline>-member (pipeline-scoped, created/deleted per build)
+ * - Local: e2e-local-admin, e2e-local-member (transient, created/deleted per run)
  *
- * Passwords are the same for both — only the username prefix differs.
+ * Email users (emailTest, emailRecv) are FIXED across pipelines because:
+ * - Echo group membership requires known, pre-existing addresses
+ * - IMAP master-user auth requires pre-existing Stalwart mail principals
+ * - The pool lease system ensures single-tenancy, so fixed users are safe
  */
 
 const baseDomain = process.env.E2E_BASE_DOMAIN || 'dev.example.com';
-const prefix = process.env.CI ? 'e2e' : 'e2e-local';
+const pipelineNum = process.env.CI_PIPELINE_NUMBER || '';
+const prefix = process.env.CI
+  ? (pipelineNum ? `e2e-${pipelineNum}` : 'e2e')
+  : 'e2e-local';
 
 export const TEST_USERS = {
   admin: {
@@ -22,16 +28,17 @@ export const TEST_USERS = {
     password: 'e2e-testpass-member',
     email: `${prefix}-member@${baseDomain}`,
   },
+  /** Sender for email round-trip + calendar tests. Fixed (not pipeline-scoped). */
   emailTest: {
-    username: `${prefix}-mailrt`,
+    username: 'e2e-mailrt',
     password: 'e2e-testpass-mailrt',
-    email: `${prefix}-mailrt@${baseDomain}`,
+    email: `e2e-mailrt@${baseDomain}`,
   },
-  /** Receiver for email round-trip test — member of the echo group. */
+  /** Receiver for email round-trip test — member of the echo group. Fixed (not pipeline-scoped). */
   emailRecv: {
-    username: `${prefix}-mailrcv`,
+    username: 'e2e-mailrcv',
     password: 'e2e-testpass-mailrcv',
-    email: `${prefix}-mailrcv@${baseDomain}`,
+    email: `e2e-mailrcv@${baseDomain}`,
   },
 } as const;
 

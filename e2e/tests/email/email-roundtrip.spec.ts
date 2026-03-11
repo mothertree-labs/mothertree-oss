@@ -46,7 +46,7 @@ test.describe('Email — Round-Trip via Echo Group', () => {
     emailTestPage: senderPage,
     emailRecvPage: receiverPage,
   }) => {
-    test.setTimeout(40_000); // Email round-trip through external echo group needs extra time
+    test.setTimeout(180_000); // Email round-trip through external echo group can take 2+ minutes
 
     const sender = TEST_USERS.emailTest;
     const receiver = TEST_USERS.emailRecv;
