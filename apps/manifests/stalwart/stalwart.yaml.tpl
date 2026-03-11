@@ -84,15 +84,16 @@ data:
     protocol = "smtp"
     tls.implicit = true
 
-    # Inbound rate limits — override Stalwart defaults (5/1s per IP, 25/1h per sender)
-    # The defaults are too restrictive for a self-hosted platform where Roundcube is
-    # the primary client and connects from a single pod IP. During CI, parallel test
-    # shards trigger calendar invite + email round-trip tests concurrently, easily
-    # exceeding 5 connections/sec and causing "smtp.rate-limit-exceeded" rejections.
+    # Disable Stalwart's default inbound rate limits (5/1s per IP, 25/1h per sender).
+    # These are designed for public-facing mail servers but too restrictive for a
+    # self-hosted platform where Roundcube is the primary SMTP client (single pod IP)
+    # and CI parallel test shards send calendar invites + email tests concurrently.
+    # Defense in depth is provided by Postfix upstream (smtpd_client_connection_rate_limit)
+    # and by Stalwart's own session.rcpt.relay (only authenticated users can relay).
     [queue.limiter.inbound.ip]
-    rate = "100/1s"
+    enable = false
     [queue.limiter.inbound.sender]
-    rate = "100/1h"
+    enable = false
     
     # IMAP with implicit TLS (OAUTHBEARER via OIDC directory - used by Roundcube)
     [server.listener.imaps]
