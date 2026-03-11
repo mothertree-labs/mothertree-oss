@@ -265,30 +265,28 @@ print(json.dumps({
 }))
 ")
 
-  local response curl_err
-  curl_err=$(mktemp)
-  response=$(echo "$payload" | curl -s --connect-timeout 10 --max-time 15 -X POST \
+  local response http_code
+  response=$(echo "$payload" | curl -sS -k --connect-timeout 10 --max-time 15 \
+    -w '\n%{http_code}' -X POST \
     "${stalwart_url}/api/principal/deploy" \
     -H "Authorization: $admin_auth" \
     -H "Content-Type: application/json" \
-    -d @- 2>"$curl_err" || echo '{"error":"curl_failed"}')
+    -d @- 2>&1 || true)
 
-  if [[ "$response" == '{"error":"curl_failed"}' ]]; then
-    echo "failed ($(cat "$curl_err" | head -1))"
-    rm -f "$curl_err"
-    return 0
-  fi
-  rm -f "$curl_err"
+  # Extract HTTP status code from last line
+  http_code=$(echo "$response" | tail -1)
+  response=$(echo "$response" | sed '$d')
 
+  # Parse response for Stalwart API errors (all responses return HTTP 200)
   local error
   error=$(echo "$response" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null || true)
 
-  if [[ -z "$error" ]]; then
+  if [[ -z "$error" && "$http_code" =~ ^2[0-9][0-9]$ ]]; then
     echo "created"
   elif [[ "$error" == "fieldAlreadyExists" ]]; then
     echo "already exists"
   else
-    echo "skipped ($error — response: $response)"
+    echo "failed (HTTP $http_code: ${response:0:200})"
   fi
 }
 
