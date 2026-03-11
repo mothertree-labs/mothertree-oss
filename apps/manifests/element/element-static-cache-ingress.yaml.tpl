@@ -18,8 +18,14 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/priority: "15"
     nginx.ingress.kubernetes.io/configuration-snippet: |
-      proxy_hide_header Cache-Control;
-      add_header Cache-Control "public, max-age=31536000, immutable" always;
+      location /themes/ {
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "public, max-age=3600" always;
+      }
+    nginx.ingress.kubernetes.io/server-snippet: |
+      sub_filter_types text/html;
+      sub_filter '</head>' '<link rel="stylesheet" href="/themes/custom.css"></head>';
+      sub_filter_once true;
 spec:
   ingressClassName: nginx
   tls:
@@ -31,6 +37,13 @@ spec:
     http:
       paths:
       - path: /bundles/
+        pathType: Prefix
+        backend:
+          service:
+            name: element-web
+            port:
+              name: http
+      - path: /themes/
         pathType: Prefix
         backend:
           service:

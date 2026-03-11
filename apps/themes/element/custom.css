@@ -1,0 +1,19 @@
+/* Custom theme overrides for mothertree */
+.mx_TabbedView_tabLabel_active {
+  border-color: #6B7A5A !important;
+}
+.mx_TabbedView_tabLabel_active span,
+.mx_TabbedView_tabLabel_active svg {
+  color: #6B7A5A !important;
+  fill: #6B7A5A !important;
+}
+
+/* Dark theme */
+[class*="dark"] .mx_TabbedView_tabLabel_active {
+  border-color: #B8C4A0 !important;
+}
+[class*="dark"] .mx_TabbedView_tabLabel_active span,
+[class*="dark"] .mx_TabbedView_tabLabel_active svg {
+  color: #B8C4A0 !important;
+  fill: #B8C4A0 !important;
+}
