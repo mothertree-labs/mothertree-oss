@@ -11,8 +11,21 @@ import { TEST_USERS } from './test-users';
  */
 export async function handleNextcloudLogin(page: Page): Promise<void> {
   if (page.url().includes('auth.')) {
-    // Landed on Keycloak — complete the login flow
-    await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+    // May be on Keycloak mid-SSO-redirect — wait briefly for auto-redirect to complete
+    // before assuming we need to login manually.
+    const leftKeycloak = await page.waitForURL(
+      (url) => !url.hostname.startsWith('auth.'),
+      { timeout: 10_000 },
+    ).then(() => true).catch(() => false);
+
+    if (!leftKeycloak) {
+      // Still on Keycloak after 10s — needs manual login
+      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      await page.waitForLoadState('networkidle').catch(() => {});
+      return;
+    }
+
+    // Auto-redirect completed — wait for page to settle
     await page.waitForLoadState('networkidle').catch(() => {});
     return;
   }

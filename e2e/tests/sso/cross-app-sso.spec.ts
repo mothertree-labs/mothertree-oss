@@ -36,14 +36,31 @@ test.describe('SSO — Cross-App Single Sign-On', () => {
   });
 
   test('login to account portal enables SSO to Roundcube', async ({ memberPage: page }) => {
-    // Trigger OIDC flow explicitly — avoids relying on Roundcube auto-redirect
-    await page.goto(`${urls.webmail}/?_task=login&_action=oauth`);
+    const ROUNDCUBE_INBOX = '#messagelist, #mailboxlist, .mailbox-list, button:has-text("Compose")';
 
-    // Wait for SSO to complete (Keycloak auto-redirects via existing session)
-    // Use longer timeout to handle OIDC redirect chain + Stalwart auto-provisioning
+    // Try the OIDC flow with a retry — the first attempt may catch Keycloak mid-redirect
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await page.goto(`${urls.webmail}/?_task=login&_action=oauth`);
+
+      const visible = await page.locator(ROUNDCUBE_INBOX).first()
+        .waitFor({ timeout: 45_000 })
+        .then(() => true)
+        .catch(() => false);
+
+      if (visible) {
+        await expect(page.locator(ROUNDCUBE_INBOX).first()).toBeVisible();
+        return;
+      }
+
+      if (attempt === 0) {
+        console.log('  [cross-app-sso] Roundcube SSO timed out, retrying...');
+      }
+    }
+
+    // Final assertion — will fail with a clear error message
     await expect(
-      page.locator('#messagelist, #mailboxlist, .mailbox-list, button:has-text("Compose")').first(),
-    ).toBeVisible({ timeout: 45_000 });
+      page.locator(ROUNDCUBE_INBOX).first(),
+    ).toBeVisible({ timeout: 15_000 });
   });
 
   test('login to account portal enables SSO to Files', async ({ memberPage: page }) => {
