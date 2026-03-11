@@ -205,12 +205,19 @@ else
 fi
 print_success "y-provider applied successfully"
 
-# Step 8a: Deploy HorizontalPodAutoscalers (HPA) for auto-scaling
-print_status "Deploying HPAs for docs backend, frontend, and y-provider..."
-envsubst < "$REPO_ROOT/docs/backend-hpa.yaml.tpl" | kubectl apply -f -
-envsubst < "$REPO_ROOT/docs/frontend-hpa.yaml.tpl" | kubectl apply -f -
-envsubst < "$REPO_ROOT/docs/yprovider-hpa.yaml.tpl" | kubectl apply -f -
-print_success "Docs HPAs deployed (CPU 80% threshold)"
+# Step 8a: Deploy HorizontalPodAutoscalers (HPA) for auto-scaling (only if min != max replicas)
+if [ "$DOCS_BACKEND_MIN_REPLICAS" != "$DOCS_BACKEND_MAX_REPLICAS" ]; then
+  print_status "Deploying HPAs for docs backend, frontend, and y-provider..."
+  envsubst < "$REPO_ROOT/docs/backend-hpa.yaml.tpl" | kubectl apply -f -
+  envsubst < "$REPO_ROOT/docs/frontend-hpa.yaml.tpl" | kubectl apply -f -
+  envsubst < "$REPO_ROOT/docs/yprovider-hpa.yaml.tpl" | kubectl apply -f -
+  print_success "Docs HPAs deployed (CPU 80% threshold)"
+else
+  kubectl delete hpa backend-hpa -n "$NS_DOCS" --ignore-not-found >/dev/null 2>&1
+  kubectl delete hpa frontend-hpa -n "$NS_DOCS" --ignore-not-found >/dev/null 2>&1
+  kubectl delete hpa yprovider-hpa -n "$NS_DOCS" --ignore-not-found >/dev/null 2>&1
+  print_status "Docs: fixed replicas, HPAs removed"
+fi
 
 # Step 8b: Deploy Grafana dashboard for Docs monitoring
 print_status "Deploying Docs Grafana dashboard..."

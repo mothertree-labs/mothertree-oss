@@ -742,10 +742,15 @@ pushd "$REPO_ROOT/apps" >/dev/null
   done
 popd >/dev/null
 
-# Deploy Element HPA (deployed after helmfile because Element is a Helm release)
-print_status "Deploying Element HPA..."
-envsubst < "$REPO_ROOT/apps/manifests/element/element-hpa.yaml.tpl" | kubectl apply -f -
-print_status "Element HPA deployed (CPU 80% threshold)"
+# Deploy Element HPA (only if min != max replicas)
+if [ "$ELEMENT_MIN_REPLICAS" != "$ELEMENT_MAX_REPLICAS" ]; then
+  print_status "Deploying Element HPA..."
+  envsubst < "$REPO_ROOT/apps/manifests/element/element-hpa.yaml.tpl" | kubectl apply -f -
+  print_status "Element HPA deployed (CPU 80% threshold)"
+else
+  kubectl delete hpa element-hpa -n "$NS_MATRIX" --ignore-not-found >/dev/null 2>&1
+  print_status "Element: fixed replicas ($ELEMENT_MIN_REPLICAS), HPA removed"
+fi
 
 # Deploy Element static cache ingress (immutable cache for webpack bundles)
 print_status "Deploying Element static cache ingress..."
@@ -767,9 +772,14 @@ kubectl get ingress -n "$NS_AUTH" -l app=keycloak -o custom-columns='NAME:.metad
 print_status "Synapse Admin: deploying to $NS_MATRIX namespace..."
 export MATRIX_REGISTRATION_SHARED_SECRET="$SYNAPSE_REGISTRATION_SHARED_SECRET"
 envsubst < "$REPO_ROOT/apps/manifests/synapse-admin/synapse-admin.yaml.tpl" | kubectl apply -f -
-# Deploy HPA for synapse-admin auto-scaling
-envsubst < "$REPO_ROOT/apps/manifests/synapse-admin/synapse-admin-hpa.yaml.tpl" | kubectl apply -f -
-print_status "Synapse Admin HPA deployed (CPU 80% threshold)"
+# Deploy HPA for synapse-admin auto-scaling (only if min != max replicas)
+if [ "$SYNAPSE_ADMIN_MIN_REPLICAS" != "$SYNAPSE_ADMIN_MAX_REPLICAS" ]; then
+  envsubst < "$REPO_ROOT/apps/manifests/synapse-admin/synapse-admin-hpa.yaml.tpl" | kubectl apply -f -
+  print_status "Synapse Admin HPA deployed (CPU 80% threshold)"
+else
+  kubectl delete hpa synapse-admin-hpa -n "$NS_MATRIX" --ignore-not-found >/dev/null 2>&1
+  print_status "Synapse Admin: fixed replicas ($SYNAPSE_ADMIN_MIN_REPLICAS), HPA removed"
+fi
 kubectl -n "$NS_MATRIX" wait --for=condition=available deployment/synapse-admin --timeout=120s || print_warning "Synapse Admin may not be fully ready"
 print_status "Synapse Admin deployed to https://$SYNAPSE_ADMIN_HOST"
 

@@ -233,10 +233,15 @@ envsubst '${NS_WEBMAIL} ${NS_MAIL} ${AUTH_HOST} ${KEYCLOAK_REALM} ${KEYCLOAK_INT
     < "$REPO_ROOT/apps/manifests/roundcube/roundcube.yaml.tpl" | kubectl apply -f -
 print_success "Roundcube Deployment and Service applied"
 
-# Deploy HorizontalPodAutoscaler (HPA) for auto-scaling
-print_status "Deploying HPA for Roundcube..."
-envsubst < "$REPO_ROOT/apps/manifests/roundcube/roundcube-hpa.yaml.tpl" | kubectl apply -f -
-print_success "Roundcube HPA deployed (CPU 80% threshold)"
+# Deploy HorizontalPodAutoscaler (HPA) for auto-scaling (only if min != max replicas)
+if [ "$ROUNDCUBE_MIN_REPLICAS" != "$ROUNDCUBE_MAX_REPLICAS" ]; then
+  print_status "Deploying HPA for Roundcube..."
+  envsubst < "$REPO_ROOT/apps/manifests/roundcube/roundcube-hpa.yaml.tpl" | kubectl apply -f -
+  print_success "Roundcube HPA deployed (CPU 80% threshold)"
+else
+  kubectl delete hpa roundcube-hpa -n "$NS_WEBMAIL" --ignore-not-found >/dev/null 2>&1
+  print_status "Roundcube: fixed replicas ($ROUNDCUBE_MIN_REPLICAS), HPA removed"
+fi
 
 # Apply ingress for webmail
 envsubst < "$REPO_ROOT/apps/manifests/roundcube/ingress.yaml.tpl" | kubectl apply -f -

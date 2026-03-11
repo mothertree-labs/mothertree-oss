@@ -166,11 +166,17 @@ print_status "Deploying Jitsi metrics exporter..."
 envsubst < "$REPO_ROOT/apps/manifests/jitsi/jitsi-metrics-exporter.yaml" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 cat "$REPO_ROOT/apps/manifests/jitsi/jitsi-metrics-exporter-servicemonitor.yaml" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 
-# Deploy HorizontalPodAutoscalers (HPA) for auto-scaling
-print_status "Deploying HPAs for Jitsi web and JVB..."
-envsubst < "$REPO_ROOT/apps/manifests/jitsi/web-hpa.yaml.tpl" | kubectl apply -f -
-envsubst < "$REPO_ROOT/apps/manifests/jitsi/jvb-hpa.yaml.tpl" | kubectl apply -f -
-print_success "Jitsi HPAs deployed (CPU 80% threshold)"
+# Deploy HorizontalPodAutoscalers (HPA) for auto-scaling (only if min != max replicas)
+if [ "$JITSI_WEB_MIN_REPLICAS" != "$JITSI_WEB_MAX_REPLICAS" ]; then
+  print_status "Deploying HPAs for Jitsi web and JVB..."
+  envsubst < "$REPO_ROOT/apps/manifests/jitsi/web-hpa.yaml.tpl" | kubectl apply -f -
+  envsubst < "$REPO_ROOT/apps/manifests/jitsi/jvb-hpa.yaml.tpl" | kubectl apply -f -
+  print_success "Jitsi HPAs deployed (CPU 80% threshold)"
+else
+  kubectl delete hpa jitsi-web-hpa -n "$NS_JITSI" --ignore-not-found >/dev/null 2>&1
+  kubectl delete hpa jitsi-jvb-hpa -n "$NS_JITSI" --ignore-not-found >/dev/null 2>&1
+  print_status "Jitsi: fixed replicas, HPAs removed"
+fi
 
 print_success "Jitsi manifests applied to namespace $NS_JITSI"
 

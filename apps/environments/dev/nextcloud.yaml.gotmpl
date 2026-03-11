@@ -1,10 +1,18 @@
 # Nextcloud Dev Environment Configuration
 # Uses environment variables for multi-tenant support
 
-# HPA scaling bounds from tenant config
+# HPA scaling: disable when min == max (fixed replicas), enable otherwise
+{{ $ncMin := env "NEXTCLOUD_MIN_REPLICAS" }}
+{{ $ncMax := env "NEXTCLOUD_MAX_REPLICAS" }}
+{{ if eq $ncMin $ncMax }}
 hpa:
-  minPods: {{ env "NEXTCLOUD_MIN_REPLICAS" }}
-  maxPods: {{ env "NEXTCLOUD_MAX_REPLICAS" }}
+  enabled: false
+replicaCount: {{ $ncMin }}
+{{ else }}
+hpa:
+  minPods: {{ $ncMin }}
+  maxPods: {{ $ncMax }}
+{{ end }}
 
 # Resource requests from tenant config (overrides base values)
 resources:

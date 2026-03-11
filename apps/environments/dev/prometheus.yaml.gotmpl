@@ -68,6 +68,10 @@ alertmanager:
         - match:
             alertname: InfoInhibitor
           receiver: 'null'
+        # Dev has no read replica — silence this known condition
+        - match:
+            alertname: PostgreSQLReadReplicaDown
+          receiver: 'null'
         # Critical alerts: email + Matrix, notify immediately and more frequently
         - match:
             severity: critical
