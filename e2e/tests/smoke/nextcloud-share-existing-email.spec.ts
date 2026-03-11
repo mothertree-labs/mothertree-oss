@@ -110,6 +110,11 @@ test.describe('Smoke — Nextcloud Share With Existing Email', () => {
   test('sharees API returns email option for known user email', async ({
     memberPage: page,
   }) => {
+    // TODO: Fix for pipeline-scoped users — user_oidc doesn't populate email in
+    // Nextcloud's DB on first login, so getByEmail() returns empty.
+    // https://github.com/mothertree-labs/mothertree-oss/issues/184
+    test.skip(!!process.env.CI, 'Skipped in CI: pipeline-scoped users not found by getByEmail (#184)');
+
     await loginToNextcloud(page);
 
     // The member user is now logged into Nextcloud, so their email is known.
