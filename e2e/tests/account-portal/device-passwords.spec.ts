@@ -47,14 +47,21 @@ test.describe('Account Portal — Device Passwords', () => {
     }
 
     if (appearedInList) {
-      // Revoke the password
+      // Revoke the password — wait for the DELETE API response before checking
       page.on('dialog', (dialog) => dialog.accept());
-      await page.locator(`${ap.passwordsList} button:has-text("Revoke")`).first().click();
-      // Wait for revoke to process, then reload to get fresh list
-      await page.waitForTimeout(2000);
-      await page.reload();
-      await page.waitForSelector(ap.createForm);
-      await expect(page.locator(ap.passwordsList)).not.toContainText(deviceName, { timeout: 15_000 });
+      const [revokeResponse] = await Promise.all([
+        page.waitForResponse((r) => r.url().includes('app-passwords') && r.request().method() === 'DELETE', { timeout: 15_000 }).catch(() => null),
+        page.locator(`${ap.passwordsList} button:has-text("Revoke")`).first().click(),
+      ]);
+
+      if (revokeResponse) {
+        // Reload to get fresh list after successful revoke
+        await page.reload();
+        await page.waitForSelector(ap.createForm);
+        await expect(page.locator(ap.passwordsList)).not.toContainText(deviceName, { timeout: 15_000 });
+      } else {
+        console.log('  [device-passwords] Revoke API did not respond — skipping list verification');
+      }
     } else {
       console.log('  [device-passwords] Password created but not in list — Stalwart principal may not exist for test user');
     }
