@@ -77,12 +77,22 @@ data:
     bind = ["[::]:587"]
     protocol = "smtp"
     tls.implicit = false
-    
+
     # SMTP submission with implicit TLS
     [server.listener.submissions]
     bind = ["[::]:465"]
     protocol = "smtp"
     tls.implicit = true
+
+    # Inbound rate limits — override Stalwart defaults (5/1s per IP, 25/1h per sender)
+    # The defaults are too restrictive for a self-hosted platform where Roundcube is
+    # the primary client and connects from a single pod IP. During CI, parallel test
+    # shards trigger calendar invite + email round-trip tests concurrently, easily
+    # exceeding 5 connections/sec and causing "smtp.rate-limit-exceeded" rejections.
+    [queue.limiter.inbound.ip]
+    rate = "100/1s"
+    [queue.limiter.inbound.sender]
+    rate = "100/1h"
     
     # IMAP with implicit TLS (OAUTHBEARER via OIDC directory - used by Roundcube)
     [server.listener.imaps]
@@ -272,7 +282,7 @@ data:
                   "server.*", "authentication.fallback-admin.*", "authentication.master.*",
                   "cluster.*", "config.local-keys.*", "storage.data", "storage.blob",
                   "storage.lookup", "storage.fts", "storage.directory", "certificate.*",
-                  "session.rcpt.*", "queue.strategy.*", "queue.route.*", "oauth.*",
+                  "session.rcpt.*", "queue.strategy.*", "queue.route.*", "queue.limiter.*", "oauth.*",
                   "spam.*", "spam-filter.list.*",
                   "auth.iprev.*", "auth.spf.*", "auth.dkim.*", "auth.dmarc.*"]
 
