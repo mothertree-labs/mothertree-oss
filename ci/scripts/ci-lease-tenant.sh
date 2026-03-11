@@ -248,8 +248,12 @@ ensure_stalwart_principal() {
 
   echo -n "  Provisioning ${username}... "
 
-  local response
-  response=$(CI_USER="$username" CI_EMAIL="$email" python3 -c "
+  local stalwart_url="https://mail.${E2E_BASE_DOMAIN}"
+  local admin_auth
+  admin_auth="Basic $(printf 'admin:%s' "$E2E_STALWART_ADMIN_PASSWORD" | base64)"
+
+  local payload
+  payload=$(CI_USER="$username" CI_EMAIL="$email" python3 -c "
 import json, os
 print(json.dumps({
   'type': 'individual',
@@ -259,11 +263,22 @@ print(json.dumps({
   'roles': ['user'],
   'secrets': []
 }))
-" | curl -s --connect-timeout 10 --max-time 15 -X POST \
-    "https://mail.${E2E_BASE_DOMAIN}/api/principal/deploy" \
-    -H "Authorization: Basic $(printf 'admin:%s' "$E2E_STALWART_ADMIN_PASSWORD" | base64)" \
+")
+
+  local response curl_err
+  curl_err=$(mktemp)
+  response=$(echo "$payload" | curl -s --connect-timeout 10 --max-time 15 -X POST \
+    "${stalwart_url}/api/principal/deploy" \
+    -H "Authorization: $admin_auth" \
     -H "Content-Type: application/json" \
-    -d @- 2>/dev/null || echo '{"error":"connection_failed"}')
+    -d @- 2>"$curl_err" || echo '{"error":"curl_failed"}')
+
+  if [[ "$response" == '{"error":"curl_failed"}' ]]; then
+    echo "failed ($(cat "$curl_err" | head -1))"
+    rm -f "$curl_err"
+    return 0
+  fi
+  rm -f "$curl_err"
 
   local error
   error=$(echo "$response" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null || true)
@@ -273,13 +288,15 @@ print(json.dumps({
   elif [[ "$error" == "fieldAlreadyExists" ]]; then
     echo "already exists"
   else
-    echo "skipped ($error)"
+    echo "skipped ($error — response: $response)"
   fi
 }
 
 if [[ -n "${E2E_STALWART_ADMIN_PASSWORD:-}" ]]; then
   echo ""
   echo "--- Pre-provisioning Stalwart mail principals"
+  echo "  Stalwart URL: https://mail.${E2E_BASE_DOMAIN}"
+  echo "  DNS check: $(getent hosts "mail.${E2E_BASE_DOMAIN}" 2>/dev/null | head -1 || echo 'resolution failed')"
   for user_spec in "${PIPELINE_USERS[@]}"; do
     IFS=: read -r suffix _password _is_admin <<< "$user_spec"
     ensure_stalwart_principal "${PREFIX}-${suffix}"
