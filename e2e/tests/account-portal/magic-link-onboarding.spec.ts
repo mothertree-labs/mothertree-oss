@@ -83,15 +83,25 @@ test.describe('Magic Link — Onboarding', () => {
         },
       });
 
-      // Verify virtual authenticator is set up (can create credentials)
-      // Note: isUserVerifyingPlatformAuthenticatorAvailable() may return false
-      // in headless Chrome even with a virtual authenticator — this is a known
-      // browser limitation. The virtual authenticator still works for actual
-      // credential creation/authentication. In a real browser with platform
-      // authenticator support, our detection JS in the FTL template will
-      // correctly show the normal passkey UI.
-      const authenticators = await cdpSession.send('WebAuthn.getVirtualAuthenticators');
-      expect(authenticators.authenticators.length).toBeGreaterThan(0);
+      // Verify virtual authenticator was successfully registered by checking
+      // it returned an authenticatorId. Note: isUserVerifyingPlatformAuthenticatorAvailable()
+      // may return false in headless Chrome even with a virtual authenticator — this is
+      // a known browser limitation. The virtual authenticator still works for actual
+      // credential creation/authentication.
+      const result = await cdpSession.send('WebAuthn.addVirtualAuthenticator', {
+        options: {
+          protocol: 'ctap2',
+          transport: 'usb',
+          hasResidentKey: false,
+          hasUserVerification: false,
+          isUserVerified: false,
+        },
+      });
+      // If we got here without error, WebAuthn virtual env is working
+      expect(result.authenticatorId).toBeTruthy();
+      await cdpSession.send('WebAuthn.removeVirtualAuthenticator', {
+        authenticatorId: result.authenticatorId,
+      });
     } finally {
       await context.close();
     }
