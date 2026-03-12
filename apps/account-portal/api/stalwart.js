@@ -56,6 +56,7 @@ async function ensureUserExists(email, name, quotaBytes) {
     emails: [email],
     description: name || '',
     secrets: [],
+    roles: ['user'],
   };
   if (quotaBytes) {
     body.quota = quotaBytes;

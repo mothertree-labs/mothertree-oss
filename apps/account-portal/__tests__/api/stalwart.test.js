@@ -65,6 +65,7 @@ describe('stalwart.js', () => {
       expect(body.type).toBe('individual');
       expect(body.name).toBe('bob@example.com');
       expect(body.emails).toEqual(['bob@example.com']);
+      expect(body.roles).toEqual(['user']);
       expect(body.quota).toBe(1073741824);
     });
 
