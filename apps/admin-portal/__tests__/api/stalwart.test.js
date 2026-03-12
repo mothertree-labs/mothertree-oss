@@ -73,6 +73,7 @@ describe('ensureUserExists', () => {
     expect(body.name).toBe('new@test.com');
     expect(body.emails).toEqual(['new@test.com']);
     expect(body.description).toBe('New User');
+    expect(body.roles).toEqual(['user']);
     expect(body.quota).toBe(1073741824);
 
     // Verify reload was called
