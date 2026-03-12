@@ -33,10 +33,6 @@ async function roundcubeLogin(page: import('@playwright/test').Page, username: s
 }
 
 test.describe('Email — Round-Trip via Echo Group', () => {
-  test('echoGroupAddress must be configured', () => {
-    expect(echoGroupAddress, 'Set E2E_ECHO_GROUP_ADDRESS env var or echoGroupAddress in e2e.config.json').toBeTruthy();
-  });
-
   // This test verifies the full email path: outbound (Roundcube → Stalwart → Postfix → internet)
   // and inbound (internet → Postfix → Stalwart → inbox). It sends from one user (e2e-mailrt)
   // to an external echo group, which forwards to a different user (e2e-mailrcv) who is a
@@ -47,6 +43,10 @@ test.describe('Email — Round-Trip via Echo Group', () => {
     emailRecvPage: receiverPage,
   }) => {
     test.setTimeout(180_000); // Email round-trip through external echo group can take 2+ minutes
+
+    // Fail fast with a clear message if echoGroupAddress is not configured
+    expect(echoGroupAddress, 'Set E2E_ECHO_GROUP_ADDRESS env var or echoGroupAddress in e2e.config.json').toBeTruthy();
+    expect(echoGroupAddress, 'echoGroupAddress must be a valid email, got: ' + echoGroupAddress).toContain('@');
 
     const sender = TEST_USERS.emailTest;
     const receiver = TEST_USERS.emailRecv;
@@ -59,6 +59,7 @@ test.describe('Email — Round-Trip via Echo Group', () => {
     await subjectInput.waitFor({ timeout: 15_000 });
 
     const toInput = senderPage.locator('.recipient-input input').first();
+    await toInput.waitFor({ state: 'visible', timeout: 10_000 });
     await toInput.click();
     await toInput.pressSequentially(echoGroupAddress);
     await toInput.press('Enter');
