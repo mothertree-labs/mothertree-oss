@@ -205,8 +205,8 @@ REALM_CONFIG=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM" \
 
 # Update SMTP settings
 UPDATED_REALM=$(echo "$REALM_CONFIG" | jq --arg fromEmail "noreply@$TENANT_DOMAIN" '.smtpServer = {
-    "host": "postfix.infra-mail.svc.cluster.local",
-    "port": "25",
+    "host": "postfix-internal.infra-mail.svc.cluster.local",
+    "port": "587",
     "from": $fromEmail,
     "fromDisplayName": "MotherTree",
     "replyTo": ("support@" + .realm),
@@ -735,7 +735,7 @@ echo "Configuration:"
 echo "  Admin Portal:   client_id=admin-portal   redirect=https://$ADMIN_HOST/*"
 echo "  Account Portal: client_id=account-portal redirect=https://$ACCOUNT_HOST/*"
 echo "  Auth flow: passkey browser (supports passkey + password)"
-echo "  SMTP: postfix.infra-mail.svc.cluster.local:25"
+echo "  SMTP: postfix-internal.infra-mail.svc.cluster.local:587"
 echo ""
 echo "Next steps:"
 echo "  1. Deploy admin portal: ./scripts/create_env -e $MT_ENV -t $MT_TENANT"

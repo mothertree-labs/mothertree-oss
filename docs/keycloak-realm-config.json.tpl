@@ -27,8 +27,8 @@
   "webAuthnPolicyPasswordlessAvoidSameAuthenticatorRegister": false,
   "webAuthnPolicyPasswordlessAcceptableAaguids": [],
   "smtpServer": {
-    "host": "postfix.infra-mail.svc.cluster.local",
-    "port": "25",
+    "host": "postfix-internal.infra-mail.svc.cluster.local",
+    "port": "587",
     "from": "noreply@${TENANT_DOMAIN}",
     "fromDisplayName": "${TENANT_DISPLAY_NAME}",
     "replyTo": "noreply@${TENANT_DOMAIN}",
