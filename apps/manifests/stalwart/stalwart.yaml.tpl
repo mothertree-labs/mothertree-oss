@@ -77,12 +77,23 @@ data:
     bind = ["[::]:587"]
     protocol = "smtp"
     tls.implicit = false
-    
+
     # SMTP submission with implicit TLS
     [server.listener.submissions]
     bind = ["[::]:465"]
     protocol = "smtp"
     tls.implicit = true
+
+    # Disable Stalwart's default inbound rate limits (5/1s per IP, 25/1h per sender).
+    # These are designed for public-facing mail servers but too restrictive for a
+    # self-hosted platform where Roundcube is the primary SMTP client (single pod IP)
+    # and CI parallel test shards send calendar invites + email tests concurrently.
+    # Defense in depth is provided by Postfix upstream (smtpd_client_connection_rate_limit)
+    # and by Stalwart's own session.rcpt.relay (only authenticated users can relay).
+    [queue.limiter.inbound.ip]
+    enable = false
+    [queue.limiter.inbound.sender]
+    enable = false
     
     # IMAP with implicit TLS (OAUTHBEARER via OIDC directory - used by Roundcube)
     [server.listener.imaps]
@@ -272,7 +283,7 @@ data:
                   "server.*", "authentication.fallback-admin.*", "authentication.master.*",
                   "cluster.*", "config.local-keys.*", "storage.data", "storage.blob",
                   "storage.lookup", "storage.fts", "storage.directory", "certificate.*",
-                  "session.rcpt.*", "queue.strategy.*", "queue.route.*", "oauth.*",
+                  "session.rcpt.*", "queue.strategy.*", "queue.route.*", "queue.limiter.*", "oauth.*",
                   "spam.*", "spam-filter.list.*",
                   "auth.iprev.*", "auth.spf.*", "auth.dkim.*", "auth.dmarc.*"]
 
