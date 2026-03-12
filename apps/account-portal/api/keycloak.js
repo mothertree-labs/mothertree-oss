@@ -717,7 +717,7 @@ async function sendExecuteActionsEmail(userId, redirectUri) {
 async function removeRequiredAction(userId, actionAlias) {
   validateUserId(userId);
   const token = await getServiceToken();
-  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
+  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}`;
 
   const response = await fetch(userUrl, {
     headers: { 'Authorization': `Bearer ${token}` },
@@ -756,7 +756,7 @@ async function removeRequiredAction(userId, actionAlias) {
 async function addRequiredAction(userId, actionAlias) {
   validateUserId(userId);
   const token = await getServiceToken();
-  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
+  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}`;
 
   const response = await fetch(userUrl, {
     headers: { 'Authorization': `Bearer ${token}` },

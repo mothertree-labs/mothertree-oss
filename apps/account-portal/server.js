@@ -641,14 +641,22 @@ app.get('/switch-to-magic-link', async (req, res) => {
     return res.status(429).send('Too many requests. Please try again later.');
   }
 
-  // Validate the redirect URL — must be on the tenant domain or a subdomain
+  // Validate the redirect URL — must be on the tenant domain or a subdomain.
+  // Reconstruct from parsed URL to prevent open-redirect via user-controlled input.
   const allowedDomain = process.env.TENANT_DOMAIN;
+  let validatedNext;
   try {
     const nextUrl = new URL(next);
     if (nextUrl.hostname !== allowedDomain && !nextUrl.hostname.endsWith('.' + allowedDomain)) {
       console.error(`switch-to-magic-link: rejected redirect to disallowed domain: ${nextUrl.hostname}`);
       return res.status(400).send('Invalid redirect URL');
     }
+    if (nextUrl.protocol !== 'https:') {
+      console.error(`switch-to-magic-link: rejected non-HTTPS redirect: ${nextUrl.protocol}`);
+      return res.status(400).send('Invalid redirect URL');
+    }
+    // Reconstruct URL from validated components to satisfy SSRF/redirect checks
+    validatedNext = nextUrl.toString();
   } catch {
     console.error('switch-to-magic-link: invalid next URL:', next);
     return res.status(400).send('Invalid redirect URL');
@@ -670,7 +678,7 @@ app.get('/switch-to-magic-link', async (req, res) => {
     res.clearCookie('mt-setup-info', { domain: cookieDomain, path: '/' });
 
     // Redirect back to Keycloak to continue with magic-link required action
-    res.redirect(302, next);
+    res.redirect(302, validatedNext);
   } catch (err) {
     console.error('switch-to-magic-link: failed to swap required actions:', err.message);
     return res.status(500).send('Failed to switch authentication method. Please try again.');
