@@ -51,6 +51,8 @@ function createClient(authUser: string, config: ImapConfig): typeof ImapFlow {
     tls: {
       rejectUnauthorized: false, // Dev/CI uses self-signed certs
     },
+    connectionTimeout: 10_000, // 10s TCP connection timeout
+    greetTimeout: 15_000,      // 15s IMAP greeting timeout
     logger: false,
   });
 }
@@ -184,6 +186,154 @@ export async function countInboxBySubject(opts: {
   } finally {
     await client.logout().catch(() => {});
   }
+}
+
+/**
+ * Poll for an email matching filter criteria and return its raw MIME source.
+ * Useful for extracting action URLs from invitation/notification emails.
+ *
+ * Matches when ALL provided filters match (AND logic):
+ * - `subjectContains`: substring match on the envelope subject
+ * - `bodyContains`: substring match on the raw MIME source (covers both text and HTML parts)
+ *
+ * Polls every `pollIntervalMs` until the email appears or `timeoutMs` is reached.
+ */
+export async function waitForEmailBody(opts: {
+  userEmail: string;
+  subjectContains?: string;
+  bodyContains?: string;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+}): Promise<string> {
+  const config = getImapConfig();
+  if (!config) {
+    throw new Error(
+      'IMAP not configured: E2E_STALWART_ADMIN_PASSWORD is not set',
+    );
+  }
+
+  const timeoutMs = opts.timeoutMs ?? 60_000;
+  const pollIntervalMs = opts.pollIntervalMs ?? 3_000;
+  const subjectNeedle = opts.subjectContains?.toLowerCase();
+  const bodyNeedle = opts.bodyContains?.toLowerCase();
+  const start = Date.now();
+
+  // Phase 1: envelope-only polling — NEVER fetch source during polling.
+  // ImapFlow's source fetch blocks the Node.js event loop during buffer
+  // processing, preventing setTimeout callbacks from firing (no timeouts work).
+  // Envelope-only fetches are fast and never block.
+  let pollCount = 0;
+  let matchedUid: number | null = null;
+
+  while (Date.now() - start < timeoutMs) {
+    pollCount++;
+    let client: typeof ImapFlow | null = null;
+
+    try {
+      client = await connectAsMaster(opts.userEmail, config);
+      const mailbox = await client.mailboxOpen('INBOX');
+
+      const uids = await client.search({ all: true });
+      if (uids && uids.length > 0) {
+        const recentUids = uids.slice(-20);
+
+        for await (const msg of client.fetch(recentUids, {
+          uid: true,
+          envelope: true,
+        })) {
+          const subject = (msg.envelope?.subject || '').toLowerCase();
+          const subjectMatch = !subjectNeedle || subject.includes(subjectNeedle);
+
+          // Check envelope To: addresses for bodyContains needle
+          let envelopeToMatch = false;
+          if (bodyNeedle && msg.envelope?.to) {
+            for (const addr of msg.envelope.to) {
+              if ((addr.address || '').toLowerCase().includes(bodyNeedle)) {
+                envelopeToMatch = true;
+                break;
+              }
+            }
+          }
+
+          if (subjectMatch && (envelopeToMatch || !bodyNeedle)) {
+            matchedUid = msg.uid;
+          }
+        }
+      }
+
+      if (pollCount <= 3 || pollCount % 10 === 0) {
+        console.log(`  [imap] Poll #${pollCount}: ${mailbox.exists ?? 0} msgs (${Math.round((Date.now() - start) / 1000)}s elapsed)`);
+      }
+    } catch (err) {
+      console.log(`  [imap] Poll #${pollCount} error: ${(err as Error).message}`);
+    } finally {
+      if (client) {
+        try { client.close(); } catch {}
+      }
+    }
+
+    if (matchedUid) break;
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+
+  // Phase 2: download source for matched UID on a fresh connection.
+  // Use ImapFlow's download() (streaming) instead of fetch() — fetch() with
+  // source:true silently yields zero results for UIDs found on other connections.
+  if (matchedUid) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const srcClient = await connectAsMaster(opts.userEmail, config);
+      try {
+        await srcClient.mailboxOpen('INBOX');
+        // download() streams a single message's content — more reliable than fetch()
+        const dl = await srcClient.download(String(matchedUid), undefined, { uid: true });
+        const chunks: Buffer[] = [];
+        for await (const chunk of dl.content) {
+          chunks.push(chunk as Buffer);
+        }
+        const raw = Buffer.concat(chunks).toString();
+        if (raw) return raw;
+        console.log(`  [imap] Source download attempt ${attempt}: empty result for uid=${matchedUid}`);
+      } catch (err) {
+        console.log(`  [imap] Source download attempt ${attempt} error: ${(err as Error).message}`);
+      } finally {
+        try { srcClient.close(); } catch {}
+      }
+    }
+    throw new Error(`Found matching email (uid=${matchedUid}) but failed to download source after 3 attempts`);
+  }
+
+  const filters = [
+    opts.subjectContains && `subject containing "${opts.subjectContains}"`,
+    opts.bodyContains && `body containing "${opts.bodyContains}"`,
+  ].filter(Boolean).join(' and ');
+
+  // Diagnostic: log what IS in the inbox to aid debugging
+  let diagnostic = '';
+  try {
+    const diagClient = await connectAsMaster(opts.userEmail, config);
+    try {
+      const mb = await diagClient.mailboxOpen('INBOX');
+      diagnostic = ` (inbox has ${mb.exists ?? 0} message(s)`;
+      if (mb.exists && mb.exists > 0) {
+        const allUids = await diagClient.search({ all: true });
+        const subjects: string[] = [];
+        for await (const msg of diagClient.fetch(allUids.slice(-5), { uid: true, envelope: true })) {
+          subjects.push(msg.envelope?.subject || '(no subject)');
+        }
+        diagnostic += `: ${subjects.map(s => `"${s}"`).join(', ')}`;
+      }
+      diagnostic += ')';
+    } finally {
+      await diagClient.logout().catch(() => {});
+    }
+  } catch {
+    diagnostic = ' (could not read inbox for diagnostics)';
+  }
+
+  throw new Error(
+    `Timed out waiting for email with ${filters} ` +
+    `in ${opts.userEmail}'s inbox after ${timeoutMs}ms${diagnostic}`,
+  );
 }
 
 /**
