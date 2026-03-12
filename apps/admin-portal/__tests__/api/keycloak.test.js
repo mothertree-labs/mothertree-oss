@@ -379,15 +379,37 @@ describe('listUsers', () => {
     fetchMock.mockResolvedValueOnce(mockResponse([
       { type: 'password', id: 'cred-2' },
     ]));
+    // checkUserHasMagicLink for user 1 - GET user (no authMethod attribute)
+    fetchMock.mockResolvedValueOnce(mockResponse({
+      id: userId1,
+      attributes: { recoveryEmail: ['alice.r@gmail.com'], userType: ['admin'] },
+    }));
+    // checkUserHasMagicLink for user 2 - GET user (no authMethod attribute)
+    fetchMock.mockResolvedValueOnce(mockResponse({
+      id: userId2,
+      attributes: { recoveryEmail: ['bob.r@gmail.com'] },
+    }));
+    // checkUserHasMagicLink for user 1 - credentials check (no magic-link)
+    fetchMock.mockResolvedValueOnce(mockResponse([
+      { type: 'webauthn-passwordless', id: 'cred-1' },
+    ]));
+    // checkUserHasMagicLink for user 2 - credentials check (no magic-link)
+    fetchMock.mockResolvedValueOnce(mockResponse([
+      { type: 'password', id: 'cred-2' },
+    ]));
 
     const users = await keycloak.listUsers();
 
     expect(users).toHaveLength(2);
     expect(users[0].email).toBe('alice@example.com');
     expect(users[0].hasPasskey).toBe(true);
+    expect(users[0].hasMagicLink).toBe(false);
+    expect(users[0].authMethod).toBe('passkey');
     expect(users[0].userType).toBe('admin');
     expect(users[1].email).toBe('bob@example.com');
     expect(users[1].hasPasskey).toBe(false);
+    expect(users[1].hasMagicLink).toBe(false);
+    expect(users[1].authMethod).toBe('none');
     expect(users[1].userType).toBe('member'); // default
   });
 });
