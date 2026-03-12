@@ -59,6 +59,23 @@ const config = {
   logLevel: process.env.LOG_LEVEL || 'info',
 };
 
+// ---------------------------------------------------------------------------
+// Retry and dead-letter constants
+// ---------------------------------------------------------------------------
+
+const RETRY_BASE_DELAY_MS = 60_000;       // 1 poll cycle
+const RETRY_MAX_DELAY_MS = 3_600_000;     // 1 hour cap
+const MAX_RETRIES = 5;                     // dead-letter after 5 failures
+const DEAD_LETTER_FOLDER = 'INBOX/iTIP-Failed';
+const RETRY_PRUNE_INTERVAL = 100;          // prune stale entries every N cycles
+const RETRY_STALE_MS = 24 * 60 * 60 * 1000; // 24h
+
+// Key: "${stalwartName}:${uid}", Value: { retries, nextRetryAfter, lastError }
+const retryTracker = new Map();
+
+// Key: stalwartName, Value: { consecutiveFullFailures, nextRetryAfter }
+const userBackoff = new Map();
+
 function requiredEnv(name) {
   const value = process.env[name];
   if (!value) {
@@ -101,6 +118,10 @@ const metrics = {
   lastPollTime: null,
   lastPollDurationMs: 0,
   usersScanned: 0,
+  messagesDeadLettered: 0,
+  messagesSkippedBackoff: 0,
+  usersSkippedBackoff: 0,
+  retryTrackerSize: 0,
   healthy: true,
 };
 
@@ -115,6 +136,7 @@ function startHealthServer() {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: metrics.healthy ? 'ok' : 'unhealthy' }));
     } else if (req.url === '/metrics') {
+      metrics.retryTrackerSize = retryTracker.size;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(metrics, null, 2));
     } else {
@@ -342,6 +364,129 @@ async function markAsProcessed(stalwartName, uid) {
     } catch {
       // Ignore logout errors
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Retry tracking and dead-letter helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a retry tracker key from stalwart name and message UID.
+ */
+function retryTrackerKey(stalwartName, uid) {
+  return `${stalwartName}:${uid}`;
+}
+
+/**
+ * Check if a message should be skipped because it's in a backoff window.
+ * Returns true if the message has a retry entry and the backoff hasn't expired.
+ */
+function shouldSkipMessage(stalwartName, uid) {
+  const key = retryTrackerKey(stalwartName, uid);
+  const entry = retryTracker.get(key);
+  if (!entry) return false;
+  return Date.now() < entry.nextRetryAfter;
+}
+
+/**
+ * Record a processing failure for a message. Increments retry count and
+ * computes exponential backoff delay.
+ * Returns true if max retries exceeded (message should be dead-lettered).
+ */
+function recordFailure(stalwartName, uid, errorMessage) {
+  const key = retryTrackerKey(stalwartName, uid);
+  const entry = retryTracker.get(key) || { retries: 0, nextRetryAfter: 0, lastError: '' };
+  entry.retries++;
+  entry.lastError = errorMessage;
+  const delay = Math.min(RETRY_BASE_DELAY_MS * Math.pow(2, entry.retries - 1), RETRY_MAX_DELAY_MS);
+  entry.nextRetryAfter = Date.now() + delay;
+  retryTracker.set(key, entry);
+
+  log('warn', 'Message processing failed, backing off', {
+    user: stalwartName,
+    uid,
+    retries: entry.retries,
+    nextRetryMs: delay,
+    error: errorMessage,
+  });
+
+  return entry.retries >= MAX_RETRIES;
+}
+
+/**
+ * Move a message to the dead-letter folder (INBOX/iTIP-Failed).
+ * Flags the message with $CalendarProcessed BEFORE moving, because
+ * IMAP MOVE changes the message UID.
+ */
+async function moveToDeadLetter(stalwartName, uid) {
+  const client = createImapClient(stalwartName);
+
+  try {
+    await client.connect();
+    await client.mailboxOpen('INBOX');
+
+    // Create dead-letter folder if it doesn't exist
+    try {
+      await client.mailboxCreate(DEAD_LETTER_FOLDER);
+      log('info', 'Created dead-letter folder', { user: stalwartName, folder: DEAD_LETTER_FOLDER });
+    } catch {
+      // Folder already exists — this is fine
+    }
+
+    // Flag BEFORE move (move changes UID, so flag must come first)
+    await client.messageFlagsAdd(uid, ['$CalendarProcessed'], { uid: true });
+    await client.messageMove(uid, DEAD_LETTER_FOLDER, { uid: true });
+
+    // Clean up retry tracker entry
+    const key = retryTrackerKey(stalwartName, uid);
+    retryTracker.delete(key);
+
+    metrics.messagesDeadLettered++;
+    log('warn', 'Dead-lettered message after max retries', {
+      user: stalwartName,
+      uid,
+      folder: DEAD_LETTER_FOLDER,
+    });
+  } finally {
+    try {
+      await client.logout();
+    } catch {
+      // Ignore logout errors
+    }
+  }
+}
+
+/**
+ * Prune stale entries from retryTracker and userBackoff maps.
+ * Removes entries whose backoff window expired more than RETRY_STALE_MS ago.
+ */
+function pruneRetryTracker() {
+  const now = Date.now();
+  let prunedRetry = 0;
+  let prunedBackoff = 0;
+
+  for (const [key, entry] of retryTracker) {
+    if (now - entry.nextRetryAfter > RETRY_STALE_MS) {
+      retryTracker.delete(key);
+      prunedRetry++;
+    }
+  }
+
+  for (const [key, entry] of userBackoff) {
+    if (now - entry.nextRetryAfter > RETRY_STALE_MS) {
+      userBackoff.delete(key);
+      prunedBackoff++;
+    }
+  }
+
+  if (prunedRetry > 0 || prunedBackoff > 0) {
+    log('info', 'Pruned stale retry entries', {
+      prunedRetry,
+      prunedBackoff,
+      remainingRetry: retryTracker.size,
+      remainingBackoff: userBackoff.size,
+    });
   }
 }
 
@@ -961,6 +1106,19 @@ async function processCancel(userEmail, icalData) {
  */
 async function processUser(user) {
   const { name: stalwartName, email: userEmail } = user;
+
+  // Check per-user backoff — skip entirely if user is in backoff window
+  const ub = userBackoff.get(stalwartName);
+  if (ub && Date.now() < ub.nextRetryAfter) {
+    metrics.usersSkippedBackoff++;
+    log('debug', 'Skipping user (in backoff)', {
+      user: stalwartName,
+      consecutiveFullFailures: ub.consecutiveFullFailures,
+      nextRetryAfter: new Date(ub.nextRetryAfter).toISOString(),
+    });
+    return;
+  }
+
   let messages;
   try {
     messages = await scanUserInbox(stalwartName);
@@ -976,7 +1134,19 @@ async function processUser(user) {
 
   log('info', `Found ${messages.length} iTIP message(s)`, { user: userEmail });
 
+  let anySucceeded = false;
+
   for (const msg of messages) {
+    // Skip messages that are in a backoff window from a previous failure
+    if (shouldSkipMessage(stalwartName, msg.uid)) {
+      metrics.messagesSkippedBackoff++;
+      log('debug', 'Skipping message (in backoff)', {
+        user: stalwartName,
+        uid: msg.uid,
+      });
+      continue;
+    }
+
     try {
       let processed = false;
 
@@ -1002,18 +1172,45 @@ async function processUser(user) {
       if (processed) {
         await markAsProcessed(stalwartName, msg.uid);
         metrics.messagesProcessed++;
+        anySucceeded = true;
       }
     } catch (err) {
       metrics.errors++;
-      log('error', 'Failed to process iTIP message', {
-        user: userEmail,
-        uid: msg.uid,
-        method: msg.method,
-        error: err.message,
-        stack: err.stack,
-      });
+
+      const maxExceeded = recordFailure(stalwartName, msg.uid, err.message);
+      if (maxExceeded) {
+        try {
+          await moveToDeadLetter(stalwartName, msg.uid);
+        } catch (dlErr) {
+          log('error', 'Failed to dead-letter message', {
+            user: stalwartName,
+            uid: msg.uid,
+            error: dlErr.message,
+          });
+        }
+      }
       // Continue processing other messages -- don't let one failure block the rest
     }
+  }
+
+  // Per-user backoff: if all messages are in the retry tracker (none succeeded),
+  // increment consecutive failure count and back off the entire user
+  if (messages.length > 0 && !anySucceeded) {
+    const existing = userBackoff.get(stalwartName) || { consecutiveFullFailures: 0, nextRetryAfter: 0 };
+    existing.consecutiveFullFailures++;
+    const delay = Math.min(
+      RETRY_BASE_DELAY_MS * Math.pow(2, existing.consecutiveFullFailures - 1),
+      RETRY_MAX_DELAY_MS,
+    );
+    existing.nextRetryAfter = Date.now() + delay;
+    userBackoff.set(stalwartName, existing);
+    log('info', 'All messages failed for user, applying user-level backoff', {
+      user: stalwartName,
+      consecutiveFullFailures: existing.consecutiveFullFailures,
+      nextRetryMs: delay,
+    });
+  } else if (anySucceeded) {
+    userBackoff.delete(stalwartName);
   }
 }
 
@@ -1023,6 +1220,11 @@ async function processUser(user) {
 async function pollCycle() {
   const startTime = Date.now();
   metrics.pollCycles++;
+
+  // Periodically prune stale retry tracker entries
+  if (metrics.pollCycles % RETRY_PRUNE_INTERVAL === 0) {
+    pruneRetryTracker();
+  }
 
   log('debug', 'Starting poll cycle', { cycle: metrics.pollCycles });
 
@@ -1109,6 +1311,12 @@ function shutdown(signal) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+
+  const retrySize = retryTracker.size;
+  const backoffSize = userBackoff.size;
+  retryTracker.clear();
+  userBackoff.clear();
+  log('info', 'Cleared retry state', { retryTrackerEntries: retrySize, userBackoffEntries: backoffSize });
 
   if (healthServer) {
     healthServer.close(() => {
