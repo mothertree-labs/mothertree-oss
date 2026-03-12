@@ -195,6 +195,67 @@
                 color: #16a34a;
                 border: 1px solid #bbf7d0;
             }
+
+            /* No platform authenticator banner */
+            .no-platform-auth-banner {
+                background: #fff7ed;
+                border: 1px solid #fed7aa;
+                border-radius: 8px;
+                padding: 1rem 1.25rem;
+                margin-bottom: 1.5rem;
+                text-align: left;
+            }
+
+            .no-platform-auth-banner .banner-title {
+                font-weight: 600;
+                color: #9a3412;
+                margin-bottom: 0.25rem;
+                font-size: 0.95rem;
+            }
+
+            .no-platform-auth-banner .banner-text {
+                color: #9a3412;
+                font-size: 0.9rem;
+                line-height: 1.5;
+            }
+
+            .btn-magic-link {
+                display: block;
+                width: 100%;
+                padding: 1rem 2rem;
+                background: var(--sage);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 1rem;
+                font-weight: 500;
+                cursor: pointer;
+                transition: background-color 0.2s;
+                text-align: center;
+                text-decoration: none;
+                box-sizing: border-box;
+            }
+
+            .btn-magic-link:hover {
+                background: var(--sage-dark);
+                color: white;
+                text-decoration: none;
+            }
+
+            .secondary-link {
+                text-align: center;
+                margin-top: 0.75rem;
+            }
+
+            .secondary-link a {
+                color: var(--warm-gray);
+                text-decoration: none;
+                font-size: 0.9rem;
+            }
+
+            .secondary-link a:hover {
+                color: var(--sage);
+            }
         </style>
         <div class="platform-header">
             <h1 class="platform-title">${realm.displayName!"the platform"}</h1>
@@ -234,10 +295,28 @@
             <input type="hidden" id="error" name="error"/>
         </form>
         
+        <div id="no-platform-auth-banner" class="no-platform-auth-banner" style="display:none">
+            <div class="banner-title">Passkey not available on this device</div>
+            <div class="banner-text">
+                Your device doesn't support passkeys (fingerprint or face recognition).
+                You can sign in using a secure link sent to your email instead.
+            </div>
+        </div>
+
         <button type="button" class="btn-primary" id="registerBtn" onclick="registerWebAuthn()">
             Register Passkey
         </button>
-        
+
+        <a id="magic-link-btn" class="btn-magic-link" style="display:none" href="#">
+            Set Up Email Sign-In
+        </a>
+
+        <div id="register-btn-secondary" class="secondary-link" style="display:none">
+            <a href="javascript:void(0)" onclick="registerWebAuthn()">
+                I have a security key &mdash; register passkey anyway
+            </a>
+        </div>
+
         <#if !isSetRetry?has_content && isAppInitiatedAction?has_content>
             <div class="back-link">
                 <form action="${url.loginAction}" method="post">
@@ -324,5 +403,57 @@
             }
         </script>
         <script type="text/javascript" src="${url.resourcesCommonPath}/node_modules/base64url/dist/base64url.min.js"></script>
+        <script type="text/javascript">
+            // Detect whether this device has a platform authenticator (Touch ID, Windows Hello, etc.)
+            // If not, show the magic-link alternative for email-based sign-in.
+            (function detectPlatformAuthenticator() {
+                if (typeof PublicKeyCredential === 'undefined' ||
+                    typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable !== 'function') {
+                    showMagicLinkOption();
+                    return;
+                }
+                PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
+                    .then(function(available) {
+                        if (!available) {
+                            showMagicLinkOption();
+                        }
+                    })
+                    .catch(function() {
+                        // Detection failed — keep normal passkey UI
+                    });
+            })();
+
+            function showMagicLinkOption() {
+                document.getElementById('no-platform-auth-banner').style.display = 'block';
+                document.getElementById('magic-link-btn').style.display = 'block';
+                document.getElementById('registerBtn').style.display = 'none';
+                document.getElementById('register-btn-secondary').style.display = 'block';
+
+                // Build the switch URL from the mt-setup-info cookie (set by /beginSetup)
+                var magicBtn = document.getElementById('magic-link-btn');
+                try {
+                    var cookies = document.cookie.split(';');
+                    for (var i = 0; i < cookies.length; i++) {
+                        var c = cookies[i].trim();
+                        if (c.indexOf('mt-setup-info=') === 0) {
+                            var payload = JSON.parse(atob(c.substring('mt-setup-info='.length).replace(/-/g, '+').replace(/_/g, '/')));
+                            var accountHost = window.location.hostname.replace(/^auth\./, 'account.');
+                            var currentUrl = window.location.href;
+                            magicBtn.href = 'https://' + accountHost + '/switch-to-magic-link'
+                                + '?userId=' + encodeURIComponent(payload.userId)
+                                + '&token=' + encodeURIComponent(payload.token)
+                                + '&next=' + encodeURIComponent(currentUrl);
+                            return;
+                        }
+                    }
+                } catch(e) {
+                    // Cookie not found or invalid — hide the magic link button
+                    magicBtn.style.display = 'none';
+                    document.getElementById('no-platform-auth-banner').style.display = 'none';
+                    document.getElementById('registerBtn').style.display = 'block';
+                    document.getElementById('register-btn-secondary').style.display = 'none';
+                }
+            }
+        </script>
     </#if>
 </@layout.registrationLayout>

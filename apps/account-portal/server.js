@@ -608,8 +608,73 @@ app.get('/beginSetup', async (req, res) => {
   // email (set when the token was created). Keycloak validates that `eml` matches
   // the user's current email. The swap happens later in /complete-registration
   // after Keycloak has processed the action token.
+
+  // Set a cookie with userId + token so the WebAuthn registration FTL can build
+  // the /switch-to-magic-link URL if the device lacks a platform authenticator.
+  // httpOnly: false so client-side JS can read it on the auth.* domain.
+  const setupInfo = Buffer.from(JSON.stringify({ userId, token })).toString('base64url');
+  res.cookie('mt-setup-info', setupInfo, {
+    maxAge: 30 * 60 * 1000,
+    httpOnly: false,
+    secure: true,
+    sameSite: 'lax',
+    domain: cookieDomain,
+  });
+
   console.log(`beginSetup: validated token for user ${userId}, redirecting to Keycloak`);
   res.redirect(302, next);
+});
+
+// Switch to Magic Link - swaps WebAuthn required action for magic-link
+// Called from the WebAuthn registration page when device lacks platform authenticator
+app.get('/switch-to-magic-link', async (req, res) => {
+  const { userId, token, next } = req.query;
+
+  if (!userId || !next) {
+    console.error('switch-to-magic-link: missing userId or next parameter');
+    return res.status(400).send('Invalid request');
+  }
+
+  // Rate limiting (reuse beginSetup rate limiter)
+  if (!checkBeginSetupRateLimit(req.ip)) {
+    console.error('switch-to-magic-link: rate limit exceeded for', req.ip);
+    return res.status(429).send('Too many requests. Please try again later.');
+  }
+
+  // Validate the redirect URL — must be on the tenant domain or a subdomain
+  const allowedDomain = process.env.TENANT_DOMAIN;
+  try {
+    const nextUrl = new URL(next);
+    if (nextUrl.hostname !== allowedDomain && !nextUrl.hostname.endsWith('.' + allowedDomain)) {
+      console.error(`switch-to-magic-link: rejected redirect to disallowed domain: ${nextUrl.hostname}`);
+      return res.status(400).send('Invalid redirect URL');
+    }
+  } catch {
+    console.error('switch-to-magic-link: invalid next URL:', next);
+    return res.status(400).send('Invalid redirect URL');
+  }
+
+  // Verify HMAC token
+  if (!verifyBeginSetupToken(userId, token)) {
+    console.error('switch-to-magic-link: invalid or missing HMAC token for user', userId);
+    return res.status(403).send('Invalid or expired setup link');
+  }
+
+  try {
+    // Swap required action: remove webauthn-register-passwordless, add magic-link
+    await keycloakApi.removeRequiredAction(userId, 'webauthn-register-passwordless');
+    await keycloakApi.addRequiredAction(userId, 'ext-magic-link');
+    console.log(`switch-to-magic-link: swapped required actions for user ${userId}`);
+
+    // Clear the setup-info cookie
+    res.clearCookie('mt-setup-info', { domain: cookieDomain, path: '/' });
+
+    // Redirect back to Keycloak to continue with magic-link required action
+    res.redirect(302, next);
+  } catch (err) {
+    console.error('switch-to-magic-link: failed to swap required actions:', err.message);
+    return res.status(500).send('Failed to switch authentication method. Please try again.');
+  }
 });
 
 // Account Recovery - public pages (no auth required)

@@ -710,6 +710,87 @@ async function sendExecuteActionsEmail(userId, redirectUri) {
   }
 }
 
+/**
+ * Remove a required action from a user's requiredActions list.
+ * Used to swap from WebAuthn to magic-link during onboarding.
+ */
+async function removeRequiredAction(userId, actionAlias) {
+  validateUserId(userId);
+  const token = await getServiceToken();
+  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
+
+  const response = await fetch(userUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to get user: ${response.status}`);
+  }
+
+  const user = await response.json();
+  const actions = (user.requiredActions || []).filter(a => a !== actionAlias);
+
+  const updateResponse = await fetch(userUrl, {
+    method: 'PUT',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      ...user,
+      requiredActions: actions,
+    }),
+  });
+
+  if (!updateResponse.ok) {
+    throw new Error(`Failed to remove required action '${actionAlias}': ${updateResponse.status}`);
+  }
+
+  console.log(`Removed required action '${actionAlias}' from user ${userId}`);
+}
+
+/**
+ * Add a required action to a user's requiredActions list.
+ * Used to swap from WebAuthn to magic-link during onboarding.
+ */
+async function addRequiredAction(userId, actionAlias) {
+  validateUserId(userId);
+  const token = await getServiceToken();
+  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
+
+  const response = await fetch(userUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to get user: ${response.status}`);
+  }
+
+  const user = await response.json();
+  const actions = user.requiredActions || [];
+  if (!actions.includes(actionAlias)) {
+    actions.push(actionAlias);
+  }
+
+  const updateResponse = await fetch(userUrl, {
+    method: 'PUT',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      ...user,
+      requiredActions: actions,
+    }),
+  });
+
+  if (!updateResponse.ok) {
+    throw new Error(`Failed to add required action '${actionAlias}': ${updateResponse.status}`);
+  }
+
+  console.log(`Added required action '${actionAlias}' to user ${userId}`);
+}
+
 module.exports = {
   swapToTenantEmailIfNeeded,
   ensurePasskeyFirst,
@@ -720,4 +801,6 @@ module.exports = {
   sendExecuteActionsEmail,
   assignRealmRole,
   removeRealmRole,
+  removeRequiredAction,
+  addRequiredAction,
 };
