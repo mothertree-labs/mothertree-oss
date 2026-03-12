@@ -19,6 +19,35 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(__dirname, 'server.js'), 'utf-8');
 
 /**
+ * Extract the body of a named function from source code.
+ * Handles both "function name()" and "async function name()" forms.
+ * Returns the function body string (including braces) or null if not found.
+ */
+function extractFunctionBody(src, funcName) {
+  const pattern = new RegExp(`(?:async\\s+)?function\\s+${funcName}\\s*\\([^)]*\\)\\s*\\{`);
+  const match = pattern.exec(src);
+  if (!match) return null;
+
+  let depth = 0;
+  let inFunc = false;
+  let body = '';
+  for (let i = match.index; i < src.length; i++) {
+    if (src[i] === '{') {
+      depth++;
+      inFunc = true;
+    }
+    if (src[i] === '}') {
+      depth--;
+    }
+    if (inFunc) {
+      body += src[i];
+    }
+    if (inFunc && depth === 0) break;
+  }
+  return body;
+}
+
+/**
  * Extract all fetch() call blocks that use method: 'PUT' from the source.
  * Returns an array of { functionName, fetchBlock } objects.
  */
@@ -101,5 +130,69 @@ describe('CalDAV PUT requests include Schedule-Reply header', () => {
         `${call.functionName} PUT fetch is missing Schedule-Reply header:\n${call.fetchBlock}`,
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Retry and dead-letter handling
+// ---------------------------------------------------------------------------
+
+describe('Retry and dead-letter handling', () => {
+  it('DEAD_LETTER_FOLDER constant should be INBOX/iTIP-Failed', () => {
+    assert.ok(
+      source.includes("DEAD_LETTER_FOLDER = 'INBOX/iTIP-Failed'"),
+      'DEAD_LETTER_FOLDER constant not found or has wrong value',
+    );
+  });
+
+  it('MAX_RETRIES constant should exist', () => {
+    assert.ok(
+      source.includes('MAX_RETRIES = 5'),
+      'MAX_RETRIES constant not found or has wrong value',
+    );
+  });
+
+  it('moveToDeadLetter should flag message before moving', () => {
+    const body = extractFunctionBody(source, 'moveToDeadLetter');
+    assert.ok(body, 'moveToDeadLetter function not found');
+
+    const flagIndex = body.indexOf('messageFlagsAdd');
+    const moveIndex = body.indexOf('messageMove');
+
+    assert.ok(flagIndex !== -1, 'messageFlagsAdd not found in moveToDeadLetter');
+    assert.ok(moveIndex !== -1, 'messageMove not found in moveToDeadLetter');
+    assert.ok(
+      flagIndex < moveIndex,
+      `messageFlagsAdd (index ${flagIndex}) must come before messageMove (index ${moveIndex}) — flag before move is critical because IMAP MOVE changes the UID`,
+    );
+  });
+
+  it('processUser should call shouldSkipMessage', () => {
+    const body = extractFunctionBody(source, 'processUser');
+    assert.ok(body, 'processUser function not found');
+    assert.ok(
+      body.includes('shouldSkipMessage'),
+      'processUser should call shouldSkipMessage to skip messages in backoff',
+    );
+  });
+
+  it('metrics should include messagesDeadLettered and messagesSkippedBackoff', () => {
+    assert.ok(
+      source.includes('messagesDeadLettered'),
+      'metrics.messagesDeadLettered not found in source',
+    );
+    assert.ok(
+      source.includes('messagesSkippedBackoff'),
+      'metrics.messagesSkippedBackoff not found in source',
+    );
+  });
+
+  it('backoff should use exponential formula', () => {
+    const body = extractFunctionBody(source, 'recordFailure');
+    assert.ok(body, 'recordFailure function not found');
+    assert.ok(
+      body.includes('Math.pow(2,'),
+      'recordFailure should use Math.pow(2, ...) for exponential backoff',
+    );
   });
 });
