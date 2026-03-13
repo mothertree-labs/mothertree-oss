@@ -308,9 +308,14 @@ async function listUsers() {
 
   const users = await response.json();
 
-  // Enrich with passkey status
+  // Enrich with passkey status and auth method
   const enrichedUsers = await Promise.all(users.map(async (user) => {
     const hasPasskey = await checkUserHasPasskey(user.id);
+    const hasMagicLink = await checkUserHasMagicLink(user.id);
+    let authMethod = 'none';
+    if (hasPasskey && hasMagicLink) authMethod = 'both';
+    else if (hasPasskey) authMethod = 'passkey';
+    else if (hasMagicLink) authMethod = 'magic-link';
     return {
       id: user.id,
       email: user.email,
@@ -319,12 +324,50 @@ async function listUsers() {
       enabled: user.enabled,
       createdTimestamp: user.createdTimestamp,
       hasPasskey,
+      hasMagicLink,
+      authMethod,
       recoveryEmail: user.attributes?.recoveryEmail?.[0],
       userType: user.attributes?.userType?.[0] || 'member',
     };
   }));
 
   return enrichedUsers;
+}
+
+/**
+ * Check if user has magic-link configured as an auth method.
+ * This is indicated by the ext-magic-link required action having been
+ * completed (the user attribute 'authMethod' is set to 'magic-link')
+ * or by the user having the ext-magic-link credential type.
+ * Fallback: check if user has no passkey and no pending webauthn required action
+ * (implies they completed onboarding via magic link).
+ */
+async function checkUserHasMagicLink(userId) {
+  validateUserId(userId);
+  const token = await getServiceToken();
+  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
+
+  const response = await fetch(userUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  if (!response.ok) return false;
+
+  const user = await response.json();
+
+  // Check user attribute (set after magic-link onboarding)
+  if (user.attributes?.authMethod?.[0] === 'magic-link') return true;
+
+  // Check if ext-magic-link is a configured credential
+  const credentialsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/credentials`;
+  const credResponse = await fetch(credentialsUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  if (!credResponse.ok) return false;
+
+  const credentials = await credResponse.json();
+  return credentials.some(cred => cred.type === 'magic-link' || cred.type === 'ext-magic-link');
 }
 
 /**
@@ -508,6 +551,7 @@ module.exports = {
   listUsers,
   deleteUser,
   checkUserHasPasskey,
+  checkUserHasMagicLink,
   ensurePasskeyFirst,
   swapToTenantEmailIfNeeded,
   sendNotificationEmail,

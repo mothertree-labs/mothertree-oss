@@ -608,8 +608,161 @@ app.get('/beginSetup', async (req, res) => {
   // email (set when the token was created). Keycloak validates that `eml` matches
   // the user's current email. The swap happens later in /complete-registration
   // after Keycloak has processed the action token.
+
+  // Set a cookie with userId + token so the WebAuthn registration FTL can build
+  // the /switch-to-magic-link URL if the device lacks a platform authenticator.
+  // httpOnly: false so client-side JS can read it on the auth.* domain.
+  const setupInfo = Buffer.from(JSON.stringify({ userId, token })).toString('base64url');
+  res.cookie('mt-setup-info', setupInfo, {
+    maxAge: 30 * 60 * 1000,
+    httpOnly: false,
+    secure: true,
+    sameSite: 'lax',
+    domain: cookieDomain,
+  });
+
   console.log(`beginSetup: validated token for user ${userId}, redirecting to Keycloak`);
   res.redirect(302, next);
+});
+
+// Switch to Magic Link - swaps WebAuthn required action for magic-link
+// Called from the WebAuthn registration page when device lacks platform authenticator
+app.get('/switch-to-magic-link', async (req, res) => {
+  const { userId, token, next } = req.query;
+
+  if (!userId || !next) {
+    console.error('switch-to-magic-link: missing userId or next parameter');
+    return res.status(400).send('Invalid request');
+  }
+
+  // Rate limiting (reuse beginSetup rate limiter)
+  if (!checkBeginSetupRateLimit(req.ip)) {
+    console.error('switch-to-magic-link: rate limit exceeded for', req.ip);
+    return res.status(429).send('Too many requests. Please try again later.');
+  }
+
+  // Validate the redirect URL — must be on the tenant domain or a subdomain.
+  // Reconstruct from parsed URL to prevent open-redirect via user-controlled input.
+  const allowedDomain = process.env.TENANT_DOMAIN;
+  let validatedNext;
+  try {
+    const nextUrl = new URL(next);
+    if (nextUrl.hostname !== allowedDomain && !nextUrl.hostname.endsWith('.' + allowedDomain)) {
+      console.error(`switch-to-magic-link: rejected redirect to disallowed domain: ${nextUrl.hostname}`);
+      return res.status(400).send('Invalid redirect URL');
+    }
+    if (nextUrl.protocol !== 'https:') {
+      console.error(`switch-to-magic-link: rejected non-HTTPS redirect: ${nextUrl.protocol}`);
+      return res.status(400).send('Invalid redirect URL');
+    }
+    // Reconstruct URL from validated components to satisfy SSRF/redirect checks
+    validatedNext = nextUrl.toString();
+  } catch {
+    console.error('switch-to-magic-link: invalid next URL:', next);
+    return res.status(400).send('Invalid redirect URL');
+  }
+
+  // Verify HMAC token
+  if (!verifyBeginSetupToken(userId, token)) {
+    console.error('switch-to-magic-link: invalid or missing HMAC token for user', userId);
+    return res.status(403).send('Invalid or expired setup link');
+  }
+
+  try {
+    // Remove webauthn required action and mark user as magic-link auth
+    await keycloakApi.removeRequiredAction(userId, 'webauthn-register-passwordless');
+    await keycloakApi.setUserAuthMethod(userId, 'magic-link');
+    console.log(`switch-to-magic-link: removed webauthn action, set authMethod=magic-link for user ${userId}`);
+
+    // Send a magic-link email instead of redirecting directly.
+    // The invitation link is long-lived (7 days) and doesn't verify email
+    // ownership. The magic-link email is short-lived and confirms the user
+    // actually has access to the email address — serving as email verification.
+    // At this point the user's Keycloak email is still the recovery email
+    // (swap hasn't happened yet), so sendMagicLinkUrlToEmail sends there.
+    const accountPortalBase = process.env.BASE_URL; // e.g. https://account.dev.mother-tree.org
+    // Get the user's current Keycloak email (recovery email during onboarding)
+    const userEmail = await keycloakApi.getUserEmail(userId);
+    await keycloakApi.sendMagicLinkUrlToEmail(userId, `${accountPortalBase}/magic-link-landing`, userEmail, 'Complete your MotherTree account setup');
+    console.log(`switch-to-magic-link: sent magic-link email to ${userEmail} for user ${userId}`);
+    const emailHint = await keycloakApi.getUserEmailHint(userId);
+
+    // Clear the setup-info cookie
+    res.clearCookie('mt-setup-info', { domain: cookieDomain, path: '/' });
+
+    res.render('check-email', {
+      title: 'Check Your Email',
+      emailHint,
+    });
+  } catch (err) {
+    console.error('switch-to-magic-link: failed:', err.message);
+    return res.status(500).send('Failed to switch authentication method. Please try again.');
+  }
+});
+
+// Magic-link landing page — receives the redirect from Keycloak's magic-link
+// action token (with ?code=...&session_state=...) after authenticating the user.
+// We strip the OIDC params and redirect to /complete-registration, which starts
+// its own OIDC flow. Since the user now has a Keycloak session, it completes
+// immediately without user interaction.
+app.get('/magic-link-landing', (req, res) => {
+  console.log('magic-link-landing: redirecting to /complete-registration');
+  res.redirect('/complete-registration');
+});
+
+// Magic-link login — public pages for returning users to sign in via email link
+app.get('/magic-link-login', (req, res) => {
+  res.render('magic-link-login', {
+    title: 'Sign In with Email Link',
+    error: null,
+  });
+});
+
+app.post('/magic-link-login', verifyOrigin, async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    return res.render('magic-link-login', {
+      title: 'Sign In with Email Link',
+      error: 'Email address is required',
+    });
+  }
+
+  const trimmedEmail = email.trim().toLowerCase();
+
+  try {
+    // Look up the user by email in Keycloak
+    const user = await keycloakApi.findUserByEmail(trimmedEmail);
+    if (!user) {
+      // Don't reveal whether the email exists — show "check your email" regardless
+      console.log(`magic-link-login: no user found for ${trimmedEmail}, showing check-email anyway`);
+      return res.render('check-email', {
+        title: 'Check Your Email',
+        emailHint: keycloakApi.maskEmail(trimmedEmail),
+      });
+    }
+
+    // Send magic-link to the user's RECOVERY email (not tenant email).
+    // The recovery email is an out-of-band address (e.g. Gmail) that:
+    // 1. Confirms identity via a different channel
+    // 2. Works even if the tenant mailbox (Stalwart) isn't provisioned yet
+    const accountPortalBase = process.env.BASE_URL;
+    const recoveryEmail = await keycloakApi.getUserRecoveryEmail(user.id);
+    const targetEmail = recoveryEmail || user.email;
+    await keycloakApi.sendMagicLinkUrlToEmail(user.id, `${accountPortalBase}/magic-link-landing`, targetEmail, 'Sign in to MotherTree');
+    console.log(`magic-link-login: sent magic-link to ${targetEmail} for user ${user.id} (requested: ${trimmedEmail})`);
+
+    // Show email hint for the recovery email (where the link was actually sent)
+    res.render('check-email', {
+      title: 'Check Your Email',
+      emailHint: keycloakApi.maskEmail(targetEmail),
+    });
+  } catch (err) {
+    console.error('magic-link-login: failed:', err.message);
+    res.render('magic-link-login', {
+      title: 'Sign In with Email Link',
+      error: 'Something went wrong. Please try again.',
+    });
+  }
 });
 
 // Account Recovery - public pages (no auth required)

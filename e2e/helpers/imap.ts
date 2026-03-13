@@ -202,6 +202,9 @@ export async function waitForEmailBody(opts: {
   userEmail: string;
   subjectContains?: string;
   bodyContains?: string;
+  /** Skip emails whose MIME source contains this string (useful for finding
+   *  a second email when a first one also matches the same envelope filters). */
+  skipContaining?: string;
   timeoutMs?: number;
   pollIntervalMs?: number;
 }): Promise<string> {
@@ -216,19 +219,22 @@ export async function waitForEmailBody(opts: {
   const pollIntervalMs = opts.pollIntervalMs ?? 3_000;
   const subjectNeedle = opts.subjectContains?.toLowerCase();
   const bodyNeedle = opts.bodyContains?.toLowerCase();
+  const skipNeedle = opts.skipContaining?.toLowerCase();
   const start = Date.now();
 
-  // Phase 1: envelope-only polling — NEVER fetch source during polling.
-  // ImapFlow's source fetch blocks the Node.js event loop during buffer
-  // processing, preventing setTimeout callbacks from firing (no timeouts work).
-  // Envelope-only fetches are fast and never block.
+  // Track UIDs whose bodies we've already downloaded and found to contain
+  // the skipContaining pattern — no need to re-download them.
+  const skippedUids = new Set<number>();
   let pollCount = 0;
-  let matchedUid: number | null = null;
+  let matchedUids: number[] = [];
 
   while (Date.now() - start < timeoutMs) {
     pollCount++;
     let client: typeof ImapFlow | null = null;
 
+    // ── Phase 1: envelope-only polling ──────────────────────────────────
+    // NEVER fetch source during polling. ImapFlow's source fetch blocks the
+    // Node.js event loop, preventing setTimeout callbacks from firing.
     try {
       client = await connectAsMaster(opts.userEmail, config);
       const mailbox = await client.mailboxOpen('INBOX');
@@ -236,6 +242,7 @@ export async function waitForEmailBody(opts: {
       const uids = await client.search({ all: true });
       if (uids && uids.length > 0) {
         const recentUids = uids.slice(-20);
+        const currentMatches: number[] = [];
 
         for await (const msg of client.fetch(recentUids, {
           uid: true,
@@ -256,13 +263,15 @@ export async function waitForEmailBody(opts: {
           }
 
           if (subjectMatch && (envelopeToMatch || !bodyNeedle)) {
-            matchedUid = msg.uid;
+            currentMatches.push(msg.uid);
           }
         }
+
+        matchedUids = currentMatches;
       }
 
       if (pollCount <= 3 || pollCount % 10 === 0) {
-        console.log(`  [imap] Poll #${pollCount}: ${mailbox.exists ?? 0} msgs (${Math.round((Date.now() - start) / 1000)}s elapsed)`);
+        console.log(`  [imap] Poll #${pollCount}: ${mailbox.exists ?? 0} msgs, ${matchedUids.length} matched, ${skippedUids.size} skipped (${Math.round((Date.now() - start) / 1000)}s elapsed)`);
       }
     } catch (err) {
       console.log(`  [imap] Poll #${pollCount} error: ${(err as Error).message}`);
@@ -272,39 +281,85 @@ export async function waitForEmailBody(opts: {
       }
     }
 
-    if (matchedUid) break;
-    await new Promise((r) => setTimeout(r, pollIntervalMs));
-  }
+    // ── Phase 2: try to download a non-skipped body ─────────────────────
+    // Only attempt if there are candidate UIDs we haven't already skipped.
+    const candidateUids = matchedUids
+      .filter(uid => !skippedUids.has(uid))
+      .sort((a, b) => b - a); // newest first
 
-  // Phase 2: download source for matched UID on a fresh connection.
-  // Use ImapFlow's download() (streaming) instead of fetch() — fetch() with
-  // source:true silently yields zero results for UIDs found on other connections.
-  if (matchedUid) {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const srcClient = await connectAsMaster(opts.userEmail, config);
-      try {
-        await srcClient.mailboxOpen('INBOX');
-        // download() streams a single message's content — more reliable than fetch()
-        const dl = await srcClient.download(String(matchedUid), undefined, { uid: true });
-        const chunks: Buffer[] = [];
-        for await (const chunk of dl.content) {
-          chunks.push(chunk as Buffer);
+    if (candidateUids.length > 0) {
+      // Without skipContaining, return the newest match immediately.
+      // With skipContaining, download and check body content.
+      if (!skipNeedle) {
+        // Download the newest matching UID
+        const uid = candidateUids[0];
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          const srcClient = await connectAsMaster(opts.userEmail, config);
+          try {
+            await srcClient.mailboxOpen('INBOX');
+            const dl = await srcClient.download(String(uid), undefined, { uid: true });
+            const chunks: Buffer[] = [];
+            for await (const chunk of dl.content) {
+              chunks.push(chunk as Buffer);
+            }
+            const raw = Buffer.concat(chunks).toString();
+            if (raw) return raw;
+            console.log(`  [imap] Source download attempt ${attempt}: empty result for uid=${uid}`);
+          } catch (err) {
+            console.log(`  [imap] Source download attempt ${attempt} error: ${(err as Error).message}`);
+          } finally {
+            try { srcClient.close(); } catch {}
+          }
         }
-        const raw = Buffer.concat(chunks).toString();
-        if (raw) return raw;
-        console.log(`  [imap] Source download attempt ${attempt}: empty result for uid=${matchedUid}`);
-      } catch (err) {
-        console.log(`  [imap] Source download attempt ${attempt} error: ${(err as Error).message}`);
-      } finally {
-        try { srcClient.close(); } catch {}
+        // All download attempts failed for this UID — continue polling
+      } else {
+        // With skipContaining: download newest candidate and check body
+        const uid = candidateUids[0];
+        let downloaded = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          const srcClient = await connectAsMaster(opts.userEmail, config);
+          try {
+            await srcClient.mailboxOpen('INBOX');
+            const dl = await srcClient.download(String(uid), undefined, { uid: true });
+            const chunks: Buffer[] = [];
+            for await (const chunk of dl.content) {
+              chunks.push(chunk as Buffer);
+            }
+            const raw = Buffer.concat(chunks).toString();
+            if (raw) {
+              downloaded = true;
+              if (raw.toLowerCase().includes(skipNeedle)) {
+                console.log(`  [imap] uid=${uid}: skipped (contains skipContaining pattern)`);
+                skippedUids.add(uid);
+              } else {
+                return raw;
+              }
+              break;
+            }
+            console.log(`  [imap] Source download attempt ${attempt}: empty result for uid=${uid}`);
+          } catch (err) {
+            console.log(`  [imap] Source download attempt ${attempt} error: ${(err as Error).message}`);
+          } finally {
+            try { srcClient.close(); } catch {}
+          }
+        }
+        // If downloaded but skipped, continue polling for a new email.
+        // If download failed, also continue polling.
+        if (downloaded) {
+          // Check if there are more non-skipped candidates to try immediately
+          const remaining = candidateUids.filter(u => !skippedUids.has(u));
+          if (remaining.length > 0) continue; // Try the next candidate without sleeping
+        }
       }
     }
-    throw new Error(`Found matching email (uid=${matchedUid}) but failed to download source after 3 attempts`);
+
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
   }
 
   const filters = [
     opts.subjectContains && `subject containing "${opts.subjectContains}"`,
     opts.bodyContains && `body containing "${opts.bodyContains}"`,
+    opts.skipContaining && `NOT containing "${opts.skipContaining}" (${skippedUids.size} skipped)`,
   ].filter(Boolean).join(' and ');
 
   // Diagnostic: log what IS in the inbox to aid debugging

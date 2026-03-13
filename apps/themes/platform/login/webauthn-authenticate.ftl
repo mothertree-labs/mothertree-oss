@@ -1,7 +1,7 @@
 <#--
-    Platform WebAuthn Authentication Page
-    This page is shown when users authenticate with a passkey/security key.
-    Keycloak renders this as data-page-id="login-webauthn-authenticate".
+    Platform WebAuthn Authentication Page (used for both regular and passwordless)
+    Keycloak 26.x uses webauthn-authenticate.ftl for ALL WebAuthn authentication flows.
+    There is no separate webauthn-authenticate-passwordless.ftl in the built-in themes.
 
     All styling uses inline styles + JS because the base template renders the
     "header" section inside an <h1> tag where <style> blocks don't reliably apply.
@@ -58,7 +58,21 @@
                 </form>
             </#if>
 
+            <#-- "Try another way" link — shown when alternative authenticators exist (e.g. magic link, password) -->
+            <#if auth?has_content && auth.showTryAnotherWayLink()>
             <div style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #eee; font-family: 'Figtree', sans-serif;">
+                <form id="kc-select-try-another-way-form" action="${url.loginAction}" method="post">
+                    <input type="hidden" name="tryAnotherWay" value="on"/>
+                    <a href="#" id="try-another-way"
+                       onclick="document.getElementById('kc-select-try-another-way-form').submit();return false;"
+                       style="color: #A7AE8D; text-decoration: none; font-size: 0.95rem; font-weight: 500;">
+                        ${msg("doTryAnotherWay","Try another way")}
+                    </a>
+                </form>
+            </div>
+            </#if>
+
+            <div style="margin-top: <#if auth?has_content && auth.showTryAnotherWayLink()>0.5rem<#else>1.5rem</#if>; <#if !(auth?has_content && auth.showTryAnotherWayLink())>padding-top: 1rem; border-top: 1px solid #eee; </#if>font-family: 'Figtree', sans-serif;">
                 <a href="#" id="recover-link" style="color: #6b6b6b; text-decoration: none; font-size: 0.9rem;">Lost your passkey?</a>
             </div>
 
@@ -113,11 +127,7 @@
         </script>
 
         <script type="text/javascript">
-            // Auto-trigger passkey prompt on page load, but only when:
-            // 1. Tab is focused (unfocused tabs fail with "document is not focused")
-            // 2. Platform authenticator is actually available (embedded browsers like
-            //    iOS WKWebView define PublicKeyCredential but block credentials.get()
-            //    without a user gesture, causing NotAllowedError)
+            // Auto-trigger passkey prompt on page load
             if (window.PublicKeyCredential && document.hasFocus()) {
                 PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
                     .then(function(available) {
@@ -132,7 +142,7 @@
                     });
             }
 
-            // Set up recovery link
+            // Set up recovery link - points to admin portal's /recover page
             var recoverLink = document.getElementById('recover-link');
             if (recoverLink) {
                 var currentHost = window.location.hostname;

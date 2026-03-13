@@ -1169,6 +1169,33 @@ else
     fi
 fi
 
+# Enable Magic Link required action (Phase Two keycloak-magic-link plugin)
+# This is used as a fallback for devices without platform authenticators (e.g. Linux desktops)
+print_status "Enabling Magic Link required action..."
+MAGIC_LINK_RA_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/magic_link_ra.json -X PUT \
+  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/required-actions/ext-magic-link" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "alias": "ext-magic-link",
+    "name": "Magic Link",
+    "providerId": "ext-magic-link",
+    "enabled": true,
+    "defaultAction": false,
+    "priority": 80,
+    "config": {}
+  }')
+
+if [ "$MAGIC_LINK_RA_RESPONSE" = "204" ]; then
+    print_success "Magic Link required action enabled"
+else
+    print_warning "Failed to enable Magic Link required action (HTTP $MAGIC_LINK_RA_RESPONSE)"
+    print_warning "This is expected if the keycloak-magic-link provider JAR is not deployed yet"
+    if [ -f /tmp/magic_link_ra.json ]; then
+        print_warning "Details: $(cat /tmp/magic_link_ra.json)"
+    fi
+fi
+
 # Update realm WebAuthn Passwordless policy
 # SAFEGUARD: Check if RP ID would change - this would invalidate all existing passkeys!
 print_status "Checking current WebAuthn RP ID..."
@@ -1372,6 +1399,22 @@ if [ -z "$PASSKEY_FLOW_EXISTS" ]; then
                     print_status "Skipping Password Form (non-dev environment: $MT_ENV)"
                 fi
 
+                # Step 6: Add Magic Link authenticator to credential subflow as ALTERNATIVE
+                # Provides email-based sign-in for devices without platform authenticators
+                print_status "Adding Magic Link authenticator to credential subflow..."
+                ADD_MAGIC_LINK_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/add_magic_link.json -X POST \
+                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser%20credential/executions/execution" \
+                  -H "Authorization: Bearer $ACCESS_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d '{"provider": "ext-magic-form"}')
+
+                if [ "$ADD_MAGIC_LINK_RESPONSE" = "201" ]; then
+                    print_success "Added Magic Link authenticator to credential subflow"
+                else
+                    print_warning "Failed to add Magic Link authenticator (HTTP $ADD_MAGIC_LINK_RESPONSE)"
+                    print_warning "This is expected if the keycloak-magic-link provider JAR is not deployed yet"
+                fi
+
                 # Set credential authenticator requirements
                 UPDATED_EXECUTIONS=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
                   "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
@@ -1380,7 +1423,7 @@ if [ -z "$PASSKEY_FLOW_EXISTS" ]; then
                 WEBAUTHN_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "webauthn-authenticator-passwordless") | .id // empty')
                 if [ -n "$WEBAUTHN_EXEC_ID" ]; then
                     if [ "$MT_ENV" = "dev" ]; then
-                        # Dev: ALTERNATIVE (user chooses between passkey and password)
+                        # Dev: ALTERNATIVE (user chooses between passkey, password, or magic link)
                         curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
                           "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
                           -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -1388,13 +1431,13 @@ if [ -z "$PASSKEY_FLOW_EXISTS" ]; then
                           -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
                         print_success "Set WebAuthn Passwordless as ALTERNATIVE"
                     else
-                        # Prod: REQUIRED (passkey is the only credential method)
+                        # Prod: ALTERNATIVE (passkey or magic link)
                         curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
                           "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
                           -H "Authorization: Bearer $ACCESS_TOKEN" \
                           -H "Content-Type: application/json" \
-                          -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"REQUIRED\"}" > /dev/null 2>&1
-                        print_success "Set WebAuthn Passwordless as REQUIRED (passkey-only)"
+                          -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+                        print_success "Set WebAuthn Passwordless as ALTERNATIVE"
                     fi
                 fi
 
@@ -1408,6 +1451,16 @@ if [ -z "$PASSKEY_FLOW_EXISTS" ]; then
                           -d "{\"id\": \"$PASSWORD_FORM_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
                         print_success "Set Password Form as ALTERNATIVE"
                     fi
+                fi
+
+                MAGIC_LINK_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "ext-magic-form") | .id // empty')
+                if [ -n "$MAGIC_LINK_EXEC_ID" ]; then
+                    curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+                      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+                      -H "Authorization: Bearer $ACCESS_TOKEN" \
+                      -H "Content-Type: application/json" \
+                      -d "{\"id\": \"$MAGIC_LINK_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+                    print_success "Set Magic Link as ALTERNATIVE"
                 fi
 
                 # Move Username Form to the top of the forms subflow (before credential subflow)
@@ -1573,6 +1626,21 @@ else
             print_status "Skipping Password Form (non-dev environment: $MT_ENV)"
         fi
 
+        # Step 6: Add Magic Link authenticator to credential subflow as ALTERNATIVE
+        print_status "Adding Magic Link authenticator to credential subflow..."
+        ADD_MAGIC_LINK_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/add_magic_link.json -X POST \
+          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser%20credential/executions/execution" \
+          -H "Authorization: Bearer $ACCESS_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{"provider": "ext-magic-form"}')
+
+        if [ "$ADD_MAGIC_LINK_RESPONSE" = "201" ]; then
+            print_success "Added Magic Link authenticator to credential subflow"
+        else
+            print_warning "Failed to add Magic Link authenticator (HTTP $ADD_MAGIC_LINK_RESPONSE)"
+            print_warning "This is expected if the keycloak-magic-link provider JAR is not deployed yet"
+        fi
+
         # Set credential authenticator requirements
         UPDATED_EXECUTIONS=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
           "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
@@ -1580,21 +1648,13 @@ else
 
         WEBAUTHN_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "webauthn-authenticator-passwordless") | .id // empty')
         if [ -n "$WEBAUTHN_EXEC_ID" ]; then
-            if [ "$MT_ENV" = "dev" ]; then
-                curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
-                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
-                  -H "Authorization: Bearer $ACCESS_TOKEN" \
-                  -H "Content-Type: application/json" \
-                  -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
-                print_success "Set WebAuthn Passwordless as ALTERNATIVE"
-            else
-                curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
-                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
-                  -H "Authorization: Bearer $ACCESS_TOKEN" \
-                  -H "Content-Type: application/json" \
-                  -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"REQUIRED\"}" > /dev/null 2>&1
-                print_success "Set WebAuthn Passwordless as REQUIRED (passkey-only)"
-            fi
+            # All envs: ALTERNATIVE (passkey or magic link)
+            curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+              "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+              -H "Authorization: Bearer $ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+            print_success "Set WebAuthn Passwordless as ALTERNATIVE"
         fi
 
         if [ "$MT_ENV" = "dev" ]; then
@@ -1609,6 +1669,16 @@ else
             fi
         fi
 
+        MAGIC_LINK_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "ext-magic-form") | .id // empty')
+        if [ -n "$MAGIC_LINK_EXEC_ID" ]; then
+            curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+              "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+              -H "Authorization: Bearer $ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"id\": \"$MAGIC_LINK_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+            print_success "Set Magic Link as ALTERNATIVE"
+        fi
+
         # Move Username Form to top of forms subflow
         if [ -n "$USERNAME_FORM_EXEC_ID" ]; then
             print_status "Reordering: moving Username Form to top of forms subflow..."
@@ -1621,22 +1691,23 @@ else
         fi
 
         if [ "$MT_ENV" = "dev" ]; then
-            print_success "Flow restructured: Username Form → credential subflow (WebAuthn | Password)"
+            print_success "Flow restructured: Username Form → credential subflow (WebAuthn | Password | Magic Link)"
         else
-            print_success "Flow restructured: Username Form → credential subflow (WebAuthn only)"
+            print_success "Flow restructured: Username Form → credential subflow (WebAuthn | Magic Link)"
         fi
     elif [ -n "$HAS_NEW_FORM" ]; then
         print_success "Flow already has new structure (Username Form + credential subflow)"
 
         # Enforce env-appropriate credential configuration
-        # In prod: remove Password Form if present, set WebAuthn as REQUIRED
-        # In dev: ensure Password Form exists, set both as ALTERNATIVE
+        # All envs: WebAuthn + Magic Link as ALTERNATIVE
+        # Dev only: also add Password Form as ALTERNATIVE
         UPDATED_EXECUTIONS=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
           "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
           -H "Authorization: Bearer $ACCESS_TOKEN")
 
         PASSWORD_FORM_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "auth-password-form") | .id // empty')
         WEBAUTHN_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "webauthn-authenticator-passwordless") | .id // empty')
+        MAGIC_LINK_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "ext-magic-form") | .id // empty')
 
         if [ "$MT_ENV" != "dev" ]; then
             # Prod: remove Password Form if it exists (leftover from dev configuration)
@@ -1647,14 +1718,14 @@ else
                   -H "Authorization: Bearer $ACCESS_TOKEN" > /dev/null 2>&1
                 print_success "Removed Password Form from prod flow"
             fi
-            # Set WebAuthn as REQUIRED (only credential method in prod)
+            # Set WebAuthn as ALTERNATIVE (passkey or magic link)
             if [ -n "$WEBAUTHN_EXEC_ID" ]; then
                 curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
                   "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
                   -H "Authorization: Bearer $ACCESS_TOKEN" \
                   -H "Content-Type: application/json" \
-                  -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"REQUIRED\"}" > /dev/null 2>&1
-                print_success "Confirmed WebAuthn Passwordless as REQUIRED (passkey-only)"
+                  -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+                print_success "Set WebAuthn Passwordless as ALTERNATIVE"
             fi
         else
             # Dev: ensure Password Form exists
@@ -1672,7 +1743,7 @@ else
                     print_warning "Failed to add Password Form (HTTP $ADD_PASSWORD_RESPONSE)"
                 fi
             fi
-            # Ensure both are ALTERNATIVE in dev
+            # Ensure all are ALTERNATIVE in dev
             UPDATED_EXECUTIONS=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
               "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
               -H "Authorization: Bearer $ACCESS_TOKEN")
@@ -1692,7 +1763,38 @@ else
                   -H "Content-Type: application/json" \
                   -d "{\"id\": \"$PASSWORD_FORM_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
             fi
-            print_success "Confirmed credential subflow configured for dev (WebAuthn | Password)"
+            print_success "Confirmed credential subflow configured for dev (WebAuthn | Password | Magic Link)"
+        fi
+
+        # Ensure Magic Link authenticator exists in credential subflow
+        if [ -z "$MAGIC_LINK_EXEC_ID" ]; then
+            print_status "Adding Magic Link authenticator to credential subflow..."
+            refresh_token
+            ADD_MAGIC_LINK_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/add_magic_link.json -X POST \
+              "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser%20credential/executions/execution" \
+              -H "Authorization: Bearer $ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"provider": "ext-magic-form"}')
+            if [ "$ADD_MAGIC_LINK_RESPONSE" = "201" ]; then
+                print_success "Added Magic Link authenticator to credential subflow"
+            else
+                print_warning "Failed to add Magic Link authenticator (HTTP $ADD_MAGIC_LINK_RESPONSE)"
+                print_warning "This is expected if the keycloak-magic-link provider JAR is not deployed yet"
+            fi
+        fi
+
+        # Set Magic Link as ALTERNATIVE
+        UPDATED_EXECUTIONS=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
+          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+          -H "Authorization: Bearer $ACCESS_TOKEN")
+        MAGIC_LINK_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "ext-magic-form") | .id // empty')
+        if [ -n "$MAGIC_LINK_EXEC_ID" ]; then
+            curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
+              "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+              -H "Authorization: Bearer $ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"id\": \"$MAGIC_LINK_EXEC_ID\", \"requirement\": \"ALTERNATIVE\"}" > /dev/null 2>&1
+            print_success "Set Magic Link as ALTERNATIVE"
         fi
     fi
 

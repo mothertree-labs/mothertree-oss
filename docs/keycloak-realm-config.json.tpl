@@ -300,6 +300,15 @@
       "defaultAction": false,
       "priority": 70,
       "config": {}
+    },
+    {
+      "alias": "ext-magic-link",
+      "name": "Magic Link",
+      "providerId": "ext-magic-link",
+      "enabled": true,
+      "defaultAction": false,
+      "priority": 80,
+      "config": {}
     }
   ],
   "users": [

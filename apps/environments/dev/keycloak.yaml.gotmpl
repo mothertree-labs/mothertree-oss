@@ -24,6 +24,10 @@ extraEnv: |
     value: '{{ env "KEYCLOAK_DB_PASSWORD" }}'
   - name: KC_LOG_LEVEL
     value: INFO
+  - name: KC_SPI_THEME_CACHE_THEMES
+    value: "false"
+  - name: KC_SPI_THEME_STATIC_MAX_AGE
+    value: "-1"
 
 resources:
   requests:
