@@ -331,7 +331,6 @@
       ]
     }
   ],
-  "_comment_browserFlow": "Custom browser flow with WebAuthn + Magic Link alternatives. Structure: Cookie (ALT) | IdP Redirector (ALT) | Forms (ALT) → Username Form (REQ) → Auth Choice (REQ) → WebAuthn Passwordless (ALT) + Magic Link (ALT). When user has only one credential type, it fires directly. When both exist, select-authenticator.ftl renders the choice.",
   "browserFlow": "browser",
   "registrationFlow": "registration",
   "directGrantFlow": "direct grant",
