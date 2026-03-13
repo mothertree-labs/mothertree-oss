@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-03-13
+
+### Added
+- E2E test for full user onboarding flow (#194)
+- Exponential backoff and dead-letter queue for failed iTIP calendar processing (#197)
+- Valkey-based tenant pool leasing for parallel CI builds (#181)
+- Standalone portal deploy scripts extracted from create_env (#178)
+
+### Changed
+- Redirect guests through OIDC login to avoid redundant name prompt (#177)
+- Dev environment: remove HPAs, fix replicas, right-size memory requests (#182)
+- Bump ejs 4.0.1 → 5.0.1 in admin-portal and account-portal (#172, #173)
+- Bump express-rate-limit 8.2.1 → 8.3.0 in admin-portal and account-portal (#170, #171)
+- Bump admin-portal to 0.9.4 and account-portal to 0.11.3 (#198)
+
+### Fixed
+- Email sharing with existing Keycloak users (#175)
+- Guest landing page redirecting to Nextcloud instead of passkey setup (#165)
+- Federated sharing causing email share routing failures (#164)
+- CI shard-5 email test reliability (#193)
+- E2E test user leak via pipeline-scoped prefixes (#179)
+- Invite-user E2E cleanup causing stale user accumulation (#174)
+
 ## [0.9.2] - 2026-03-07
 
 ### Added
