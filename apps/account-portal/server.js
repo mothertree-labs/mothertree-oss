@@ -678,7 +678,7 @@ app.get('/switch-to-magic-link', async (req, res) => {
     // (Keycloak's auth session still has the old required action; a fresh
     // magic-link token creates a new session with no required actions.)
     const accountPortalBase = process.env.BASE_URL; // e.g. https://account.dev.mother-tree.org
-    const magicLink = await keycloakApi.createMagicLink(userId, `${accountPortalBase}/complete-registration`);
+    const magicLink = await keycloakApi.createMagicLink(userId, `${accountPortalBase}/magic-link-landing`);
     console.log(`switch-to-magic-link: generated magic link for user ${userId}`);
 
     // Clear the setup-info cookie
@@ -690,6 +690,16 @@ app.get('/switch-to-magic-link', async (req, res) => {
     console.error('switch-to-magic-link: failed:', err.message);
     return res.status(500).send('Failed to switch authentication method. Please try again.');
   }
+});
+
+// Magic-link landing page — receives the redirect from Keycloak's magic-link
+// action token (with ?code=...&session_state=...) after authenticating the user.
+// We strip the OIDC params and redirect to /complete-registration, which starts
+// its own OIDC flow. Since the user now has a Keycloak session, it completes
+// immediately without user interaction.
+app.get('/magic-link-landing', (req, res) => {
+  console.log('magic-link-landing: redirecting to /complete-registration');
+  res.redirect('/complete-registration');
 });
 
 // Account Recovery - public pages (no auth required)
