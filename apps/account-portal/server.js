@@ -737,7 +737,7 @@ app.post('/magic-link-login', verifyOrigin, async (req, res) => {
       console.log(`magic-link-login: no user found for ${trimmedEmail}, showing check-email anyway`);
       return res.render('check-email', {
         title: 'Check Your Email',
-        emailHint: maskEmail(trimmedEmail),
+        emailHint: keycloakApi.maskEmail(trimmedEmail),
       });
     }
 
@@ -754,7 +754,7 @@ app.post('/magic-link-login', verifyOrigin, async (req, res) => {
     // Show email hint for the recovery email (where the link was actually sent)
     res.render('check-email', {
       title: 'Check Your Email',
-      emailHint: maskEmail(targetEmail),
+      emailHint: keycloakApi.maskEmail(targetEmail),
     });
   } catch (err) {
     console.error('magic-link-login: failed:', err.message);
@@ -764,13 +764,6 @@ app.post('/magic-link-login', verifyOrigin, async (req, res) => {
     });
   }
 });
-
-function maskEmail(email) {
-  const [local, domain] = email.split('@');
-  if (!domain) return '***';
-  const visible = local.substring(0, Math.min(3, local.length));
-  return `${visible}***@${domain}`;
-}
 
 // Account Recovery - public pages (no auth required)
 app.get('/recover', (req, res) => {

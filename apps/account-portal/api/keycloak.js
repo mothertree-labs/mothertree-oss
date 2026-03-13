@@ -859,65 +859,16 @@ async function getUserEmail(userId) {
  * Get a privacy-masked email hint for a user (e.g., "mic***@example.com").
  */
 async function getUserEmailHint(userId) {
-  validateUserId(userId);
-  const token = await getServiceToken();
-  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}`;
-  const response = await fetch(userUrl, {
-    headers: { 'Authorization': `Bearer ${token}` },
-  });
-  if (!response.ok) {
-    return '***';
-  }
-  const user = await response.json();
-  const email = user.email || user.username || '';
+  const email = await getUserEmail(userId);
+  if (!email) return '***';
+  return maskEmail(email);
+}
+
+function maskEmail(email) {
   const [local, domain] = email.split('@');
   if (!domain) return '***';
   const visible = local.substring(0, Math.min(3, local.length));
   return `${visible}***@${domain}`;
-}
-
-/**
- * Send a magic-link email to a user (Phase Two plugin).
- * Uses send_email=true so Keycloak sends the email with a sign-in link.
- * The link authenticates the user and redirects to redirectUri.
- */
-async function sendMagicLinkEmail(userId, redirectUri) {
-  validateUserId(userId);
-  const token = await getServiceToken();
-
-  // Look up the user to get their email
-  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}`;
-  const userResponse = await fetch(userUrl, {
-    headers: { 'Authorization': `Bearer ${token}` },
-  });
-  if (!userResponse.ok) {
-    throw new Error(`sendMagicLinkEmail: failed to get user: ${userResponse.status}`);
-  }
-  const user = await userResponse.json();
-  const email = user.email || user.username;
-
-  // Call the Phase Two magic-link REST API with send_email=true
-  const magicLinkUrl = `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/magic-link`;
-  const response = await fetch(magicLinkUrl, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      email,
-      client_id: CLIENT_ID,
-      redirect_uri: redirectUri,
-      send_email: true,
-    }),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`sendMagicLinkEmail: ${response.status} ${text}`);
-  }
-
-  console.log(`Sent magic-link email to user ${userId} (email: ${email})`);
 }
 
 /**
@@ -1000,9 +951,9 @@ module.exports = {
   removeRequiredAction,
   setUserAuthMethod,
   createMagicLink,
-  sendMagicLinkEmail,
   getUserEmail,
   getUserEmailHint,
   getUserRecoveryEmail,
   sendMagicLinkUrlToEmail,
+  maskEmail,
 };
