@@ -840,6 +840,153 @@ async function createMagicLink(userId, redirectUri) {
   return result.link;
 }
 
+/**
+ * Get a user's current email address from Keycloak.
+ */
+async function getUserEmail(userId) {
+  validateUserId(userId);
+  const token = await getServiceToken();
+  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}`;
+  const response = await fetch(userUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!response.ok) return null;
+  const user = await response.json();
+  return user.email || user.username || null;
+}
+
+/**
+ * Get a privacy-masked email hint for a user (e.g., "mic***@example.com").
+ */
+async function getUserEmailHint(userId) {
+  validateUserId(userId);
+  const token = await getServiceToken();
+  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}`;
+  const response = await fetch(userUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    return '***';
+  }
+  const user = await response.json();
+  const email = user.email || user.username || '';
+  const [local, domain] = email.split('@');
+  if (!domain) return '***';
+  const visible = local.substring(0, Math.min(3, local.length));
+  return `${visible}***@${domain}`;
+}
+
+/**
+ * Send a magic-link email to a user (Phase Two plugin).
+ * Uses send_email=true so Keycloak sends the email with a sign-in link.
+ * The link authenticates the user and redirects to redirectUri.
+ */
+async function sendMagicLinkEmail(userId, redirectUri) {
+  validateUserId(userId);
+  const token = await getServiceToken();
+
+  // Look up the user to get their email
+  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}`;
+  const userResponse = await fetch(userUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!userResponse.ok) {
+    throw new Error(`sendMagicLinkEmail: failed to get user: ${userResponse.status}`);
+  }
+  const user = await userResponse.json();
+  const email = user.email || user.username;
+
+  // Call the Phase Two magic-link REST API with send_email=true
+  const magicLinkUrl = `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/magic-link`;
+  const response = await fetch(magicLinkUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email,
+      client_id: CLIENT_ID,
+      redirect_uri: redirectUri,
+      send_email: true,
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`sendMagicLinkEmail: ${response.status} ${text}`);
+  }
+
+  console.log(`Sent magic-link email to user ${userId} (email: ${email})`);
+}
+
+/**
+ * Get the recovery email for a user (stored as Keycloak attribute).
+ * Returns null if no recovery email is set.
+ */
+async function getUserRecoveryEmail(userId) {
+  validateUserId(userId);
+  const token = await getServiceToken();
+  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}`;
+  const response = await fetch(userUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!response.ok) return null;
+  const user = await response.json();
+  return user.attributes?.recoveryEmail?.[0] || null;
+}
+
+/**
+ * Create a magic-link URL and send it via email to a specific address.
+ * Used for both onboarding and login magic-link emails.
+ * @param {string} emailSubject - Email subject line (different for onboarding vs login)
+ */
+async function sendMagicLinkUrlToEmail(userId, redirectUri, targetEmail, emailSubject) {
+  const magicLinkUrl = await createMagicLink(userId, redirectUri);
+  const subject = emailSubject || 'Sign in to MotherTree';
+
+  const nodemailer = require('nodemailer');
+  const smtpHost = process.env.SMTP_RELAY_HOST || 'postfix-internal.infra-mail.svc.cluster.local';
+  const smtpPort = process.env.SMTP_PORT || 587;
+  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.TENANT_DOMAIN || 'example.com'}`;
+  const smtpFromName = process.env.SMTP_FROM_NAME || 'MotherTree';
+
+  const transporter = nodemailer.createTransport({
+    host: smtpHost,
+    port: smtpPort,
+    secure: false,
+    tls: { rejectUnauthorized: false },
+  });
+
+  await transporter.sendMail({
+    from: `"${smtpFromName}" <${smtpFrom}>`,
+    to: targetEmail,
+    subject,
+    text: `Click the link below to sign in to your MotherTree account:\n\n${magicLinkUrl}\n\nThis link expires in 15 minutes. If you didn't request this, you can safely ignore this email.`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h1 style="color: #4a6741; font-size: 24px; margin-bottom: 20px;">MotherTree</h1>
+        <p style="color: #3d3d3d; line-height: 1.6; margin-bottom: 20px;">
+          Click the button below to sign in to your account:
+        </p>
+        <a href="${magicLinkUrl}" style="display: inline-block; background-color: #4a6741; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 500; margin-bottom: 20px;">
+          Sign In to MotherTree
+        </a>
+        <p style="color: #999; font-size: 13px; line-height: 1.5; margin-top: 20px;">
+          This link expires in 15 minutes. If you didn't request this, you can safely ignore this email.
+        </p>
+        <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+        <p style="color: #ccc; font-size: 11px;">
+          If the button doesn't work, copy and paste this URL into your browser:<br>
+          <span style="word-break: break-all;">${magicLinkUrl}</span>
+        </p>
+      </div>
+    `,
+  });
+
+  console.log(`Sent magic-link URL email to ${targetEmail} for user ${userId}`);
+}
+
 module.exports = {
   swapToTenantEmailIfNeeded,
   ensurePasskeyFirst,
@@ -853,4 +1000,9 @@ module.exports = {
   removeRequiredAction,
   setUserAuthMethod,
   createMagicLink,
+  sendMagicLinkEmail,
+  getUserEmail,
+  getUserEmailHint,
+  getUserRecoveryEmail,
+  sendMagicLinkUrlToEmail,
 };

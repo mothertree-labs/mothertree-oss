@@ -20,22 +20,24 @@ const baseDomain = urls.baseDomain;
  * 3. Navigate to setup URL WITHOUT virtual authenticator
  * 4. WebAuthn page detects no platform auth -> shows magic-link option
  * 5. Click "Set Up Email Sign-In" -> /switch-to-magic-link
- * 6. /switch-to-magic-link removes webauthn required action, sets authMethod attribute
- * 7. Keycloak has no more required actions -> user is authenticated -> /home
+ * 6. Server sends magic-link email, renders "Check your email" page
+ * 7. IMAP: read magic-link email, extract sign-in URL
+ * 8. Click the magic-link URL -> Keycloak authenticates -> /home
  *
- * Note: The magic-link EMAIL is used for future LOGINS, not during onboarding.
- * During onboarding, we simply skip passkey registration. The magic-link
- * authenticator in the browser flow handles subsequent logins.
+ * The magic-link email serves as email verification: the invitation link
+ * is long-lived (7 days) and could be forwarded, so it does NOT verify
+ * email ownership. The magic-link is short-lived and confirms the user
+ * actually has access to the email address.
  *
  * Prerequisites:
- * - keycloak-magic-link plugin deployed (ext-magic-form authenticator)
+ * - keycloak-magic-link plugin deployed (ext-magic-link authenticator)
  * - Custom browser flow with WebAuthn + Magic Link alternatives
  * - IMAP access configured (E2E_STALWART_ADMIN_PASSWORD)
  */
 test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () => {
   test.setTimeout(300_000); // 5 minutes
 
-  test('user without platform auth completes onboarding via magic link', async ({ adminPage }) => {
+  test('user without platform auth completes onboarding via magic link email', async ({ adminPage }) => {
     test.skip(!isImapConfigured(), 'IMAP not configured (E2E_STALWART_ADMIN_PASSWORD not set)');
 
     const ap = selectors.adminPortal;
@@ -83,6 +85,7 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
         bodyContains: uniqueId,
         timeoutMs: 180_000,
         pollIntervalMs: 3_000,
+        // Don't use skipContaining here — we want the invitation email
       });
 
       const decodedEmail = rawEmail
@@ -143,9 +146,6 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
         const noPlatformBanner = userPage.locator('#no-platform-auth-banner');
         const magicLinkButton = userPage.locator('#magic-link-btn');
 
-        // Wait for detection JS to run and show the magic-link option.
-        // In headless Chrome without a virtual authenticator,
-        // isUserVerifyingPlatformAuthenticatorAvailable() returns false.
         const detected = await Promise.race([
           magicLinkButton.waitFor({ state: 'visible', timeout: 15_000 }).then(() => 'magic-link' as const),
           noPlatformBanner.waitFor({ state: 'visible', timeout: 15_000 }).then(() => 'banner' as const),
@@ -161,64 +161,105 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
           return;
         }
 
-        // Verify both banner and button are visible
         await expect(noPlatformBanner).toBeVisible();
         await expect(magicLinkButton).toBeVisible();
 
-        // Verify the "Register Passkey" primary button is hidden
         const registerBtnVisible = await userPage.locator('#registerBtn').isVisible().catch(() => true);
         expect(registerBtnVisible).toBe(false);
 
-        // Verify "I have a security key" secondary link is visible
         await expect(userPage.locator('#register-btn-secondary')).toBeVisible();
 
         console.log('  [magic-link] Step 4: Banner and magic-link button verified');
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Step 5: Click "Set Up Email Sign-In" and complete onboarding
+        // Step 5: Click "Set Up Email Sign-In"
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
         await magicLinkButton.click();
         console.log('  [magic-link] Step 5: Clicked "Set Up Email Sign-In"');
 
-        // The click should redirect:
-        // 1. /switch-to-magic-link (account portal) - removes webauthn action
-        // 2. Back to Keycloak (via `next` param)
-        // 3. Keycloak has no more required actions → authenticates user
-        // 4. Redirects to /complete-registration or /home
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // Step 6: Expect "Check your email" page (NOT immediate redirect)
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        // Wait for the page to leave Keycloak and reach account portal
-        const reachedHome = await userPage.waitForURL(
+        // The /switch-to-magic-link endpoint should send a magic-link email
+        // and render a "check your email" page instead of redirecting.
+        await userPage.waitForLoadState('load');
+
+        await expect(
+          userPage.locator('text=Check your email'),
+        ).toBeVisible({ timeout: 30_000 });
+
+        console.log('  [magic-link] Step 6: "Check your email" page displayed');
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // Step 7: Read magic-link email from IMAP
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        // The magic-link email is sent to the user's Keycloak email, which is
+        // still the recovery email at this point (email swap happens later in
+        // /complete-registration). Both the invitation and magic-link emails
+        // land in the e2e-mailrt inbox. Use skipContaining to skip the
+        // invitation email (which contains "beginSetup").
+        console.log('  [magic-link] Step 7: Polling IMAP for magic-link email...');
+
+        const magicLinkRawEmail = await waitForEmailBody({
+          userEmail: TEST_USERS.emailTest.email,
+          bodyContains: uniqueId,
+          subjectContains: 'Complete your',
+          timeoutMs: 120_000,
+          pollIntervalMs: 3_000,
+        });
+
+        const decodedMagicEmail = magicLinkRawEmail
+          .replace(/=\r?\n/g, '')
+          .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+
+        // Extract the magic-link URL from the email body.
+        // The Phase Two plugin sends a Keycloak action-token URL.
+        const magicLinkMatch = decodedMagicEmail.match(
+          /https:\/\/auth\.[^\s"<>]+(?:action-token|magic-link)[^\s"<>]*/,
+        );
+        // Fallback: any link containing the auth host
+        const authLinkFallback = decodedMagicEmail.match(
+          /https:\/\/auth\.[^\s"<>]+/,
+        );
+        const magicLinkUrl = (magicLinkMatch?.[0] || authLinkFallback?.[0])?.replace(/&amp;/g, '&');
+
+        expect(magicLinkUrl, 'Could not find magic-link URL in email').toBeTruthy();
+        console.log(`  [magic-link] Step 7: Magic-link URL: ${magicLinkUrl!.substring(0, 80)}...`);
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // Step 8: Click magic-link URL and complete onboarding
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        await userPage.goto(magicLinkUrl!);
+        console.log('  [magic-link] Step 8: Navigated to magic-link URL');
+
+        // The magic link authenticates the user via Keycloak, then redirects to
+        // /magic-link-landing -> /complete-registration -> /home
+        await userPage.waitForURL(
           url => url.pathname.includes('/home') || url.pathname.includes('/complete'),
           { timeout: 60_000 },
-        ).then(() => true).catch(() => false);
+        );
 
-        const currentUrl = userPage.url();
-        console.log(`  [magic-link] Step 5: After redirect: ${currentUrl.substring(0, 100)}`);
+        const finalUrl = userPage.url();
+        console.log(`  [magic-link] Step 8: After magic-link redirect: ${finalUrl.substring(0, 100)}`);
 
-        if (!reachedHome) {
-          // If we're still on Keycloak, the switch may have failed
-          // or there are additional required actions. Log diagnostics.
-          const pageText = await userPage.evaluate(() =>
-            document.body?.innerText?.substring(0, 500) || '',
-          ).catch(() => '');
-          console.log(`  [magic-link] Did not reach /home. URL: ${currentUrl}`);
-          console.log(`  [magic-link] Page text: ${pageText.substring(0, 300)}`);
-
-          // Try navigating directly to /home as a fallback
-          await userPage.goto(`${urls.accountPortal}/home`);
-          await userPage.waitForLoadState('load');
+        // If we hit /complete-registration, wait for it to redirect to /home
+        if (finalUrl.includes('/complete')) {
+          await userPage.waitForURL(url => url.pathname.includes('/home'), { timeout: 30_000 });
         }
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Step 6: Verify user is on account portal home
+        // Step 9: Verify user is on account portal home
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
         await expect(
           userPage.locator(selectors.accountPortal.welcomeHeading),
         ).toBeVisible({ timeout: 15_000 });
 
-        console.log('  [magic-link] Step 6: Onboarding complete - user reached /home');
+        console.log('  [magic-link] Step 9: Onboarding complete - user reached /home');
 
       } finally {
         await userContext.close();

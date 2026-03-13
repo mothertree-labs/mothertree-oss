@@ -674,18 +674,26 @@ app.get('/switch-to-magic-link', async (req, res) => {
     await keycloakApi.setUserAuthMethod(userId, 'magic-link');
     console.log(`switch-to-magic-link: removed webauthn action, set authMethod=magic-link for user ${userId}`);
 
-    // Generate a magic-link login URL that bypasses the stale session
-    // (Keycloak's auth session still has the old required action; a fresh
-    // magic-link token creates a new session with no required actions.)
+    // Send a magic-link email instead of redirecting directly.
+    // The invitation link is long-lived (7 days) and doesn't verify email
+    // ownership. The magic-link email is short-lived and confirms the user
+    // actually has access to the email address — serving as email verification.
+    // At this point the user's Keycloak email is still the recovery email
+    // (swap hasn't happened yet), so sendMagicLinkUrlToEmail sends there.
     const accountPortalBase = process.env.BASE_URL; // e.g. https://account.dev.mother-tree.org
-    const magicLink = await keycloakApi.createMagicLink(userId, `${accountPortalBase}/magic-link-landing`);
-    console.log(`switch-to-magic-link: generated magic link for user ${userId}`);
+    // Get the user's current Keycloak email (recovery email during onboarding)
+    const userEmail = await keycloakApi.getUserEmail(userId);
+    await keycloakApi.sendMagicLinkUrlToEmail(userId, `${accountPortalBase}/magic-link-landing`, userEmail, 'Complete your MotherTree account setup');
+    console.log(`switch-to-magic-link: sent magic-link email to ${userEmail} for user ${userId}`);
+    const emailHint = await keycloakApi.getUserEmailHint(userId);
 
     // Clear the setup-info cookie
     res.clearCookie('mt-setup-info', { domain: cookieDomain, path: '/' });
 
-    // Redirect user to the magic link (authenticates them in a fresh session)
-    res.redirect(302, magicLink);
+    res.render('check-email', {
+      title: 'Check Your Email',
+      emailHint,
+    });
   } catch (err) {
     console.error('switch-to-magic-link: failed:', err.message);
     return res.status(500).send('Failed to switch authentication method. Please try again.');
@@ -701,6 +709,68 @@ app.get('/magic-link-landing', (req, res) => {
   console.log('magic-link-landing: redirecting to /complete-registration');
   res.redirect('/complete-registration');
 });
+
+// Magic-link login — public pages for returning users to sign in via email link
+app.get('/magic-link-login', (req, res) => {
+  res.render('magic-link-login', {
+    title: 'Sign In with Email Link',
+    error: null,
+  });
+});
+
+app.post('/magic-link-login', verifyOrigin, async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    return res.render('magic-link-login', {
+      title: 'Sign In with Email Link',
+      error: 'Email address is required',
+    });
+  }
+
+  const trimmedEmail = email.trim().toLowerCase();
+
+  try {
+    // Look up the user by email in Keycloak
+    const user = await keycloakApi.findUserByEmail(trimmedEmail);
+    if (!user) {
+      // Don't reveal whether the email exists — show "check your email" regardless
+      console.log(`magic-link-login: no user found for ${trimmedEmail}, showing check-email anyway`);
+      return res.render('check-email', {
+        title: 'Check Your Email',
+        emailHint: maskEmail(trimmedEmail),
+      });
+    }
+
+    // Send magic-link to the user's RECOVERY email (not tenant email).
+    // The recovery email is an out-of-band address (e.g. Gmail) that:
+    // 1. Confirms identity via a different channel
+    // 2. Works even if the tenant mailbox (Stalwart) isn't provisioned yet
+    const accountPortalBase = process.env.BASE_URL;
+    const recoveryEmail = await keycloakApi.getUserRecoveryEmail(user.id);
+    const targetEmail = recoveryEmail || user.email;
+    await keycloakApi.sendMagicLinkUrlToEmail(user.id, `${accountPortalBase}/magic-link-landing`, targetEmail, 'Sign in to MotherTree');
+    console.log(`magic-link-login: sent magic-link to ${targetEmail} for user ${user.id} (requested: ${trimmedEmail})`);
+
+    // Show email hint for the recovery email (where the link was actually sent)
+    res.render('check-email', {
+      title: 'Check Your Email',
+      emailHint: maskEmail(targetEmail),
+    });
+  } catch (err) {
+    console.error('magic-link-login: failed:', err.message);
+    res.render('magic-link-login', {
+      title: 'Sign In with Email Link',
+      error: 'Something went wrong. Please try again.',
+    });
+  }
+});
+
+function maskEmail(email) {
+  const [local, domain] = email.split('@');
+  if (!domain) return '***';
+  const visible = local.substring(0, Math.min(3, local.length));
+  return `${visible}***@${domain}`;
+}
 
 // Account Recovery - public pages (no auth required)
 app.get('/recover', (req, res) => {
