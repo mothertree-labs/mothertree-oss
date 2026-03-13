@@ -669,18 +669,25 @@ app.get('/switch-to-magic-link', async (req, res) => {
   }
 
   try {
-    // Swap required action: remove webauthn-register-passwordless, add magic-link
+    // Remove webauthn required action and mark user as magic-link auth
     await keycloakApi.removeRequiredAction(userId, 'webauthn-register-passwordless');
-    await keycloakApi.addRequiredAction(userId, 'ext-magic-link');
-    console.log(`switch-to-magic-link: swapped required actions for user ${userId}`);
+    await keycloakApi.setUserAuthMethod(userId, 'magic-link');
+    console.log(`switch-to-magic-link: removed webauthn action, set authMethod=magic-link for user ${userId}`);
+
+    // Generate a magic-link login URL that bypasses the stale session
+    // (Keycloak's auth session still has the old required action; a fresh
+    // magic-link token creates a new session with no required actions.)
+    const accountPortalBase = `https://account.${process.env.TENANT_DOMAIN}`;
+    const magicLink = await keycloakApi.createMagicLink(userId, `${accountPortalBase}/complete-registration`);
+    console.log(`switch-to-magic-link: generated magic link for user ${userId}`);
 
     // Clear the setup-info cookie
     res.clearCookie('mt-setup-info', { domain: cookieDomain, path: '/' });
 
-    // Redirect back to Keycloak to continue with magic-link required action
-    res.redirect(302, validatedNext);
+    // Redirect user to the magic link (authenticates them in a fresh session)
+    res.redirect(302, magicLink);
   } catch (err) {
-    console.error('switch-to-magic-link: failed to swap required actions:', err.message);
+    console.error('switch-to-magic-link: failed:', err.message);
     return res.status(500).send('Failed to switch authentication method. Please try again.');
   }
 });

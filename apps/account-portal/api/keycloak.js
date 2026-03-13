@@ -750,10 +750,10 @@ async function removeRequiredAction(userId, actionAlias) {
 }
 
 /**
- * Add a required action to a user's requiredActions list.
- * Used to swap from WebAuthn to magic-link during onboarding.
+ * Set a user's authMethod attribute (e.g. 'magic-link').
+ * Used during onboarding when user opts for magic-link instead of passkey.
  */
-async function addRequiredAction(userId, actionAlias) {
+async function setUserAuthMethod(userId, method) {
   validateUserId(userId);
   const token = await getServiceToken();
   const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}`;
@@ -767,10 +767,6 @@ async function addRequiredAction(userId, actionAlias) {
   }
 
   const user = await response.json();
-  const actions = user.requiredActions || [];
-  if (!actions.includes(actionAlias)) {
-    actions.push(actionAlias);
-  }
 
   const updateResponse = await fetch(userUrl, {
     method: 'PUT',
@@ -780,15 +776,68 @@ async function addRequiredAction(userId, actionAlias) {
     },
     body: JSON.stringify({
       ...user,
-      requiredActions: actions,
+      attributes: {
+        ...user.attributes,
+        authMethod: [method],
+      },
     }),
   });
 
   if (!updateResponse.ok) {
-    throw new Error(`Failed to add required action '${actionAlias}': ${updateResponse.status}`);
+    throw new Error(`Failed to set authMethod '${method}': ${updateResponse.status}`);
   }
 
-  console.log(`Added required action '${actionAlias}' to user ${userId}`);
+  console.log(`Set authMethod='${method}' for user ${userId}`);
+}
+
+/**
+ * Create a magic-link login URL for a user (Phase Two plugin).
+ * Uses send_email=false to get the link directly without emailing.
+ * The link authenticates the user and redirects to redirectUri.
+ */
+async function createMagicLink(userId, redirectUri) {
+  validateUserId(userId);
+  const token = await getServiceToken();
+
+  // Look up the user to get their username/email
+  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}`;
+  const userResponse = await fetch(userUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!userResponse.ok) {
+    throw new Error(`createMagicLink: failed to get user: ${userResponse.status}`);
+  }
+  const user = await userResponse.json();
+  const email = user.email || user.username;
+
+  // Call the Phase Two magic-link REST API
+  const magicLinkUrl = `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/magic-link`;
+  const response = await fetch(magicLinkUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email,
+      client_id: CLIENT_ID,
+      redirect_uri: redirectUri,
+      send_email: false,
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`createMagicLink: ${response.status} ${text}`);
+  }
+
+  const result = await response.json();
+  if (!result.link) {
+    throw new Error(`createMagicLink: no link in response: ${JSON.stringify(result)}`);
+  }
+
+  console.log(`Created magic-link for user ${userId} (email: ${email})`);
+  return result.link;
 }
 
 module.exports = {
@@ -802,5 +851,6 @@ module.exports = {
   assignRealmRole,
   removeRealmRole,
   removeRequiredAction,
-  addRequiredAction,
+  setUserAuthMethod,
+  createMagicLink,
 };

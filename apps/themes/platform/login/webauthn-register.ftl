@@ -1,297 +1,251 @@
 <#--
-    Platform WebAuthn Passwordless Registration Page
-    This page is shown when users need to register a passkey.
+    Platform WebAuthn Registration Page (used for both regular and passwordless)
+    Keycloak 26.x uses webauthn-register.ftl for ALL WebAuthn registration flows.
+    There is no separate webauthn-register-passwordless.ftl in the built-in themes.
+
+    Includes magic-link fallback: when the device lacks a platform authenticator,
+    shows an option to set up email-based sign-in instead.
+
+    All styling uses inline styles + JS because the base template renders the
+    "header" section inside an <h1> tag where <style> blocks don't reliably apply.
 -->
 <#import "template.ftl" as layout>
-<@layout.registrationLayout displayMessage=!messagesPerField.existsError('') displayRequiredFields=false; section>
+<@layout.registrationLayout displayMessage=true; section>
     <#if section = "header">
-        <link rel="stylesheet" href="${url.resourcesPath}/css/styles.css" />
-        <link rel="stylesheet" href="${url.resourcesPath}/css/fonts.css" />
-        <style>
-            /* Override Keycloak background - matching platform cream */
-            html.login-pf, html.login-pf body, body, .login-pf-page {
-                background: #F3E8D6 !important;
-                background-image: none !important;
-                min-height: 100vh !important;
-            }
-            .login-pf-page-header { display: none !important; }
-            
-            /* Center content container */
-            .login-pf-page { 
-                display: flex !important; 
-                flex-direction: column !important;
-                align-items: center !important; 
-                justify-content: center !important;
-                padding: 2rem !important;
-            }
-            
-            /* Card styling */
-            .card-pf, .login-pf-page .card-pf {
-                background: rgba(255,255,255,0.95) !important;
-                border-radius: 16px !important;
-                box-shadow: 0 4px 24px rgba(0,0,0,0.08) !important;
-                padding: 0 !important;
-                max-width: 480px !important;
-                margin: 0 auto !important;
-            }
-            
-            .platform-header { 
-                text-align: center; 
-                padding: 2.5rem 2rem 1.5rem;
-                background: transparent;
-            }
-            .platform-title { 
-                font-family: 'Figtree', sans-serif;
-                font-size: 2.5rem; font-weight: 600; color: #A7AE8D;
-                margin: 0 0 0.5rem 0; letter-spacing: 0.03em;
-            }
-            .platform-welcome {
-                font-family: 'Figtree', sans-serif;
-                font-size: 1.1rem; color: #6b6b6b; margin: 0; font-weight: 400; 
-            }
-            
-            /* WebAuthn specific styles */
-            .webauthn-register-container {
-                padding: 0 2rem 2.5rem;
-                text-align: center;
-            }
-            
-            .user-email-display {
-                background: #F3E8D6;
-                border-radius: 8px;
-                padding: 1rem;
-                margin-bottom: 1.5rem;
-                font-family: 'Figtree', sans-serif;
-            }
-            
-            .user-email-label {
-                font-size: 0.85rem;
-                color: #6b6b6b;
-                margin-bottom: 0.25rem;
-            }
-            
-            .user-email-value {
-                font-size: 1.1rem;
-                color: #3d3d3d;
-                font-weight: 500;
-            }
-            
-            .passkey-icon {
-                font-size: 4rem;
-                margin-bottom: 1rem;
-            }
-            
-            .passkey-instructions {
-                font-family: 'Figtree', sans-serif;
-                font-size: 1rem;
-                color: #6b6b6b;
-                margin-bottom: 1.5rem;
-                line-height: 1.5;
-            }
-            
-            /* Register button */
-            #registerWebAuthn, .webauthn-register-btn {
-                display: inline-flex !important;
-                align-items: center;
-                justify-content: center;
-                gap: 0.75rem;
-                padding: 1rem 2rem !important;
-                background: #A7AE8D !important;
-                border: none !important;
-                border-radius: 8px !important;
-                color: #fff !important;
-                font-size: 1.1rem !important;
-                font-weight: 500 !important;
-                cursor: pointer !important;
-                transition: all 0.2s ease !important;
-                box-shadow: 0 4px 12px rgba(167, 174, 141, 0.3) !important;
-                width: 100%;
-                max-width: 320px;
-            }
-            
-            #registerWebAuthn:hover, .webauthn-register-btn:hover {
-                background: #8A9475 !important;
-                transform: translateY(-2px);
-                box-shadow: 0 6px 16px rgba(167, 174, 141, 0.4) !important;
-            }
-            
-            /* Error messages */
-            .alert-error {
-                background: #fef2f2;
-                border: 1px solid #fecaca;
-                border-radius: 8px;
-                padding: 1rem;
-                margin-bottom: 1.5rem;
-                color: #991b1b;
-                font-family: 'Figtree', sans-serif;
-            }
-            
-            /* Hide default form elements that we don't need */
-            .pf-c-form__label, .pf-c-form__helper-text {
-                display: none !important;
-            }
-        </style>
-        <div class="platform-header">
-            <h1 class="platform-title">${realm.displayName!"the platform"}</h1>
-            <p class="platform-welcome">Set up your passkey</p>
-        </div>
+        ${realm.displayName!"the platform"}
+    <#elseif section = "title">
+        Set Up Your Passkey
     <#elseif section = "form">
-        <div class="webauthn-register-container">
-            <#if user?? && user.username??>
-                <div class="user-email-display">
-                    <div class="user-email-label">Your email address</div>
-                    <div class="user-email-value">${user.username}</div>
-                </div>
-            </#if>
-            
-            <div class="passkey-icon">🔐</div>
-            
-            <div class="passkey-instructions">
-                A passkey lets you sign in securely using your device's biometrics (fingerprint or face) 
-                or a security key. No password needed!
+        <link rel="stylesheet" href="${url.resourcesPath}/css/fonts.css" />
+
+        <div style="text-align: center; padding: 2.5rem 2rem 1.5rem;">
+            <h1 style="font-family: 'Figtree', sans-serif; font-size: 2.5rem; font-weight: 600; color: #A7AE8D; margin: 0 0 0.5rem 0; letter-spacing: 0.03em;">
+                ${realm.displayName!"the platform"}
+            </h1>
+            <p style="font-family: 'Figtree', sans-serif; font-size: 1.1rem; color: #6b6b6b; margin: 0; font-weight: 400;">
+                Complete your account setup
+            </p>
+        </div>
+
+        <div style="padding: 0 2rem 2.5rem; text-align: center;">
+            <div style="width: 64px; height: 64px; margin: 0 auto 1.5rem; background: #EDF3EB; border-radius: 50%; display: flex; align-items: center; justify-content: center;">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="width: 32px; height: 32px; fill: #A7AE8D;">
+                    <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
+                </svg>
             </div>
-            
-            <form id="webauthn-register-form" action="${url.loginAction}" method="post">
+
+            <h2 style="font-size: 1.5rem; font-weight: 500; color: #A7AE8D; margin: 0 0 1rem 0; font-family: 'Figtree', sans-serif;">
+                Set Up Your Passkey
+            </h2>
+
+            <p style="color: #6b6b6b; margin-bottom: 2rem; line-height: 1.6; font-family: 'Figtree', sans-serif;">
+                To secure your account, you'll need to register a passkey.
+                This can be your device's fingerprint, face recognition, or a security key.
+            </p>
+
+            <form id="register" action="${url.loginAction}" method="post">
+                <div style="margin-bottom: 1.5rem; text-align: left;">
+                    <label for="registerWebAuthnLabel" style="display: block; margin-bottom: 0.5rem; color: #6b6b6b; font-weight: 500; font-family: 'Figtree', sans-serif;">
+                        Passkey Label
+                    </label>
+                    <input type="text" id="registerWebAuthnLabel" name="registerWebAuthnLabel"
+                           value="Passkey"
+                           placeholder="e.g., MacBook Touch ID"
+                           style="width: 100%; padding: 0.75rem 1rem; border: 1px solid #d1d5db; border-radius: 8px; font-size: 1rem; box-sizing: border-box;" />
+                </div>
+
                 <input type="hidden" id="clientDataJSON" name="clientDataJSON"/>
                 <input type="hidden" id="attestationObject" name="attestationObject"/>
                 <input type="hidden" id="publicKeyCredentialId" name="publicKeyCredentialId"/>
                 <input type="hidden" id="authenticatorLabel" name="authenticatorLabel"/>
                 <input type="hidden" id="transports" name="transports"/>
                 <input type="hidden" id="error" name="error"/>
-                
-                <button type="button" id="registerWebAuthn" class="webauthn-register-btn">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="currentColor"/>
-                    </svg>
-                    Register Passkey
-                </button>
             </form>
+
+            <div id="no-platform-auth-banner" style="display:none; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; text-align: left;">
+                <div style="font-weight: 600; color: #9a3412; margin-bottom: 0.25rem; font-size: 0.95rem;">Passkey not available on this device</div>
+                <div style="color: #9a3412; font-size: 0.9rem; line-height: 1.5;">
+                    Your device doesn't support passkeys (fingerprint or face recognition).
+                    You can sign in using a secure link sent to your email instead.
+                </div>
+            </div>
+
+            <button type="button" id="registerBtn" onclick="registerWebAuthn()"
+                    style="width: 100%; padding: 1rem 2rem; background: #A7AE8D; color: white; border: none; border-radius: 8px; font-size: 1rem; font-weight: 500; cursor: pointer; font-family: 'Figtree', sans-serif;">
+                Register Passkey
+            </button>
+
+            <a id="magic-link-btn" href="#"
+               style="display:none; width: 100%; padding: 1rem 2rem; background: #A7AE8D; color: white; border: none; border-radius: 8px; font-size: 1rem; font-weight: 500; cursor: pointer; text-align: center; text-decoration: none; box-sizing: border-box; font-family: 'Figtree', sans-serif;">
+                Set Up Email Sign-In
+            </a>
+
+            <div id="register-btn-secondary" style="display:none; text-align: center; margin-top: 0.75rem;">
+                <a href="javascript:void(0)" onclick="registerWebAuthn()"
+                   style="color: #6b6b6b; text-decoration: none; font-size: 0.9rem; font-family: 'Figtree', sans-serif;">
+                    I have a security key &mdash; register passkey anyway
+                </a>
+            </div>
+
+            <#if !isSetRetry?has_content && isAppInitiatedAction?has_content>
+                <div style="text-align: center; margin-top: 1.5rem;">
+                    <form action="${url.loginAction}" method="post">
+                        <input type="hidden" id="isSetRetry" name="isSetRetry" value="true"/>
+                        <a href="javascript:void(0)" onclick="this.parentNode.submit()"
+                           style="color: #6b6b6b; text-decoration: none; font-size: 0.9rem; font-family: 'Figtree', sans-serif;">
+                            Skip for now
+                        </a>
+                    </form>
+                </div>
+            </#if>
         </div>
-        
+
+        <#-- Page styling script — isolated from WebAuthn code -->
         <script type="text/javascript">
-            // WebAuthn registration challenge from Keycloak
-            var challenge = "${challenge}";
-            var userid = "${userid}";
-            var username = "${username}";
-            var signatureAlgorithms = [<#list signatureAlgorithms as sigAlg>${sigAlg}<#sep>, </#sep></#list>];
-            var rpEntityName = "${rpEntityName}";
-            var rpId = "${rpId}";
-            var attestationConveyancePreference = "${attestationConveyancePreference}";
-            var authenticatorAttachment = "${authenticatorAttachment}";
-            var requireResidentKey = "${requireResidentKey}";
-            var userVerificationRequirement = "${userVerificationRequirement}";
-            var createTimeout = ${createTimeout};
-            var excludeCredentialIds = "${excludeCredentialIds}";
-            
-            function base64UrlToArrayBuffer(base64Url) {
-                var base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-                var padding = '='.repeat((4 - base64.length % 4) % 4);
-                var base64Padded = base64 + padding;
-                var binary = atob(base64Padded);
-                var bytes = new Uint8Array(binary.length);
-                for (var i = 0; i < binary.length; i++) {
-                    bytes[i] = binary.charCodeAt(i);
-                }
-                return bytes.buffer;
-            }
-            
-            function arrayBufferToBase64Url(buffer) {
-                var bytes = new Uint8Array(buffer);
-                var binary = '';
-                for (var i = 0; i < bytes.byteLength; i++) {
-                    binary += String.fromCharCode(bytes[i]);
-                }
-                var base64 = btoa(binary);
-                return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-            }
-            
-            function registerSecurityKey() {
+            document.documentElement.style.cssText += 'background: #F3E8D6 !important; background-image: none !important;';
+            document.body.style.cssText += 'background: #F3E8D6 !important; background-image: none !important; min-height: 100vh;';
+
+            var loginPage = document.querySelector('.login-pf-page');
+            if (loginPage) loginPage.style.cssText += 'background: #F3E8D6 !important; display: flex !important; flex-direction: column !important; align-items: center !important; justify-content: center !important; padding: 2rem !important; background-image: none !important;';
+
+            var card = document.querySelector('.card-pf') || document.querySelector('.pf-c-login__main');
+            if (card) card.style.cssText += 'background: rgba(255,255,255,0.95) !important; border-radius: 16px !important; box-shadow: 0 4px 24px rgba(0,0,0,0.08) !important; padding: 0 !important; max-width: 500px !important; margin: 0 auto !important; border: none !important;';
+
+            // Hide base template elements
+            ['#kc-header', '.login-pf-page-header', '#kc-header-wrapper',
+             '.login-pf-header', '#kc-info', '#kc-info-wrapper'].forEach(function(sel) {
+                var el = document.querySelector(sel);
+                if (el) el.style.display = 'none';
+            });
+        </script>
+
+        <script type="text/javascript" src="${url.resourcesCommonPath}/node_modules/jquery/dist/jquery.min.js"></script>
+        <script type="text/javascript">
+            function registerWebAuthn() {
+                var challenge = "${challenge}";
+                var userid = "${userid}";
+                var username = "${username}";
+                var signatureAlgorithms = [<#list signatureAlgorithms as alg>${alg?c},</#list>];
+                var rpEntityName = "${rpEntityName}";
+                var rpId = "${rpId}";
+                var attestationConveyancePreference = "${attestationConveyancePreference}";
+                var authenticatorAttachment = "${authenticatorAttachment}";
+                var requireResidentKey = "${requireResidentKey}";
+                var userVerificationRequirement = "${userVerificationRequirement}";
+                var createTimeout = ${createTimeout};
+                var excludeCredentialIds = "${excludeCredentialIds}";
+                var initLabel = document.getElementById('registerWebAuthnLabel').value;
+
                 var pubKeyCredParams = [];
                 for (var i = 0; i < signatureAlgorithms.length; i++) {
-                    pubKeyCredParams.push({
-                        type: 'public-key',
-                        alg: signatureAlgorithms[i]
-                    });
+                    pubKeyCredParams.push({type: "public-key", alg: signatureAlgorithms[i]});
                 }
-                
-                var publicKeyCredentialCreationOptions = {
-                    challenge: base64UrlToArrayBuffer(challenge),
-                    rp: {
-                        name: rpEntityName
-                    },
+
+                var excludeCredentials = [];
+                if (excludeCredentialIds !== "") {
+                    var excludeCredentialIdsList = excludeCredentialIds.split(',');
+                    for (var i = 0; i < excludeCredentialIdsList.length; i++) {
+                        excludeCredentials.push({
+                            type: "public-key",
+                            id: base64url.decode(excludeCredentialIdsList[i], {loose: true})
+                        });
+                    }
+                }
+
+                var publicKey = {
+                    challenge: base64url.decode(challenge, {loose: true}),
+                    rp: {id: rpId, name: rpEntityName},
                     user: {
-                        id: base64UrlToArrayBuffer(userid),
+                        id: base64url.decode(userid, {loose: true}),
                         name: username,
                         displayName: username
                     },
                     pubKeyCredParams: pubKeyCredParams,
                     authenticatorSelection: {
+                        authenticatorAttachment: authenticatorAttachment === "not specified" ? undefined : authenticatorAttachment,
+                        requireResidentKey: requireResidentKey === "Yes",
+                        residentKey: requireResidentKey === "Yes" ? "required" : "discouraged",
                         userVerification: userVerificationRequirement
                     },
-                    timeout: createTimeout === 0 ? 60000 : createTimeout
+                    timeout: createTimeout === 0 ? undefined : createTimeout * 1000,
+                    attestation: attestationConveyancePreference,
+                    excludeCredentials: excludeCredentials
                 };
-                
-                if (rpId) {
-                    publicKeyCredentialCreationOptions.rp.id = rpId;
-                }
-                
-                if (attestationConveyancePreference !== 'not specified') {
-                    publicKeyCredentialCreationOptions.attestation = attestationConveyancePreference;
-                }
-                
-                if (authenticatorAttachment !== 'not specified') {
-                    publicKeyCredentialCreationOptions.authenticatorSelection.authenticatorAttachment = authenticatorAttachment;
-                }
-                
-                if (requireResidentKey === 'Yes') {
-                    publicKeyCredentialCreationOptions.authenticatorSelection.requireResidentKey = true;
-                    publicKeyCredentialCreationOptions.authenticatorSelection.residentKey = 'required';
-                } else if (requireResidentKey === 'No') {
-                    publicKeyCredentialCreationOptions.authenticatorSelection.requireResidentKey = false;
-                    publicKeyCredentialCreationOptions.authenticatorSelection.residentKey = 'discouraged';
-                }
-                
-                if (excludeCredentialIds) {
-                    var excludeIds = excludeCredentialIds.split(',');
-                    var excludeCredentials = [];
-                    for (var i = 0; i < excludeIds.length; i++) {
-                        if (excludeIds[i].trim()) {
-                            excludeCredentials.push({
-                                type: 'public-key',
-                                id: base64UrlToArrayBuffer(excludeIds[i].trim())
-                            });
-                        }
-                    }
-                    if (excludeCredentials.length > 0) {
-                        publicKeyCredentialCreationOptions.excludeCredentials = excludeCredentials;
-                    }
-                }
-                
-                navigator.credentials.create({publicKey: publicKeyCredentialCreationOptions})
-                    .then(function(credential) {
-                        var response = credential.response;
-                        
-                        document.getElementById('clientDataJSON').value = arrayBufferToBase64Url(response.clientDataJSON);
-                        document.getElementById('attestationObject').value = arrayBufferToBase64Url(response.attestationObject);
-                        document.getElementById('publicKeyCredentialId').value = arrayBufferToBase64Url(credential.rawId);
-                        document.getElementById('authenticatorLabel').value = 'Passkey';
-                        
-                        var transports = [];
-                        if (typeof response.getTransports === 'function') {
-                            transports = response.getTransports();
-                        }
+
+                navigator.credentials.create({publicKey: publicKey})
+                    .then(function(result) {
+                        var clientDataJSON = result.response.clientDataJSON;
+                        var attestationObject = result.response.attestationObject;
+                        var publicKeyCredentialId = result.id;
+
+                        document.getElementById('clientDataJSON').value = base64url.encode(new Uint8Array(clientDataJSON), {pad: false});
+                        document.getElementById('attestationObject').value = base64url.encode(new Uint8Array(attestationObject), {pad: false});
+                        document.getElementById('publicKeyCredentialId').value = publicKeyCredentialId;
+                        document.getElementById('authenticatorLabel').value = initLabel;
+
+                        var transports = result.response.getTransports ? result.response.getTransports() : [];
                         document.getElementById('transports').value = transports.join(',');
-                        
-                        document.getElementById('webauthn-register-form').submit();
+
+                        document.getElementById('register').submit();
                     })
                     .catch(function(err) {
-                        console.error('WebAuthn registration error:', err);
-                        document.getElementById('error').value = err.message || 'Registration failed';
-                        document.getElementById('webauthn-register-form').submit();
+                        document.getElementById('error').value = err.name + ": " + err.message;
+                        document.getElementById('register').submit();
                     });
             }
-            
-            document.getElementById('registerWebAuthn').addEventListener('click', registerSecurityKey);
+        </script>
+        <script type="text/javascript" src="${url.resourcesCommonPath}/node_modules/base64url/dist/base64url.min.js"></script>
+        <script type="text/javascript">
+            // Detect whether this device has a platform authenticator (Touch ID, Windows Hello, etc.)
+            // If not, show the magic-link alternative for email-based sign-in.
+            (function detectPlatformAuthenticator() {
+                if (typeof PublicKeyCredential === 'undefined' ||
+                    typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable !== 'function') {
+                    showMagicLinkOption();
+                    return;
+                }
+                PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
+                    .then(function(available) {
+                        if (!available) {
+                            showMagicLinkOption();
+                        }
+                    })
+                    .catch(function() {
+                        // Detection failed — keep normal passkey UI
+                    });
+            })();
+
+            function showMagicLinkOption() {
+                document.getElementById('no-platform-auth-banner').style.display = 'block';
+                document.getElementById('magic-link-btn').style.display = 'block';
+                document.getElementById('registerBtn').style.display = 'none';
+                document.getElementById('register-btn-secondary').style.display = 'block';
+
+                // Build the switch URL from the mt-setup-info cookie (set by /beginSetup)
+                var magicBtn = document.getElementById('magic-link-btn');
+                try {
+                    var cookies = document.cookie.split(';');
+                    for (var i = 0; i < cookies.length; i++) {
+                        var c = cookies[i].trim();
+                        if (c.indexOf('mt-setup-info=') === 0) {
+                            var payload = JSON.parse(atob(c.substring('mt-setup-info='.length).replace(/-/g, '+').replace(/_/g, '/')));
+                            var accountHost = window.location.hostname.replace(/^auth\./, 'account.');
+                            var currentUrl = window.location.href;
+                            magicBtn.href = 'https://' + accountHost + '/switch-to-magic-link'
+                                + '?userId=' + encodeURIComponent(payload.userId)
+                                + '&token=' + encodeURIComponent(payload.token)
+                                + '&next=' + encodeURIComponent(currentUrl);
+                            return;
+                        }
+                    }
+                } catch(e) {
+                    // Cookie not found or invalid — hide the magic link button
+                    magicBtn.style.display = 'none';
+                    document.getElementById('no-platform-auth-banner').style.display = 'none';
+                    document.getElementById('registerBtn').style.display = 'block';
+                    document.getElementById('register-btn-secondary').style.display = 'none';
+                }
+            }
         </script>
     </#if>
 </@layout.registrationLayout>

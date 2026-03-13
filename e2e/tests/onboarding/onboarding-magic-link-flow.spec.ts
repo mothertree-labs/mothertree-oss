@@ -19,9 +19,13 @@ const baseDomain = urls.baseDomain;
  * 2. IMAP: read invitation email, extract setup URL
  * 3. Navigate to setup URL WITHOUT virtual authenticator
  * 4. WebAuthn page detects no platform auth -> shows magic-link option
- * 5. Click "Set Up Email Sign-In" -> /switch-to-magic-link -> Keycloak magic-link action
- * 6. IMAP: read magic-link email, extract sign-in URL
- * 7. Click magic-link URL -> onboarding complete, redirected to /home
+ * 5. Click "Set Up Email Sign-In" -> /switch-to-magic-link
+ * 6. /switch-to-magic-link removes webauthn required action, sets authMethod attribute
+ * 7. Keycloak has no more required actions -> user is authenticated -> /home
+ *
+ * Note: The magic-link EMAIL is used for future LOGINS, not during onboarding.
+ * During onboarding, we simply skip passkey registration. The magic-link
+ * authenticator in the browser flow handles subsequent logins.
  *
  * Prerequisites:
  * - keycloak-magic-link plugin deployed (ext-magic-form authenticator)
@@ -37,7 +41,6 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
     const ap = selectors.adminPortal;
     const uniqueId = `${Date.now()}`;
     const username = `${e2ePrefix('mlink')}-${uniqueId}`;
-    const userEmail = `${username}@${baseDomain}`;
     const firstName = `MLink${uniqueId}`;
     const lastName = 'E2ETest';
 
@@ -45,18 +48,10 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
     const recoveryEmail = `e2e-mailrt+mlink-${uniqueId}@${baseDomain}`;
 
     let invitedUserId: string | null = null;
-    const results: Record<string, { passed: boolean; error?: string }> = {};
-
-    function record(service: string, passed: boolean, error?: string) {
-      results[service] = { passed, error };
-      if (!passed) {
-        console.log(`  [magic-link] SOFT FAIL - ${service}: ${error}`);
-      }
-    }
 
     try {
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      // Step 1: Admin Portal - Create invitation (same as passkey flow)
+      // Step 1: Admin Portal - Create invitation
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
       await adminPage.fill(ap.firstNameInput, firstName);
@@ -75,14 +70,12 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
       await expect(adminPage.locator(ap.formMessage)).toBeVisible({ timeout: 30_000 });
       const messageText = await adminPage.locator(ap.formMessage).textContent();
       expect(messageText).toContain('successfully');
-
       await expect(adminPage.locator(ap.membersList)).toContainText(firstName, { timeout: 10_000 });
 
-      record('admin-portal-invite', true);
       console.log(`  [magic-link] Invite sent: userId=${invitedUserId}`);
 
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      // Step 2: Read invitation email (same as passkey flow)
+      // Step 2: Read invitation email
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
       const rawEmail = await waitForEmailBody({
@@ -109,16 +102,12 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
       }
 
       expect(setupUrl, 'Could not find setup URL in invitation email').toBeTruthy();
-      record('invitation-email', true);
       console.log(`  [magic-link] Setup URL: ${setupUrl!.substring(0, 80)}...`);
 
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       // Step 3: Navigate to setup WITHOUT virtual authenticator
-      // The WebAuthn page should detect no platform auth and show magic-link option
       // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-      // Use a fresh context WITHOUT CDP virtual authenticator
-      // This simulates a Linux desktop user without platform authenticator
       const userContext = await adminPage.context().browser()!.newContext({
         ignoreHTTPSErrors: true,
       });
@@ -132,8 +121,8 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
 
         // Handle "Click here to proceed" intermediate page
         const proceedLink = userPage.locator('a:has-text("Click here to proceed"), a:has-text("click here")');
-        const registerBtn = userPage.locator('#registerBtn, #registerWebAuthn, button:has-text("Register Passkey"), input[type="submit"]');
-        const magicLinkBtn = userPage.locator('#magic-link-btn, a:has-text("Set Up Email Sign-In"), .btn-magic-link');
+        const registerBtn = userPage.locator('#registerBtn, button:has-text("Register Passkey")');
+        const magicLinkBtn = userPage.locator('#magic-link-btn');
 
         const firstVisible = await Promise.race([
           proceedLink.first().waitFor({ timeout: 30_000 }).then(() => 'proceed' as const),
@@ -147,138 +136,92 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
           await userPage.waitForLoadState('load');
         }
 
-        // Wait for the detection JS to run and show the magic-link option.
-        // The JS calls isUserVerifyingPlatformAuthenticatorAvailable() which returns
-        // false in headless Chrome without virtual authenticator, then shows the banner.
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // Step 4: Verify magic-link detection and banner
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
         const noPlatformBanner = userPage.locator('#no-platform-auth-banner');
         const magicLinkButton = userPage.locator('#magic-link-btn');
 
-        // Wait for either the magic-link button (detection fired) or the register button
+        // Wait for detection JS to run and show the magic-link option.
+        // In headless Chrome without a virtual authenticator,
+        // isUserVerifyingPlatformAuthenticatorAvailable() returns false.
         const detected = await Promise.race([
           magicLinkButton.waitFor({ state: 'visible', timeout: 15_000 }).then(() => 'magic-link' as const),
           noPlatformBanner.waitFor({ state: 'visible', timeout: 15_000 }).then(() => 'banner' as const),
         ]).catch(() => 'not-detected' as const);
 
         if (detected === 'not-detected') {
-          // Magic-link plugin may not be deployed yet, or the detection JS didn't run
-          // (e.g., page isn't the WebAuthn registration page).
-          // Check if we're even on the right page
           const pageContent = await userPage.evaluate(() => {
             const el = document.querySelector('#kc-content-wrapper') || document.body;
             return el?.textContent?.substring(0, 500) || '';
           }).catch(() => '');
-          console.log(`  [magic-link] Detection JS did not fire. Page content: ${pageContent.substring(0, 200)}`);
-
-          // This test requires the magic-link plugin to be deployed
-          test.skip(true, 'Magic-link detection not available - plugin may not be deployed yet');
+          console.log(`  [magic-link] Detection JS did not fire. Page content: ${pageContent.substring(0, 300)}`);
+          test.skip(true, 'Magic-link detection not available on this page');
           return;
         }
 
-        console.log('  [magic-link] Step 3: No-platform-auth banner detected, magic-link button visible');
+        // Verify both banner and button are visible
+        await expect(noPlatformBanner).toBeVisible();
+        await expect(magicLinkButton).toBeVisible();
 
-        // Click "Set Up Email Sign-In" — this redirects to /switch-to-magic-link
-        // which swaps the WebAuthn required action for magic-link
+        // Verify the "Register Passkey" primary button is hidden
+        const registerBtnVisible = await userPage.locator('#registerBtn').isVisible().catch(() => true);
+        expect(registerBtnVisible).toBe(false);
+
+        // Verify "I have a security key" secondary link is visible
+        await expect(userPage.locator('#register-btn-secondary')).toBeVisible();
+
+        console.log('  [magic-link] Step 4: Banner and magic-link button verified');
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // Step 5: Click "Set Up Email Sign-In" and complete onboarding
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
         await magicLinkButton.click();
-        console.log('  [magic-link] Step 3: Clicked "Set Up Email Sign-In"');
+        console.log('  [magic-link] Step 5: Clicked "Set Up Email Sign-In"');
 
-        // Wait for redirect through /switch-to-magic-link back to Keycloak
-        await userPage.waitForLoadState('load');
-        console.log(`  [magic-link] Step 3: After redirect: ${userPage.url().substring(0, 100)}`);
+        // The click should redirect:
+        // 1. /switch-to-magic-link (account portal) - removes webauthn action
+        // 2. Back to Keycloak (via `next` param)
+        // 3. Keycloak has no more required actions → authenticates user
+        // 4. Redirects to /complete-registration or /home
 
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Step 4: Keycloak now shows magic-link required action
-        // The plugin should send a magic-link email and show a "check email" page
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-        // The magic-link plugin shows a page saying "Check your email for a sign-in link"
-        // Wait briefly for the email to be sent
-        console.log('  [magic-link] Step 4: Waiting for magic-link email...');
-
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Step 5: Read magic-link email from e2e-mailrt inbox
-        // The magic-link email is sent to the user's email (not recovery email)
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-        // The magic-link email goes to userEmail (the tenant email).
-        // Since the user was just created, mail routing may go to recovery email instead.
-        // Try both: the user's tenant email inbox and the recovery email inbox.
-        const magicLinkEmail = await waitForEmailBody({
-          userEmail: TEST_USERS.emailTest.email, // recovery email recipient
-          subjectContains: 'sign in',
-          bodyContains: uniqueId,
-          timeoutMs: 120_000,
-          pollIntervalMs: 3_000,
-        });
-
-        const decodedMagicLink = magicLinkEmail
-          .replace(/=\r?\n/g, '')
-          .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
-
-        // Extract the magic-link URL from the email
-        const magicLinkUrlMatch = decodedMagicLink.match(/https:\/\/auth\.[^\s"<>]+magic-link[^\s"<>]+/);
-        const actionTokenMatch = decodedMagicLink.match(/https:\/\/auth\.[^\s"<>]+action-token[^\s"<>]+/);
-        const magicLinkUrl = (magicLinkUrlMatch?.[0] || actionTokenMatch?.[0])?.replace(/&amp;/g, '&');
-
-        expect(magicLinkUrl, 'Could not find magic-link URL in email').toBeTruthy();
-        record('magic-link-email', true);
-        console.log(`  [magic-link] Step 5: Magic link URL: ${magicLinkUrl!.substring(0, 80)}...`);
-
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Step 6: Click magic-link URL -> onboarding complete
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-        await userPage.goto(magicLinkUrl!);
-        await userPage.waitForLoadState('load');
-        console.log(`  [magic-link] Step 6: After clicking magic link: ${userPage.url().substring(0, 100)}`);
-
-        // Wait for redirect to account portal /home
+        // Wait for the page to leave Keycloak and reach account portal
         const reachedHome = await userPage.waitForURL(
-          url => url.pathname.includes('/home'),
+          url => url.pathname.includes('/home') || url.pathname.includes('/complete'),
           { timeout: 60_000 },
         ).then(() => true).catch(() => false);
 
+        const currentUrl = userPage.url();
+        console.log(`  [magic-link] Step 5: After redirect: ${currentUrl.substring(0, 100)}`);
+
         if (!reachedHome) {
-          // Try navigating to /complete-registration
-          const completeUrl = `https://account.${baseDomain}/complete-registration`;
-          await userPage.goto(completeUrl);
-          await userPage.waitForURL(
-            url => url.pathname.includes('/home'),
-            { timeout: 30_000 },
-          );
+          // If we're still on Keycloak, the switch may have failed
+          // or there are additional required actions. Log diagnostics.
+          const pageText = await userPage.evaluate(() =>
+            document.body?.innerText?.substring(0, 500) || '',
+          ).catch(() => '');
+          console.log(`  [magic-link] Did not reach /home. URL: ${currentUrl}`);
+          console.log(`  [magic-link] Page text: ${pageText.substring(0, 300)}`);
+
+          // Try navigating directly to /home as a fallback
+          await userPage.goto(`${urls.accountPortal}/home`);
+          await userPage.waitForLoadState('load');
         }
 
-        // Verify we're on the account portal home page
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // Step 6: Verify user is on account portal home
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
         await expect(
           userPage.locator(selectors.accountPortal.welcomeHeading),
         ).toBeVisible({ timeout: 15_000 });
 
-        record('magic-link-onboarding', true);
         console.log('  [magic-link] Step 6: Onboarding complete - user reached /home');
 
       } finally {
         await userContext.close();
-      }
-
-      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      // Summary
-      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-      console.log('\n  ┌──────────────────────────────────────────────');
-      console.log('  │ Magic-Link Onboarding E2E Results');
-      console.log('  ├──────────────────────────────────────────────');
-      for (const [service, result] of Object.entries(results)) {
-        const icon = result.passed ? 'PASS' : 'FAIL';
-        const detail = result.error ? ` - ${result.error}` : '';
-        console.log(`  │ [${icon}] ${service}${detail}`);
-      }
-      console.log('  └──────────────────────────────────────────────\n');
-
-      // Hard-fail on critical steps
-      const critical = ['admin-portal-invite', 'invitation-email', 'magic-link-onboarding'];
-      for (const svc of critical) {
-        if (results[svc] && !results[svc].passed) {
-          throw new Error(`Critical service failed: ${svc} - ${results[svc].error}`);
-        }
       }
     } finally {
       // Always clean up the invited user
