@@ -677,7 +677,7 @@ app.get('/switch-to-magic-link', async (req, res) => {
     // Generate a magic-link login URL that bypasses the stale session
     // (Keycloak's auth session still has the old required action; a fresh
     // magic-link token creates a new session with no required actions.)
-    const accountPortalBase = `https://account.${process.env.TENANT_DOMAIN}`;
+    const accountPortalBase = process.env.BASE_URL; // e.g. https://account.dev.mother-tree.org
     const magicLink = await keycloakApi.createMagicLink(userId, `${accountPortalBase}/complete-registration`);
     console.log(`switch-to-magic-link: generated magic link for user ${userId}`);
 
