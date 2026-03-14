@@ -399,11 +399,20 @@ app.get('/auth/callback',
       return res.redirect('/home');
     }
 
-    // Check if we should redirect somewhere specific (e.g., after registration)
+    // Check if we should redirect somewhere specific (e.g., magic-link login with destination)
     const postLoginRedirect = req.session.postLoginRedirect;
     if (postLoginRedirect) {
       delete req.session.postLoginRedirect;
-      return res.redirect(postLoginRedirect);
+      // Re-validate the redirect URL (defense in depth — already validated when stored)
+      try {
+        const redirectUrl = new URL(postLoginRedirect);
+        const allowedDomain = process.env.TENANT_DOMAIN;
+        if (redirectUrl.protocol === 'https:' &&
+            (redirectUrl.hostname === allowedDomain || redirectUrl.hostname.endsWith('.' + allowedDomain))) {
+          return res.redirect(postLoginRedirect);
+        }
+      } catch {}
+      console.warn(`auth/callback: rejected invalid postLoginRedirect: ${postLoginRedirect}`);
     }
 
     // Default: go to home page
