@@ -27,6 +27,8 @@ export const selectors = {
     adminPasswordInput: '#admin-login-form #password',
     passKeyLoginBtn: '#passkey-login-btn',
     magicLinkLogin: '#magic-link-login',
+    magicLinkSubtle: '#magic-link-subtle',
+    magicLinkSubtleLink: '#magic-link-subtle-link',
   },
 
   // ─── Account Portal ────────────────────────────────────────────────

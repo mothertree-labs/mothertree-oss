@@ -169,6 +169,9 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
 
         await expect(userPage.locator('#register-btn-secondary')).toBeVisible();
 
+        // The subtle always-visible link should be hidden when the prominent banner is shown
+        await expect(userPage.locator('#magic-link-subtle')).not.toBeVisible();
+
         console.log('  [magic-link] Step 4: Banner and magic-link button verified');
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
