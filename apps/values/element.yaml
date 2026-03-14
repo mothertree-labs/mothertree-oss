@@ -39,8 +39,8 @@ config:
                   format: "woff2"
           general: "'Figtree', sans-serif"
         colors:
-          accent-color: "#8A9475"
-          primary-color: "#A7AE8D"
+          accent-color: "#6B7A5A"
+          primary-color: "#6B7A5A"
           sidebar-color: "#141511"
           roomlist-background-color: "#C5CAB2"
           roomlist-text-color: "#141511"
@@ -51,6 +51,10 @@ config:
           timeline-text-color: "#141511"
           timeline-text-secondary-color: "#4A4D3E"
           timeline-highlights-color: "#D5D9C8"
+        compound:
+          --cpd-color-border-interactive: "var(--cpd-color-green-700)"
+          --cpd-color-bg-action-selected: "var(--cpd-color-green-200)"
+          --cpd-color-text-action-accent: "var(--cpd-color-green-700)"
       - name: "mothertree dark"
         is_dark: true
         fonts:
@@ -61,8 +65,8 @@ config:
                   format: "woff2"
           general: "'Figtree', sans-serif"
         colors:
-          accent-color: "#A7AE8D"
-          primary-color: "#A7AE8D"
+          accent-color: "#B8C4A0"
+          primary-color: "#B8C4A0"
           sidebar-color: "#0D0E0B"
           roomlist-background-color: "#141511"
           roomlist-text-color: "#F3E8D6"
@@ -73,6 +77,10 @@ config:
           timeline-text-color: "#F3E8D6"
           timeline-text-secondary-color: "#C8BEAE"
           timeline-highlights-color: "#222420"
+        compound:
+          --cpd-color-border-interactive: "var(--cpd-color-green-300)"
+          --cpd-color-bg-action-selected: "var(--cpd-color-green-900)"
+          --cpd-color-text-action-accent: "var(--cpd-color-green-300)"
 
 # Mount branding assets from ConfigMap (created by create_env before helmfile sync)
 extraVolumes:
@@ -98,3 +106,6 @@ extraVolumeMounts:
   - name: branding
     mountPath: /app/fonts/figtree-italic-latin-ext.woff2
     subPath: figtree-italic-latin-ext.woff2
+  - name: branding
+    mountPath: /app/themes/custom.css
+    subPath: custom.css
