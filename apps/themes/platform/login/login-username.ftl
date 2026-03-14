@@ -266,6 +266,11 @@
                 <a href="#" id="recover-link">Lost your passkey?</a>
             </div>
 
+            <#-- Magic-link login link -->
+            <div class="bottom-links" style="margin-top: 0.5rem;">
+                <a href="#" id="magic-link-login">Sign in with email link</a>
+            </div>
+
             <#-- Guest registration link -->
             <div class="bottom-links" style="margin-top: 0.5rem;">
                 <a href="#" id="guest-register-link">Guest? Register here</a>
@@ -335,6 +340,13 @@
                     var currentHost = window.location.hostname;
                     var adminHost = currentHost.replace(/^auth\./, 'admin.');
                     guestRegisterLink.href = 'https://' + adminHost + '/register';
+                }
+
+                // Set up magic-link login link
+                var magicLinkLogin = document.getElementById('magic-link-login');
+                if (magicLinkLogin) {
+                    var accountHost = window.location.hostname.replace(/^auth\./, 'account.');
+                    magicLinkLogin.href = 'https://' + accountHost + '/magic-link-login';
                 }
             });
         </script>
