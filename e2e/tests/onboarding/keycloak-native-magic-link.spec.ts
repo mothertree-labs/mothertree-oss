@@ -93,23 +93,20 @@ test.describe('Keycloak Native Magic-Link (credential-less user)', () => {
         // Step 3: Enter email in Keycloak username field
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        // The Keycloak login page may show the passkey button first.
-        // Click the passkey button to reveal the username form, then fill it.
-        const passkeyBtn = userPage.locator(selectors.keycloak.passKeyLoginBtn);
-        if (await passkeyBtn.isVisible({ timeout: 5_000 }).catch(() => false)) {
-          await passkeyBtn.click();
-        }
-
-        // Wait for the username field to be visible
+        // The Keycloak browser flow renders login-username.ftl first:
+        // a #username input and a .continue-btn ("Continue with Passkey").
+        // Submitting the email triggers Keycloak to evaluate available
+        // authenticators — for a credential-less user, only magic-link
+        // is available, so it auto-selects and shows view-email.ftl.
         const usernameInput = userPage.locator(selectors.keycloak.usernameInput);
         await expect(usernameInput).toBeVisible({ timeout: 15_000 });
 
         await usernameInput.fill(tenantEmail);
 
-        // Submit the form — find the submit button in the admin login form
-        const submitBtn = userPage.locator('#admin-login-form button[type="submit"]');
-        await expect(submitBtn).toBeVisible({ timeout: 5_000 });
-        await submitBtn.click();
+        // Submit via the continue button (login-username.ftl)
+        const continueBtn = userPage.locator(selectors.keycloak.continueBtn);
+        await expect(continueBtn).toBeVisible({ timeout: 5_000 });
+        await continueBtn.click();
 
         console.log(`  [kc-magic-link] Step 3: Submitted email ${tenantEmail}`);
 
@@ -140,16 +137,16 @@ test.describe('Keycloak Native Magic-Link (credential-less user)', () => {
         // Step 5: Read magic-link email from IMAP
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        // The magic-link email is sent to the user's Keycloak email.
-        // For a freshly invited user, this is the tenant email (username@domain).
-        // We poll the e2e-mailrt inbox since the recovery email is plus-addressed there.
-        // But wait — Keycloak sends the magic-link to the user's primary email,
-        // which is the tenant email. We need to poll THAT mailbox.
+        // After invitation, sendInvitationEmail swaps the user's primary
+        // email to the recovery email. Keycloak sends the magic-link to
+        // the user's primary email = recovery email, which is plus-addressed
+        // to the e2e-mailrt inbox. Poll that mailbox.
         console.log('  [kc-magic-link] Step 5: Polling IMAP for magic-link email...');
 
         const magicLinkRawEmail = await waitForEmailBody({
-          userEmail: tenantEmail,
+          userEmail: TEST_USERS.emailTest.email,
           bodyContains: uniqueId,
+          skipContaining: 'beginSetup',  // Skip the invitation email
           timeoutMs: 120_000,
           pollIntervalMs: 3_000,
         });
