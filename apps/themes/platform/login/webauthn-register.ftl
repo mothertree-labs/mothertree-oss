@@ -87,6 +87,13 @@
                 </a>
             </div>
 
+            <div id="magic-link-subtle" style="display:none; text-align: center; margin-top: 0.75rem; font-family: 'Figtree', sans-serif;">
+                <a id="magic-link-subtle-link" href="#"
+                   style="color: #6b6b6b; text-decoration: none; font-size: 0.9rem;">
+                    Sign up using a magic link instead
+                </a>
+            </div>
+
             <#if !isSetRetry?has_content && isAppInitiatedAction?has_content>
                 <div style="text-align: center; margin-top: 1.5rem;">
                     <form action="${url.loginAction}" method="post">
@@ -196,8 +203,41 @@
         </script>
         <script type="text/javascript" src="${url.resourcesCommonPath}/node_modules/base64url/dist/base64url.min.js"></script>
         <script type="text/javascript">
+            // Build the /switch-to-magic-link URL from the mt-setup-info cookie (set by /beginSetup).
+            // Returns the URL string, or null if the cookie is missing/invalid.
+            function buildSwitchToMagicLinkUrl() {
+                try {
+                    var cookies = document.cookie.split(';');
+                    for (var i = 0; i < cookies.length; i++) {
+                        var c = cookies[i].trim();
+                        if (c.indexOf('mt-setup-info=') === 0) {
+                            var payload = JSON.parse(atob(c.substring('mt-setup-info='.length).replace(/-/g, '+').replace(/_/g, '/')));
+                            var accountHost = window.location.hostname.replace(/^auth\./, 'account.');
+                            var currentUrl = window.location.href;
+                            return 'https://' + accountHost + '/switch-to-magic-link'
+                                + '?userId=' + encodeURIComponent(payload.userId)
+                                + '&token=' + encodeURIComponent(payload.token)
+                                + '&next=' + encodeURIComponent(currentUrl);
+                        }
+                    }
+                } catch(e) {
+                    // Cookie not found or invalid
+                }
+                return null;
+            }
+
+            // Show the always-visible subtle magic-link option (if cookie is available)
+            (function initSubtleMagicLink() {
+                var switchUrl = buildSwitchToMagicLinkUrl();
+                var subtleDiv = document.getElementById('magic-link-subtle');
+                if (switchUrl && subtleDiv) {
+                    document.getElementById('magic-link-subtle-link').href = switchUrl;
+                    subtleDiv.style.display = 'block';
+                }
+            })();
+
             // Detect whether this device has a platform authenticator (Touch ID, Windows Hello, etc.)
-            // If not, show the magic-link alternative for email-based sign-in.
+            // If not, show the prominent magic-link alternative for email-based sign-in.
             (function detectPlatformAuthenticator() {
                 if (typeof PublicKeyCredential === 'undefined' ||
                     typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable !== 'function') {
@@ -217,29 +257,20 @@
 
             function showMagicLinkOption() {
                 document.getElementById('no-platform-auth-banner').style.display = 'block';
-                document.getElementById('magic-link-btn').style.display = 'block';
                 document.getElementById('registerBtn').style.display = 'none';
                 document.getElementById('register-btn-secondary').style.display = 'block';
 
-                // Build the switch URL from the mt-setup-info cookie (set by /beginSetup)
+                // Hide the subtle link — the prominent button replaces it
+                var subtleDiv = document.getElementById('magic-link-subtle');
+                if (subtleDiv) subtleDiv.style.display = 'none';
+
                 var magicBtn = document.getElementById('magic-link-btn');
-                try {
-                    var cookies = document.cookie.split(';');
-                    for (var i = 0; i < cookies.length; i++) {
-                        var c = cookies[i].trim();
-                        if (c.indexOf('mt-setup-info=') === 0) {
-                            var payload = JSON.parse(atob(c.substring('mt-setup-info='.length).replace(/-/g, '+').replace(/_/g, '/')));
-                            var accountHost = window.location.hostname.replace(/^auth\./, 'account.');
-                            var currentUrl = window.location.href;
-                            magicBtn.href = 'https://' + accountHost + '/switch-to-magic-link'
-                                + '?userId=' + encodeURIComponent(payload.userId)
-                                + '&token=' + encodeURIComponent(payload.token)
-                                + '&next=' + encodeURIComponent(currentUrl);
-                            return;
-                        }
-                    }
-                } catch(e) {
-                    // Cookie not found or invalid — hide the magic link button
+                var switchUrl = buildSwitchToMagicLinkUrl();
+                if (switchUrl) {
+                    magicBtn.href = switchUrl;
+                    magicBtn.style.display = 'block';
+                } else {
+                    // No cookie — revert to normal passkey UI
                     magicBtn.style.display = 'none';
                     document.getElementById('no-platform-auth-banner').style.display = 'none';
                     document.getElementById('registerBtn').style.display = 'block';
