@@ -400,9 +400,19 @@ app.get('/auth/callback',
     }
 
     // Check if we should redirect somewhere specific (e.g., magic-link login with destination)
-    const postLoginRedirect = req.session.postLoginRedirect;
+    // First check session, then fall back to cookie (cookie survives OIDC session regeneration)
+    let postLoginRedirect = req.session.postLoginRedirect;
     if (postLoginRedirect) {
       delete req.session.postLoginRedirect;
+    } else {
+      const cookies = req.headers.cookie || '';
+      const redirectMatch = cookies.match(/(?:^|;\s*)mt-post-login-redirect=([^;]+)/);
+      if (redirectMatch) {
+        postLoginRedirect = decodeURIComponent(redirectMatch[1]);
+        res.clearCookie('mt-post-login-redirect', { domain: cookieDomain, path: '/' });
+      }
+    }
+    if (postLoginRedirect) {
       // Re-validate the redirect URL (defense in depth — already validated when stored)
       try {
         const redirectUrl = new URL(postLoginRedirect);
@@ -531,11 +541,13 @@ app.get('/registration-callback',
       console.error('ensurePasskeyFirst setup failed:', err.message);
     }
 
-    // Check for post-login redirect (e.g., magic-link login with destination URL)
-    const postLoginRedirect = req.session.postLoginRedirect;
+    // Check for post-login redirect cookie (set in /magic-link-landing to survive OIDC session regeneration)
+    const cookies = req.headers.cookie || '';
+    const redirectMatch = cookies.match(/(?:^|;\s*)mt-post-login-redirect=([^;]+)/);
+    const postLoginRedirect = redirectMatch ? decodeURIComponent(redirectMatch[1]) : null;
     if (postLoginRedirect) {
-      delete req.session.postLoginRedirect;
-      // Re-validate the redirect URL (defense in depth — already validated when stored)
+      res.clearCookie('mt-post-login-redirect', { domain: cookieDomain, path: '/' });
+      // Validate the redirect URL (defense in depth — already validated when stored)
       try {
         const redirectUrl = new URL(postLoginRedirect);
         const allowedDomain = process.env.TENANT_DOMAIN;
@@ -545,7 +557,7 @@ app.get('/registration-callback',
           return res.redirect(postLoginRedirect);
         }
       } catch {}
-      console.warn(`Registration callback: rejected invalid postLoginRedirect: ${postLoginRedirect}`);
+      console.warn(`Registration callback: rejected invalid redirect cookie: ${postLoginRedirect}`);
     }
 
     // Default: redirect to home page
@@ -733,9 +745,19 @@ app.get('/switch-to-magic-link', async (req, res) => {
 // immediately without user interaction.
 app.get('/magic-link-landing', (req, res) => {
   console.log('magic-link-landing: redirecting to /complete-registration');
-  // Preserve postLoginRedirect through the OIDC flow if set (from magic-link login with next param)
-  if (req.session.postLoginRedirect) {
-    console.log(`magic-link-landing: will redirect to ${req.session.postLoginRedirect} after OIDC`);
+  // Transfer postLoginRedirect from session to a cookie so it survives the
+  // OIDC session regeneration that happens during passport.authenticate().
+  const postLoginRedirect = req.session.postLoginRedirect;
+  if (postLoginRedirect) {
+    delete req.session.postLoginRedirect;
+    res.cookie('mt-post-login-redirect', postLoginRedirect, {
+      maxAge: 10 * 60 * 1000, // 10 minutes
+      httpOnly: true,
+      secure: true,
+      sameSite: 'lax',
+      domain: cookieDomain,
+    });
+    console.log(`magic-link-landing: stored redirect in cookie: ${postLoginRedirect}`);
   }
   res.redirect('/complete-registration');
 });
