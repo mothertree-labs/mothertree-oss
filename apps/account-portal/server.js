@@ -499,7 +499,7 @@ app.delete('/api/app-passwords/:name', verifyOrigin, requireAuth, async (req, re
 app.get('/registration-callback',
   passport.authenticate('oidc-registration', { failureRedirect: '/auth/error' }),
   async (req, res) => {
-    console.log(`Registration callback for user ${req.user.id}, redirecting to /home`);
+    console.log(`Registration callback for user ${req.user.id}`);
 
     // Swap email from recovery to tenant
     try {
@@ -522,7 +522,24 @@ app.get('/registration-callback',
       console.error('ensurePasskeyFirst setup failed:', err.message);
     }
 
-    // Redirect to home page
+    // Check for post-login redirect (e.g., magic-link login with destination URL)
+    const postLoginRedirect = req.session.postLoginRedirect;
+    if (postLoginRedirect) {
+      delete req.session.postLoginRedirect;
+      // Re-validate the redirect URL (defense in depth — already validated when stored)
+      try {
+        const redirectUrl = new URL(postLoginRedirect);
+        const allowedDomain = process.env.TENANT_DOMAIN;
+        if (redirectUrl.protocol === 'https:' &&
+            (redirectUrl.hostname === allowedDomain || redirectUrl.hostname.endsWith('.' + allowedDomain))) {
+          console.log(`Registration callback: redirecting to ${postLoginRedirect}`);
+          return res.redirect(postLoginRedirect);
+        }
+      } catch {}
+      console.warn(`Registration callback: rejected invalid postLoginRedirect: ${postLoginRedirect}`);
+    }
+
+    // Default: redirect to home page
     res.redirect('/home');
   }
 );
@@ -707,6 +724,10 @@ app.get('/switch-to-magic-link', async (req, res) => {
 // immediately without user interaction.
 app.get('/magic-link-landing', (req, res) => {
   console.log('magic-link-landing: redirecting to /complete-registration');
+  // Preserve postLoginRedirect through the OIDC flow if set (from magic-link login with next param)
+  if (req.session.postLoginRedirect) {
+    console.log(`magic-link-landing: will redirect to ${req.session.postLoginRedirect} after OIDC`);
+  }
   res.redirect('/complete-registration');
 });
 
@@ -715,16 +736,35 @@ app.get('/magic-link-login', (req, res) => {
   res.render('magic-link-login', {
     title: 'Sign In with Email Link',
     error: null,
+    next: req.query.next || '',
   });
 });
 
 app.post('/magic-link-login', verifyOrigin, async (req, res) => {
-  const { email } = req.body;
+  const { email, next } = req.body;
   if (!email) {
     return res.render('magic-link-login', {
       title: 'Sign In with Email Link',
       error: 'Email address is required',
+      next: next || '',
     });
+  }
+
+  // Validate and store the post-login redirect destination
+  const allowedDomain = process.env.TENANT_DOMAIN;
+  let validatedNext = '';
+  if (next) {
+    try {
+      const nextUrl = new URL(next);
+      if (nextUrl.protocol === 'https:' &&
+          (nextUrl.hostname === allowedDomain || nextUrl.hostname.endsWith('.' + allowedDomain))) {
+        validatedNext = next;
+      } else {
+        console.warn(`magic-link-login: rejected next URL with disallowed domain: ${nextUrl.hostname}`);
+      }
+    } catch {
+      console.warn(`magic-link-login: rejected invalid next URL: ${next}`);
+    }
   }
 
   const trimmedEmail = email.trim().toLowerCase();
@@ -739,6 +779,13 @@ app.post('/magic-link-login', verifyOrigin, async (req, res) => {
         title: 'Check Your Email',
         emailHint: keycloakApi.maskEmail(trimmedEmail),
       });
+    }
+
+    // Store the validated redirect destination in the session so it survives the
+    // magic-link click → Keycloak → /magic-link-landing → OIDC → /registration-callback chain.
+    if (validatedNext) {
+      req.session.postLoginRedirect = validatedNext;
+      console.log(`magic-link-login: stored postLoginRedirect: ${validatedNext}`);
     }
 
     // Send magic-link to the user's RECOVERY email (not tenant email).
@@ -761,6 +808,7 @@ app.post('/magic-link-login', verifyOrigin, async (req, res) => {
     res.render('magic-link-login', {
       title: 'Sign In with Email Link',
       error: 'Something went wrong. Please try again.',
+      next: validatedNext,
     });
   }
 });
