@@ -32,7 +32,7 @@
 
             <#-- User's email address in a styled box -->
             <#if auth?has_content && auth.attemptedUsername?has_content>
-                <div style="font-family: 'Figtree', sans-serif; background: #f5f5f5; border: 1px solid #e5e5e5; border-radius: 8px; padding: 0.75rem 1rem; margin: 0 auto 1.5rem; display: inline-block; max-width: 100%; word-break: break-all; font-size: 1rem; color: #333;">
+                <div id="magic-link-email" style="font-family: 'Figtree', sans-serif; background: #f5f5f5; border: 1px solid #e5e5e5; border-radius: 8px; padding: 0.75rem 1rem; margin: 0 auto 1.5rem; display: inline-block; max-width: 100%; word-break: break-all; font-size: 1rem; color: #333;">
                     ${auth.attemptedUsername}
                 </div>
             </#if>

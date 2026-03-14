@@ -121,10 +121,13 @@ test.describe('Keycloak Native Magic-Link (credential-less user)', () => {
           userPage.locator('text=Check your email'),
         ).toBeVisible({ timeout: 30_000 });
 
-        // Verify user's email is displayed on the page
+        // Verify user's email is displayed in the styled email box
         await expect(
-          userPage.locator(`text=${tenantEmail}`),
+          userPage.locator('#magic-link-email'),
         ).toBeVisible({ timeout: 5_000 });
+        await expect(
+          userPage.locator('#magic-link-email'),
+        ).toContainText(tenantEmail);
 
         // Verify "Start over" link is present
         await expect(
