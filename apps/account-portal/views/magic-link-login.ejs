@@ -30,6 +30,9 @@
     </p>
 
     <form method="POST" action="/magic-link-login" class="space-y-4">
+      <% if (next) { %>
+        <input type="hidden" name="next" value="<%= next %>">
+      <% } %>
       <div>
         <label for="magicLinkEmail" class="block text-sm font-medium text-gray-700 mb-1">
           Your MotherTree Email

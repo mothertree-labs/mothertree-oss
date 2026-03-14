@@ -470,7 +470,20 @@
                 var magicLinkLogin = document.getElementById('magic-link-login');
                 if (magicLinkLogin) {
                     var accountHost = window.location.hostname.replace(/^auth\./, 'account.');
-                    magicLinkLogin.href = 'https://' + accountHost + '/magic-link-login';
+                    var magicLinkUrl = 'https://' + accountHost + '/magic-link-login';
+                    // Preserve the original destination (e.g. files.*, docs.*) through the magic-link flow
+                    try {
+                        var params = new URLSearchParams(window.location.search);
+                        var redirectUri = params.get('redirect_uri');
+                        if (redirectUri) {
+                            var appOrigin = new URL(redirectUri).origin;
+                            var accountOrigin = 'https://' + accountHost;
+                            if (appOrigin !== accountOrigin) {
+                                magicLinkUrl += '?next=' + encodeURIComponent(appOrigin);
+                            }
+                        }
+                    } catch (e) {}
+                    magicLinkLogin.href = magicLinkUrl;
                 }
             });
         </script>
