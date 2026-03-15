@@ -40,7 +40,7 @@ class oauth_name extends rcube_plugin
     public function on_user_create($args)
     {
         if ($this->oauth_identity && !empty($this->oauth_identity['name'])) {
-            $args['user_name'] = $this->oauth_identity['name'];
+            $args['user_name'] = $this->sanitize_name($this->oauth_identity['name']);
         }
 
         return $args;
@@ -67,10 +67,18 @@ class oauth_name extends rcube_plugin
 
         if ($identity && empty($identity['name'])) {
             $user->update_identity($identity['identity_id'], [
-                'name' => $this->oauth_identity['name'],
+                'name' => $this->sanitize_name($this->oauth_identity['name']),
             ]);
         }
 
         return $args;
+    }
+
+    /**
+     * Strip control characters to prevent header injection.
+     */
+    private function sanitize_name($name)
+    {
+        return trim(str_replace(["\r", "\n", "\0"], '', $name));
     }
 }
