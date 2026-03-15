@@ -47,10 +47,9 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Rate limiting - defaults: 100 req/15min, configurable via env vars
-// Prod: 300/min (~5 QPS), Dev: 2000/min (~33 QPS) — set via RATE_LIMIT_MAX + RATE_LIMIT_WINDOW_MS
+// Rate limiting - defaults: 100 req/5min, configurable via env vars
 app.use(rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 5 * 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_MAX, 10) || 100,
   standardHeaders: true,
   legacyHeaders: false,
@@ -197,7 +196,7 @@ function verifyBeginSetupToken(userId, token) {
 const beginSetupAttempts = new Map();
 function checkBeginSetupRateLimit(ip) {
   const now = Date.now();
-  const windowMs = 15 * 60 * 1000; // 15 minutes
+  const windowMs = 5 * 60 * 1000; // 5 minutes
   const maxAttempts = 20;
   const attempts = (beginSetupAttempts.get(ip) || []).filter(t => t > now - windowMs);
   beginSetupAttempts.set(ip, attempts);
@@ -891,12 +890,12 @@ app.post('/recover', verifyOrigin, async (req, res) => {
 });
 
 // Guest Registration - public pages (no auth required)
-// Rate limiting: simple in-memory tracker (max 10 registrations per IP per hour)
+// Rate limiting: simple in-memory tracker (max 10 registrations per IP per 20 minutes)
 const guestRegistrationAttempts = new Map();
 function checkGuestRateLimit(ip) {
   const now = Date.now();
-  const hourAgo = now - 60 * 60 * 1000;
-  const attempts = (guestRegistrationAttempts.get(ip) || []).filter(t => t > hourAgo);
+  const windowMs = 20 * 60 * 1000; // 20 minutes
+  const attempts = (guestRegistrationAttempts.get(ip) || []).filter(t => t > now - windowMs);
   guestRegistrationAttempts.set(ip, attempts);
   if (attempts.length >= 10) return false;
   attempts.push(now);
@@ -1096,9 +1095,9 @@ app.post('/api/register-guest', verifyOrigin, async (req, res) => {
 // (sendBeacon ignores responses).
 const ensurePasskeyAttempts = new Map();
 app.post('/api/ensure-passkey-priority', async (req, res) => {
-  // Rate limit: 30 requests per IP per 15 minutes
+  // Rate limit: 30 requests per IP per 5 minutes
   const now = Date.now();
-  const windowMs = 15 * 60 * 1000;
+  const windowMs = 5 * 60 * 1000;
   const maxAttempts = 30;
   const ip = req.ip;
   const attempts = (ensurePasskeyAttempts.get(ip) || []).filter(t => t > now - windowMs);
