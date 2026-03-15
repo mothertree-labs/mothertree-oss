@@ -29,7 +29,7 @@ metadata:
       proxy_hide_header X-Frame-Options;
       proxy_hide_header Content-Security-Policy;
       # CSP - Roundcube needs unsafe-inline for its UI, and connects to auth for OIDC
-      add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; form-action 'self' https://*.${TENANT_DOMAIN}; base-uri 'self';" always;
+      add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; form-action 'self' https://*.${TENANT_DOMAIN}; base-uri 'self';" always;
       add_header X-Content-Type-Options "nosniff" always;
       add_header X-Frame-Options "SAMEORIGIN" always;
       add_header Referrer-Policy "strict-origin-when-cross-origin" always;
