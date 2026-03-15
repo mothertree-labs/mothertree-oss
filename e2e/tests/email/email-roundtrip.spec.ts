@@ -2,7 +2,6 @@ import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
-import { isImapConfigured, fetchFromFolder } from '../../helpers/imap';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -76,32 +75,32 @@ test.describe('Email — Round-Trip via Echo Group', () => {
     // Wait for send to complete (returns to inbox)
     await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
 
-    // ── Step 1b: Verify From header includes display name (not bare email) ──
-    if (isImapConfigured()) {
-      const rawMime = await fetchFromFolder({
-        userEmail: sender.email,
-        folder: 'Sent',
-        subjectContains: subject,
-        timeoutMs: 15_000,
-      });
+    // ── Step 1b: Verify sender identity has a display name (set by oauth_name plugin) ──
+    // Navigate to Settings → Identities and check the default identity has a non-empty name.
+    // This verifies the oauth_name plugin populated the identity from the OIDC "name" claim.
+    await senderPage.goto(`${urls.webmail}/?_task=settings&_action=identities`);
+    await senderPage.waitForLoadState('networkidle');
 
-      expect(rawMime, 'Expected sent email in Sent folder via IMAP').toBeTruthy();
+    // The identities list shows identity rows; click the first (default) one
+    const identityRow = senderPage.locator('#identities-table tbody tr, .listing tbody tr').first();
+    await identityRow.waitFor({ timeout: 10_000 });
+    await identityRow.click();
+    await senderPage.waitForTimeout(1000);
 
-      const fromMatch = rawMime!.match(/^From:\s*(.+)$/mi);
-      expect(fromMatch, 'Expected From header in sent email').toBeTruthy();
-      const fromHeader = fromMatch![1];
+    // The identity edit form has a "Display name" input field
+    const nameInput = senderPage.locator('input[name="_name"]');
+    await nameInput.waitFor({ timeout: 10_000 });
+    const identityName = await nameInput.inputValue();
 
-      // With the fix, From should be: "Display Name" <email@domain> or Display Name <email@domain>
-      // Without the fix, From is just: email@domain or <email@domain>
-      const hasAngleBracket = fromHeader.includes('<');
-      const displayName = hasAngleBracket
-        ? fromHeader.split('<')[0].trim().replace(/"/g, '')
-        : '';
-      expect(
-        displayName.length,
-        `From header should include a display name before <email>, got: ${fromHeader}`,
-      ).toBeGreaterThan(0);
-    }
+    expect(
+      identityName.trim().length,
+      `Roundcube identity display name should be set from OIDC profile, but was empty. ` +
+      `The oauth_name plugin should populate this from Keycloak's "name" claim on login.`,
+    ).toBeGreaterThan(0);
+
+    // Return to inbox before proceeding
+    await senderPage.goto(`${urls.webmail}/?_task=mail`);
+    await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 15_000 });
 
     // ── Step 2: Receiver logs into Roundcube and polls for the forwarded email ──
     await roundcubeLogin(receiverPage, receiver.username, receiver.password);
