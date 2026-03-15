@@ -179,43 +179,6 @@ else
 fi
 
 # =============================================================================
-# Apply Kolab/Calendar Plugin Database Schema
-# =============================================================================
-print_status "Applying Kolab/Calendar plugin database schema..."
-
-# Get postgres admin password
-PG_ADMIN_PASS=$(kubectl get secret docs-postgresql -n infra-db -o jsonpath='{.data.postgres-password}' | base64 -d)
-
-# Determine PostgreSQL pod name based on architecture (replication vs standalone)
-if [[ "$PG_HOST" == *"postgresql-primary"* ]]; then
-    PG_POD_NAME="docs-postgresql-primary-0"
-else
-    PG_POD_NAME="docs-postgresql-0"
-fi
-
-# Check if kolab_folders table exists (indicates schema already applied)
-KOLAB_EXISTS=$(kubectl exec -n infra-db "$PG_POD_NAME" -- bash -c "PGPASSWORD='$PG_ADMIN_PASS' psql -U postgres -d $ROUNDCUBE_DB_NAME -tAc \"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'kolab_folders');\"" 2>/dev/null || echo "f")
-
-if [ "$KOLAB_EXISTS" = "t" ]; then
-    print_status "Kolab schema already exists, skipping"
-else
-    print_status "Applying libkolab schema..."
-    cat "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/libkolab/SQL/postgres.initial.sql" | \
-        kubectl exec -i -n infra-db "$PG_POD_NAME" -- bash -c "PGPASSWORD='$PG_ADMIN_PASS' psql -U postgres -d $ROUNDCUBE_DB_NAME" >/dev/null
-    print_success "libkolab schema applied"
-
-    print_status "Applying caldav/calendar schema..."
-    cat "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/calendar/drivers/caldav/SQL/postgres.initial.sql" | \
-        kubectl exec -i -n infra-db "$PG_POD_NAME" -- bash -c "PGPASSWORD='$PG_ADMIN_PASS' psql -U postgres -d $ROUNDCUBE_DB_NAME" >/dev/null
-    print_success "caldav schema applied"
-
-    # Grant permissions on new tables to the Roundcube user
-    print_status "Granting permissions to $ROUNDCUBE_DB_USER..."
-    kubectl exec -n infra-db "$PG_POD_NAME" -- bash -c "PGPASSWORD='$PG_ADMIN_PASS' psql -U postgres -d $ROUNDCUBE_DB_NAME -c \"GRANT ALL ON ALL TABLES IN SCHEMA public TO $ROUNDCUBE_DB_USER; GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO $ROUNDCUBE_DB_USER;\"" >/dev/null
-    print_success "Permissions granted"
-fi
-
-# =============================================================================
 # Load Roundcube image tag from CI-built tags (or fall back to :latest)
 # =============================================================================
 export CONTAINER_REGISTRY="${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}"
