@@ -2,6 +2,7 @@ import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
+import { isImapConfigured, waitForEmailBody } from '../../helpers/imap';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -58,23 +59,6 @@ test.describe('Email — Round-Trip via Echo Group', () => {
     const subjectInput = senderPage.getByRole('textbox', { name: 'Subject' });
     await subjectInput.waitFor({ timeout: 15_000 });
 
-    // ── Step 1b: Verify sender identity has a display name (set by oauth_name plugin) ──
-    // Check the From identity while the compose form is already open. Roundcube's
-    // <select id="_from"> shows "Display Name <email>" when name is set, or just "email"
-    // when empty. The select exists even with a single identity (may be hidden).
-    const fromText = await senderPage.locator('#_from').evaluate((el: HTMLSelectElement) => {
-      return el.options?.[el.selectedIndex]?.text || '';
-    });
-
-    const hasAngleBracket = fromText.includes('<');
-    const displayName = hasAngleBracket
-      ? fromText.split('<')[0].trim().replace(/"/g, '')
-      : '';
-    expect(
-      displayName.length,
-      `Compose From should include a display name from OIDC, got: "${fromText}"`,
-    ).toBeGreaterThan(0);
-
     const toInput = senderPage.locator('.recipient-input input').first();
     await toInput.waitFor({ state: 'visible', timeout: 10_000 });
     await toInput.click();
@@ -123,5 +107,31 @@ test.describe('Email — Round-Trip via Echo Group', () => {
     }
 
     expect(found, `Expected email with subject "${subject}" to appear in receiver's inbox within ${maxWait / 1000}s`).toBe(true);
+
+    // ── Step 3: Verify the received email's From header includes a display name ──
+    // Download the email via IMAP and check that the original sender's From header
+    // has "Display Name <email>" rather than just a bare email address.
+    if (isImapConfigured()) {
+      const rawMime = await waitForEmailBody({
+        userEmail: receiver.email,
+        subjectContains: subject,
+        timeoutMs: 15_000,
+      });
+
+      const fromMatch = rawMime.match(/^From:\s*(.+)$/mi);
+      expect(fromMatch, 'Expected From header in received email').toBeTruthy();
+      const fromHeader = fromMatch![1];
+
+      // From should be: "Display Name" <email@domain> or Display Name <email@domain>
+      // Not just: email@domain or <email@domain>
+      const hasAngleBracket = fromHeader.includes('<');
+      const displayName = hasAngleBracket
+        ? fromHeader.split('<')[0].trim().replace(/"/g, '')
+        : '';
+      expect(
+        displayName.length,
+        `From header of received email should include a display name, got: "${fromHeader}"`,
+      ).toBeGreaterThan(0);
+    }
   });
 });
