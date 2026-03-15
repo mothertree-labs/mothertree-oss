@@ -84,6 +84,13 @@ test.describe('Login — Magic Link Flow (Returning User)', () => {
       const actionUrlFallback = decodedEmail.match(/https:\/\/auth\.[^\s"<>]+action-token[^\s"<>]+/);
       let setupUrl = (urlMatch?.[0] || actionUrlFallback?.[0])?.replace(/&amp;/g, '&');
 
+      // The email MUST contain a beginSetup URL (not a direct Keycloak action-token link).
+      // If it doesn't, the Keycloak realm is missing user profile attributes
+      // (setupUserId, beginSetupToken, isRecoveryFlow) — see docs/import-keycloak-realm.sh.
+      expect(urlMatch, 'Invitation email should contain a beginSetup URL, not a direct Keycloak link. ' +
+        'Check that the Keycloak realm has setupUserId, beginSetupToken, and isRecoveryFlow ' +
+        'registered in the User Profile configuration.').toBeTruthy();
+
       if (setupUrl?.includes('beginSetup?userId=&') || setupUrl?.includes('beginSetup?userId=&amp;')) {
         const nextParam = new URL(setupUrl).searchParams.get('next');
         if (nextParam) setupUrl = nextParam;

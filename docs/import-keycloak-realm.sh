@@ -1830,6 +1830,62 @@ else
     fi
 fi
 
+# Ensure user profile attributes required by the invitation flow are registered.
+# Keycloak 26.x enforces User Profile — unregistered attributes are invisible
+# in email templates, breaking the beginSetup URL generation.
+print_status "Configuring user profile attributes..."
+CURRENT_PROFILE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
+  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/users/profile" \
+  -H "Authorization: Bearer $ACCESS_TOKEN")
+
+REQUIRED_ATTRS='["beginSetupToken","isRecoveryFlow","setupUserId"]'
+MISSING_ATTRS=$(echo "$CURRENT_PROFILE" | python3 -c "
+import json, sys
+profile = json.load(sys.stdin)
+existing = {a['name'] for a in profile.get('attributes', [])}
+required = $REQUIRED_ATTRS
+missing = [r for r in required if r not in existing]
+print(json.dumps(missing))
+")
+
+if [ "$MISSING_ATTRS" = "[]" ]; then
+    print_success "All required user profile attributes already registered"
+else
+    print_status "Adding missing attributes: $MISSING_ATTRS"
+    UPDATED_PROFILE=$(echo "$CURRENT_PROFILE" | python3 -c "
+import json, sys
+profile = json.load(sys.stdin)
+existing = {a['name'] for a in profile.get('attributes', [])}
+required = $REQUIRED_ATTRS
+admin_only_attr = {
+    'permissions': {'view': ['admin'], 'edit': ['admin']},
+    'multivalued': False
+}
+for name in required:
+    if name not in existing:
+        profile['attributes'].append({
+            'name': name,
+            **admin_only_attr
+        })
+print(json.dumps(profile))
+")
+
+    UP_RESULT=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/user_profile_update.json -X PUT \
+      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/users/profile" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "$UPDATED_PROFILE")
+
+    if [ "$UP_RESULT" = "200" ]; then
+        print_success "User profile attributes updated"
+    else
+        print_warning "Failed to update user profile (HTTP $UP_RESULT)"
+        if [ -f /tmp/user_profile_update.json ]; then
+            print_warning "Details: $(cat /tmp/user_profile_update.json)"
+        fi
+    fi
+fi
+
 # Create tenant-admin role if it doesn't exist
 print_status "Ensuring tenant-admin role exists..."
 TENANT_ADMIN_ROLE_CHECK=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/tenant_admin_role.json \
