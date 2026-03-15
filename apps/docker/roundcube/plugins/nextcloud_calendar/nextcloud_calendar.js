@@ -6,7 +6,7 @@ if (window.rcmail) {
         var url = rcmail.env.nextcloud_calendar_url;
         if (!url) return;
 
-        var btn = document.querySelector('#taskmenu a.calendar');
+        var btn = document.querySelector('#taskmenu a.button-calendar');
         if (!btn) return;
 
         btn.href = url;

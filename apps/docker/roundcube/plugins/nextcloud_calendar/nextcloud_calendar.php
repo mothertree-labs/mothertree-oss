@@ -19,6 +19,19 @@ class nextcloud_calendar extends rcube_plugin
         $this->add_hook('startup', [$this, 'on_startup']);
         $this->include_script('nextcloud_calendar.js');
 
+        // Add the calendar button to the taskbar (sidebar navigation)
+        $this->add_button(
+            [
+                'command'    => 'calendar',
+                'class'      => 'button-calendar',
+                'classsel'   => 'button-calendar button-selected',
+                'innerclass' => 'button-inner',
+                'label'      => 'nextcloud_calendar.calendar',
+                'type'       => 'link',
+            ],
+            'taskbar'
+        );
+
         $rcmail = rcmail::get_instance();
         $url = $rcmail->config->get('nextcloud_calendar_url', '');
         if ($url) {
