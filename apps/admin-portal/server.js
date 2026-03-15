@@ -46,10 +46,9 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Rate limiting - defaults: 100 req/15min, configurable via env vars
-// Prod: 300/min (~5 QPS), Dev: 2000/min (~33 QPS) — set via RATE_LIMIT_MAX + RATE_LIMIT_WINDOW_MS
+// Rate limiting - defaults: 100 req/5min, configurable via env vars
 app.use(rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 5 * 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_MAX, 10) || 100,
   standardHeaders: true,
   legacyHeaders: false,
