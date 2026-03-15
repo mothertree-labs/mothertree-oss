@@ -76,29 +76,29 @@ test.describe('Email — Round-Trip via Echo Group', () => {
     await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
 
     // ── Step 1b: Verify sender identity has a display name (set by oauth_name plugin) ──
-    // Navigate to Settings → Identities and check the default identity has a non-empty name.
-    // This verifies the oauth_name plugin populated the identity from the OIDC "name" claim.
-    await senderPage.goto(`${urls.webmail}/?_task=settings&_action=identities`);
-    await senderPage.waitForLoadState('networkidle');
+    // Re-open compose to inspect the From identity. Roundcube's <select id="_from">
+    // shows the identity as "Display Name <email>" when name is set, or just "email" when empty.
+    // The select exists even with a single identity (may be hidden, but option text is readable).
+    await senderPage.getByRole('button', { name: 'Compose' }).click();
+    const composeCheck = senderPage.getByRole('textbox', { name: 'Subject' });
+    await composeCheck.waitFor({ timeout: 15_000 });
 
-    // The identities list shows identity rows; click the first (default) one
-    const identityRow = senderPage.locator('#identities-table tbody tr, .listing tbody tr').first();
-    await identityRow.waitFor({ timeout: 10_000 });
-    await identityRow.click();
-    await senderPage.waitForTimeout(1000);
+    const fromText = await senderPage.locator('#_from').evaluate((el: HTMLSelectElement) => {
+      return el.options?.[el.selectedIndex]?.text || '';
+    });
 
-    // The identity edit form has a "Display name" input field
-    const nameInput = senderPage.locator('input[name="_name"]');
-    await nameInput.waitFor({ timeout: 10_000 });
-    const identityName = await nameInput.inputValue();
-
+    // With the oauth_name plugin, From should be: "Display Name <email@domain>"
+    // Without it, From is just: "email@domain" (no angle brackets, no display name)
+    const hasAngleBracket = fromText.includes('<');
+    const displayName = hasAngleBracket
+      ? fromText.split('<')[0].trim().replace(/"/g, '')
+      : '';
     expect(
-      identityName.trim().length,
-      `Roundcube identity display name should be set from OIDC profile, but was empty. ` +
-      `The oauth_name plugin should populate this from Keycloak's "name" claim on login.`,
+      displayName.length,
+      `Compose From should include a display name from OIDC, got: "${fromText}"`,
     ).toBeGreaterThan(0);
 
-    // Return to inbox before proceeding
+    // Discard the compose and return to inbox
     await senderPage.goto(`${urls.webmail}/?_task=mail`);
     await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 15_000 });
 
