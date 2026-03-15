@@ -1,4 +1,4 @@
-# Custom Roundcube Docker image with calendar and Mailvelope plugins
+# Custom Roundcube Docker image with Mailvelope, calendar redirect, and custom plugins
 # Installs dependencies via Composer and copies plugin files from submodules.
 #
 # Build from repo root: docker buildx build -f apps/docker/roundcube/Dockerfile -t ghcr.io/myorg/mothertree-roundcube:latest .
@@ -10,28 +10,19 @@ ENV COMPOSER_ALLOW_SUPERUSER=1
 # The Roundcube source is in /usr/src/roundcubemail and gets copied to /var/www/html at runtime
 WORKDIR /usr/src/roundcubemail
 
-# Install just the dependencies needed by Kolab plugins (without the plugins themselves)
-# This avoids the Roundcube plugin installer which tries to run DB scripts
+# Install dependencies (net_sieve is needed by managesieve plugin)
 RUN composer require --no-plugins --no-scripts \
-    sabre/vobject:^4.5 \
-    sabre/xml:^4.0 \
-    sabre/uri:^3.0 \
-    pear/http_request2:^2.6 \
     pear/net_sieve:~1.4.0
 
 # Install keyboard shortcuts plugin via Composer (uses Roundcube plugin-installer)
 RUN composer require joachimneu/keyboard_shortcuts:dev-master#0a83950ce3fd5082d1a4df65c83071d6e0589ba2
 
-# Copy Kolab plugins from submodules (pre-patched with bearer token support)
-COPY submodules/roundcubemail-plugins-kolab/plugins/calendar /usr/src/roundcubemail/plugins/calendar
-COPY submodules/roundcubemail-plugins-kolab/plugins/libcalendaring /usr/src/roundcubemail/plugins/libcalendaring
-COPY submodules/roundcubemail-plugins-kolab/plugins/libkolab /usr/src/roundcubemail/plugins/libkolab
-
 # Copy Mailvelope client plugin from submodule
 COPY submodules/mailvelope_client /usr/src/roundcubemail/plugins/mailvelope_client
 
-# OAuth display name plugin (sets identity name from OIDC "name" claim)
+# Custom plugins
 COPY apps/docker/roundcube/plugins/oauth_name /usr/src/roundcubemail/plugins/oauth_name
+COPY apps/docker/roundcube/plugins/nextcloud_calendar /usr/src/roundcubemail/plugins/nextcloud_calendar
 
 # Upgrade TinyMCE 5.10.9 → 8.3.2 for Safari performance
 # TinyMCE 5.x has a known contenteditable perf issue in Safari/WebKit

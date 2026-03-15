@@ -84,7 +84,7 @@ fi
 
 print_status "Webmail host: $WEBMAIL_HOST"
 print_status "Mail host: $MAIL_HOST"
-print_status "Files host (CalDAV): $FILES_HOST"
+print_status "Files host (calendar): $FILES_HOST"
 print_status "Auth host: $AUTH_HOST"
 
 # Validate required secrets
