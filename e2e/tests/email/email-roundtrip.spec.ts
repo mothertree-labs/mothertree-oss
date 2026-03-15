@@ -58,6 +58,23 @@ test.describe('Email — Round-Trip via Echo Group', () => {
     const subjectInput = senderPage.getByRole('textbox', { name: 'Subject' });
     await subjectInput.waitFor({ timeout: 15_000 });
 
+    // ── Step 1b: Verify sender identity has a display name (set by oauth_name plugin) ──
+    // Check the From identity while the compose form is already open. Roundcube's
+    // <select id="_from"> shows "Display Name <email>" when name is set, or just "email"
+    // when empty. The select exists even with a single identity (may be hidden).
+    const fromText = await senderPage.locator('#_from').evaluate((el: HTMLSelectElement) => {
+      return el.options?.[el.selectedIndex]?.text || '';
+    });
+
+    const hasAngleBracket = fromText.includes('<');
+    const displayName = hasAngleBracket
+      ? fromText.split('<')[0].trim().replace(/"/g, '')
+      : '';
+    expect(
+      displayName.length,
+      `Compose From should include a display name from OIDC, got: "${fromText}"`,
+    ).toBeGreaterThan(0);
+
     const toInput = senderPage.locator('.recipient-input input').first();
     await toInput.waitFor({ state: 'visible', timeout: 10_000 });
     await toInput.click();
@@ -74,33 +91,6 @@ test.describe('Email — Round-Trip via Echo Group', () => {
 
     // Wait for send to complete (returns to inbox)
     await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
-
-    // ── Step 1b: Verify sender identity has a display name (set by oauth_name plugin) ──
-    // Re-open compose to inspect the From identity. Roundcube's <select id="_from">
-    // shows the identity as "Display Name <email>" when name is set, or just "email" when empty.
-    // The select exists even with a single identity (may be hidden, but option text is readable).
-    await senderPage.getByRole('button', { name: 'Compose' }).click();
-    const composeCheck = senderPage.getByRole('textbox', { name: 'Subject' });
-    await composeCheck.waitFor({ timeout: 15_000 });
-
-    const fromText = await senderPage.locator('#_from').evaluate((el: HTMLSelectElement) => {
-      return el.options?.[el.selectedIndex]?.text || '';
-    });
-
-    // With the oauth_name plugin, From should be: "Display Name <email@domain>"
-    // Without it, From is just: "email@domain" (no angle brackets, no display name)
-    const hasAngleBracket = fromText.includes('<');
-    const displayName = hasAngleBracket
-      ? fromText.split('<')[0].trim().replace(/"/g, '')
-      : '';
-    expect(
-      displayName.length,
-      `Compose From should include a display name from OIDC, got: "${fromText}"`,
-    ).toBeGreaterThan(0);
-
-    // Discard the compose and return to inbox
-    await senderPage.goto(`${urls.webmail}/?_task=mail`);
-    await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 15_000 });
 
     // ── Step 2: Receiver logs into Roundcube and polls for the forwarded email ──
     await roundcubeLogin(receiverPage, receiver.username, receiver.password);
