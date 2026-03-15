@@ -2,6 +2,7 @@ import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
+import { isImapConfigured, fetchFromFolder } from '../../helpers/imap';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -74,6 +75,33 @@ test.describe('Email — Round-Trip via Echo Group', () => {
 
     // Wait for send to complete (returns to inbox)
     await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
+
+    // ── Step 1b: Verify From header includes display name (not bare email) ──
+    if (isImapConfigured()) {
+      const rawMime = await fetchFromFolder({
+        userEmail: sender.email,
+        folder: 'Sent',
+        subjectContains: subject,
+        timeoutMs: 15_000,
+      });
+
+      expect(rawMime, 'Expected sent email in Sent folder via IMAP').toBeTruthy();
+
+      const fromMatch = rawMime!.match(/^From:\s*(.+)$/mi);
+      expect(fromMatch, 'Expected From header in sent email').toBeTruthy();
+      const fromHeader = fromMatch![1];
+
+      // With the fix, From should be: "Display Name" <email@domain> or Display Name <email@domain>
+      // Without the fix, From is just: email@domain or <email@domain>
+      const hasAngleBracket = fromHeader.includes('<');
+      const displayName = hasAngleBracket
+        ? fromHeader.split('<')[0].trim().replace(/"/g, '')
+        : '';
+      expect(
+        displayName.length,
+        `From header should include a display name before <email>, got: ${fromHeader}`,
+      ).toBeGreaterThan(0);
+    }
 
     // ── Step 2: Receiver logs into Roundcube and polls for the forwarded email ──
     await roundcubeLogin(receiverPage, receiver.username, receiver.password);
