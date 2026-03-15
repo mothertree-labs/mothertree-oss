@@ -50,7 +50,7 @@ data:
     $config['oauth_auth_uri'] = 'https://${AUTH_HOST}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth';
     $config['oauth_token_uri'] = '${KEYCLOAK_INTERNAL_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token';
     $config['oauth_identity_uri'] = '${KEYCLOAK_INTERNAL_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo';
-    $config['oauth_identity_fields'] = ['email', 'name'];
+    $config['oauth_identity_fields'] = ['email'];
     $config['oauth_scope'] = 'openid email profile';
     
     // Use XOAUTH2 for IMAP/SMTP authentication
@@ -129,7 +129,8 @@ data:
         'libcalendaring',
         'libkolab',
         'mailvelope_client',
-        'keyboard_shortcuts'
+        'keyboard_shortcuts',
+        'oauth_name'
     ];
 
     // markasjunk plugin - adds "Junk" / "Not Junk" toolbar buttons

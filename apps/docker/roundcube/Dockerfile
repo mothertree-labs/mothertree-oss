@@ -30,6 +30,9 @@ COPY submodules/roundcubemail-plugins-kolab/plugins/libkolab /usr/src/roundcubem
 # Copy Mailvelope client plugin from submodule
 COPY submodules/mailvelope_client /usr/src/roundcubemail/plugins/mailvelope_client
 
+# OAuth display name plugin (sets identity name from OIDC "name" claim)
+COPY apps/docker/roundcube/plugins/oauth_name /usr/src/roundcubemail/plugins/oauth_name
+
 # Upgrade TinyMCE 5.10.9 → 8.3.2 for Safari performance
 # TinyMCE 5.x has a known contenteditable perf issue in Safari/WebKit
 # v7+ requires license_key: 'gpl' for open-source use (set in patched editor.js)
