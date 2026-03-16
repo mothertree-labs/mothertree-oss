@@ -1,7 +1,7 @@
 # Email Probe - End-to-end email delivery monitoring
 # Deployed per-tenant to namespace tn-<tenant>-mail
 #
-# Sends probe emails through the full mail chain every 5 minutes,
+# Sends probe emails through the full mail chain every 15 minutes,
 # waits for auto-reply, and exposes Prometheus metrics.
 #
 # Required environment variables:
@@ -78,7 +78,7 @@ spec:
         - name: TARGET_EMAIL
           value: "${TARGET_EMAIL}"
         - name: PROBE_INTERVAL
-          value: "300"
+          value: "900"
         - name: PROBE_TIMEOUT
           value: "240"
         - name: TENANT_NAME

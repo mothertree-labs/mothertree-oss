@@ -105,6 +105,37 @@
         mode: '0644'
       notify: restart postfix
 
+    - name: Deploy SASL credentials for SES SMTP relay
+      copy:
+        content: "[{{ ses_smtp_endpoint }}]:587 {{ ses_smtp_username }}:{{ ses_smtp_password }}\n"
+        dest: /etc/postfix/sasl_passwd
+        owner: root
+        group: root
+        mode: '0600'
+      notify: postmap sasl credentials
+      when: ses_smtp_endpoint is defined and ses_smtp_endpoint | length > 0
+
+    - name: Deploy TLS policy map (enforce strict TLS for SES only)
+      copy:
+        content: "[{{ ses_smtp_endpoint }}]:587    secure\n"
+        dest: /etc/postfix/tls_policy
+        owner: root
+        group: root
+        mode: '0644'
+      notify: postmap tls policy
+      when: ses_smtp_endpoint is defined and ses_smtp_endpoint | length > 0
+
+    - name: Remove SES config files when SES is not configured
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/postfix/sasl_passwd
+        - /etc/postfix/sasl_passwd.db
+        - /etc/postfix/tls_policy
+        - /etc/postfix/tls_policy.db
+      when: ses_smtp_endpoint is not defined or ses_smtp_endpoint | length == 0
+
     - name: Deploy transport map for inbound mail routing
       template:
         src: postfix-transport.j2
@@ -203,6 +234,14 @@
       when: vpn_private_ip is defined and vpn_private_ip | length > 0
 
   handlers:
+    - name: postmap sasl credentials
+      command: postmap /etc/postfix/sasl_passwd
+      notify: restart postfix
+
+    - name: postmap tls policy
+      command: postmap /etc/postfix/tls_policy
+      notify: restart postfix
+
     - name: rebuild postfix maps
       shell: |
         postmap /etc/postfix/transport 2>/dev/null || true
