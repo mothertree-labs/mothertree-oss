@@ -55,6 +55,12 @@ test.describe('Email — Round-Trip via Echo Group', () => {
     // ── Step 1: Sender logs into Roundcube and sends email to the echo group ──
     await roundcubeLogin(senderPage, sender.username, sender.password);
 
+    // Wait for Roundcube JS app to finish initializing (rcmail.busy clears
+    // after IMAP inbox load completes — large inboxes delay this)
+    await senderPage.waitForFunction(
+      () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
+      { timeout: 30_000 },
+    );
     await senderPage.getByRole('button', { name: 'Compose' }).click();
     const subjectInput = senderPage.getByRole('textbox', { name: 'Subject' });
     await subjectInput.waitFor({ timeout: 15_000 });
