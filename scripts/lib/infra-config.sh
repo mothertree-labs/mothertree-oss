@@ -277,6 +277,20 @@ _mt_infra_load_shared_secrets() {
     export MICROSOCKS_PASSWORD="$_microsocks_pw"
     echo "[INFO] Microsocks SOCKS5 password loaded from infra tenant secrets"
   fi
+
+  # AWS SES SMTP relay (optional — only for prod outbound mail)
+  local _ses_endpoint _ses_username _ses_password
+  _ses_endpoint=$(yq '.ses.smtp_endpoint // ""' "$_infra_secrets")
+  _ses_username=$(yq '.ses.smtp_username // ""' "$_infra_secrets")
+  _ses_password=$(yq '.ses.smtp_password // ""' "$_infra_secrets")
+  if [ -n "$_ses_endpoint" ] && [ "$_ses_endpoint" != "null" ] && \
+     [ -n "$_ses_username" ] && [ "$_ses_username" != "null" ] && \
+     [ -n "$_ses_password" ] && [ "$_ses_password" != "null" ]; then
+    export SES_SMTP_ENDPOINT="$_ses_endpoint"
+    export SES_SMTP_USERNAME="$_ses_username"
+    export SES_SMTP_PASSWORD="$_ses_password"
+    echo "[INFO] AWS SES SMTP relay credentials loaded from infra tenant secrets"
+  fi
 }
 
 # ---------------------------------------------------------------------------

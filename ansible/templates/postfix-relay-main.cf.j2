@@ -50,8 +50,13 @@ unverified_recipient_reject_code = 550
 unverified_recipient_reject_reason = Recipient address rejected: undeliverable address
 
 # Delivery settings - pure relay, no local delivery
-mydestination = 
-relayhost = 
+mydestination =
+{% if ses_smtp_endpoint is defined and ses_smtp_endpoint | length > 0 %}
+# Outbound relay via AWS SES (STARTTLS on port 587)
+relayhost = [{{ ses_smtp_endpoint }}]:587
+{% else %}
+relayhost =
+{% endif %}
 
 # Inbound mail routing - accept mail for tenant domains and route to K8s Postfix
 # These files are generated from tenant configs by deploy_infra
@@ -72,9 +77,25 @@ message_size_limit = 52428800
 mailbox_size_limit = 0
 
 # TLS settings for outbound connections
+# Global level stays "may" so internal relay to K8s Postfix works (its cert
+# won't pass strict verification). Per-destination policy enforces "secure"
+# for SES when configured.
 smtp_tls_security_level = may
 smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
 smtp_tls_loglevel = 1
+
+{% if ses_smtp_endpoint is defined and ses_smtp_endpoint | length > 0 %}
+# AWS SES requires TLS — per https://docs.aws.amazon.com/ses/latest/dg/postfix.html
+smtp_use_tls = yes
+smtp_tls_note_starttls_offer = yes
+# Enforce strict TLS only for the SES endpoint (not for internal K8s relay)
+smtp_tls_policy_maps = hash:/etc/postfix/tls_policy
+
+# SASL authentication for AWS SES SMTP
+smtp_sasl_auth_enable = yes
+smtp_sasl_security_options = noanonymous
+smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+{% endif %}
 
 # TLS for inbound (Let's Encrypt cert via Certbot; renewal hooks managed by Ansible)
 {% if tls_email is defined and tls_email | length > 0 %}

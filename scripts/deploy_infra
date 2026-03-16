@@ -933,6 +933,13 @@ EOF
     echo "microsocks_password: \"${MICROSOCKS_PASSWORD}\"" >> "$TEMP_EXTRA_VARS"
   fi
 
+  # AWS SES SMTP relay (outbound mail via SES instead of direct delivery)
+  if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
+    echo "ses_smtp_endpoint: \"${SES_SMTP_ENDPOINT}\"" >> "$TEMP_EXTRA_VARS"
+    echo "ses_smtp_username: \"${SES_SMTP_USERNAME}\"" >> "$TEMP_EXTRA_VARS"
+    echo "ses_smtp_password: \"${SES_SMTP_PASSWORD}\"" >> "$TEMP_EXTRA_VARS"
+  fi
+
   print_status "=== VPN POSTFIX CONFIGURATION ==="
   print_status "Environment:        $MT_ENV"
   print_status "VPN Host:           $VPN_HOST"

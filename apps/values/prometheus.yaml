@@ -616,11 +616,11 @@ additionalPrometheusRulesMap:
               severity: critical
           - alert: EmailProbeHighRoundtrip
             annotations:
-              summary: 'Email probe roundtrip >3min (tenant={{ $labels.tenant }})'
-              description: 'Email probe roundtrip for tenant {{ $labels.tenant }} has been above 180s for 10 minutes.'
+              summary: 'Email probe roundtrip >4min (tenant={{ $labels.tenant }})'
+              description: 'Email probe roundtrip for tenant {{ $labels.tenant }} has been above 240s for 30 minutes.'
             expr: |-
               email_probe_roundtrip_seconds > 240
-            for: 16m
+            for: 30m
             labels:
               severity: warning
           - alert: EmailProbeDown
@@ -634,10 +634,10 @@ additionalPrometheusRulesMap:
               severity: warning
           - alert: EmailProbeNoRecentSuccess
             annotations:
-              summary: 'No successful email probe in 30min (tenant={{ $labels.tenant }})'
-              description: 'Email probe for tenant {{ $labels.tenant }} has not had a successful roundtrip in over 30 minutes.'
+              summary: 'No successful email probe in 1h (tenant={{ $labels.tenant }})'
+              description: 'Email probe for tenant {{ $labels.tenant }} has not had a successful roundtrip in over 1 hour.'
             expr: |-
-              (time() - email_probe_last_success_timestamp) > 1800
+              (time() - email_probe_last_success_timestamp) > 3600
             for: 5m
             labels:
               severity: critical
