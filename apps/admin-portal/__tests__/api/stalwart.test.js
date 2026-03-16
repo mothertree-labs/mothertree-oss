@@ -56,13 +56,15 @@ describe('ensureUserExists', () => {
     fetchMock.mockResolvedValueOnce(mockResponse({ error: 'notFound', item: 'new@test.com' }));
     // Create user - 200 (no error in body)
     fetchMock.mockResolvedValueOnce(mockResponse({ data: { id: 1 } }));
+    // ensureRoles: GET principal (roles already present)
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: { roles: ['user'] } }));
     // Reload config (cache clear)
     fetchMock.mockResolvedValueOnce(mockResponse({ data: {} }));
 
     const result = await stalwart.ensureUserExists('new@test.com', 'New User', 1073741824);
 
     expect(result.created).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
 
     const createCall = fetchMock.mock.calls[1];
     expect(createCall[0]).toBe(`${STALWART_URL}/api/principal/deploy`);
@@ -77,7 +79,33 @@ describe('ensureUserExists', () => {
     expect(body.quota).toBe(1073741824);
 
     // Verify reload was called
-    expect(fetchMock.mock.calls[2][0]).toBe(`${STALWART_URL}/api/reload`);
+    expect(fetchMock.mock.calls[3][0]).toBe(`${STALWART_URL}/api/reload`);
+  });
+
+  test('patches roles when deploy endpoint silently drops them', async () => {
+    const stalwart = getStalwart();
+
+    fetchMock.mockResolvedValueOnce(mockResponse({ error: 'notFound', item: 'norole@test.com' }));
+    // Deploy succeeds
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: { id: 3 } }));
+    // ensureRoles: GET principal — no roles field
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: { name: 'norole@test.com' } }));
+    // ensureRoles: PATCH to add roles
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: null }));
+    // Reload config
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: {} }));
+
+    const result = await stalwart.ensureUserExists('norole@test.com', 'No Role', 0);
+
+    expect(result.created).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+
+    // Verify the PATCH call
+    const patchCall = fetchMock.mock.calls[3];
+    expect(patchCall[0]).toContain('/api/principal/norole%40test.com');
+    expect(patchCall[1].method).toBe('PATCH');
+    const patchBody = JSON.parse(patchCall[1].body);
+    expect(patchBody).toEqual([{ action: 'set', field: 'roles', value: ['user'] }]);
   });
 
   test('returns created:false on 409 conflict (race condition)', async () => {
@@ -115,6 +143,7 @@ describe('ensureUserExists', () => {
 
     fetchMock.mockResolvedValueOnce(mockResponse({ error: 'notFound', item: 'noq@test.com' }));
     fetchMock.mockResolvedValueOnce(mockResponse({ data: { id: 2 } }));
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: { roles: ['user'] } })); // ensureRoles
     fetchMock.mockResolvedValueOnce(mockResponse({ data: {} })); // reload
 
     await stalwart.ensureUserExists('noq@test.com', 'No Quota', 0);
@@ -375,6 +404,67 @@ describe('createAppPassword', () => {
 
     await expect(stalwart.createAppPassword('user@test.com', 'Device', 'pw'))
       .rejects.toThrow('Failed to create app password: 500');
+  });
+});
+
+// --- ensureRoles ---
+
+describe('ensureRoles', () => {
+  test('does nothing when principal already has user role', async () => {
+    const stalwart = getStalwart();
+
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: { roles: ['user'] } }));
+
+    await stalwart.ensureRoles('user@test.com');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1]?.method).toBeUndefined(); // GET (no method = GET)
+  });
+
+  test('patches roles when missing from principal', async () => {
+    const stalwart = getStalwart();
+
+    // GET - no roles
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: { name: 'user@test.com' } }));
+    // PATCH
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: null }));
+
+    await stalwart.ensureRoles('user@test.com');
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const patchCall = fetchMock.mock.calls[1];
+    expect(patchCall[1].method).toBe('PATCH');
+    const body = JSON.parse(patchCall[1].body);
+    expect(body).toEqual([{ action: 'set', field: 'roles', value: ['user'] }]);
+  });
+
+  test('patches roles when roles array is empty', async () => {
+    const stalwart = getStalwart();
+
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: { roles: [] } }));
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: null }));
+
+    await stalwart.ensureRoles('user@test.com');
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('does not throw when GET fails', async () => {
+    const stalwart = getStalwart();
+
+    fetchMock.mockResolvedValueOnce(mockResponse('Error', { status: 500 }));
+
+    await expect(stalwart.ensureRoles('user@test.com')).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not throw when PATCH fails', async () => {
+    const stalwart = getStalwart();
+
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: { name: 'user@test.com' } }));
+    fetchMock.mockResolvedValueOnce(mockResponse('Error', { status: 500 }));
+
+    await expect(stalwart.ensureRoles('user@test.com')).resolves.toBeUndefined();
   });
 });
 

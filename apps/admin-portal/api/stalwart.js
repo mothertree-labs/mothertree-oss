@@ -87,11 +87,57 @@ async function ensureUserExists(email, name, quotaBytes) {
     throw new Error(`Stalwart principal creation failed: ${responseData.error} - ${responseData.details || 'no details'}`);
   }
 
+  // Verify the principal was created with the correct roles.
+  // The deploy endpoint may silently drop the roles field in some Stalwart
+  // versions, leaving the user unable to receive inbound email (bounces with
+  // "security.unauthorized" / "This account is not authorized to receive email").
+  await ensureRoles(email);
+
   // Clear directory cache so RCPT TO picks up the new principal immediately
   await reloadConfig();
 
   console.log(`Stalwart: principal ${email} created`);
   return { created: true };
+}
+
+/**
+ * Verify a principal has roles: ['user'] and PATCH if missing.
+ * Without the 'user' role, Stalwart rejects inbound email delivery with
+ * "security.unauthorized" / "This account is not authorized to receive email".
+ * See: https://github.com/mothertree-labs/mothertree-oss/issues/189
+ */
+async function ensureRoles(email) {
+  const adminAuth = getAdminAuth();
+
+  const response = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+    headers: { 'Authorization': adminAuth },
+  });
+
+  if (!response.ok) return;
+
+  const data = await response.json();
+  if (data.error) return;
+
+  const roles = data.data?.roles || [];
+  if (roles.includes('user')) return;
+
+  console.log(`Stalwart: principal ${email} missing 'user' role, patching...`);
+  const patchResponse = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': adminAuth,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify([{
+      action: 'set',
+      field: 'roles',
+      value: ['user'],
+    }]),
+  });
+
+  if (!patchResponse.ok) {
+    console.warn(`Stalwart: failed to patch roles for ${email}: ${patchResponse.status}`);
+  }
 }
 
 /**
@@ -325,6 +371,7 @@ async function revokeAppPassword(email, passwordName) {
 
 module.exports = {
   ensureUserExists,
+  ensureRoles,
   listAppPasswords,
   createAppPassword,
   revokeAppPassword,
