@@ -235,6 +235,7 @@ releases:
       - {{ requiredEnv "NS_INGRESS_INTERNAL" }}/ingress-nginx-internal
     labels:
       tier: apps
+      component: matrix
     values:
       - values/synapse.yaml
       - environments/{{ .Environment.Name }}/synapse.yaml.gotmpl
@@ -249,6 +250,7 @@ releases:
       - {{ requiredEnv "NS_INGRESS" }}/ingress-nginx
     labels:
       tier: apps
+      component: matrix
     values:
       - values/element.yaml
       - environments/{{ .Environment.Name }}/element.yaml.gotmpl
