@@ -112,6 +112,7 @@
         owner: root
         group: root
         mode: '0600'
+      no_log: true
       notify: postmap sasl credentials
       when: ses_smtp_endpoint is defined and ses_smtp_endpoint | length > 0
 
