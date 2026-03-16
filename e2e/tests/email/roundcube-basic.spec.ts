@@ -83,6 +83,22 @@ test.describe('Email — Roundcube Basic', () => {
     expect(dialogText).toContain('Reply');
   });
 
+  test('calendar button links to Nextcloud Calendar', async ({ emailTestPage: page }) => {
+    await navigateToRoundcube(page, TEST_USERS.emailTest.username, TEST_USERS.emailTest.password);
+
+    // The nextcloud_calendar plugin adds a calendar button to the sidebar
+    const calendarBtn = page.locator('#taskmenu a.button-calendar');
+    await expect(calendarBtn).toBeAttached({ timeout: 10_000 });
+
+    // Button should link to Nextcloud Calendar (not Roundcube's built-in calendar)
+    const href = await calendarBtn.getAttribute('href');
+    expect(href).toContain('/apps/calendar');
+
+    // Should open in a new tab
+    const target = await calendarBtn.getAttribute('target');
+    expect(target).toBe('_blank');
+  });
+
   test('can open compose form', async ({ emailTestPage: page }) => {
     await navigateToRoundcube(page, TEST_USERS.emailTest.username, TEST_USERS.emailTest.password);
 

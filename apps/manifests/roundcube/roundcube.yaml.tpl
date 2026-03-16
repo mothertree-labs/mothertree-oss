@@ -125,11 +125,10 @@ data:
         'zipdownload',
         'managesieve',
         'markasjunk',
-        'calendar',
-        'libcalendaring',
-        'libkolab',
+        'nextcloud_calendar',
         'mailvelope_client',
-        'keyboard_shortcuts'
+        'keyboard_shortcuts',
+        'oauth_name'
     ];
 
     // markasjunk plugin - adds "Junk" / "Not Junk" toolbar buttons
@@ -148,14 +147,8 @@ data:
         ],
     ];
 
-    // Calendar configuration (CalDAV to Nextcloud)
-    // Uses OAuth bearer token authentication (patched in custom image)
-    // Requires Keycloak audience mapper to include 'nextcloud-app' in Roundcube tokens
-    $config['calendar_driver'] = 'caldav';
-    $config['calendar_caldav_server'] = 'https://${FILES_HOST}/remote.php/dav/';
-    $config['calendar_default_view'] = 'agendaWeek';
-    $config['calendar_first_day'] = 1;  // Monday
-    $config['calendar_crypt_key'] = '${ROUNDCUBE_DES_KEY}';
+    // Calendar button redirects to Nextcloud Calendar app
+    $config['nextcloud_calendar_url'] = 'https://${FILES_HOST}/apps/calendar';
     
     // Mailvelope client plugin (no config needed - auto-detects browser extension)
     

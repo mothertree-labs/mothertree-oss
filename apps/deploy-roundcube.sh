@@ -84,7 +84,7 @@ fi
 
 print_status "Webmail host: $WEBMAIL_HOST"
 print_status "Mail host: $MAIL_HOST"
-print_status "Files host (CalDAV): $FILES_HOST"
+print_status "Files host (calendar): $FILES_HOST"
 print_status "Auth host: $AUTH_HOST"
 
 # Validate required secrets
@@ -176,43 +176,6 @@ else
         print_warning "Database initialization may not have completed (timeout)"
         print_status "Check job status: kubectl get job roundcube-db-init -n $NS_WEBMAIL"
     fi
-fi
-
-# =============================================================================
-# Apply Kolab/Calendar Plugin Database Schema
-# =============================================================================
-print_status "Applying Kolab/Calendar plugin database schema..."
-
-# Get postgres admin password
-PG_ADMIN_PASS=$(kubectl get secret docs-postgresql -n infra-db -o jsonpath='{.data.postgres-password}' | base64 -d)
-
-# Determine PostgreSQL pod name based on architecture (replication vs standalone)
-if [[ "$PG_HOST" == *"postgresql-primary"* ]]; then
-    PG_POD_NAME="docs-postgresql-primary-0"
-else
-    PG_POD_NAME="docs-postgresql-0"
-fi
-
-# Check if kolab_folders table exists (indicates schema already applied)
-KOLAB_EXISTS=$(kubectl exec -n infra-db "$PG_POD_NAME" -- bash -c "PGPASSWORD='$PG_ADMIN_PASS' psql -U postgres -d $ROUNDCUBE_DB_NAME -tAc \"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'kolab_folders');\"" 2>/dev/null || echo "f")
-
-if [ "$KOLAB_EXISTS" = "t" ]; then
-    print_status "Kolab schema already exists, skipping"
-else
-    print_status "Applying libkolab schema..."
-    cat "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/libkolab/SQL/postgres.initial.sql" | \
-        kubectl exec -i -n infra-db "$PG_POD_NAME" -- bash -c "PGPASSWORD='$PG_ADMIN_PASS' psql -U postgres -d $ROUNDCUBE_DB_NAME" >/dev/null
-    print_success "libkolab schema applied"
-
-    print_status "Applying caldav/calendar schema..."
-    cat "$REPO_ROOT/submodules/roundcubemail-plugins-kolab/plugins/calendar/drivers/caldav/SQL/postgres.initial.sql" | \
-        kubectl exec -i -n infra-db "$PG_POD_NAME" -- bash -c "PGPASSWORD='$PG_ADMIN_PASS' psql -U postgres -d $ROUNDCUBE_DB_NAME" >/dev/null
-    print_success "caldav schema applied"
-
-    # Grant permissions on new tables to the Roundcube user
-    print_status "Granting permissions to $ROUNDCUBE_DB_USER..."
-    kubectl exec -n infra-db "$PG_POD_NAME" -- bash -c "PGPASSWORD='$PG_ADMIN_PASS' psql -U postgres -d $ROUNDCUBE_DB_NAME -c \"GRANT ALL ON ALL TABLES IN SCHEMA public TO $ROUNDCUBE_DB_USER; GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO $ROUNDCUBE_DB_USER;\"" >/dev/null
-    print_success "Permissions granted"
 fi
 
 # =============================================================================
