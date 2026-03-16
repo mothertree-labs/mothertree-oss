@@ -39,10 +39,42 @@ Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Eleme
 
 ### Prerequisites
 
+**Accounts:**
 - Linode account with API token
 - Cloudflare account with API token and zone ID
 - A domain with DNS managed by Cloudflare
-- `terraform`, `kubectl`, `helm`, `helmfile`, `yq` installed
+
+**Required CLI tools:**
+
+| Tool | Min Version | Purpose |
+|------|-------------|---------|
+| `terraform` | >= 1.0 | Infrastructure provisioning (LKE, DNS, VPN) |
+| `kubectl` | >= 1.27 | Kubernetes cluster management |
+| `helm` | >= 3.0 | Kubernetes package management |
+| `helmfile` | >= 1.0 | Multi-chart Helm orchestration (v0.x will **not** work) |
+| `kustomize` | >= 5.0 | Kubernetes manifest customization (helmfile exec dependency) |
+| `yq` | >= 4.0 | YAML parsing (tenant config files) |
+| `jq` | any | JSON parsing (API responses, secrets) |
+| `envsubst` | any | Template variable substitution (from `gettext` package) |
+| `openssl` | any | TLS cert and secret generation |
+| `curl` | any | HTTP API calls |
+| `node` | >= 22 LTS | Admin and account portal development |
+
+> **Note**: `kustomize` is not called directly by any deploy script, but helmfile invokes it internally. If missing, helmfile will fail with `exec: "kustomize": executable file not found in $PATH`.
+
+**Optional tools** (auto-detected; scripts degrade gracefully if absent):
+
+| Tool | When needed |
+|------|-------------|
+| `ansible-playbook` | VPN/Postfix relay setup (required by `deploy_infra` VPN section) |
+| `docker` | Building container images |
+| `gh` | GitHub CLI (PR workflows) |
+| `dig` | DNS verification in `deploy_infra` and `verify-endpoints` (skipped if missing) |
+| `swaks` | Email delivery testing in `test-email-system` (skipped if missing) |
+| `psql` | Direct PostgreSQL administration |
+| `linode-cli` | Linode resource management, S3 buckets, teardown (skipped if missing) |
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed installation instructions on macOS and Linux.
 
 ### 1. Configure
 
