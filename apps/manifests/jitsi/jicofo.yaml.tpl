@@ -82,6 +82,7 @@ spec:
         readinessProbe:
           tcpSocket:
             port: 8888
+          periodSeconds: 10
         resources:
           requests:
             cpu: 50m

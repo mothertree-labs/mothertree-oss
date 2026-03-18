@@ -155,6 +155,30 @@ fi
 envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 envsubst < "$REPO_ROOT/apps/manifests/jitsi/jicofo.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 
+# Restart Jicofo after Prosody so it rejoins the brewery MUC with a fresh XMPP connection.
+# Without this, Jicofo can fail to rejoin the brewery after a Prosody restart,
+# leaving it unable to discover JVB bridges (calls fail with "no bridge available").
+print_status "Waiting for Prosody to be ready before restarting Jicofo..."
+kubectl wait --for=condition=ready pod/jitsi-prosody-0 -n "$NS_JITSI" --timeout=60s 2>/dev/null || true
+kubectl rollout restart deployment/jitsi-jicofo -n "$NS_JITSI"
+kubectl rollout status deployment/jitsi-jicofo -n "$NS_JITSI" --timeout=60s 2>/dev/null || true
+
+# Wait for Jicofo to discover JVB bridges (up to 30s)
+print_status "Waiting for Jicofo to discover JVB bridges..."
+for i in $(seq 1 15); do
+    BRIDGE_COUNT=$(kubectl exec -n "$NS_JITSI" deployment/jitsi-jicofo -- \
+        curl -sf http://localhost:8888/stats 2>/dev/null | \
+        python3 -c "import sys,json; print(json.load(sys.stdin).get('bridge_selector',{}).get('bridge_count',0))" 2>/dev/null)
+    if [ "${BRIDGE_COUNT:-0}" -gt 0 ]; then
+        print_success "Jicofo found $BRIDGE_COUNT bridge(s)"
+        break
+    fi
+    sleep 2
+done
+if [ "${BRIDGE_COUNT:-0}" -eq 0 ]; then
+    print_warning "Jicofo has not discovered any bridges yet — calls may fail until bridges register"
+fi
+
 # Apply templated ConfigMap
 envsubst < "$REPO_ROOT/apps/manifests/jitsi/web-config.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 
