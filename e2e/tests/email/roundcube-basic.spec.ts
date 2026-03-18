@@ -102,6 +102,15 @@ test.describe('Email — Roundcube Basic', () => {
   test('can open compose form', async ({ emailTestPage: page }) => {
     await navigateToRoundcube(page, TEST_USERS.emailTest.username, TEST_USERS.emailTest.password);
 
+    // Wait for Roundcube JS app to finish initializing before clicking.
+    // The Compose button element appears in the DOM before rcmail.init() binds
+    // the click handler. With large inboxes, IMAP init takes longer and clicks
+    // during this window silently do nothing.
+    await page.waitForFunction(
+      () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
+      { timeout: 30_000 },
+    );
+
     // Click compose button
     await page.locator('button:has-text("Compose"), a.compose, [data-command="compose"]').first().click();
 
