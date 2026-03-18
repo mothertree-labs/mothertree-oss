@@ -36,7 +36,9 @@ LEASED_POOL=""
 ELAPSED=0
 
 while [[ -z "$LEASED_POOL" ]]; do
-  for pool in "${POOLS[@]}"; do
+  # Shuffle pool order so concurrent pipelines don't all contend on slot 1
+  mapfile -t SHUFFLED < <(printf '%s\n' "${POOLS[@]}" | sort -R)
+  for pool in "${SHUFFLED[@]}"; do
     KEY="ci-lease-${pool}"
     # SET NX EX: atomic "create if not exists" with TTL
     RESULT=$(vcli SET "$KEY" "$CI_PIPELINE_NUMBER" NX EX "$LEASE_TTL" 2>/dev/null || true)
