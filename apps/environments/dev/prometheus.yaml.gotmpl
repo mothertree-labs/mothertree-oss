@@ -1,6 +1,6 @@
 prometheus:
-  # Dev-only resource reductions to avoid request-based scheduling pressure on a single node.
-  # (Limits can stay reasonably high; requests are what block scheduling.)
+  # Dev-only overrides. Requests raised to match actual usage (~1156Mi observed)
+  # so the scheduler accurately represents node pressure.
   prometheusSpec:
     # Dev-only: avoid consuming a Linode block volume attachment.
     # Single-node dev clusters can hit Linode's max attached volume limit when multiple tenants are deployed.
@@ -10,7 +10,7 @@ prometheus:
     resources:
       requests:
         cpu: 100m
-        memory: 1Gi
+        memory: 1280Mi
       limits:
         memory: 3Gi
   ingress:
@@ -23,13 +23,13 @@ prometheus:
 
 grafana:
   adminPassword: '{{ env "TF_VAR_grafana_admin_password" | default "changeme" }}'
-  # Dev-only resource reductions.
+  # Match prod base values — actual usage ~260Mi, was exceeding the 256Mi limit.
   resources:
     requests:
       cpu: 50m
-      memory: 128Mi
+      memory: 320Mi
     limits:
-      memory: 256Mi
+      memory: 512Mi
   ingress:
     hosts:
       - 'grafana.internal.{{ env "INFRA_ENV_DNS_LABEL" }}.{{ env "INFRA_DOMAIN" }}'

@@ -1,8 +1,8 @@
-# Dev resource reduction — ~50% of prod base values
+# Match prod base values — actual usage ~550-620Mi, 256Mi was severely under-requested.
 resources:
   requests:
     cpu: 100m
-    memory: 256Mi
+    memory: 512Mi
   limits:
     memory: 1Gi
 
