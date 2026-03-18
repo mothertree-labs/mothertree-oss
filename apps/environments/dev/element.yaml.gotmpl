@@ -1,6 +1,14 @@
 # Replica count from tenant config (HPA will manage scaling)
 replicaCount: {{ env "ELEMENT_MIN_REPLICAS" }}
 
+# Actual usage ~19Mi — base value of 128Mi/256Mi wastes scheduler budget on small dev nodes.
+resources:
+  requests:
+    cpu: 100m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
 defaultServer:
   url: 'https://{{ env "MATRIX_HOST" }}'
   name: '{{ env "MATRIX_HOST" }}'
