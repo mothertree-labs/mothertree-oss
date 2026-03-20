@@ -951,6 +951,33 @@ EOF
     echo "ses_smtp_password: \"${SES_SMTP_PASSWORD}\"" >> "$TEMP_EXTRA_VARS"
   fi
 
+  # VPN networking: Unbound DNS + OpenVPN routes (moved from infra/ Terraform)
+  # These IPs are used to configure internal DNS and VPN routing to K8s services.
+  CLUSTER_LB_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+  CLUSTER_NODE_IP=$(kubectl get nodes \
+    -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "")
+
+  if [ -n "$CLUSTER_LB_IP" ] && [ -n "$CLUSTER_NODE_IP" ]; then
+    echo "cluster_lb_ip: \"${CLUSTER_LB_IP}\"" >> "$TEMP_EXTRA_VARS"
+    echo "cluster_node_ip: \"${CLUSTER_NODE_IP}\"" >> "$TEMP_EXTRA_VARS"
+
+    # Internal DNS domain: dev → internal.dev.<domain>, prod → prod.<domain>
+    if [ -n "$INFRA_ENV_DNS_LABEL" ] && [ "$INFRA_ENV_DNS_LABEL" != "null" ] && [ "$INFRA_ENV_DNS_LABEL" != "prod" ]; then
+      INTERNAL_DNS_DOMAIN="internal.${INFRA_ENV_DNS_LABEL}.${INFRA_DOMAIN}"
+    else
+      INTERNAL_DNS_DOMAIN="prod.${INFRA_DOMAIN}"
+    fi
+    echo "internal_dns_domain: \"${INTERNAL_DNS_DOMAIN}\"" >> "$TEMP_EXTRA_VARS"
+  else
+    print_warning "Could not get cluster IPs — VPN Unbound DNS will not be updated"
+  fi
+
+  # VPN network CIDR for iptables NAT rules
+  if [ -n "${VPN_NETWORK_CIDR:-}" ]; then
+    echo "vpn_network_cidr: \"${VPN_NETWORK_CIDR}\"" >> "$TEMP_EXTRA_VARS"
+  fi
+
   print_status "=== VPN POSTFIX CONFIGURATION ==="
   print_status "Environment:        $MT_ENV"
   print_status "VPN Host:           $VPN_HOST"

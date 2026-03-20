@@ -254,6 +254,107 @@
         name: postfix
         state: restarted
 
+# =============================================================================
+# VPN Networking: Unbound DNS, OpenVPN routes, iptables NAT
+# Ensures VPN clients can reach K8s services (monitoring via NodePort,
+# web services via NodeBalancer) using internal DNS names.
+# =============================================================================
+- name: Configure VPN Networking (Unbound DNS, OpenVPN routes)
+  hosts: vpn_servers
+  become: yes
+
+  tasks:
+    - name: Skip VPN networking if cluster IPs not provided
+      debug:
+        msg: "Skipping VPN networking — cluster_node_ip and/or cluster_lb_ip not provided"
+      when: cluster_node_ip is not defined or cluster_lb_ip is not defined
+
+    # --- OpenVPN route push for K8s node subnet ---
+    # VPN clients need a route to the K8s node subnet so they can reach
+    # monitoring services (Grafana, Prometheus, Alertmanager) via NodePort.
+    - name: Compute K8s node subnet
+      set_fact:
+        node_subnet: "{{ cluster_node_ip.split('.')[0:3] | join('.') }}.0"
+      when: cluster_node_ip is defined
+
+    - name: Update OpenVPN node subnet route push
+      lineinfile:
+        path: /etc/openvpn/server.conf
+        regexp: '^push "route 192\.168\.\d+\.0 255\.255\.255\.0"'
+        line: 'push "route {{ node_subnet }} 255.255.255.0"'
+        insertafter: '^push "route '
+      notify: restart openvpn deferred
+      when: cluster_node_ip is defined
+
+    # --- iptables NAT for VPN→node-subnet traffic ---
+    # Without this MASQUERADE rule, nodes can't reply to VPN clients
+    # because the VPN client IPs aren't routable from the node subnet.
+    - name: Remove stale iptables MASQUERADE rules for old node subnets
+      shell: |
+        iptables -t nat -S POSTROUTING | grep -E '\-s {{ vpn_network_cidr }} .*\-d 192\.168\.[0-9]+\.[0-9]+\.0/24 .*\-j MASQUERADE' | while read -r rule; do
+          iptables -t nat $(echo "$rule" | sed 's/^-A/-D/') || true
+        done
+      when: cluster_node_ip is defined and vpn_network_cidr is defined
+      changed_when: false
+
+    - name: Add iptables MASQUERADE for VPN to node subnet
+      iptables:
+        table: nat
+        chain: POSTROUTING
+        source: "{{ vpn_network_cidr }}"
+        destination: "{{ node_subnet }}/24"
+        out_interface: eth0
+        jump: MASQUERADE
+      notify: save iptables
+      when: cluster_node_ip is defined and vpn_network_cidr is defined
+
+    # --- Unbound DNS for internal service resolution ---
+    # Monitoring services resolve to NODE_IP (NodePort access).
+    # Web services resolve to CLUSTER_IP (NodeBalancer, bypasses Cloudflare for VPN debugging).
+    - name: Ensure Unbound conf.d directory exists
+      file:
+        path: /opt/unbound/conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: cluster_node_ip is defined
+
+    - name: Ensure Unbound includes conf.d
+      lineinfile:
+        path: /opt/unbound/unbound.conf
+        regexp: '^include: "/opt/unbound/conf.d/\*\.conf"'
+        line: 'include: "/opt/unbound/conf.d/*.conf"'
+        insertbefore: '^stub-zone:'
+      notify: restart unbound
+      when: cluster_node_ip is defined
+
+    - name: Deploy Unbound DNS configuration
+      template:
+        src: unbound-local-data.conf.j2
+        dest: /opt/unbound/conf.d/local-data.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart unbound
+      when: cluster_node_ip is defined and cluster_lb_ip is defined and internal_dns_domain is defined
+
+  handlers:
+    - name: restart unbound
+      shell: cd /opt/unbound && docker-compose restart
+      retries: 3
+      delay: 2
+
+    - name: save iptables
+      shell: iptables-save > /etc/iptables/rules.v4
+
+    # Deferred restart: nohup prevents SIGHUP when SSH session drops
+    # (happens when connected via VPN tunnel — restarting OpenVPN kills the tunnel)
+    - name: restart openvpn deferred
+      shell: nohup sh -c 'sleep 1; systemctl restart openvpn@server' >/dev/null 2>&1 &
+      async: 10
+      poll: 0
+
 - name: Configure TURN Server
   hosts: turn_servers
   become: yes
