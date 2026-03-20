@@ -459,19 +459,26 @@ fi
 APP_VERSIONS_FILE="$REPO_ROOT/apps/manifests/nextcloud/app-versions.json"
 _build_app_urls_from_manifest() {
     # Build APP_ID|URL lines from app-versions.json
-    # URL pattern: https://github.com/nextcloud-releases/{app}/releases/download/v{version}/{app}-v{version}.tar.gz
-    python3 -c "
+    # Uses authoritative download URLs stored in the manifest (sourced from the
+    # Nextcloud app store API), not constructed from a pattern.
+    python3 - "$APP_VERSIONS_FILE" <<'PYEOF'
 import json, sys, os
-with open('$APP_VERSIONS_FILE') as f:
+with open(sys.argv[1]) as f:
     manifest = json.load(f)
 needed = {'user_oidc', 'calendar', 'richdocuments', 'external', 'notify_push'}
 if os.environ.get('GOOGLE_IMPORT_ENABLED') == 'true':
     needed.add('integration_google')
-for app_id, version in manifest['apps'].items():
+for app_id, info in manifest['apps'].items():
     if app_id in needed:
-        url = f'https://github.com/nextcloud-releases/{app_id}/releases/download/v{version}/{app_id}-v{version}.tar.gz'
+        # Support both formats: {"version": "x", "url": "..."} and plain "version"
+        if isinstance(info, dict):
+            url = info['url']
+        else:
+            # Legacy format (version string only) — construct URL from pattern
+            version = info
+            url = f'https://github.com/nextcloud-releases/{app_id}/releases/download/v{version}/{app_id}-v{version}.tar.gz'
         print(f'{app_id}|{url}')
-" 2>/dev/null
+PYEOF
 }
 
 if [ -f "$APP_VERSIONS_FILE" ]; then

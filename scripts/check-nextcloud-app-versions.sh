@@ -23,7 +23,11 @@ if [ ! -f "$MANIFEST" ]; then
     exit 1
 fi
 
-PLATFORM_VERSION=$(python3 -c "import json; print(json.load(open('$MANIFEST'))['platform_version'])")
+PLATFORM_VERSION=$(python3 - "$MANIFEST" <<'PYEOF'
+import json, sys
+print(json.load(open(sys.argv[1]))['platform_version'])
+PYEOF
+)
 
 echo "Checking Nextcloud app store for platform version $PLATFORM_VERSION..."
 echo ""
@@ -52,7 +56,10 @@ with open(api_path) as f:
 app_index = {a['id']: a for a in apps}
 
 updates = []
-for app_id, pinned_version in sorted(manifest['apps'].items()):
+for app_id, info in sorted(manifest['apps'].items()):
+    # Support both formats: {"version": "x", "url": "..."} and plain "version"
+    pinned_version = info['version'] if isinstance(info, dict) else info
+
     if app_id not in app_index:
         print(f'  {app_id}: {pinned_version} (not found in app store)')
         continue
@@ -99,7 +106,11 @@ for app_id in manifest['apps']:
     if app_id in app_index:
         releases = app_index[app_id].get('releases', [])
         if releases:
-            manifest['apps'][app_id] = releases[0]['version']
+            # Store both version and authoritative download URL from the API
+            manifest['apps'][app_id] = {
+                'version': releases[0]['version'],
+                'url': releases[0]['download']
+            }
 
 with open(manifest_path, 'w') as f:
     json.dump(manifest, f, indent=2)
