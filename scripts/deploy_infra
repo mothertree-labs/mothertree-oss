@@ -400,6 +400,17 @@ for pid in $CERTMANAGER_PIDS; do
 done
 print_status "Cert-manager is ready"
 
+# =============================================================================
+# Deploy ClusterIssuers and Cloudflare API token for cert-manager
+# =============================================================================
+print_status "Deploying ClusterIssuers and Cloudflare API token..."
+export TLS_EMAIL="$TF_VAR_tls_email"
+export CLOUDFLARE_API_TOKEN="$TF_VAR_cloudflare_api_token"
+envsubst '${CLOUDFLARE_API_TOKEN} ${NS_CERTMANAGER}' < "$REPO_ROOT/apps/manifests/cert-manager/cloudflare-api-token.yaml.tpl" | kubectl apply -f -
+envsubst '${TLS_EMAIL}' < "$REPO_ROOT/apps/manifests/cert-manager/clusterissuer-http01.yaml.tpl" | kubectl apply -f -
+envsubst '${TLS_EMAIL}' < "$REPO_ROOT/apps/manifests/cert-manager/clusterissuer-dns01.yaml.tpl" | kubectl apply -f -
+print_status "ClusterIssuers and Cloudflare API token deployed"
+
 # Deploy PostgreSQL to shared database namespace
 print_status "Deploying PostgreSQL to $NS_DB namespace..."
 
