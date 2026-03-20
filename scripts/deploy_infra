@@ -565,8 +565,8 @@ else
   fi
 fi
 
-# Run Terraform for DNS, ClusterIssuers, etc.
-print_status "Running Terraform for DNS and certificates..."
+# Run Terraform for DNS and reverse DNS
+print_status "Running Terraform for DNS..."
 pushd "$REPO_ROOT/infra" >/dev/null
   # Source secrets
   if [ -f "$REPO_ROOT/secrets.$MT_ENV.tfvars.env" ]; then
@@ -582,37 +582,9 @@ pushd "$REPO_ROOT/infra" >/dev/null
   ENV_DNS_LABEL="$MT_ENV"
   [ "$MT_ENV" = "prod" ] && ENV_DNS_LABEL=""
 
-  # Build ALLOWED_SENDER_DOMAINS from tenant configs (env-aware)
-  SMTP_ALLOWED_SENDER_DOMAINS=""
-  for tenant_dir in "$MT_TENANTS_DIR"/*/; do
-    config_file="$tenant_dir/${MT_ENV}.config.yaml"
-    if [ -f "$config_file" ]; then
-      base_domain=$(yq '.dns.domain' "$config_file")
-      env_label=$(yq '.dns.env_dns_label // ""' "$config_file")
-      if [ -n "$env_label" ] && [ "$env_label" != "null" ]; then
-        domain="${env_label}.${base_domain}"
-      else
-        domain="$base_domain"
-      fi
-      if [ -n "$domain" ] && [ "$domain" != "null" ]; then
-        SMTP_ALLOWED_SENDER_DOMAINS="${SMTP_ALLOWED_SENDER_DOMAINS:+$SMTP_ALLOWED_SENDER_DOMAINS,}$domain"
-      fi
-    fi
-  done
-
-  # Detect VPN tunnel for SSH access
-  VPN_SSH_HOST=""
-  VPN_TUNNEL_IP="${VPN_SERVER_TUNNEL_IP:-10.8.0.1}"
-  if ping -c 1 -W 2 "$VPN_TUNNEL_IP" >/dev/null 2>&1; then
-    print_status "VPN tunnel reachable — Terraform will SSH via $VPN_TUNNEL_IP"
-    VPN_SSH_HOST="$VPN_TUNNEL_IP"
-  fi
-
   terraform apply -input=false -auto-approve $VAR_FILE_FLAG \
     -var env="$MT_ENV" \
-    -var env_dns_label="$ENV_DNS_LABEL" \
-    -var smtp_allowed_sender_domains="$SMTP_ALLOWED_SENDER_DOMAINS" \
-    -var vpn_ssh_host="$VPN_SSH_HOST"
+    -var env_dns_label="$ENV_DNS_LABEL"
 
 popd >/dev/null
 
@@ -728,6 +700,17 @@ if [ -n "${LKE_FW_ID:-}" ] && [ -n "$VPN_SERVER_PRIVATE_IP" ] && [ -n "${TF_VAR_
   fi
 else
   print_status "Skipping SMTP NodePort firewall rule (missing LKE firewall ID, VPN private IP, or Linode token)"
+fi
+
+# =============================================================================
+# Deploy K8s Postfix (ConfigMaps, Deployment, Services, NetworkPolicy)
+# =============================================================================
+print_status "Deploying K8s Postfix..."
+if [ -x "$REPO_ROOT/apps/deploy-postfix.sh" ]; then
+  "$REPO_ROOT/apps/deploy-postfix.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+else
+  print_error "deploy-postfix.sh not found"
+  exit 1
 fi
 
 # =============================================================================

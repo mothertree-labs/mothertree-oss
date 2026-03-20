@@ -212,38 +212,5 @@ variable "linode_token" {
   sensitive   = true
 }
 
-# =============================================================================
-# SMTP/Email Configuration (Postfix)
-# =============================================================================
-
-variable "smtp_enabled" {
-  description = "Whether to deploy the Postfix SMTP server for sending emails"
-  type        = bool
-  default     = true
-}
-
-variable "smtp_domain" {
-  description = "Domain for SMTP server (defaults to main domain if empty)"
-  type        = string
-  default     = ""
-}
-
-# NOTE: dkim_selector variable removed - DKIM now managed per-tenant by create_env
-
-variable "smtp_relay_networks" {
-  description = "Networks allowed to relay through Postfix (CIDR notation, comma-separated)"
-  type        = string
-  default     = "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
-}
-
-variable "smtp_allowed_sender_domains" {
-  description = "Domains allowed to send email through Postfix (comma-separated). Must include all tenant domains."
-  type        = string
-  default     = "example.com"
-}
-
-variable "vpn_ssh_host" {
-  description = "SSH host for VPN server provisioners. Defaults to public IP; set to VPN tunnel IP (e.g. 10.8.0.1) when SSH to public IP is blocked."
-  type        = string
-  default     = ""
-}
+# NOTE: Postfix/SMTP variables removed — Postfix K8s resources are now managed by
+# apps/deploy-postfix.sh (not Terraform). See issue #242.
