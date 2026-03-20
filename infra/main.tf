@@ -42,21 +42,10 @@ data "external" "cluster_ip" {
   depends_on = [data.kubernetes_namespace.db]
 }
 
-# Get Kubernetes node external IPs for SPF record (emails egress through node IPs)
-data "external" "node_external_ips" {
-  program = ["bash", "-c", <<-EOF
-    KUBECONFIG=${path.root}/../kubeconfig.${var.env}.yaml kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="ExternalIP")].address}' | tr ' ' '\n' | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0)) | {ips: join(",")}'
-  EOF
-  ]
-  depends_on = [data.kubernetes_namespace.db]
-}
-
 # Get cluster IP address from Kubernetes service
 locals {
   # Get the actual IP address from the ingress controller service
   cluster_ip_address = data.external.cluster_ip.result.ip
-  # Get node external IPs for SPF record
-  node_external_ips = compact(split(",", data.external.node_external_ips.result.ips))
 }
 
 # Configure Kubernetes provider using kubeconfig
@@ -219,31 +208,6 @@ resource "kubernetes_secret" "cloudflare_api_token" {
 # This keeps tenant-specific resources out of Terraform
 
 // Helm manages application PVCs; do not pre-create them here to avoid ownership conflicts
-
-# TURN server setup
-resource "null_resource" "turn_server_setup" {
-  count = data.terraform_remote_state.phase1.outputs.turn_server_enabled ? 1 : 0
-
-  provisioner "local-exec" {
-    command = <<-EOT
-      export KUBECONFIG=${path.root}/../kubeconfig.${var.env}.yaml
-      # Wait for ingress controller to be ready
-      kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=ingress-nginx -n infra-ingress --timeout=300s
-      
-      # Get the external IP of the ingress controller
-      EXTERNAL_IP=$(kubectl get svc -n infra-ingress ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-      
-      if [ -n "$EXTERNAL_IP" ]; then
-        echo "Ingress controller external IP: $EXTERNAL_IP"
-        echo "TURN server should be configured with this IP: $EXTERNAL_IP"
-      else
-        echo "Warning: Could not get external IP for ingress controller"
-      fi
-    EOT
-  }
-
-  depends_on = [data.kubernetes_namespace.db]
-}
 
 # Wait for VPN server to be ready before updating Unbound
 # This ensures the VPN server has finished provisioning, cloud-init is complete, and services are running
@@ -487,27 +451,6 @@ $DNS_ENTRIES
   ]
 }
 
-# Get pod CIDR range for whitelist (needed when using NodePort with externalTrafficPolicy: Cluster)
-# kube-proxy SNATs traffic to pod IPs, so we need to whitelist the pod CIDR range
-# Pod CIDRs are per-node, so we use a broader range (10.2.0.0/16) to cover all nodes
-data "external" "pod_cidr" {
-  program = ["bash", "-c", <<-EOT
-    set -e
-    # Get all pod CIDRs from nodes
-    POD_CIDRS=$(KUBECONFIG=${path.root}/../kubeconfig.${var.env}.yaml kubectl get nodes -o jsonpath='{.items[*].spec.podCIDR}' 2>/dev/null || echo "")
-    if [ -n "$POD_CIDRS" ] && [ "$POD_CIDRS" != "" ]; then
-      # Use broader range 10.2.0.0/16 to cover all node pod CIDRs
-      POD_CIDR="10.2.0.0/16"
-    else
-      # Fallback: use default pod CIDR range
-      POD_CIDR="10.2.0.0/16"
-    fi
-    echo "{\"cidr\": \"$POD_CIDR\"}"
-  EOT
-  ]
-  depends_on = [data.kubernetes_namespace.db]
-}
-
 # NOTE: Internal ingress whitelist CIDRs are now managed by Helm via deploy_infra script
 # The script computes the CIDRs and passes them to helmfile as environment variables
 # This avoids field manager conflicts between Helm and kubectl patch
@@ -561,12 +504,6 @@ data "external" "cluster_node_ip" {
 # Use exact VPN server VPC/LAN CIDR from phase1 outputs (support subnet)
 locals {
   vpn_server_vpc_cidr = data.terraform_remote_state.phase1.outputs.vpn_server_vpc_cidr
-  # Compute cluster node subnet (/24) from first node InternalIP (e.g., 192.168.156.0/24)
-  cluster_node_subnet_cidr = format("%s.%s.%s.0/24",
-    split(".", data.external.cluster_node_ip.result.ip)[0],
-    split(".", data.external.cluster_node_ip.result.ip)[1],
-    split(".", data.external.cluster_node_ip.result.ip)[2]
-  )
   # Compute OpenVPN server eth0 /24 subnet CIDR from its private IP
   openvpn_server_private_ip_octets = split(".", data.terraform_remote_state.phase1.outputs.openvpn_server_private_ip)
   vpn_server_eth0_subnet_cidr = format("%s.%s.%s.0/24",
