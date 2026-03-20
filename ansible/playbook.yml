@@ -280,7 +280,7 @@
     - name: Update OpenVPN node subnet route push
       lineinfile:
         path: /etc/openvpn/server.conf
-        regexp: '^push "route 192\.168\.\d+\.\d+\.0 255\.255\.255\.0"'
+        regexp: '^push "route 192\.168\.\d+\.0 255\.255\.255\.0"'
         line: 'push "route {{ node_subnet }} 255.255.255.0"'
         insertafter: '^push "route '
       notify: restart openvpn deferred
@@ -311,16 +311,6 @@
     # --- Unbound DNS for internal service resolution ---
     # Monitoring services resolve to NODE_IP (NodePort access).
     # Web services resolve to CLUSTER_IP (NodeBalancer, bypasses Cloudflare for VPN debugging).
-    - name: Deploy Unbound DNS configuration
-      template:
-        src: unbound-local-data.conf.j2
-        dest: /opt/unbound/conf.d/local-data.conf
-        owner: root
-        group: root
-        mode: '0644'
-      notify: restart unbound
-      when: cluster_node_ip is defined and cluster_lb_ip is defined and internal_dns_domain is defined
-
     - name: Ensure Unbound conf.d directory exists
       file:
         path: /opt/unbound/conf.d
@@ -338,6 +328,16 @@
         insertbefore: '^stub-zone:'
       notify: restart unbound
       when: cluster_node_ip is defined
+
+    - name: Deploy Unbound DNS configuration
+      template:
+        src: unbound-local-data.conf.j2
+        dest: /opt/unbound/conf.d/local-data.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart unbound
+      when: cluster_node_ip is defined and cluster_lb_ip is defined and internal_dns_domain is defined
 
   handlers:
     - name: restart unbound
