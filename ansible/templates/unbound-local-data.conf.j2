@@ -5,8 +5,6 @@
 # Web services → cluster LB IP (NodeBalancer, bypasses Cloudflare)
 
 server:
-    local-zone: "{{ internal_dns_domain }}." transparent
-
     # Monitoring services (NodePort access via node IP)
     local-data: "grafana.{{ internal_dns_domain }}. IN A {{ cluster_node_ip }}"
     local-data: "prometheus.{{ internal_dns_domain }}. IN A {{ cluster_node_ip }}"
