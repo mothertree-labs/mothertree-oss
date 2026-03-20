@@ -155,6 +155,7 @@ fi
 print_status "Creating Element branding ConfigMap..."
 FONTS_DIR="$REPO_ROOT/apps/account-portal/public/fonts"
 ASSETS_DIR="$REPO_ROOT/apps/account-portal/public"
+THEMES_DIR="$REPO_ROOT/apps/themes/element"
 kubectl -n "$NS_MATRIX" create configmap element-branding \
     --from-file=favicon.svg="$ASSETS_DIR/favicon.svg" \
     --from-file=logo.svg="$ASSETS_DIR/favicon.svg" \
@@ -162,6 +163,7 @@ kubectl -n "$NS_MATRIX" create configmap element-branding \
     --from-file=figtree-latin-ext.woff2="$FONTS_DIR/figtree-latin-ext.woff2" \
     --from-file=figtree-italic-latin.woff2="$FONTS_DIR/figtree-italic-latin.woff2" \
     --from-file=figtree-italic-latin-ext.woff2="$FONTS_DIR/figtree-italic-latin-ext.woff2" \
+    --from-file=custom.css="$THEMES_DIR/custom.css" \
     --dry-run=client -o yaml | kubectl apply -f -
 print_status "Element branding ConfigMap created in namespace $NS_MATRIX"
 

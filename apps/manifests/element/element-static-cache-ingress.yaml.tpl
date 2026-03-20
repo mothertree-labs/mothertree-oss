@@ -1,6 +1,11 @@
-# Separate ingress for Element Web /bundles/ path with long-lived cache headers.
-# Webpack content-hashes all filenames, so these are safe to cache indefinitely.
-# The chart's built-in nginx config handles index.html (no-cache) and config.json.
+# Ingress for Element Web static assets and custom CSS injection.
+#
+# - /bundles/ gets immutable cache headers (webpack content-hashed filenames)
+# - /themes/ serves custom CSS mounted from the branding ConfigMap
+# - HTML responses get a <link> tag injected via sub_filter to load custom.css
+#
+# The ananace/element-web Helm chart has no native custom CSS support,
+# so nginx sub_filter is used to inject the stylesheet reference.
 #
 # Required environment variables:
 #   MATRIX_HOST - The tenant's Matrix hostname (e.g., matrix.dev.example.com)
@@ -20,6 +25,12 @@ metadata:
     nginx.ingress.kubernetes.io/configuration-snippet: |
       proxy_hide_header Cache-Control;
       add_header Cache-Control "public, max-age=31536000, immutable" always;
+    nginx.ingress.kubernetes.io/server-snippet: |
+      location ~* ^/themes/ {
+        proxy_pass http://element-web.${NS_MATRIX}.svc.cluster.local;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "public, max-age=3600" always;
+      }
 spec:
   ingressClassName: nginx
   tls:
