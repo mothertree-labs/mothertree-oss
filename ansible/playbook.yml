@@ -311,6 +311,8 @@
     # --- Unbound DNS for internal service resolution ---
     # Monitoring services resolve to NODE_IP (NodePort access).
     # Web services resolve to CLUSTER_IP (NodeBalancer, bypasses Cloudflare for VPN debugging).
+    # Unbound runs in Docker with unbound.conf mounted. We add a conf.d volume
+    # for DNS overrides so the base config stays untouched.
     - name: Ensure Unbound conf.d directory exists
       file:
         path: /opt/unbound/conf.d
@@ -320,11 +322,20 @@
         mode: '0755'
       when: cluster_node_ip is defined
 
-    - name: Ensure Unbound includes conf.d
+    - name: Add conf.d volume mount to Unbound docker-compose
+      lineinfile:
+        path: /opt/unbound/docker-compose.yml
+        regexp: 'conf\.d:/opt/unbound/etc/unbound/conf\.d'
+        line: '      - ./conf.d:/opt/unbound/etc/unbound/conf.d:ro'
+        insertafter: 'unbound\.conf:/opt/unbound/etc/unbound/unbound\.conf'
+      notify: recreate unbound
+      when: cluster_node_ip is defined
+
+    - name: Ensure Unbound includes conf.d (container path)
       lineinfile:
         path: /opt/unbound/unbound.conf
-        regexp: '^include: "/opt/unbound/conf.d/\*\.conf"'
-        line: 'include: "/opt/unbound/conf.d/*.conf"'
+        regexp: 'include:.*conf\.d/\*\.conf'
+        line: 'include: "/opt/unbound/etc/unbound/conf.d/*.conf"'
         insertbefore: '^stub-zone:'
       notify: restart unbound
       when: cluster_node_ip is defined
@@ -340,6 +351,11 @@
       when: cluster_node_ip is defined and cluster_lb_ip is defined and internal_dns_domain is defined
 
   handlers:
+    - name: recreate unbound
+      shell: cd /opt/unbound && docker-compose down && docker-compose up -d
+      retries: 3
+      delay: 2
+
     - name: restart unbound
       shell: cd /opt/unbound && docker-compose restart
       retries: 3
