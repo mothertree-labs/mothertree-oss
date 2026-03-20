@@ -16,6 +16,13 @@ ingress:
   className: nginx
   annotations:
     nginx.ingress.kubernetes.io/priority: "10"  # Lower priority than API paths
+    # Inject custom CSS into Element HTML — the Helm chart has no native custom CSS support.
+    # Accept-Encoding "" forces uncompressed upstream so sub_filter can modify HTML.
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Accept-Encoding "";
+      sub_filter '</head>' '<link rel="stylesheet" href="/themes/custom.css"></head>';
+      sub_filter_once on;
+      sub_filter_types text/html;
   # hosts, tls, and iframe annotations are set in environment-specific files
   # NOTE: No cert-manager annotation here — Element shares MATRIX_HOST with Synapse,
   # so Synapse's Ingress handles certificate provisioning (synapse-tls secret).
@@ -39,8 +46,8 @@ config:
                   format: "woff2"
           general: "'Figtree', sans-serif"
         colors:
-          accent-color: "#8A9475"
-          primary-color: "#A7AE8D"
+          accent-color: "#6B7A5A"
+          primary-color: "#6B7A5A"
           sidebar-color: "#141511"
           roomlist-background-color: "#C5CAB2"
           roomlist-text-color: "#141511"
@@ -61,8 +68,8 @@ config:
                   format: "woff2"
           general: "'Figtree', sans-serif"
         colors:
-          accent-color: "#A7AE8D"
-          primary-color: "#A7AE8D"
+          accent-color: "#B8C4A0"
+          primary-color: "#B8C4A0"
           sidebar-color: "#0D0E0B"
           roomlist-background-color: "#141511"
           roomlist-text-color: "#F3E8D6"
@@ -98,3 +105,6 @@ extraVolumeMounts:
   - name: branding
     mountPath: /app/fonts/figtree-italic-latin-ext.woff2
     subPath: figtree-italic-latin-ext.woff2
+  - name: branding
+    mountPath: /app/themes/custom.css
+    subPath: custom.css

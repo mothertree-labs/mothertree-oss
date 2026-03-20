@@ -1,0 +1,16 @@
+/* Mothertree custom overrides for Element Web.
+ *
+ * Element's tab styling uses hardcoded values (color: #fff, background via
+ * --cpd-color-bg-subtle-secondary) that cannot be changed through the
+ * custom_themes config. This CSS is injected via nginx sub_filter.
+ */
+
+/* Active settings tab: accent green background so white text has clear contrast */
+.mx_TabbedView_tabsOnLeft .mx_TabbedView_tabLabel_active {
+  background-color: #6B7A5A !important;
+}
+
+/* Dark theme: lighter sage background for active tab */
+.cpd-theme-dark .mx_TabbedView_tabsOnLeft .mx_TabbedView_tabLabel_active {
+  background-color: #B8C4A0 !important;
+}
