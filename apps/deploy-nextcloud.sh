@@ -446,29 +446,59 @@ if [ -f "$HOOK_SCRIPT" ]; then
     print_status "before-starting hook ConfigMap created/updated"
 fi
 
-# Step 5c: Ensure appstore-urls ConfigMap exists before helmfile sync (create only)
+# Step 5c: Ensure appstore-urls ConfigMap exists before helmfile sync
 # App store apps (user_oidc, calendar, richdocuments, external, notify_push) live on
 # emptyDir and are lost on pod restart. The init container downloads them from URLs
 # stored in this ConfigMap on every boot.
 #
-# CRITICAL: Only CREATE this ConfigMap if it doesn't exist yet (first deploy).
-# Never UPDATE it before helmfile sync — updating would give new pods (from rolling
-# update or HPA scale-up) different app versions than existing pods. When the new
-# pod's before-starting hook runs `occ upgrade`, the version mismatch modifies the
-# shared DB, breaking occ commands on all other pods ("require upgrade").
+# Versions are pinned in app-versions.json (git-tracked manifest). This ensures ALL
+# pods — existing, restarted, HPA-scaled — always get the same app versions. Version
+# updates happen via PRs (automated by GitHub Action), not during deploys.
 #
-# The ConfigMap is refreshed AFTER all occ commands complete (step 9c.1), when it's
-# safe for future pods to pick up new versions.
-if ! kubectl get configmap nextcloud-appstore-urls -n "$NS_FILES" &>/dev/null; then
-    print_status "Creating initial app store download URLs ConfigMap (first deploy)..."
-    NC_CHART_VERSION=$(grep -A3 'chart: nextcloud/nextcloud' "$REPO_ROOT/apps/helmfile.yaml.gotmpl" \
-        | grep 'version:' | head -1 | awk '{print $2}')
-    if [ -n "$NC_CHART_VERSION" ]; then
-        NC_APP_VERSION=$(helm show chart nextcloud/nextcloud --version "$NC_CHART_VERSION" 2>/dev/null \
-            | grep '^appVersion:' | awk '{print $2}')
+# The ConfigMap is always rebuilt from the manifest to ensure consistency.
+APP_VERSIONS_FILE="$REPO_ROOT/apps/manifests/nextcloud/app-versions.json"
+_build_app_urls_from_manifest() {
+    # Build APP_ID|URL lines from app-versions.json
+    # URL pattern: https://github.com/nextcloud-releases/{app}/releases/download/v{version}/{app}-v{version}.tar.gz
+    python3 -c "
+import json, sys, os
+with open('$APP_VERSIONS_FILE') as f:
+    manifest = json.load(f)
+needed = {'user_oidc', 'calendar', 'richdocuments', 'external', 'notify_push'}
+if os.environ.get('GOOGLE_IMPORT_ENABLED') == 'true':
+    needed.add('integration_google')
+for app_id, version in manifest['apps'].items():
+    if app_id in needed:
+        url = f'https://github.com/nextcloud-releases/{app_id}/releases/download/v{version}/{app_id}-v{version}.tar.gz'
+        print(f'{app_id}|{url}')
+" 2>/dev/null
+}
+
+if [ -f "$APP_VERSIONS_FILE" ]; then
+    print_status "Building app store URLs from version manifest..."
+    APP_URLS=$(_build_app_urls_from_manifest)
+    if [ -n "$APP_URLS" ]; then
+        kubectl create configmap nextcloud-appstore-urls \
+            --namespace "$NS_FILES" \
+            --from-literal=app-urls="$APP_URLS" \
+            --dry-run=client -o yaml | kubectl apply -f -
+        APP_COUNT=$(echo "$APP_URLS" | wc -l | tr -d ' ')
+        print_success "App store URLs ConfigMap applied from manifest ($APP_COUNT apps)"
+    else
+        print_warning "Could not build app URLs from manifest"
     fi
-    if [ -n "${NC_APP_VERSION:-}" ]; then
-        APP_URLS=$(curl -sf "https://apps.nextcloud.com/api/v1/platform/${NC_APP_VERSION}/apps.json" | python3 -c "
+else
+    # Fallback for deployments without the manifest file (backward compat)
+    if ! kubectl get configmap nextcloud-appstore-urls -n "$NS_FILES" &>/dev/null; then
+        print_status "No app-versions.json found, fetching from app store API (first deploy)..."
+        NC_CHART_VERSION=$(grep -A3 'chart: nextcloud/nextcloud' "$REPO_ROOT/apps/helmfile.yaml.gotmpl" \
+            | grep 'version:' | head -1 | awk '{print $2}')
+        if [ -n "$NC_CHART_VERSION" ]; then
+            NC_APP_VERSION=$(helm show chart nextcloud/nextcloud --version "$NC_CHART_VERSION" 2>/dev/null \
+                | grep '^appVersion:' | awk '{print $2}')
+        fi
+        if [ -n "${NC_APP_VERSION:-}" ]; then
+            APP_URLS=$(curl -sf "https://apps.nextcloud.com/api/v1/platform/${NC_APP_VERSION}/apps.json" | python3 -c "
 import json, sys, os
 apps = json.load(sys.stdin)
 needed = {'user_oidc', 'calendar', 'richdocuments', 'external', 'notify_push'}
@@ -479,21 +509,22 @@ for a in apps:
         r = a['releases'][0]
         print(f\"{a['id']}|{r['download']}\")
 " 2>/dev/null || true)
-        if [ -n "$APP_URLS" ]; then
-            kubectl create configmap nextcloud-appstore-urls \
-                --namespace "$NS_FILES" \
-                --from-literal=app-urls="$APP_URLS" \
-                --dry-run=client -o yaml | kubectl apply -f -
-            APP_COUNT=$(echo "$APP_URLS" | wc -l | tr -d ' ')
-            print_success "App store URLs ConfigMap created ($APP_COUNT apps for NC $NC_APP_VERSION)"
+            if [ -n "$APP_URLS" ]; then
+                kubectl create configmap nextcloud-appstore-urls \
+                    --namespace "$NS_FILES" \
+                    --from-literal=app-urls="$APP_URLS" \
+                    --dry-run=client -o yaml | kubectl apply -f -
+                APP_COUNT=$(echo "$APP_URLS" | wc -l | tr -d ' ')
+                print_success "App store URLs ConfigMap created ($APP_COUNT apps for NC $NC_APP_VERSION)"
+            else
+                print_warning "Could not fetch app store URLs from API (non-critical for first deploy)"
+            fi
         else
-            print_warning "Could not fetch app store URLs from API (non-critical for first deploy)"
+            print_warning "Could not determine NC version from Helm chart ${NC_CHART_VERSION:-unknown}"
         fi
     else
-        print_warning "Could not determine NC version from Helm chart ${NC_CHART_VERSION:-unknown}"
+        print_status "App store URLs ConfigMap already exists (preserving for version consistency)"
     fi
-else
-    print_status "App store URLs ConfigMap already exists (preserving for version consistency)"
 fi
 
 # Step 6: Deploy Nextcloud via helmfile
@@ -1018,20 +1049,29 @@ else
     print_warning "Nextcloud pod not found, skipping notify_push deployment"
 fi
 
-# Step 9c.1: Update app store download URLs ConfigMap (post-deploy, post-theming)
-# This is the ONLY place the ConfigMap gets updated (step 5c only creates if missing).
-# By running after all occ commands, we ensure that during the deploy window, all pods
-# share the same app versions. Future pod restarts/scale-ups will get these URLs.
-print_status "Refreshing app store download URLs ConfigMap..."
-NEXTCLOUD_POD=$(_get_nc_pod)
-if [ -n "$NEXTCLOUD_POD" ]; then
-    # App store API requires 3-part version (32.0.5), not 4-part (32.0.5.0)
-    NC_API_VERSION=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-        php -r 'require "/var/www/html/version.php"; echo $OC_Version[0].".".$OC_Version[1].".".$OC_Version[2];' 2>/dev/null || true)
-    if [ -n "$NC_API_VERSION" ]; then
-        # Query app store API for download URLs of our required apps
-        # The API returns all compatible apps for a given platform version
-        APP_URLS=$(curl -sf "https://apps.nextcloud.com/api/v1/platform/${NC_API_VERSION}/apps.json" | python3 -c "
+# Step 9c.1: Reconcile app store download URLs ConfigMap (post-deploy, post-theming)
+# When using app-versions.json, this is a no-op (ConfigMap was already set from manifest
+# in step 5c). For legacy deployments without the manifest, refresh from the API.
+if [ -f "$APP_VERSIONS_FILE" ]; then
+    # Manifest-based: rebuild from manifest (idempotent, ensures ConfigMap matches)
+    print_status "Reconciling app store URLs ConfigMap from manifest..."
+    APP_URLS=$(_build_app_urls_from_manifest)
+    if [ -n "$APP_URLS" ]; then
+        kubectl create configmap nextcloud-appstore-urls \
+            --namespace "$NS_FILES" \
+            --from-literal=app-urls="$APP_URLS" \
+            --dry-run=client -o yaml | kubectl apply -f -
+        print_success "App store URLs ConfigMap reconciled from manifest"
+    fi
+else
+    # Legacy: fetch latest compatible versions from API (original behavior)
+    print_status "Refreshing app store download URLs ConfigMap from API..."
+    NEXTCLOUD_POD=$(_get_nc_pod)
+    if [ -n "$NEXTCLOUD_POD" ]; then
+        NC_API_VERSION=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+            php -r 'require "/var/www/html/version.php"; echo $OC_Version[0].".".$OC_Version[1].".".$OC_Version[2];' 2>/dev/null || true)
+        if [ -n "$NC_API_VERSION" ]; then
+            APP_URLS=$(curl -sf "https://apps.nextcloud.com/api/v1/platform/${NC_API_VERSION}/apps.json" | python3 -c "
 import json, sys, os
 apps = json.load(sys.stdin)
 needed = {'user_oidc', 'calendar', 'richdocuments', 'external', 'notify_push'}
@@ -1042,21 +1082,22 @@ for a in apps:
         r = a['releases'][0]
         print(f\"{a['id']}|{r['download']}\")
 " 2>/dev/null || true)
-        if [ -n "$APP_URLS" ]; then
-            kubectl create configmap nextcloud-appstore-urls \
-                --namespace "$NS_FILES" \
-                --from-literal=app-urls="$APP_URLS" \
-                --dry-run=client -o yaml | kubectl apply -f -
-            APP_COUNT=$(echo "$APP_URLS" | wc -l | tr -d ' ')
-            print_success "App store URLs ConfigMap created ($APP_COUNT apps for NC $NC_API_VERSION)"
+            if [ -n "$APP_URLS" ]; then
+                kubectl create configmap nextcloud-appstore-urls \
+                    --namespace "$NS_FILES" \
+                    --from-literal=app-urls="$APP_URLS" \
+                    --dry-run=client -o yaml | kubectl apply -f -
+                APP_COUNT=$(echo "$APP_URLS" | wc -l | tr -d ' ')
+                print_success "App store URLs ConfigMap refreshed ($APP_COUNT apps for NC $NC_API_VERSION)"
+            else
+                print_warning "Could not fetch app store URLs (non-critical — apps already installed on current pod)"
+            fi
         else
-            print_warning "Could not fetch app store URLs (non-critical — apps already installed on current pod)"
+            print_warning "Could not determine Nextcloud version, skipping app store URL ConfigMap"
         fi
     else
-        print_warning "Could not determine Nextcloud version, skipping app store URL ConfigMap"
+        print_warning "Nextcloud pod not found, skipping app store URL ConfigMap"
     fi
-else
-    print_warning "Nextcloud pod not found, skipping app store URL ConfigMap"
 fi
 
 # Step 9d: Configure Nextcloud theming (brand colors, logo, name)

@@ -416,6 +416,18 @@ additionalPrometheusRulesMap:
             for: 3m
             labels:
               severity: critical
+          - alert: NextcloudDegraded
+            annotations:
+              summary: 'Nextcloud has degraded capacity in {{ $labels.namespace }}'
+              description: 'Nextcloud deployment in {{ $labels.namespace }} has fewer available replicas than desired for more than 15 minutes. One or more pods may have failed readiness (possible app version split-brain).'
+            expr: |-
+              (
+                kube_deployment_spec_replicas{deployment="nextcloud", namespace=~"tn-.*-files"}
+                  - kube_deployment_status_replicas_available{deployment="nextcloud", namespace=~"tn-.*-files"}
+              ) > 0
+            for: 15m
+            labels:
+              severity: warning
           - alert: JitsiProsodyDown
             annotations:
               summary: 'Jitsi Prosody is down in {{ $labels.namespace }}'
