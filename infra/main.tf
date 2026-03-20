@@ -59,30 +59,6 @@ provider "kubectl" {
 
 # Ensure cert-manager CRDs are present before applying any cert-manager resources
 # Helmfile installs cert-manager; this waits until CRDs and namespace exist
-resource "null_resource" "wait_for_cert_manager" {
-  provisioner "local-exec" {
-    command = <<-EOT
-      set -e
-      export KUBECONFIG=${path.root}/../kubeconfig.${var.env}.yaml
-      echo "Waiting for cert-manager CRDs and namespace to be available..."
-      max_attempts=60
-      attempt=0
-      until kubectl get namespace infra-cert-manager >/dev/null 2>&1 \
-        && kubectl get crd clusterissuers.cert-manager.io >/dev/null 2>&1 \
-        && kubectl get crd certificates.cert-manager.io >/dev/null 2>&1; do
-        attempt=$((attempt + 1))
-        if [ $attempt -ge $max_attempts ]; then
-          echo "Timeout waiting for cert-manager CRDs/namespace" >&2
-          exit 1
-        fi
-        echo "Attempt $attempt/$max_attempts: cert-manager not ready yet, retrying in 5s..."
-        sleep 5
-      done
-      echo "cert-manager CRDs and namespace are available."
-    EOT
-  }
-}
-
 # Configure the Cloudflare Provider
 provider "cloudflare" {
   api_token = var.cloudflare_api_token
@@ -118,88 +94,8 @@ data "kubernetes_namespace" "db" {
 # Note: Tenant namespaces (tn-<tenant>-*) are created by scripts/create_env
 # This keeps Terraform focused on shared infrastructure only
 
-# Create ClusterIssuer for Let's Encrypt (HTTP-01 for public services)
-# Note: This will be created after cert-manager is deployed via Helmfile
-resource "kubectl_manifest" "cluster_issuer" {
-  depends_on = [null_resource.wait_for_cert_manager]
-
-  yaml_body = yamlencode({
-    apiVersion = "cert-manager.io/v1"
-    kind       = "ClusterIssuer"
-    metadata = {
-      name = "letsencrypt-prod"
-    }
-    spec = {
-      acme = {
-        server = "https://acme-v02.api.letsencrypt.org/directory"
-        email  = var.tls_email
-        privateKeySecretRef = {
-          name = "letsencrypt-prod"
-        }
-        solvers = [
-          {
-            http01 = {
-              ingress = {
-                class = "nginx"
-              }
-            }
-          }
-        ]
-      }
-    }
-  })
-}
-
-# Create ClusterIssuer for Let's Encrypt (DNS-01 for internal services)
-resource "kubectl_manifest" "cluster_issuer_dns01" {
-  depends_on = [
-    null_resource.wait_for_cert_manager,
-    kubernetes_secret.cloudflare_api_token
-  ]
-
-  yaml_body = yamlencode({
-    apiVersion = "cert-manager.io/v1"
-    kind       = "ClusterIssuer"
-    metadata = {
-      name = "letsencrypt-prod-dns01"
-    }
-    spec = {
-      acme = {
-        server = "https://acme-v02.api.letsencrypt.org/directory"
-        email  = var.tls_email
-        privateKeySecretRef = {
-          name = "letsencrypt-prod-dns01"
-        }
-        solvers = [
-          {
-            dns01 = {
-              cloudflare = {
-                email = var.tls_email
-                apiTokenSecretRef = {
-                  name = "cloudflare-api-token"
-                  key  = "api-token"
-                }
-              }
-            }
-          }
-        ]
-      }
-    }
-  })
-}
-
-# Cloudflare API Token Secret for DNS-01 challenge
-resource "kubernetes_secret" "cloudflare_api_token" {
-  depends_on = [null_resource.wait_for_cert_manager]
-  metadata {
-    name      = "cloudflare-api-token"
-    namespace = "infra-cert-manager"
-  }
-
-  data = {
-    "api-token" = var.cloudflare_api_token
-  }
-}
+# Note: ClusterIssuers and Cloudflare API token secret are now managed by
+# deploy_infra script (apps/manifests/cert-manager/) instead of Terraform.
 
 # Note: Synapse Admin is now deployed by scripts/create_env
 # This keeps tenant-specific resources out of Terraform
