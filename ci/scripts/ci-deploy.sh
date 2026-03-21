@@ -43,6 +43,8 @@ WORK_DIR=$(mktemp -d /tmp/mt-deploy-XXXXXX)
 chmod 0700 "$WORK_DIR"
 
 _cleanup() {
+  # Stop lease renewal background process
+  [[ -n "${_LEASE_RENEWAL_PID:-}" ]] && kill "$_LEASE_RENEWAL_PID" 2>/dev/null || true
   # Remove decrypted vault contents
   rm -rf "$WORK_DIR"
   # Remove secrets copied into worktree
@@ -141,6 +143,28 @@ fi
 if [[ ${#TENANTS[@]} -eq 0 ]]; then
   echo "ERROR: No tenants to deploy"
   exit 1
+fi
+
+# ── Keep tenant lease alive during deploy ─────────────────────────
+# The deploy can take 10+ minutes but the Valkey lease TTL is 600s.
+# Renew both the lease key and reverse-lookup key every 120s in the background.
+_LEASE_RENEWAL_PID=""
+if [[ "$ALL_TENANTS" != "true" ]] && [[ -n "${CI_VALKEY_PASSWORD:-}" ]] && [[ -n "${CI_PIPELINE_NUMBER:-}" ]]; then
+  _VCLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
+  _POOL=$($_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+    GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || echo "")
+  (
+    while true; do
+      sleep 120
+      $_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+        EXPIRE "ci-lease-${_POOL}" 600 >/dev/null 2>&1 || true
+      $_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+        EXPIRE "ci-build-${CI_PIPELINE_NUMBER}" 600 >/dev/null 2>&1 || true
+      echo "Renewed tenant lease (pool=${_POOL}, pipeline=#${CI_PIPELINE_NUMBER})"
+    done
+  ) &
+  _LEASE_RENEWAL_PID=$!
+  echo "Started lease renewal background process (PID: $_LEASE_RENEWAL_PID)"
 fi
 
 # ── Deploy infrastructure ────────────────────────────────────────
