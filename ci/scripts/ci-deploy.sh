@@ -78,9 +78,10 @@ fi
 
 # ── Clone private config submodules ───────────────────────────────
 # Use GitHub PAT to authenticate SSH-based submodule URLs via URL rewriting.
+# Must be --global so child git processes (spawned by submodule update) inherit it.
 cd "$REPO_ROOT"
 if [[ -n "${GITHUB_PAT:-}" ]]; then
-  git config url."https://x-access-token:${GITHUB_PAT}@github.com/".insteadOf "git@github.com:"
+  git config --global url."https://x-access-token:${GITHUB_PAT}@github.com/".insteadOf "git@github.com:"
   echo "Configured git URL rewriting for private submodule access"
 fi
 
