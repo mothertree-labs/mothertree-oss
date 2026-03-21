@@ -10,9 +10,9 @@ hostmaster: root
 webmaster: root
 
 # Bounce handling - send to a monitoring address
-root: monitoring@${domain}
+root: monitoring@${SMTP_DOMAIN}
 
 # No-reply handling (for noreply@mail.example.com)
 noreply: /dev/null
 no-reply: /dev/null
-donotreply: /dev/null 
+donotreply: /dev/null

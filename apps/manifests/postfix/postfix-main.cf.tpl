@@ -12,16 +12,16 @@ append_dot_mydomain = no
 readme_directory = no
 
 # Network and hostname settings
-myhostname = ${myhostname}
-mydomain = ${mydomain}
-myorigin = ${myorigin}
+myhostname = ${SMTP_HOSTNAME}
+mydomain = ${SMTP_DOMAIN}
+myorigin = ${SMTP_DOMAIN}
 mydestination = $myhostname, localhost, localhost.localdomain
-mynetworks = ${mynetworks}
+mynetworks = ${POSTFIX_MYNETWORKS}
 
 # Relay host - forward all outbound mail through the SMTP relay
 # This ensures a consistent source IP for SPF compliance
 # The relay server is the VPN server (mail.* = MX host)
-relayhost = [${smtp_relay_host}]:25
+relayhost = [${VPN_SERVER_PRIVATE_IP}]:25
 
 # =============================================================================
 # Inbound Mail Routing (Multi-Tenant)
@@ -99,11 +99,11 @@ milter_protocol = 6
 maillog_file = /dev/stdout
 
 # Disable unnecessary features for send-only server
-home_mailbox = 
-mailbox_command = 
-virtual_alias_maps = 
-virtual_mailbox_maps = 
-virtual_mailbox_domains = 
+home_mailbox =
+mailbox_command =
+virtual_alias_maps =
+virtual_mailbox_maps =
+virtual_mailbox_domains =
 
 # Prevent backscatter
 bounce_notice_recipient = postmaster
@@ -117,4 +117,4 @@ smtpd_helo_required = yes
 # Rate limiting to prevent abuse
 smtpd_client_connection_count_limit = 50
 smtpd_client_connection_rate_limit = 100
-smtpd_client_message_rate_limit = 100 
+smtpd_client_message_rate_limit = 100
