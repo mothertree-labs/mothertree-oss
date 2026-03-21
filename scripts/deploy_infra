@@ -89,6 +89,7 @@ helm repo add vector https://helm.vector.dev 2>/dev/null || true
 helm repo add codecentric https://codecentric.github.io/helm-charts 2>/dev/null || true
 helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ 2>/dev/null || true
 helm repo add linode-cfw https://linode.github.io/cloud-firewall-controller 2>/dev/null || true
+helm repo add emberstack https://emberstack.github.io/helm-charts 2>/dev/null || true
 helm repo update >/dev/null 2>&1 &
 HELM_REPO_UPDATE_PID=$!
 print_status "Helm repo update started in background (PID: $HELM_REPO_UPDATE_PID)"
