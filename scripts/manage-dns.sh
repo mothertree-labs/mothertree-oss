@@ -161,9 +161,13 @@ if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
 fi
 
 # 7. Matrix federation SRV records
+# SRV domain must match the Matrix server_name:
+#   prod: _matrix._tcp.mother-tree.org → synapse.mother-tree.org
+#   dev:  _matrix._tcp.dev.mother-tree.org → synapse.dev.mother-tree.org
 SYNAPSE_TARGET="${SYNAPSE_CNAME}.${ENV_DOT}${DOMAIN}"
-create_srv_record "_matrix" "_tcp" "${DOMAIN}" 10 5 443 "$SYNAPSE_TARGET"
-create_srv_record "_matrix-fed" "_tcp" "${DOMAIN}" 10 5 8448 "$SYNAPSE_TARGET"
+SRV_DOMAIN="${ENV_DOT}${DOMAIN}"
+create_srv_record "_matrix" "_tcp" "$SRV_DOMAIN" 10 5 443 "$SYNAPSE_TARGET"
+create_srv_record "_matrix-fed" "_tcp" "$SRV_DOMAIN" 10 5 8448 "$SYNAPSE_TARGET"
 
 # =============================================================================
 # Set Linode reverse DNS (PTR) for VPN server

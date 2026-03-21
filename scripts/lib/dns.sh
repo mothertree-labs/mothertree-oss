@@ -99,7 +99,13 @@ create_srv_record() {
     if echo "$RESULT" | jq -e '.success' >/dev/null 2>&1; then
       print_status "Updated SRV: ${record_name} -> ${srv_target}:${srv_port}"
     else
-      print_error "Failed to update SRV: ${record_name} — $(echo "$RESULT" | jq -r '.errors[0].message // "unknown error"')"
+      local err_msg
+      err_msg=$(echo "$RESULT" | jq -r '.errors[0].message // "unknown error"')
+      if echo "$err_msg" | grep -qi "identical record already exists"; then
+        print_status "SRV unchanged: ${record_name} -> ${srv_target}:${srv_port}"
+      else
+        print_error "Failed to update SRV: ${record_name} — $err_msg"
+      fi
     fi
   else
     RESULT=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records" \
@@ -109,7 +115,13 @@ create_srv_record() {
     if echo "$RESULT" | jq -e '.success' >/dev/null 2>&1; then
       print_status "Created SRV: ${record_name} -> ${srv_target}:${srv_port}"
     else
-      print_error "Failed to create SRV: ${record_name} — $(echo "$RESULT" | jq -r '.errors[0].message // "unknown error"')"
+      local err_msg
+      err_msg=$(echo "$RESULT" | jq -r '.errors[0].message // "unknown error"')
+      if echo "$err_msg" | grep -qi "identical record already exists"; then
+        print_status "SRV already exists: ${record_name} -> ${srv_target}:${srv_port}"
+      else
+        print_error "Failed to create SRV: ${record_name} — $err_msg"
+      fi
     fi
   fi
 }
