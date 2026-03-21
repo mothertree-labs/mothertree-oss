@@ -31,9 +31,7 @@ print_success() { echo -e "${GREEN}[vault]${NC} $1"; }
 print_error() { echo -e "${RED}[vault]${NC} $1" >&2; }
 
 # ── LastPass entry for the vault password ─────────────────────────
-# Set MT_VAULT_LPASS_ENTRY to the LastPass entry ID or unique name
-# containing the Ansible Vault password for deploy archives.
-LPASS_VAULT_ENTRY="${MT_VAULT_LPASS_ENTRY:?Set MT_VAULT_LPASS_ENTRY to your LastPass entry ID}"
+LPASS_VAULT_ENTRY="7375668101991863677"
 
 # ── Validate prerequisites ────────────────────────────────────────
 for cmd in ansible-vault lpass tar; do
