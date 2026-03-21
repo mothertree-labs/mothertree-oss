@@ -31,7 +31,7 @@ fi
 echo "=== CI Deploy: env=$MT_ENV all_tenants=$ALL_TENANTS pipeline=#${CI_PIPELINE_NUMBER:-unknown} ==="
 
 # ── Decrypt vault ────────────────────────────────────────────────
-VAULT_FILE="/home/woodpecker/deploy-vaults/${MT_ENV}.vault"
+VAULT_FILE="/home/woodpecker/deploy-vaults/deploy-vault-${MT_ENV}.vault"
 if [[ ! -f "$VAULT_FILE" ]]; then
   echo "ERROR: Deploy vault not found: $VAULT_FILE"
   echo "Run Ansible to provision vault files to the CI host."
