@@ -278,6 +278,22 @@ _mt_infra_load_shared_secrets() {
     echo "[INFO] Microsocks SOCKS5 password loaded from infra tenant secrets"
   fi
 
+  # Cloudflare, TLS, Linode, and PostgreSQL credentials (used by deploy_infra)
+  local _cf_token _cf_zone _tls_email _linode_token _pg_password
+  _cf_token=$(yq '.cloudflare.api_token // ""' "$_infra_secrets")
+  _cf_zone=$(yq '.cloudflare.zone_id // ""' "$_infra_secrets")
+  _tls_email=$(yq '.tls.email // ""' "$_infra_secrets")
+  _linode_token=$(yq '.linode.token // ""' "$_infra_secrets")
+  _pg_password=$(yq '.database.postgres_password // ""' "$_infra_secrets")
+
+  [ -n "$_cf_token" ] && [ "$_cf_token" != "null" ] && export TF_VAR_cloudflare_api_token="$_cf_token"
+  [ -n "$_cf_zone" ] && [ "$_cf_zone" != "null" ] && export TF_VAR_cloudflare_zone_id="$_cf_zone"
+  [ -n "$_tls_email" ] && [ "$_tls_email" != "null" ] && export TF_VAR_tls_email="$_tls_email"
+  [ -n "$_linode_token" ] && [ "$_linode_token" != "null" ] && export TF_VAR_linode_token="$_linode_token"
+  [ -n "$_pg_password" ] && [ "$_pg_password" != "null" ] && export TF_VAR_postgres_password="$_pg_password"
+
+  echo "[INFO] Infrastructure credentials loaded (Cloudflare, TLS, Linode, PostgreSQL)"
+
   # AWS SES SMTP relay (optional — only for prod outbound mail)
   local _ses_endpoint _ses_username _ses_password
   _ses_endpoint=$(yq '.ses.smtp_endpoint // ""' "$_infra_secrets")
