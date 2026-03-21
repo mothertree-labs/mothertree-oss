@@ -2,6 +2,7 @@
 
 # Infrastructure Management Script
 # Purpose: Manage dangerous infrastructure operations (LKE cluster, VPN, TURN servers)
+#          and infrastructure DNS records (Cloudflare + Linode rDNS).
 # This script handles phase1 Terraform and should be run manually by operators.
 #
 # Usage:
@@ -9,10 +10,11 @@
 #   ./scripts/manage_infra <env> [options]   (backward compat)
 #
 # Examples:
-#   ./scripts/manage_infra -e prod                    # Apply infrastructure for prod
+#   ./scripts/manage_infra -e prod                    # Apply infrastructure + DNS
 #   ./scripts/manage_infra -e dev --jitsi_tester=yes  # Apply with jitsi tester
-#   ./scripts/manage_infra -e prod --plan             # Show what would change
+#   ./scripts/manage_infra -e prod --plan             # Show what would change (TF only)
 #   ./scripts/manage_infra -e prod --destroy          # Tear down (requires confirmation)
+#   ./scripts/manage_infra -e dev --dns               # Only update DNS records
 
 set -euo pipefail
 
@@ -23,20 +25,24 @@ source "${REPO_ROOT}/scripts/lib/args.sh"
 mt_usage() {
   echo "Usage: $0 -e <env> [options]"
   echo ""
-  echo "Manage infrastructure (phase1 Terraform)."
+  echo "Manage infrastructure (phase1 Terraform + DNS records)."
   echo ""
   echo "Options:"
   echo "  -e <env>               Environment (e.g., prod, dev)"
   echo "  --jitsi_tester=yes|no  Enable/disable Jitsi tester VM (default: no)"
-  echo "  --plan                 Show planned changes without applying"
+  echo "  --plan                 Show planned changes without applying (TF only)"
   echo "  --destroy              Tear down infrastructure (requires confirmation)"
+  echo "  --dns                  Only update DNS records (skip Terraform)"
+  echo "  --lb-ip=X.X.X.X       Override ingress LB IP for DNS (auto-detected if omitted)"
   echo "  -h, --help             Show this help"
   echo ""
   echo "Examples:"
-  echo "  $0 -e prod                    # Apply infrastructure for prod"
+  echo "  $0 -e prod                    # Apply infrastructure + DNS"
   echo "  $0 -e dev --jitsi_tester=yes  # Apply dev with Jitsi tester"
   echo "  $0 -e prod --plan             # Preview changes for prod"
   echo "  $0 -e prod --destroy          # Destroy prod infrastructure"
+  echo "  $0 -e dev --dns               # Only update DNS records"
+  echo "  $0 -e dev --dns --lb-ip=1.2.3.4  # DNS with explicit LB IP"
 }
 
 mt_parse_args "$@"
@@ -46,6 +52,7 @@ mt_require_env
 JITSI_TESTER_ENABLED="false"
 PLAN_ONLY="false"
 DESTROY="false"
+DNS_ONLY="false"
 
 JITSI_TESTER_VAL=$(mt_get_flag_value "--jitsi_tester" || echo "")
 if [ "$JITSI_TESTER_VAL" = "yes" ]; then
@@ -61,6 +68,10 @@ fi
 
 if mt_has_flag "--destroy"; then
   DESTROY="true"
+fi
+
+if mt_has_flag "--dns"; then
+  DNS_ONLY="true"
 fi
 
 source "${REPO_ROOT}/scripts/lib/notify.sh"
@@ -95,83 +106,110 @@ if [ "$MT_ENV" = "prod" ]; then
   ENV_DNS_LABEL=""
 fi
 
-pushd "$REPO_ROOT/phase1" >/dev/null
-  print_status "Phase1: Initializing Terraform..."
-  terraform init -input=false
+# =============================================================================
+# Phase 1: Terraform (skip if --dns only)
+# =============================================================================
+if [ "$DNS_ONLY" != "true" ]; then
+  pushd "$REPO_ROOT/phase1" >/dev/null
+    print_status "Phase1: Initializing Terraform..."
+    terraform init -input=false
 
-  print_status "Phase1: Selecting workspace '$MT_ENV'..."
-  terraform workspace select "$MT_ENV" 2>/dev/null || terraform workspace new "$MT_ENV"
+    print_status "Phase1: Selecting workspace '$MT_ENV'..."
+    terraform workspace select "$MT_ENV" 2>/dev/null || terraform workspace new "$MT_ENV"
 
-  # Build variable file flags (common first, then env-specific overrides)
-  #
-  # This enables different cluster/node-pool/autoscaler settings for dev vs prod:
-  # - Common defaults live in:    $REPO_ROOT/terraform.tfvars
-  # - Env overrides live in:      $REPO_ROOT/terraform.<env>.tfvars  (e.g., terraform.dev.tfvars)
-  #
-  # Terraform applies var-files in order; later files override earlier ones.
-  VAR_FILE_FLAGS=()
-  if [ -f "$REPO_ROOT/terraform.tfvars" ]; then
-    VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.tfvars")
-  fi
-  if [ -f "$REPO_ROOT/terraform.${MT_ENV}.tfvars" ]; then
-    print_status "Using environment-specific overrides: $REPO_ROOT/terraform.${MT_ENV}.tfvars"
-    VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.${MT_ENV}.tfvars")
-  fi
-
-  if [ "$DESTROY" = "true" ]; then
-    echo ""
-    echo "============================================================"
-    print_warning "This will DESTROY all infrastructure for '$MT_ENV'!"
-    echo "============================================================"
-    echo ""
-    echo "This includes:"
-    echo "  - LKE Kubernetes cluster"
-    echo "  - OpenVPN server"
-    echo "  - TURN server"
-    echo "  - All associated firewalls and VPC resources"
-    echo ""
-    read -p "Type 'destroy $MT_ENV' to confirm: " confirm
-    if [ "$confirm" != "destroy $MT_ENV" ]; then
-      print_status "Destruction cancelled"
-      exit 1
+    # Build variable file flags (common first, then env-specific overrides)
+    #
+    # This enables different cluster/node-pool/autoscaler settings for dev vs prod:
+    # - Common defaults live in:    $REPO_ROOT/terraform.tfvars
+    # - Env overrides live in:      $REPO_ROOT/terraform.<env>.tfvars  (e.g., terraform.dev.tfvars)
+    #
+    # Terraform applies var-files in order; later files override earlier ones.
+    VAR_FILE_FLAGS=()
+    if [ -f "$REPO_ROOT/terraform.tfvars" ]; then
+      VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.tfvars")
+    fi
+    if [ -f "$REPO_ROOT/terraform.${MT_ENV}.tfvars" ]; then
+      print_status "Using environment-specific overrides: $REPO_ROOT/terraform.${MT_ENV}.tfvars"
+      VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.${MT_ENV}.tfvars")
     fi
 
-    print_status "Phase1: Destroying infrastructure..."
-    terraform destroy -auto-approve "${VAR_FILE_FLAGS[@]}" \
-      -var env="$MT_ENV" \
-      -var env_dns_label="$ENV_DNS_LABEL" \
-      -var jitsi_tester_enabled="$JITSI_TESTER_ENABLED"
+    if [ "$DESTROY" = "true" ]; then
+      echo ""
+      echo "============================================================"
+      print_warning "This will DESTROY all infrastructure for '$MT_ENV'!"
+      echo "============================================================"
+      echo ""
+      echo "This includes:"
+      echo "  - LKE Kubernetes cluster"
+      echo "  - OpenVPN server"
+      echo "  - TURN server"
+      echo "  - All associated firewalls and VPC resources"
+      echo ""
+      read -p "Type 'destroy $MT_ENV' to confirm: " confirm
+      if [ "$confirm" != "destroy $MT_ENV" ]; then
+        print_status "Destruction cancelled"
+        exit 1
+      fi
 
-  elif [ "$PLAN_ONLY" = "true" ]; then
-    print_status "Phase1: Planning changes..."
-    terraform plan "${VAR_FILE_FLAGS[@]}" \
-      -var env="$MT_ENV" \
-      -var env_dns_label="$ENV_DNS_LABEL" \
-      -var jitsi_tester_enabled="$JITSI_TESTER_ENABLED"
+      print_status "Phase1: Destroying infrastructure..."
+      terraform destroy -auto-approve "${VAR_FILE_FLAGS[@]}" \
+        -var env="$MT_ENV" \
+        -var env_dns_label="$ENV_DNS_LABEL" \
+        -var jitsi_tester_enabled="$JITSI_TESTER_ENABLED"
 
+    elif [ "$PLAN_ONLY" = "true" ]; then
+      print_status "Phase1: Planning changes..."
+      terraform plan "${VAR_FILE_FLAGS[@]}" \
+        -var env="$MT_ENV" \
+        -var env_dns_label="$ENV_DNS_LABEL" \
+        -var jitsi_tester_enabled="$JITSI_TESTER_ENABLED"
+
+    else
+      print_status "Phase1: Applying infrastructure..."
+      terraform apply -input=false -auto-approve "${VAR_FILE_FLAGS[@]}" \
+        -var env="$MT_ENV" \
+        -var env_dns_label="$ENV_DNS_LABEL" \
+        -var jitsi_tester_enabled="$JITSI_TESTER_ENABLED"
+
+      # Extract outputs for reference
+      echo ""
+      print_status "Infrastructure outputs:"
+      TURN_SERVER_IP=$(terraform output -raw turn_server_ip 2>/dev/null || echo "")
+      if [ -n "$TURN_SERVER_IP" ] && [ "$TURN_SERVER_IP" != "null" ]; then
+        echo "  TURN server IP: $TURN_SERVER_IP"
+      fi
+
+      VPN_SERVER_IP=$(terraform output -raw openvpn_server_ip 2>/dev/null || echo "")
+      if [ -n "$VPN_SERVER_IP" ] && [ "$VPN_SERVER_IP" != "null" ]; then
+        echo "  VPN server IP: $VPN_SERVER_IP"
+      fi
+
+      echo "  Kubeconfig: $REPO_ROOT/kubeconfig.$MT_ENV.yaml"
+    fi
+  popd >/dev/null
+fi
+
+# =============================================================================
+# Phase 2: DNS records (skip if --plan or --destroy)
+# =============================================================================
+if [ "$PLAN_ONLY" != "true" ] && [ "$DESTROY" != "true" ]; then
+  echo ""
+  print_status "Phase2: Configuring infrastructure DNS records..."
+
+  # Forward --lb-ip and --nesting-level flags to manage-dns.sh
+  DNS_FLAGS="-e $MT_ENV --nesting-level=$((MT_NESTING_LEVEL+1))"
+  LB_IP_VAL=$(mt_get_flag_value "--lb-ip" || echo "")
+  if [ -n "$LB_IP_VAL" ]; then
+    DNS_FLAGS="$DNS_FLAGS --lb-ip=$LB_IP_VAL"
+  fi
+
+  if [ -x "$REPO_ROOT/scripts/manage-dns.sh" ]; then
+    "$REPO_ROOT/scripts/manage-dns.sh" $DNS_FLAGS 2>&1 | sed 's/^/  /'
   else
-    print_status "Phase1: Applying infrastructure..."
-    terraform apply -input=false -auto-approve "${VAR_FILE_FLAGS[@]}" \
-      -var env="$MT_ENV" \
-      -var env_dns_label="$ENV_DNS_LABEL" \
-      -var jitsi_tester_enabled="$JITSI_TESTER_ENABLED"
-
-    # Extract outputs for reference
-    echo ""
-    print_status "Infrastructure outputs:"
-    TURN_SERVER_IP=$(terraform output -raw turn_server_ip 2>/dev/null || echo "")
-    if [ -n "$TURN_SERVER_IP" ] && [ "$TURN_SERVER_IP" != "null" ]; then
-      echo "  TURN server IP: $TURN_SERVER_IP"
-    fi
-
-    VPN_SERVER_IP=$(terraform output -raw openvpn_server_ip 2>/dev/null || echo "")
-    if [ -n "$VPN_SERVER_IP" ] && [ "$VPN_SERVER_IP" != "null" ]; then
-      echo "  VPN server IP: $VPN_SERVER_IP"
-    fi
-
-    echo "  Kubeconfig: $REPO_ROOT/kubeconfig.$MT_ENV.yaml"
+    print_error "manage-dns.sh not found"
+    exit 1
   fi
-popd >/dev/null
+fi
 
 echo ""
 print_success "Infrastructure management complete for '$MT_ENV'"

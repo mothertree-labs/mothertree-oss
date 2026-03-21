@@ -258,103 +258,8 @@ if [ -z "$INGRESS_IP" ]; then
 else
   print_status "Ingress IP: $INGRESS_IP"
 
-  # Function to create/update Cloudflare DNS record
-  # Args: record_name record_type record_content [proxied]
-  # proxied: "true" to enable Cloudflare proxy (orange cloud), default "false"
-  create_dns_record() {
-    local record_name="$1"
-    local record_type="$2"
-    local record_content="$3"
-    local proxied="${4:-false}"
-    local ttl=300
-
-    # Cloudflare requires ttl=1 (automatic) when proxied is enabled
-    if [ "$proxied" = "true" ]; then
-      ttl=1
-    fi
-
-    # Check if record of the same type exists
-    EXISTING=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records?name=${record_name}&type=${record_type}" \
-      -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
-      -H "Content-Type: application/json")
-
-    RECORD_ID=$(echo "$EXISTING" | jq -r '.result[0].id // empty')
-
-    if [ -z "$RECORD_ID" ]; then
-      # No record of the same type — check for a conflicting record of a different type
-      CONFLICTING=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records?name=${record_name}" \
-        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
-        -H "Content-Type: application/json")
-      CONFLICT_ID=$(echo "$CONFLICTING" | jq -r '.result[0].id // empty')
-      CONFLICT_TYPE=$(echo "$CONFLICTING" | jq -r '.result[0].type // empty')
-
-      if [ -n "$CONFLICT_ID" ] && [ "$CONFLICT_TYPE" != "$record_type" ]; then
-        print_status "Removing conflicting ${CONFLICT_TYPE} record for $record_name (replacing with ${record_type})"
-        curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records/${CONFLICT_ID}" \
-          -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
-          -H "Content-Type: application/json" >/dev/null
-      fi
-    fi
-
-    if [ -n "$RECORD_ID" ]; then
-      # Update existing record (same type)
-      RESULT=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records/${RECORD_ID}" \
-        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
-        -H "Content-Type: application/json" \
-        --data "{\"type\":\"${record_type}\",\"name\":\"${record_name}\",\"content\":\"${record_content}\",\"ttl\":${ttl},\"proxied\":${proxied}}")
-      if echo "$RESULT" | jq -e '.success' >/dev/null 2>&1; then
-        print_status "Updated DNS: $record_name -> $record_content (proxied=$proxied)"
-      else
-        print_error "Failed to update DNS: $record_name — $(echo "$RESULT" | jq -r '.errors[0].message // "unknown error"')"
-      fi
-    else
-      # Create new record
-      RESULT=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records" \
-        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
-        -H "Content-Type: application/json" \
-        --data "{\"type\":\"${record_type}\",\"name\":\"${record_name}\",\"content\":\"${record_content}\",\"ttl\":${ttl},\"proxied\":${proxied}}")
-      if echo "$RESULT" | jq -e '.success' >/dev/null 2>&1; then
-        print_status "Created DNS: $record_name -> $record_content (proxied=$proxied)"
-      else
-        print_error "Failed to create DNS: $record_name — $(echo "$RESULT" | jq -r '.errors[0].message // "unknown error"')"
-      fi
-    fi
-  }
-
-  # Function to create/update Cloudflare SRV record (for mail autodiscovery)
-  create_srv_record() {
-    local srv_service="$1"   # e.g., "_imaps"
-    local srv_proto="$2"     # e.g., "_tcp"
-    local srv_domain="$3"    # e.g., "example.com"
-    local srv_priority="$4"  # e.g., 0
-    local srv_weight="$5"    # e.g., 1
-    local srv_port="$6"      # e.g., 99301
-    local srv_target="$7"    # e.g., "mail.example.com"
-
-    local record_name="${srv_service}.${srv_proto}.${srv_domain}"
-
-    EXISTING=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records?name=${record_name}&type=SRV" \
-      -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
-      -H "Content-Type: application/json")
-
-    RECORD_ID=$(echo "$EXISTING" | jq -r '.result[0].id // empty')
-
-    local srv_data="{\"type\":\"SRV\",\"name\":\"${record_name}\",\"data\":{\"service\":\"${srv_service}\",\"proto\":\"${srv_proto}\",\"name\":\"${srv_domain}\",\"priority\":${srv_priority},\"weight\":${srv_weight},\"port\":${srv_port},\"target\":\"${srv_target}\"},\"ttl\":300}"
-
-    if [ -n "$RECORD_ID" ]; then
-      curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records/${RECORD_ID}" \
-        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
-        -H "Content-Type: application/json" \
-        --data "$srv_data" >/dev/null
-      print_status "Updated SRV: ${record_name} -> ${srv_target}:${srv_port}"
-    else
-      curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records" \
-        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
-        -H "Content-Type: application/json" \
-        --data "$srv_data" >/dev/null
-      print_status "Created SRV: ${record_name} -> ${srv_target}:${srv_port}"
-    fi
-  }
+  # Load shared DNS functions (create_dns_record, create_srv_record, create_mx_record)
+  source "${REPO_ROOT}/scripts/lib/dns.sh"
 
   # Create lb1 A record for this tenant's domain
   if [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
@@ -399,26 +304,7 @@ else
   if [ "$MAIL_ENABLED" = "true" ]; then
     print_status "Creating MX record for $EMAIL_DOMAIN..."
     MX_HOST="${MAIL_HOST}"
-
-    MX_EXISTING=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records?name=${EMAIL_DOMAIN}&type=MX" \
-      -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
-      -H "Content-Type: application/json")
-
-    MX_RECORD_ID=$(echo "$MX_EXISTING" | jq -r '.result[0].id // empty')
-
-    if [ -n "$MX_RECORD_ID" ]; then
-      curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records/${MX_RECORD_ID}" \
-        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
-        -H "Content-Type: application/json" \
-        --data "{\"type\":\"MX\",\"name\":\"${EMAIL_DOMAIN}\",\"content\":\"${MX_HOST}\",\"ttl\":300,\"priority\":10}" >/dev/null
-      print_status "Updated MX: $EMAIL_DOMAIN -> $MX_HOST (priority 10)"
-    else
-      curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records" \
-        -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
-        -H "Content-Type: application/json" \
-        --data "{\"type\":\"MX\",\"name\":\"${EMAIL_DOMAIN}\",\"content\":\"${MX_HOST}\",\"ttl\":300,\"priority\":10}" >/dev/null
-      print_status "Created MX: $EMAIL_DOMAIN -> $MX_HOST (priority 10)"
-    fi
+    create_mx_record "$EMAIL_DOMAIN" "$MX_HOST" 10
 
     # ==========================================================================
     # Create SRV records for mail client autodiscovery (RFC 6186)

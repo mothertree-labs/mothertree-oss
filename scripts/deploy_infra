@@ -9,7 +9,7 @@
 #   - Monitoring stack (Prometheus, Grafana, Vector)
 #   - PostgreSQL (shared database)
 #   - Keycloak (shared authentication)
-#   - Postfix SMTP server
+#   - Postfix SMTP server (via deploy-postfix.sh)
 #
 # Run this ONCE per environment, not per tenant.
 # For tenant deployments, use: ./scripts/create_env -e <env> -t <tenant>
@@ -52,7 +52,7 @@ mt_load_infra_config
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy_infra"
 
-mt_require_commands kubectl helm helmfile yq terraform jq curl openssl
+mt_require_commands kubectl helm helmfile yq jq curl openssl
 # Note: ansible-playbook is checked later, right before the Ansible section,
 # so partial deploys work in environments without Ansible installed.
 
@@ -565,28 +565,8 @@ else
   fi
 fi
 
-# Run Terraform for DNS and reverse DNS
-print_status "Running Terraform for DNS..."
-pushd "$REPO_ROOT/infra" >/dev/null
-  # Source secrets
-  if [ -f "$REPO_ROOT/secrets.$MT_ENV.tfvars.env" ]; then
-    source "$REPO_ROOT/secrets.$MT_ENV.tfvars.env"
-  fi
-
-  terraform init -input=false
-  terraform workspace select "$MT_ENV" 2>/dev/null || terraform workspace new "$MT_ENV"
-
-  VAR_FILE_FLAG=""
-  [ -f "$REPO_ROOT/terraform.tfvars" ] && VAR_FILE_FLAG="-var-file=$REPO_ROOT/terraform.tfvars"
-
-  ENV_DNS_LABEL="$MT_ENV"
-  [ "$MT_ENV" = "prod" ] && ENV_DNS_LABEL=""
-
-  terraform apply -input=false -auto-approve $VAR_FILE_FLAG \
-    -var env="$MT_ENV" \
-    -var env_dns_label="$ENV_DNS_LABEL"
-
-popd >/dev/null
+# NOTE: DNS records are now managed by manage_infra --dns (via scripts/manage-dns.sh)
+# Terraform invocation removed — infra/ directory deprecated. See issue #243.
 
 # =============================================================================
 # Ensure LKE firewall allows JVB (Jitsi) UDP from the internet
