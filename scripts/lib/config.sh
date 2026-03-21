@@ -521,23 +521,35 @@ _mt_load_tenant_secrets() {
 }
 
 # ---------------------------------------------------------------------------
-# Internal: get TURN server IP from phase1 terraform outputs
+# Internal: get TURN server IP from static terraform outputs file
 # ---------------------------------------------------------------------------
 _mt_load_turn_server_ip() {
   if [ -n "${TURN_SERVER_IP:-}" ]; then
     return 0
   fi
 
-  if [ -d "$REPO_ROOT/phase1" ]; then
-    pushd "$REPO_ROOT/phase1" >/dev/null
-      if terraform workspace select "$MT_ENV" >/dev/null 2>&1; then
-        TURN_SERVER_IP=$(terraform output -raw turn_server_ip 2>/dev/null || echo "")
-        if [ -n "$TURN_SERVER_IP" ] && [ "$TURN_SERVER_IP" != "null" ]; then
-          export TURN_SERVER_IP
-        fi
-      fi
-    popd >/dev/null
+  # Load from static terraform outputs file
+  local _tf_out="${MT_TERRAFORM_OUTPUTS_FILE:-}"
+  if [ -z "$_tf_out" ]; then
+    source "${REPO_ROOT}/scripts/lib/paths.sh"
+    _mt_resolve_infra_config "${MT_ENV}"
+    if [ -n "${MT_INFRA_CONFIG:-}" ]; then
+      _tf_out="${MT_INFRA_CONFIG%/*}/terraform-outputs.${MT_ENV}.env"
+    fi
   fi
+
+  if [ -n "$_tf_out" ] && [ -f "$_tf_out" ]; then
+    # shellcheck disable=SC1090
+    source "$_tf_out"
+    if [ -n "${TURN_SERVER_IP:-}" ] && [ "$TURN_SERVER_IP" != "null" ]; then
+      export TURN_SERVER_IP
+      return 0
+    fi
+  fi
+
+  echo "[ERROR] Terraform outputs file not found: ${_tf_out:-<not resolved>}" >&2
+  echo "[ERROR] Run './scripts/manage_infra -e $MT_ENV --phase1' to generate it." >&2
+  exit 1
 }
 
 # ---------------------------------------------------------------------------

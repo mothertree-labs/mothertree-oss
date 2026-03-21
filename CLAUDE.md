@@ -43,8 +43,8 @@ ansible/         VPN server config (OpenVPN, Postfix relay, Unbound DNS)
 
 ## Three-Phase Deployment
 
-1. **`./scripts/manage_infra -e <env>`** — Terraform, DNS, LKE firewall, Ansible (runs locally, requires VPN)
-2. **`./scripts/deploy_infra -e <env>`** — Shared K8s infra (ingress, certs, PostgreSQL, Keycloak, Postfix, monitoring) — CI-able
+1. **`./scripts/manage_infra -e <env>`** — Terraform, DNS, LKE firewall, Ansible (runs locally, requires VPN). Generates `terraform-outputs.<env>.env` after phase1 apply.
+2. **`./scripts/deploy_infra -e <env>`** — Shared K8s infra (ingress, certs, PostgreSQL, Keycloak, Postfix, monitoring) — CI-able. Requires `terraform-outputs.<env>.env` from step 1.
 3. **`./scripts/create_env -e <env> -t <tenant> [--create-alert-user]`** — Tenant apps (Synapse, Element, Docs, Files, Jitsi, Stalwart, Roundcube, Admin Portal) — CI-able
 
 `manage_infra` supports phase selectors: `--phase1`, `--dns`, `--firewall`, `--ansible` (default: all).
@@ -63,6 +63,17 @@ Sub-scripts are fully self-contained and independently runnable:
 ./apps/deploy-docs.sh -e dev -t example
 ./apps/deploy-stalwart.sh -e prod -t acme
 ```
+
+## CI Deployment (Woodpecker)
+
+CI runs `deploy_infra` and `create_env` automatically via `ci/scripts/ci-deploy.sh`:
+
+- **PRs (dev)**: After validate + build-images + ci-lease, deploys to the leased dev tenant slot. E2E tests run after deploy.
+- **Merges to main (prod)**: After mothertree-build gate passes, deploys infra + all prod tenants.
+
+Secrets (kubeconfigs, tenant secrets, terraform outputs) are stored as Ansible Vault-encrypted archives on the CI host at `/home/woodpecker/deploy-vaults/{dev,prod}.vault`. They are decrypted into temp dirs at build time and cleaned up on exit.
+
+Pipeline files: `.woodpecker/deploy-dev.yaml`, `.woodpecker/deploy-prod.yaml`
 
 ## Namespace Conventions
 
