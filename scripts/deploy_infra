@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Deploy Shared Infrastructure Components
+# Deploy Shared Infrastructure Components (pure K8s — CI-able)
 # Purpose: Deploy shared Kubernetes infrastructure that all tenants use
 #
 # This script deploys:
@@ -10,6 +10,11 @@
 #   - PostgreSQL (shared database)
 #   - Keycloak (shared authentication)
 #   - Postfix SMTP server (via deploy-postfix.sh)
+#   - nginx TCP proxy for SMTP
+#   - VPN route DaemonSet
+#
+# Does NOT require: VPN connectivity, Ansible, Linode API (except CFW K8s secret)
+# For VPN/Ansible/firewall, use: ./scripts/manage_infra -e <env>
 #
 # Run this ONCE per environment, not per tenant.
 # For tenant deployments, use: ./scripts/create_env -e <env> -t <tenant>
@@ -53,8 +58,6 @@ source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy_infra"
 
 mt_require_commands kubectl helm helmfile yq jq curl openssl
-# Note: ansible-playbook is checked later, right before the Ansible section,
-# so partial deploys work in environments without Ansible installed.
 
 # Validate Cloudflare IP ranges before deploying (firewall rules depend on these)
 print_status "Validating Cloudflare IP ranges..."
@@ -566,121 +569,7 @@ else
 fi
 
 # NOTE: DNS records are now managed by manage_infra --dns (via scripts/manage-dns.sh)
-# Terraform invocation removed — infra/ directory deprecated. See issue #243.
-
-# =============================================================================
-# Ensure LKE firewall allows JVB (Jitsi) UDP from the internet
-#
-# LKE auto-creates a Cloud Firewall on cluster nodes that restricts NodePorts to
-# the NodeBalancer subnet (192.168.255.0/24). This blocks JVB media traffic since
-# WebRTC clients connect directly to JVB via UDP hostPort, not through the
-# NodeBalancer. We add rules for each tenant's JVB port so media can flow.
-# =============================================================================
-if [ -n "$LKE_CLUSTER_ID" ] && [ -n "${TF_VAR_linode_token:-}" ]; then
-  LKE_FW_ID=$(curl -s -H "Authorization: Bearer $TF_VAR_linode_token" \
-    "https://api.linode.com/v4/networking/firewalls" \
-    | jq -r ".data[] | select(.label == \"lke-${LKE_CLUSTER_ID}\") | .id // empty")
-
-  if [ -n "$LKE_FW_ID" ]; then
-    JVB_PORTS=""
-    for config_file in "$MT_TENANTS_DIR"/*/$(echo "$MT_ENV" | tr '[:upper:]' '[:lower:]').config.yaml; do
-      [ -f "$config_file" ] || continue
-      port=$(yq '.resources.jitsi.jvb_port' "$config_file" 2>/dev/null)
-      if [ -n "$port" ] && [ "$port" != "null" ]; then
-        JVB_PORTS="${JVB_PORTS:+$JVB_PORTS,}$port"
-      fi
-    done
-
-    if [ -n "$JVB_PORTS" ]; then
-      LKE_FW_RULES=$(curl -s -H "Authorization: Bearer $TF_VAR_linode_token" \
-        "https://api.linode.com/v4/networking/firewalls/$LKE_FW_ID/rules")
-
-      EXISTING_JVB_PORTS=$(echo "$LKE_FW_RULES" | jq -r '.inbound[] | select(.label == "allow-jvb-udp") | .ports // empty')
-
-      if [ "$EXISTING_JVB_PORTS" = "$JVB_PORTS" ]; then
-        print_status "LKE firewall $LKE_FW_ID already has JVB UDP rule for ports $JVB_PORTS"
-      else
-        print_status "Updating LKE firewall $LKE_FW_ID to allow JVB UDP ports $JVB_PORTS from internet..."
-
-        JQ_FILTER=$(cat <<'JQEOF'
-.inbound |= (
-  [.[] | select(.label == "allow-jvb-udp" | not)] |
-  to_entries |
-  map(
-    if .value.label == "allow-cluster-nodeports-udp" then
-      {key: .key, value: {"protocol":"UDP","addresses":{"ipv4":["0.0.0.0/0"],"ipv6":["::/0"]},"action":"ACCEPT","label":"allow-jvb-udp","ports":$ports,"description":"Jitsi JVB media UDP - managed by deploy_infra"}},
-      .
-    else . end
-  ) | [.[].value]
-)
-JQEOF
-        )
-        UPDATED_RULES=$(echo "$LKE_FW_RULES" | jq --arg ports "$JVB_PORTS" "$JQ_FILTER")
-
-        RESULT=$(curl -s -X PUT -H "Authorization: Bearer $TF_VAR_linode_token" \
-          -H "Content-Type: application/json" \
-          "https://api.linode.com/v4/networking/firewalls/$LKE_FW_ID/rules" \
-          -d "$UPDATED_RULES")
-
-        if echo "$RESULT" | jq -e '.inbound' >/dev/null 2>&1; then
-          print_status "LKE firewall updated — JVB UDP ports $JVB_PORTS open from internet"
-        else
-          print_warning "Failed to update LKE firewall: $(echo "$RESULT" | jq -r '.errors[0].reason // "unknown error"')"
-        fi
-      fi
-    else
-      print_status "No JVB ports found in tenant configs — skipping LKE firewall JVB rule"
-    fi
-  else
-    print_status "No LKE-managed firewall found for cluster $LKE_CLUSTER_ID — skipping JVB rule"
-  fi
-else
-  print_status "No LKE cluster ID available — skipping LKE firewall JVB rule"
-fi
-
-# =============================================================================
-# Ensure LKE firewall allows SMTP NodePort from VPN server
-#
-# The VPN Postfix relay delivers inbound mail to K8s Postfix via NodePort 30025.
-# The LKE Cloud Firewall restricts NodePorts to the NodeBalancer subnet by default,
-# so we must add a rule allowing the VPN server's private IP to reach port 30025.
-# =============================================================================
-if [ -n "${LKE_FW_ID:-}" ] && [ -n "$VPN_SERVER_PRIVATE_IP" ] && [ -n "${TF_VAR_linode_token:-}" ]; then
-  EXISTING_SMTP_RULE=$(curl -s -H "Authorization: Bearer $TF_VAR_linode_token" \
-    "https://api.linode.com/v4/networking/firewalls/$LKE_FW_ID/rules" \
-    | jq -r '.inbound[] | select(.label == "allow-smtp-nodeport-vpn") | .addresses.ipv4[0] // empty')
-
-  EXPECTED_CIDR="${VPN_SERVER_PRIVATE_IP}/32"
-
-  if [ "$EXISTING_SMTP_RULE" = "$EXPECTED_CIDR" ]; then
-    print_status "LKE firewall $LKE_FW_ID already has SMTP NodePort rule for $VPN_SERVER_PRIVATE_IP"
-  else
-    print_status "Updating LKE firewall $LKE_FW_ID to allow SMTP NodePort 30025 from $VPN_SERVER_PRIVATE_IP..."
-
-    LKE_FW_RULES=$(curl -s -H "Authorization: Bearer $TF_VAR_linode_token" \
-      "https://api.linode.com/v4/networking/firewalls/$LKE_FW_ID/rules")
-
-    UPDATED_RULES=$(echo "$LKE_FW_RULES" | jq --arg cidr "$EXPECTED_CIDR" '
-      .inbound |= (
-        [.[] | select(.label == "allow-smtp-nodeport-vpn" | not)] +
-        [{"protocol":"TCP","addresses":{"ipv4":[$cidr]},"action":"ACCEPT","label":"allow-smtp-nodeport-vpn","ports":"30025","description":"VPN Postfix relay to K8s Postfix - managed by deploy_infra"}]
-      )
-    ')
-
-    RESULT=$(curl -s -X PUT -H "Authorization: Bearer $TF_VAR_linode_token" \
-      -H "Content-Type: application/json" \
-      "https://api.linode.com/v4/networking/firewalls/$LKE_FW_ID/rules" \
-      -d "$UPDATED_RULES")
-
-    if echo "$RESULT" | jq -e '.inbound' >/dev/null 2>&1; then
-      print_status "LKE firewall updated — SMTP NodePort 30025 open from $VPN_SERVER_PRIVATE_IP"
-    else
-      print_warning "Failed to update LKE firewall: $(echo "$RESULT" | jq -r '.errors[0].reason // "unknown error"')"
-    fi
-  fi
-else
-  print_status "Skipping SMTP NodePort firewall rule (missing LKE firewall ID, VPN private IP, or Linode token)"
-fi
+# NOTE: LKE firewall rules are now managed by manage_infra --firewall. See issue #244.
 
 # =============================================================================
 # Deploy K8s Postfix (ConfigMaps, Deployment, Services, NetworkPolicy)
@@ -701,36 +590,6 @@ if [ -x "$REPO_ROOT/scripts/configure-mail-routing" ]; then
   "$REPO_ROOT/scripts/configure-mail-routing" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
 else
   print_warning "configure-mail-routing script not found"
-fi
-
-# =============================================================================
-# Scan tenants for VPN Postfix Ansible configuration
-# =============================================================================
-print_status "Scanning tenants for VPN Postfix configuration..."
-TENANT_DOMAINS=""
-
-for tenant_dir in "$MT_TENANTS_DIR"/*/; do
-  tenant_name=$(basename "$tenant_dir")
-  config_file="$tenant_dir/${MT_ENV}.config.yaml"
-
-  if [ -f "$config_file" ]; then
-    base_domain=$(yq '.dns.domain' "$config_file")
-    env_label=$(yq '.dns.env_dns_label // ""' "$config_file")
-
-    if [ -n "$env_label" ] && [ "$env_label" != "null" ]; then
-      domain="${env_label}.${base_domain}"
-    else
-      domain="$base_domain"
-    fi
-
-    if [ -n "$domain" ] && [ "$domain" != "null" ]; then
-      TENANT_DOMAINS="${TENANT_DOMAINS:+$TENANT_DOMAINS }$domain"
-    fi
-  fi
-done
-
-if [ -z "$TENANT_DOMAINS" ]; then
-  print_warning "No tenant configs found for environment $MT_ENV"
 fi
 
 # =============================================================================
@@ -775,200 +634,7 @@ else
   print_warning "VPN server private IP not found in Terraform outputs, skipping route DaemonSet"
 fi
 
-# =============================================================================
-# Configure SMTP relay on VPN server (Ansible)
-# =============================================================================
-mt_require_commands ansible-playbook
-
-print_status "Configuring SMTP relay on VPN server..."
-pushd "$REPO_ROOT/ansible" >/dev/null
-
-  VPN_DNS_LABEL="$MT_ENV"
-  [ "$MT_ENV" = "prod" ] && VPN_DNS_LABEL="prod"
-  VPN_HOST="vpn.${VPN_DNS_LABEL}.${INFRA_DOMAIN}"
-
-  export ANSIBLE_HOST_KEY_CHECKING=False
-
-  # MX mail host FQDN
-  if [ -n "$INFRA_ENV_DNS_LABEL" ]; then
-    MX_MAIL_HOST_FQDN="mail.${INFRA_ENV_DNS_LABEL}.${INFRA_DOMAIN}"
-  else
-    MX_MAIL_HOST_FQDN="mail.${INFRA_DOMAIN}"
-  fi
-
-  # Fail fast: we need either a routable IP or resolvable DNS
-  if [ -z "${VPN_SERVER_IP:-}" ]; then
-    if command -v python3 >/dev/null 2>&1; then
-      if ! python3 - <<'PY' "$VPN_HOST" >/dev/null 2>&1
-import socket, sys
-socket.getaddrinfo(sys.argv[1], None)
-PY
-      then
-        print_error "Could not resolve $VPN_HOST and no VPN server IP was found in phase1 Terraform outputs."
-        echo "  This usually means phase1 hasn't been applied for env '$MT_ENV' or DNS hasn't been created yet."
-        exit 1
-      fi
-    else
-      print_error "python3 not found; cannot preflight DNS for $VPN_HOST, and no VPN server IP was found in phase1 outputs."
-      exit 1
-    fi
-  fi
-
-  # Validate VPN IP matches environment
-  if command -v dig >/dev/null 2>&1; then
-    EXPECTED_VPN_IP=$(dig +short @1.1.1.1 A "vpn.${VPN_DNS_LABEL}.${INFRA_DOMAIN}" 2>/dev/null | head -1)
-    if [ -z "$EXPECTED_VPN_IP" ]; then
-      print_status "DNS record vpn.${VPN_DNS_LABEL}.${INFRA_DOMAIN} not found (may be first deployment)"
-    elif [ -n "$VPN_SERVER_IP" ] && [ "$VPN_SERVER_IP" != "$EXPECTED_VPN_IP" ]; then
-      print_warning "VPN IP mismatch - please verify this is correct!"
-      echo "  Terraform output: $VPN_SERVER_IP"
-      echo "  DNS resolution:   $EXPECTED_VPN_IP"
-    fi
-  fi
-
-  K8S_NODE_VPC_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "")
-  if [ -n "$K8S_NODE_VPC_IP" ]; then
-    print_status "K8s node VPC IP (fallback reference): $K8S_NODE_VPC_IP"
-  fi
-
-  # Prefer VPN tunnel IP when connected to VPN, since public SSH may be blocked
-  # by firewall (admin_ssh_cidrs). Fall back to public IP if not on VPN.
-  ANSIBLE_TARGET_IP="${VPN_SERVER_IP:-$VPN_HOST}"
-  if [ -n "$VPN_SERVER_TUNNEL_IP" ] && ping -c 1 -W 2 "$VPN_SERVER_TUNNEL_IP" >/dev/null 2>&1; then
-    print_status "VPN tunnel reachable — using $VPN_SERVER_TUNNEL_IP for Ansible"
-    ANSIBLE_TARGET_IP="$VPN_SERVER_TUNNEL_IP"
-  else
-    print_warning "VPN tunnel not reachable — using public IP $ANSIBLE_TARGET_IP for Ansible (SSH must be allowed in admin_ssh_cidrs)"
-  fi
-
-  TEMP_INVENTORY=$(mktemp)
-  cat > "$TEMP_INVENTORY" <<EOF
-[vpn_servers]
-${VPN_HOST} ansible_host=${ANSIBLE_TARGET_IP} ansible_user=root mail_domain=${INFRA_DOMAIN} mx_mail_host_fqdn=${MX_MAIL_HOST_FQDN}
-EOF
-
-  # Add TURN server to inventory if available.
-  # SSH reaches the TURN server via ProxyJump through the VPN server (tunnel IP),
-  # since the TURN firewall only allows SSH from the VPN server's public IP.
-  if [ -n "$TURN_SERVER_IP" ]; then
-    if [ -n "$VPN_SERVER_TUNNEL_IP" ] && ping -c 1 -W 2 "$VPN_SERVER_TUNNEL_IP" >/dev/null 2>&1; then
-      TURN_JUMP_HOST="root@${VPN_SERVER_TUNNEL_IP}"
-      print_status "TURN server ${TURN_SERVER_IP} will be reached via ProxyJump through VPN server"
-    else
-      TURN_JUMP_HOST=""
-      print_warning "VPN tunnel not reachable — TURN server SSH requires direct access"
-    fi
-    cat >> "$TEMP_INVENTORY" <<EOF
-
-[turn_servers]
-turn-server ansible_host=${TURN_SERVER_IP} ansible_user=root${TURN_JUMP_HOST:+ ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -J ${TURN_JUMP_HOST}'}
-EOF
-  else
-    print_status "No TURN server IP found — skipping TURN server provisioning"
-  fi
-
-  # Source secrets so tls_email is available for Certbot
-  if [ -f "$REPO_ROOT/secrets.$MT_ENV.tfvars.env" ]; then
-    source "$REPO_ROOT/secrets.$MT_ENV.tfvars.env"
-  fi
-
-  # Create Ansible extra vars file
-  TEMP_EXTRA_VARS=$(mktemp)
-  cat > "$TEMP_EXTRA_VARS" <<EOF
-# Auto-generated by deploy_infra for VPN Postfix mail routing
-# Tenant domains to accept inbound mail for
-tenant_domains:
-EOF
-  for domain in $TENANT_DOMAINS; do
-    echo "  - $domain" >> "$TEMP_EXTRA_VARS"
-  done
-  cat >> "$TEMP_EXTRA_VARS" <<EOF
-
-# K8s Postfix inbound mail routing via NodeBalancer TCP proxy
-k8s_postfix_nodeport: 30025
-k8s_lb_host: "lb1.${MT_ENV}.${INFRA_DOMAIN}"
-EOF
-  if [ -n "${TF_VAR_tls_email:-}" ]; then
-    echo "tls_email: \"${TF_VAR_tls_email}\"" >> "$TEMP_EXTRA_VARS"
-  fi
-
-  # TURN shared secret
-  if [ -n "${TF_VAR_turn_shared_secret:-}" ]; then
-    echo "turn_shared_secret: \"${TF_VAR_turn_shared_secret}\"" >> "$TEMP_EXTRA_VARS"
-  fi
-
-  # VPN private IP for microsocks SOCKS5 proxy (Blackbox Exporter probes)
-  if [ -n "${VPN_SERVER_PRIVATE_IP:-}" ]; then
-    echo "vpn_private_ip: \"${VPN_SERVER_PRIVATE_IP}\"" >> "$TEMP_EXTRA_VARS"
-  fi
-
-  # Microsocks SOCKS5 proxy authentication
-  if [ -n "${MICROSOCKS_PASSWORD:-}" ]; then
-    echo "microsocks_password: \"${MICROSOCKS_PASSWORD}\"" >> "$TEMP_EXTRA_VARS"
-  fi
-
-  # AWS SES SMTP relay (outbound mail via SES instead of direct delivery)
-  if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
-    echo "ses_smtp_endpoint: \"${SES_SMTP_ENDPOINT}\"" >> "$TEMP_EXTRA_VARS"
-    echo "ses_smtp_username: \"${SES_SMTP_USERNAME}\"" >> "$TEMP_EXTRA_VARS"
-    echo "ses_smtp_password: \"${SES_SMTP_PASSWORD}\"" >> "$TEMP_EXTRA_VARS"
-  fi
-
-  # VPN networking: Unbound DNS + OpenVPN routes (moved from infra/ Terraform)
-  # These IPs are used to configure internal DNS and VPN routing to K8s services.
-  CLUSTER_LB_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-  CLUSTER_NODE_IP=$(kubectl get nodes \
-    -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "")
-
-  if [ -n "$CLUSTER_LB_IP" ] && [ -n "$CLUSTER_NODE_IP" ]; then
-    echo "cluster_lb_ip: \"${CLUSTER_LB_IP}\"" >> "$TEMP_EXTRA_VARS"
-    echo "cluster_node_ip: \"${CLUSTER_NODE_IP}\"" >> "$TEMP_EXTRA_VARS"
-
-    # Internal DNS domain: dev → internal.dev.<domain>, prod → prod.<domain>
-    if [ -n "$INFRA_ENV_DNS_LABEL" ] && [ "$INFRA_ENV_DNS_LABEL" != "null" ] && [ "$INFRA_ENV_DNS_LABEL" != "prod" ]; then
-      INTERNAL_DNS_DOMAIN="internal.${INFRA_ENV_DNS_LABEL}.${INFRA_DOMAIN}"
-    else
-      INTERNAL_DNS_DOMAIN="prod.${INFRA_DOMAIN}"
-    fi
-    echo "internal_dns_domain: \"${INTERNAL_DNS_DOMAIN}\"" >> "$TEMP_EXTRA_VARS"
-  else
-    print_warning "Could not get cluster IPs — VPN Unbound DNS will not be updated"
-  fi
-
-  # VPN network CIDR for iptables NAT rules
-  if [ -n "${VPN_NETWORK_CIDR:-}" ]; then
-    echo "vpn_network_cidr: \"${VPN_NETWORK_CIDR}\"" >> "$TEMP_EXTRA_VARS"
-  fi
-
-  print_status "=== VPN POSTFIX CONFIGURATION ==="
-  print_status "Environment:        $MT_ENV"
-  print_status "VPN Host:           $VPN_HOST"
-  print_status "VPN IP:             ${VPN_SERVER_IP:-<resolving from DNS>}"
-  print_status "MX mail host FQDN:  $MX_MAIL_HOST_FQDN"
-  print_status "TLS email:          ${TF_VAR_tls_email:-<not set, Certbot/TLS skipped>}"
-  print_status "Tenant Domains:     ${TENANT_DOMAINS:-<none>}"
-  print_status "K8s LB Host:        lb1.${MT_ENV}.${INFRA_DOMAIN}"
-  print_status "==================================="
-
-  # Run playbook
-  set +e
-  ansible-playbook playbook.yml -i "$TEMP_INVENTORY" -e "@$TEMP_EXTRA_VARS" 2>&1 | while read line; do
-    echo "  $line"
-  done
-  ANSIBLE_EXIT=${PIPESTATUS[0]}
-  set -e
-
-  rm -f "$TEMP_INVENTORY" "$TEMP_EXTRA_VARS"
-
-  if [ $ANSIBLE_EXIT -eq 0 ]; then
-    print_success "Ansible playbook completed — VPN server ($VPN_HOST)${TURN_SERVER_IP:+ + TURN server ($TURN_SERVER_IP)}"
-  else
-    print_error "Ansible playbook failed with exit code $ANSIBLE_EXIT"
-    exit 1
-  fi
-
-popd >/dev/null
+# NOTE: Ansible (VPN Postfix, TURN, Unbound) is now managed by manage_infra --ansible. See issue #244.
 
 # Wait for linkeditor build that was started in background at the beginning
 if [ -n "$LINKEDITOR_BUILD_PID" ]; then

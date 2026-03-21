@@ -43,9 +43,20 @@ ansible/         VPN server config (OpenVPN, Postfix relay, Unbound DNS)
 
 ## Three-Phase Deployment
 
-1. **`./scripts/manage_infra -e <env> [--plan|--destroy]`** — Phase 1: LKE cluster, VPN, TURN, base DNS
-2. **`./scripts/deploy_infra -e <env>`** — Phase 2: Shared infra (ingress, certs, PostgreSQL, Keycloak, Postfix, monitoring)
-3. **`./scripts/create_env -e <env> -t <tenant> [--create-alert-user]`** — Phase 3: Tenant apps (Synapse, Element, Docs, Files, Jitsi, Stalwart, Roundcube, Admin Portal)
+1. **`./scripts/manage_infra -e <env>`** — Terraform, DNS, LKE firewall, Ansible (runs locally, requires VPN)
+2. **`./scripts/deploy_infra -e <env>`** — Shared K8s infra (ingress, certs, PostgreSQL, Keycloak, Postfix, monitoring) — CI-able
+3. **`./scripts/create_env -e <env> -t <tenant> [--create-alert-user]`** — Tenant apps (Synapse, Element, Docs, Files, Jitsi, Stalwart, Roundcube, Admin Portal) — CI-able
+
+`manage_infra` supports phase selectors: `--phase1`, `--dns`, `--firewall`, `--ansible` (default: all).
+`--plan` and `--destroy` are phase1-only modifiers.
+
+On initial setup of a new environment, DNS must run after deploy_infra creates the ingress:
+```bash
+manage_infra -e <env> --phase1          # Create cluster, VPN, TURN
+deploy_infra -e <env>                   # Deploy K8s infra (creates ingress LB)
+manage_infra -e <env> --dns             # Create DNS records (needs LB IP)
+manage_infra -e <env> --firewall --ansible  # Firewall rules + VPN config
+```
 
 Sub-scripts are fully self-contained and independently runnable:
 ```bash
