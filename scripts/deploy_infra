@@ -512,8 +512,8 @@ fi
 # so we always ensure it matches the current secrets file value.
 # Note: sed escapes single quotes in the password to prevent SQL injection.
 print_status "Syncing Keycloak DB password in PostgreSQL..."
-PG_SUPERUSER_PASS=$(kubectl get secret docs-postgresql -n "$NS_DB" --kubeconfig="$REPO_ROOT/kubeconfig.$MT_ENV.yaml" -o jsonpath='{.data.postgres-password}' | base64 -d)
-kubectl exec -i "${PG_SERVICE_NAME}-0" -n "$NS_DB" --kubeconfig="$REPO_ROOT/kubeconfig.$MT_ENV.yaml" -- \
+PG_SUPERUSER_PASS=$(kubectl get secret docs-postgresql -n "$NS_DB" --kubeconfig="$KUBECONFIG" -o jsonpath='{.data.postgres-password}' | base64 -d)
+kubectl exec -i "${PG_SERVICE_NAME}-0" -n "$NS_DB" --kubeconfig="$KUBECONFIG" -- \
   env PGPASSWORD="$PG_SUPERUSER_PASS" psql -U postgres -c "ALTER ROLE keycloak WITH PASSWORD '$(echo "$KEYCLOAK_DB_PASSWORD" | sed "s/'/''/g")';" 2>/dev/null || \
   print_warning "Could not update keycloak DB password — PostgreSQL may not be ready yet"
 
@@ -536,11 +536,11 @@ kubectl -n "$NS_AUTH" rollout status statefulset/keycloak-keycloakx --timeout=30
 # handling credential rotation and migration from legacy hardcoded passwords.
 print_status "Waiting for Keycloak to be ready before syncing admin password..."
 kubectl wait --for=condition=ready pod/keycloak-keycloakx-0 -n "$NS_AUTH" \
-  --kubeconfig="$REPO_ROOT/kubeconfig.$MT_ENV.yaml" --timeout=180s 2>/dev/null || true
+  --kubeconfig="$KUBECONFIG" --timeout=180s 2>/dev/null || true
 
 print_status "Syncing Keycloak admin password..."
 if kubectl exec keycloak-keycloakx-0 -n "$NS_AUTH" -c keycloak \
-    --kubeconfig="$REPO_ROOT/kubeconfig.$MT_ENV.yaml" -- \
+    --kubeconfig="$KUBECONFIG" -- \
     /opt/keycloak/bin/kcadm.sh config credentials \
     --server http://localhost:8080 --realm master \
     --user admin --password "$KEYCLOAK_ADMIN_PASSWORD" 2>/dev/null; then
@@ -550,13 +550,13 @@ else
   ADMIN_UPDATED=false
   for old_pass in "${LEGACY_PASSWORDS[@]}"; do
     if kubectl exec keycloak-keycloakx-0 -n "$NS_AUTH" -c keycloak \
-        --kubeconfig="$REPO_ROOT/kubeconfig.$MT_ENV.yaml" -- \
+        --kubeconfig="$KUBECONFIG" -- \
         /opt/keycloak/bin/kcadm.sh config credentials \
         --server http://localhost:8080 --realm master \
         --user admin --password "$old_pass" 2>/dev/null; then
       print_status "Authenticated with legacy password, updating to new password..."
       kubectl exec keycloak-keycloakx-0 -n "$NS_AUTH" -c keycloak \
-          --kubeconfig="$REPO_ROOT/kubeconfig.$MT_ENV.yaml" -- \
+          --kubeconfig="$KUBECONFIG" -- \
           /opt/keycloak/bin/kcadm.sh set-password \
           --server http://localhost:8080 --realm master \
           --username admin --new-password "$KEYCLOAK_ADMIN_PASSWORD" 2>/dev/null && \
