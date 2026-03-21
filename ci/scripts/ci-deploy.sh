@@ -13,6 +13,7 @@ set -euo pipefail
 #
 # Required environment variables:
 #   DEPLOY_VAULT_PASSWORD — Ansible Vault password (from Woodpecker secret)
+#   GITHUB_PAT            — GitHub PAT for cloning private config submodules
 #   CI_VALKEY_PASSWORD    — Valkey password for deploy lock (dev only)
 #   CI_PIPELINE_NUMBER    — Woodpecker pipeline number (for lease resolution)
 #
@@ -75,15 +76,23 @@ if [[ ! -f "$MT_TERRAFORM_OUTPUTS_FILE" ]]; then
   exit 1
 fi
 
-# ── Initialize config submodules ─────────────────────────────────
-echo "Initializing config submodules..."
+# ── Clone private config submodules ───────────────────────────────
+# Use GitHub PAT to authenticate SSH-based submodule URLs via URL rewriting.
 cd "$REPO_ROOT"
-git submodule update --init config/platform config/tenants 2>/dev/null || {
-  echo "WARNING: Could not init config submodules (may already be initialized)"
+if [[ -n "${GITHUB_PAT:-}" ]]; then
+  git config url."https://x-access-token:${GITHUB_PAT}@github.com/".insteadOf "git@github.com:"
+  echo "Configured git URL rewriting for private submodule access"
+fi
+
+echo "Initializing config submodules..."
+git submodule update --init config/platform config/tenants || {
+  echo "ERROR: Failed to init config submodules."
+  echo "Ensure GITHUB_PAT secret is set and has access to the private config repos."
+  exit 1
 }
 
-# ── Copy secrets into workspace ──────────────────────────────────
-# The deploy scripts expect secrets alongside config files in config/tenants/
+# ── Copy secrets from vault into workspace ────────────────────────
+# Config files come from submodules; secrets come from the encrypted vault.
 if [[ -d "$WORK_DIR/tenants" ]]; then
   for tenant_secrets_dir in "$WORK_DIR/tenants"/*/; do
     [[ -d "$tenant_secrets_dir" ]] || continue
@@ -91,13 +100,14 @@ if [[ -d "$WORK_DIR/tenants" ]]; then
     target_dir="$REPO_ROOT/config/tenants/$tenant_name"
     if [[ -d "$target_dir" ]]; then
       cp "$tenant_secrets_dir"/*.secrets.yaml "$target_dir/" 2>/dev/null || true
-      echo "Copied secrets for tenant: $tenant_name"
+      echo "  Copied secrets for tenant: $tenant_name"
     else
-      echo "WARNING: Tenant config dir not found: $target_dir (skipping secrets copy)"
+      echo "  WARNING: Tenant config dir not found: $target_dir (skipping secrets)"
     fi
   done
 else
-  echo "WARNING: No tenants/ directory in vault archive"
+  echo "ERROR: No tenants/ directory in vault archive"
+  exit 1
 fi
 
 # ── Resolve tenant(s) to deploy ──────────────────────────────────

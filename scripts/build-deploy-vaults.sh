@@ -104,7 +104,7 @@ for env in "${ENVS[@]}"; do
     ERRORS+=("Terraform outputs not found: $TF_OUTPUTS_SRC")
   fi
 
-  # 3. Tenant secrets
+  # 3. Tenant secrets (config files come from git submodules, not the vault)
   TENANT_COUNT=0
   for tenant_dir in "$TENANTS_DIR"/*/; do
     [[ -d "$tenant_dir" ]] || continue

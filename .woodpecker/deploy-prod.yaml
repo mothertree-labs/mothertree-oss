@@ -18,5 +18,7 @@ steps:
       CI: "true"
       DEPLOY_VAULT_PASSWORD:
         from_secret: deploy_vault_password
+      GITHUB_PAT:
+        from_secret: github_pat
     commands:
       - ci/scripts/ci-deploy.sh prod --all-tenants
