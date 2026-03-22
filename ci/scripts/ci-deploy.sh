@@ -230,6 +230,17 @@ else
       exit 1
     fi
 
+    # For prod: check if we've already been superseded before even trying the lock
+    if [[ "$ALL_TENANTS" == "true" ]]; then
+      CURRENT_PENDING=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+        GET "$PENDING_KEY" 2>/dev/null || echo "")
+      if [[ -n "$CURRENT_PENDING" ]] && [[ "$CURRENT_PENDING" != "$CI_PIPELINE_NUMBER" ]]; then
+        echo "Superseded by pipeline #$CURRENT_PENDING while waiting — skipping deploy"
+        echo "=== Deploy skipped (newer merge will deploy) ==="
+        exit 0
+      fi
+    fi
+
     # Try to acquire the lock
     RESULT=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
       SET "$LOCK_KEY" "$CI_PIPELINE_NUMBER" NX EX "$LOCK_TTL" 2>/dev/null || true)
