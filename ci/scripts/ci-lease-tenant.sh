@@ -21,9 +21,9 @@ _CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
 # shellcheck disable=SC2086
 vcli() { $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
 
-LEASE_TTL=600  # 10 minutes
+LEASE_TTL=600  # 10 minutes (renewed by ci-deploy.sh and e2e shards)
 RETRY_INTERVAL=60
-MAX_WAIT=600
+MAX_WAIT=3600  # 1 hour — prod deploys on other slots can take 20-30 min
 
 # ── Pool slots (add new slots here when onboarding tenants) ──────
 POOLS=(pool1 pool2)
