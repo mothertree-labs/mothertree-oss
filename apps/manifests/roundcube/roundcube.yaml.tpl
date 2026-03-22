@@ -51,7 +51,7 @@ data:
     $config['oauth_token_uri'] = '${KEYCLOAK_INTERNAL_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token';
     $config['oauth_identity_uri'] = '${KEYCLOAK_INTERNAL_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/userinfo';
     $config['oauth_identity_fields'] = ['email'];
-    $config['oauth_scope'] = 'openid email profile';
+    $config['oauth_scope'] = 'openid email profile offline_access';
     
     // Use XOAUTH2 for IMAP/SMTP authentication
     $config['imap_auth_type'] = 'XOAUTH2';

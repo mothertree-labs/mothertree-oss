@@ -169,7 +169,7 @@ spec:
                 --clientid='$OIDC_CLIENT_ID' \
                 --clientsecret='$OIDC_CLIENT_SECRET' \
                 --discoveryuri='https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/.well-known/openid-configuration' \
-                --scope='openid email profile' \
+                --scope='openid email profile offline_access' \
                 --unique-uid=0 \
                 --mapping-uid=email \
                 --mapping-display-name=name \
