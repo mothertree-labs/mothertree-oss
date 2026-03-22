@@ -34,7 +34,7 @@ if [ -z "${MT_ENV:-}" ]; then
   print_error "MT_ENV is not set. Usage: MT_ENV=dev ./docs/import-keycloak-realm.sh"
   exit 1
 fi
-export KUBECONFIG="$REPO_ROOT/kubeconfig.$MT_ENV.yaml"
+export KUBECONFIG="${KUBECONFIG:-$REPO_ROOT/kubeconfig.$MT_ENV.yaml}"
 
 # Use namespace variables from environment, with defaults
 NS_AUTH="${NS_AUTH:-infra-auth}"

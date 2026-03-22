@@ -3,8 +3,7 @@ when:
   - event: push
     branch: main
 
-depends_on:
-  - validate
+depends_on: []
 
 clone:
   - name: clone

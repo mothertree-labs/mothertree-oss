@@ -47,7 +47,7 @@ source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "configure-mail-routing"
 
 # Use environment kubeconfig
-export KUBECONFIG="$REPO_ROOT/kubeconfig.$MT_ENV.yaml"
+export KUBECONFIG="${KUBECONFIG:-$REPO_ROOT/kubeconfig.$MT_ENV.yaml}"
 if [ ! -f "$KUBECONFIG" ]; then
   print_error "Kubeconfig not found: $KUBECONFIG"
   exit 1

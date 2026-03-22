@@ -6,6 +6,9 @@
 #   woodpecker_agent_secret, woodpecker_github_client, woodpecker_github_secret,
 #   woodpecker_host, woodpecker_admin, cloudflare_tunnel_token,
 #   ghcr_username, ghcr_pat
+#
+# Optional vars for CI deploy vaults:
+#   ci_deploy_vaults — list of local paths to encrypted vault files to provision
 
 - name: Configure Woodpecker CI Server
   hosts: ci_servers
@@ -310,6 +313,20 @@
         dest: /usr/local/bin/yq
         mode: "0755"
 
+    - name: Install kubectl
+      ansible.builtin.get_url:
+        url: https://dl.k8s.io/release/v1.31.4/bin/linux/amd64/kubectl
+        dest: /usr/local/bin/kubectl
+        mode: "0755"
+
+    - name: Install jq, envsubst, and ansible-core
+      ansible.builtin.apt:
+        name:
+          - jq
+          - gettext-base
+          - ansible-core
+        state: present
+
     # ── Valkey (Redis-compatible KV store for CI tenant leasing) ────
     # Runs as a Docker container with port 6379 bound to localhost only.
     # Pipeline steps (local backend) connect via redis-cli -h 127.0.0.1.
@@ -384,6 +401,36 @@
       become_user: woodpecker
       args:
         creates: /home/woodpecker/.docker/buildx
+
+    # ── Deploy Vaults (encrypted secrets for CI deploy steps) ─────
+    # Vault files are Ansible Vault-encrypted tarballs containing
+    # kubeconfigs, tenant secrets, and terraform outputs per environment.
+    # They remain encrypted at rest on disk; CI scripts decrypt them
+    # into temp dirs at build time using DEPLOY_VAULT_PASSWORD.
+    - name: Create deploy-vaults directory
+      ansible.builtin.file:
+        path: /home/woodpecker/deploy-vaults
+        state: directory
+        owner: woodpecker
+        group: woodpecker
+        mode: "0700"
+
+    - name: Deploy encrypted vault files
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: /home/woodpecker/deploy-vaults/
+        owner: woodpecker
+        group: woodpecker
+        mode: "0600"
+        decrypt: false
+      loop: "{{ ci_deploy_vaults | default([]) }}"
+
+    - name: Clean up orphaned deploy temp dirs (cron)
+      ansible.builtin.cron:
+        name: "Clean orphaned deploy secrets"
+        minute: "*/30"
+        user: woodpecker
+        job: 'find /tmp -maxdepth 1 -name "mt-deploy-*" -type d -mmin +120 -exec rm -rf {} + 2>/dev/null'
 
   handlers:
     - name: Restart Docker

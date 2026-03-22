@@ -26,17 +26,6 @@ print_status() { echo -e "${BLUE}[ci]${NC} $1"; }
 print_success() { echo -e "${GREEN}[ci]${NC} $1"; }
 print_error() { echo -e "${RED}[ci]${NC} $1" >&2; }
 
-# Resolve tfvars from private config
-TFVARS=""
-if [ -f "$REPO_ROOT/config/platform/ci/terraform.tfvars" ]; then
-  TFVARS="-var-file=$REPO_ROOT/config/platform/ci/terraform.tfvars"
-elif [ -f "$TF_DIR/terraform.tfvars" ]; then
-  TFVARS="-var-file=$TF_DIR/terraform.tfvars"
-else
-  print_error "No terraform.tfvars found. Copy ci/terraform/terraform.tfvars.example to config/platform/ci/terraform.tfvars"
-  exit 1
-fi
-
 # Resolve ansible vars
 ANSIBLE_VARS=""
 if [ -f "$REPO_ROOT/config/platform/ci/ansible-vars.yml" ]; then
@@ -45,7 +34,19 @@ elif [ -f "$ANSIBLE_DIR/ansible-vars.yml" ]; then
   ANSIBLE_VARS="$ANSIBLE_DIR/ansible-vars.yml"
 fi
 
+resolve_tfvars() {
+  if [ -f "$REPO_ROOT/config/platform/ci/terraform.tfvars" ]; then
+    TFVARS="-var-file=$REPO_ROOT/config/platform/ci/terraform.tfvars"
+  elif [ -f "$TF_DIR/terraform.tfvars" ]; then
+    TFVARS="-var-file=$TF_DIR/terraform.tfvars"
+  else
+    print_error "No terraform.tfvars found. Copy ci/terraform/terraform.tfvars.example to config/platform/ci/terraform.tfvars"
+    exit 1
+  fi
+}
+
 run_terraform() {
+  resolve_tfvars
   print_status "Running terraform $1..."
   cd "$TF_DIR"
   terraform init -input=false
