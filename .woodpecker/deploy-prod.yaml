@@ -16,6 +16,8 @@ steps:
     image: bash
     environment:
       CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
       DEPLOY_VAULT_PASSWORD:
         from_secret: deploy_vault_password
       GITHUB_PAT:
