@@ -51,13 +51,18 @@ spec:
         - /bin/sh
         - -c
         - |
-          export HOME=/tmp
-          pip install --no-cache-dir prometheus-client requests && \
-          python /app/exporter.py
+          pip install --no-cache-dir --target=/tmp/deps prometheus-client requests && \
+          exec python /app/exporter.py
         volumeMounts:
         - name: exporter-script
           mountPath: /app
         env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTHONPATH
+          value: "/tmp/deps"
+        - name: HOME
+          value: "/tmp"
         - name: JVB_URL
           value: "http://jitsi-jvb:8080"
         - name: JICOFO_URL
