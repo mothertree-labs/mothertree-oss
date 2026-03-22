@@ -206,6 +206,16 @@ Never skip this step, even if the changes seem trivial.
 
 Never skip this step, even if the changes seem trivial.
 
+## Fail Fast — Never Silently Skip
+
+**CRITICAL**: Scripts must fail immediately and loudly when a required value is missing. Never silently skip logic because an env var, secret, or parameter is empty/null/unset.
+
+- Use `: "${VAR:?error message}"` for required env vars
+- `set -euo pipefail` — the `u` flag catches unset variables
+- When a guard check determines a feature should run, **validate its required inputs and fail if missing** — don't make the entire feature optional by wrapping it in an existence check
+- Security-critical paths (locking, auth, encryption) must NEVER be optional
+- The only exception is truly optional features (e.g., SES relay credentials). But if a feature is expected to run, its inputs are required.
+
 ## DNS Safety Rules
 
 - **NEVER modify the base domain DNS record.** The base domain is a CNAME pointing to an external website. The `create_env` script must not create A/CNAME records for the bare domain.

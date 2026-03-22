@@ -193,77 +193,75 @@ _release_deploy_lock() {
 }
 
 _DEPLOY_LOCK_ACQUIRED=""
-if [[ -n "${CI_VALKEY_PASSWORD:-}" ]]; then
-  _CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
-  LOCK_KEY="ci-deploy-${MT_ENV}"
-  PENDING_KEY="ci-deploy-pending-${MT_ENV}"
-  LOCK_TTL=2400  # 40 min (prod deploy can take 20-30 min)
-  MAX_WAIT=2400
-  ELAPSED=0
+: "${CI_VALKEY_PASSWORD:?CI_VALKEY_PASSWORD is required for deploy locking}"
+_CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
+LOCK_KEY="ci-deploy-${MT_ENV}"
+PENDING_KEY="ci-deploy-pending-${MT_ENV}"
+LOCK_TTL=2400  # 40 min (prod deploy can take 20-30 min)
+MAX_WAIT=2400
+ELAPSED=0
 
-  echo "Acquiring deploy lock ($LOCK_KEY)..."
-  RESULT=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-    SET "$LOCK_KEY" "$CI_PIPELINE_NUMBER" NX EX "$LOCK_TTL" 2>/dev/null || true)
+echo "Acquiring deploy lock ($LOCK_KEY)..."
+RESULT=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+  SET "$LOCK_KEY" "$CI_PIPELINE_NUMBER" NX EX "$LOCK_TTL" 2>/dev/null || true)
 
-  if [[ "$RESULT" == "OK" ]]; then
-    _DEPLOY_LOCK_ACQUIRED=1
-    echo "Acquired deploy lock (pipeline #$CI_PIPELINE_NUMBER)"
-  else
-    # Lock is held — register as pending (overwrites any previous pending)
-    HOLDER=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-      GET "$LOCK_KEY" 2>/dev/null || echo "unknown")
-    echo "Deploy lock held by pipeline #$HOLDER"
+if [[ "$RESULT" == "OK" ]]; then
+  _DEPLOY_LOCK_ACQUIRED=1
+  echo "Acquired deploy lock (pipeline #$CI_PIPELINE_NUMBER)"
+else
+  # Lock is held — register as pending (overwrites any previous pending)
+  HOLDER=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+    GET "$LOCK_KEY" 2>/dev/null || echo "unknown")
+  echo "Deploy lock held by pipeline #$HOLDER"
 
-    if [[ "$ALL_TENANTS" == "true" ]]; then
-      # Prod: smart last-writer-wins
-      $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-        SET "$PENDING_KEY" "$CI_PIPELINE_NUMBER" EX "$MAX_WAIT" >/dev/null 2>&1
-      echo "Registered as pending deploy (pipeline #$CI_PIPELINE_NUMBER)"
-    fi
-
-    # Wait for lock to be released
-    while true; do
-      sleep 30
-      ELAPSED=$((ELAPSED + 30))
-      if (( ELAPSED >= MAX_WAIT )); then
-        echo "ERROR: Could not acquire deploy lock after ${MAX_WAIT}s"
-        exit 1
-      fi
-
-      # Try to acquire the lock
-      RESULT=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-        SET "$LOCK_KEY" "$CI_PIPELINE_NUMBER" NX EX "$LOCK_TTL" 2>/dev/null || true)
-      if [[ "$RESULT" == "OK" ]]; then
-        # Got the lock — but for prod, check if we're still the latest pending
-        if [[ "$ALL_TENANTS" == "true" ]]; then
-          CURRENT_PENDING=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-            GET "$PENDING_KEY" 2>/dev/null || echo "")
-          if [[ -n "$CURRENT_PENDING" ]] && [[ "$CURRENT_PENDING" != "$CI_PIPELINE_NUMBER" ]]; then
-            # A newer pipeline superseded us — release lock and abort
-            $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-              DEL "$LOCK_KEY" >/dev/null 2>&1 || true
-            echo "Superseded by pipeline #$CURRENT_PENDING — skipping deploy"
-            echo "=== Deploy skipped (newer merge will deploy) ==="
-            exit 0
-          fi
-          # We're the latest — clear pending key
-          $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-            DEL "$PENDING_KEY" >/dev/null 2>&1 || true
-        fi
-        _DEPLOY_LOCK_ACQUIRED=1
-        echo "Acquired deploy lock (pipeline #$CI_PIPELINE_NUMBER)"
-        break
-      fi
-
-      HOLDER=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-        GET "$LOCK_KEY" 2>/dev/null || echo "unknown")
-      echo "Deploy lock held by #$HOLDER, waiting... ($ELAPSED/${MAX_WAIT}s)"
-    done
+  if [[ "$ALL_TENANTS" == "true" ]]; then
+    # Prod: smart last-writer-wins
+    $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+      SET "$PENDING_KEY" "$CI_PIPELINE_NUMBER" EX "$MAX_WAIT" >/dev/null 2>&1
+    echo "Registered as pending deploy (pipeline #$CI_PIPELINE_NUMBER)"
   fi
 
-  # Extend the cleanup trap to also release the lock
-  trap '_release_deploy_lock; _cleanup' EXIT
+  # Wait for lock to be released
+  while true; do
+    sleep 30
+    ELAPSED=$((ELAPSED + 30))
+    if (( ELAPSED >= MAX_WAIT )); then
+      echo "ERROR: Could not acquire deploy lock after ${MAX_WAIT}s"
+      exit 1
+    fi
+
+    # Try to acquire the lock
+    RESULT=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+      SET "$LOCK_KEY" "$CI_PIPELINE_NUMBER" NX EX "$LOCK_TTL" 2>/dev/null || true)
+    if [[ "$RESULT" == "OK" ]]; then
+      # Got the lock — but for prod, check if we're still the latest pending
+      if [[ "$ALL_TENANTS" == "true" ]]; then
+        CURRENT_PENDING=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+          GET "$PENDING_KEY" 2>/dev/null || echo "")
+        if [[ -n "$CURRENT_PENDING" ]] && [[ "$CURRENT_PENDING" != "$CI_PIPELINE_NUMBER" ]]; then
+          # A newer pipeline superseded us — release lock and abort
+          $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+            DEL "$LOCK_KEY" >/dev/null 2>&1 || true
+          echo "Superseded by pipeline #$CURRENT_PENDING — skipping deploy"
+          echo "=== Deploy skipped (newer merge will deploy) ==="
+          exit 0
+        fi
+        # We're the latest — clear pending key
+        $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+          DEL "$PENDING_KEY" >/dev/null 2>&1 || true
+      fi
+      _DEPLOY_LOCK_ACQUIRED=1
+      echo "Acquired deploy lock (pipeline #$CI_PIPELINE_NUMBER)"
+      break
+    fi
+
+    HOLDER=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+      GET "$LOCK_KEY" 2>/dev/null || echo "unknown")
+    echo "Deploy lock held by #$HOLDER, waiting... ($ELAPSED/${MAX_WAIT}s)"
+  done
 fi
+
+trap '_release_deploy_lock; _cleanup' EXIT
 
 echo ""
 echo "=== Running deploy_infra -e $MT_ENV ==="
