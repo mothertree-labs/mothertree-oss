@@ -234,15 +234,17 @@ else
     RESULT=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
       SET "$LOCK_KEY" "$CI_PIPELINE_NUMBER" NX EX "$LOCK_TTL" 2>/dev/null || true)
     if [[ "$RESULT" == "OK" ]]; then
-      # Got the lock — but for prod, check if we're still the latest pending
+      # Got the lock — but for prod, only proceed if we're still the pending one.
+      # If pending key is empty (someone else already deployed and cleared it)
+      # or someone else (a newer pipeline overwrote us), we're stale — abort.
       if [[ "$ALL_TENANTS" == "true" ]]; then
         CURRENT_PENDING=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
           GET "$PENDING_KEY" 2>/dev/null || echo "")
-        if [[ -n "$CURRENT_PENDING" ]] && [[ "$CURRENT_PENDING" != "$CI_PIPELINE_NUMBER" ]]; then
-          # A newer pipeline superseded us — release lock and abort
+        if [[ "$CURRENT_PENDING" != "$CI_PIPELINE_NUMBER" ]]; then
+          # We've been superseded — release lock and abort
           $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
             DEL "$LOCK_KEY" >/dev/null 2>&1 || true
-          echo "Superseded by pipeline #$CURRENT_PENDING — skipping deploy"
+          echo "Superseded (pending=${CURRENT_PENDING:-<empty>}, us=$CI_PIPELINE_NUMBER) — skipping deploy"
           echo "=== Deploy skipped (newer merge will deploy) ==="
           exit 0
         fi
