@@ -23,9 +23,7 @@ config/          Private config submodules (optional, for operators)
   platform/      Container registry, infra sizing, theme overrides, CLAUDE.private.md
   tenants/       Per-tenant configs (domains, databases, S3 buckets, resources)
 phase1/          Terraform: LKE cluster, VPN server, TURN server, base DNS
-infra/           Terraform: K8s infra (Postfix, cert-manager, DNS records, certs)
-  templates/     Postfix main.cf, master.cf, aliases, opendkim.conf templates
-modules/         Terraform modules: lke-cluster/, dns/, openvpn-server/, helm-bootstrap/
+modules/         Terraform modules: lke-cluster/, openvpn-server/, helm-bootstrap/
 apps/            Application deployment layer
   helmfile.yaml.gotmpl   Main helmfile (Go-templated, env-aware)
   values/                Base Helm values (all environments)
@@ -36,9 +34,15 @@ apps/            Application deployment layer
   admin-portal/          Node.js admin app (Express + EJS + OIDC)
 scripts/         Orchestration scripts (manage_infra, deploy_infra, create_env)
   lib/             Shared libraries (common.sh, args.sh, config.sh, infra-config.sh, paths.sh, notify.sh)
+  build-deploy-vaults.sh   Build encrypted CI deploy vault archives
 tenants/         Per-tenant config (or use config/tenants/ submodule)
   .example/      Template for new tenants
 ansible/         VPN server config (OpenVPN, Postfix relay, Unbound DNS)
+ci/              CI server (Woodpecker)
+  terraform/     CI VM provisioning (Linode)
+  ansible/       CI VM configuration (tools, vaults, deploy keys)
+  scripts/       CI pipeline scripts (ci-deploy.sh, build-image.sh, lease/release)
+.woodpecker/     Woodpecker pipeline definitions
 ```
 
 ## Three-Phase Deployment
@@ -64,16 +68,39 @@ Sub-scripts are fully self-contained and independently runnable:
 ./apps/deploy-stalwart.sh -e prod -t acme
 ```
 
-## CI Deployment (Woodpecker)
+## CI/CD (Woodpecker)
 
-CI runs `deploy_infra` and `create_env` automatically via `ci/scripts/ci-deploy.sh`:
+Woodpecker CI runs on a dedicated Linode VM (`ci/`). All pipeline files are in `.woodpecker/`.
 
-- **PRs (dev)**: After validate + build-images + ci-lease, deploys to the leased dev tenant slot. E2E tests run after deploy.
-- **Merges to main (prod)**: After mothertree-build gate passes, deploys infra + all prod tenants.
+**PR pipeline** (dev):
+```
+validate ─────────────┐
+build-images ──────────┤  (starts immediately, parallel with validate)
+ci-lease ──────────────┤
+e2e-setup ─────────────┤
+deploy-dev ────────────┤  → deploy_infra -e dev + create_env -e dev -t <leased-tenant>
+                       │
+           e2e-shard-1..10  → Playwright tests against freshly deployed code
+                       │
+               ci-release   → release Valkey lease + cleanup KC users
+                       │
+           mothertree-build → gate (required status check)
+```
 
-Secrets (kubeconfigs, tenant secrets, terraform outputs) are stored as Ansible Vault-encrypted archives on the CI host at `/home/woodpecker/deploy-vaults/{dev,prod}.vault`. They are decrypted into temp dirs at build time and cleaned up on exit.
+**Main merge pipeline** (prod):
+Same as above, but deploy-dev is a no-op (step-level `when: pull_request`). After the gate passes:
+```
+deploy-prod → deploy_infra -e prod + create_env -e prod -t <all tenants>
+```
 
-Pipeline files: `.woodpecker/deploy-dev.yaml`, `.woodpecker/deploy-prod.yaml`
+**Secrets architecture**:
+- Kubeconfigs, terraform outputs, and tenant secrets are stored as **Ansible Vault-encrypted archives** on the CI host (`/home/woodpecker/deploy-vaults/{dev,prod}.vault`)
+- Decrypted into temp dirs at build time, cleaned up on exit
+- Private config submodules cloned via GitHub PAT (fine-grained, read-only)
+- Vault password stored as Woodpecker secret `deploy_vault_password`
+- Build vaults with `scripts/build-deploy-vaults.sh` (uses `lpass` for vault password)
+
+**Key files**: `ci/scripts/ci-deploy.sh` (deploy wrapper), `.woodpecker/deploy-dev.yaml`, `.woodpecker/deploy-prod.yaml`, `ci/ansible/playbook.yml` (CI box provisioning), `scripts/build-deploy-vaults.sh` (vault assembly)
 
 ## Namespace Conventions
 
@@ -147,7 +174,7 @@ mt_load_tenant_config
 ## Build/Test Commands
 
 - **Admin Portal**: `cd apps/admin-portal && npm install && npm start`
-- **Terraform**: `cd phase1 && terraform init && terraform plan` (or `cd infra`)
+- **Terraform**: `cd phase1 && terraform init && terraform plan`
 - **Helmfile lint**: `cd apps && helmfile -e dev lint`
 - **Check pods**: `kubectl --kubeconfig=kubeconfig.<env>.yaml get pods -A`
 - **Test email**: `./scripts/test-email-system -e dev -t example`
@@ -181,8 +208,8 @@ Never skip this step, even if the changes seem trivial.
 
 ## DNS Safety Rules
 
-- **NEVER modify the base domain DNS record.** The base domain is a CNAME managed by Terraform (`modules/dns/main.tf` `base_domain_cname`) pointing to an external website. The `create_env` script must not create A/CNAME records for the bare domain.
-- Records managed by Terraform (in `modules/dns/` and `infra/main.tf`) should not be duplicated or overridden by `create_env`. Terraform-managed records include: base domain CNAME, `lb1` A record, `mail` A record, MX, SPF, DKIM, DMARC, TURN SRV.
+- **NEVER modify the base domain DNS record.** The base domain is a CNAME pointing to an external website. The `create_env` script must not create A/CNAME records for the bare domain.
+- Records managed by `manage_infra --dns` (via `scripts/manage-dns.sh`) should not be duplicated or overridden by `create_env`. Managed records include: base domain CNAME, `lb1` A record, `mail` A record, MX, SPF, DKIM, DMARC, TURN SRV.
 - The `create_env` script manages per-tenant CNAME records (subdomains like `matrix`, `element`, `docs`, etc.) and tenant-specific email DNS records only.
 
 ## Troubleshooting

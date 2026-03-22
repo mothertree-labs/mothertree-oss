@@ -120,8 +120,7 @@ config/          Private config submodules (optional, for operators with access)
   platform/      Container registry, infra sizing, theme overrides
   tenants/       Real tenant configs (domains, databases, S3 buckets)
 phase1/          Terraform: LKE cluster, VPN server, TURN server, base DNS
-infra/           Terraform: K8s infra (Postfix, cert-manager, DNS records, certs)
-modules/         Terraform modules: lke-cluster/, dns/, openvpn-server/, helm-bootstrap/
+modules/         Terraform modules: lke-cluster/, openvpn-server/, helm-bootstrap/
 apps/            Application deployment layer
   helmfile.yaml.gotmpl   Main helmfile (Go-templated, env-aware)
   values/                Base Helm values
@@ -135,6 +134,8 @@ scripts/         Orchestration scripts (manage_infra, deploy_infra, create_env)
   lib/             Shared libraries (common.sh, config.sh, paths.sh, etc.)
 tenants/         Tenant config template (.example/) or local configs
 ansible/         VPN server config (OpenVPN, Postfix relay)
+ci/              CI server (Woodpecker) — Terraform, Ansible, pipeline scripts
+.woodpecker/     CI pipeline definitions
 ```
 
 ## Multi-Tenancy
@@ -155,18 +156,27 @@ Shared infrastructure lives in `infra-*` namespaces (db, auth, ingress, monitori
 
 See [tenants/README.md](tenants/README.md) for tenant configuration details.
 
-## Deployment Commands
+## Deployment
+
+### CI/CD (automatic)
+
+Woodpecker CI deploys automatically:
+- **Pull requests** deploy to dev (leased tenant slot), then run E2E tests
+- **Merges to main** deploy to prod (all tenants) after the gate passes
+
+Pipeline: validate → build-images → deploy-dev → E2E → gate → deploy-prod
+
+### Manual deployment
 
 ```bash
 # Deploy all tenant apps
-./scripts/create_env --tenant=<name> <env>
+./scripts/create_env -e <env> -t <tenant>
 
 # Deploy individual components
-MT_ENV=dev apps/deploy-docs.sh
-MT_ENV=dev apps/deploy-jitsi.sh
-MT_ENV=dev apps/deploy-stalwart.sh
-MT_ENV=dev apps/deploy-nextcloud.sh
-MT_ENV=dev TENANT=<name> apps/deploy-roundcube.sh
+./apps/deploy-docs.sh -e dev -t my-org
+./apps/deploy-jitsi.sh -e dev -t my-org
+./apps/deploy-stalwart.sh -e dev -t my-org
+./apps/deploy-nextcloud.sh -e dev -t my-org
 
 # Helmfile (Synapse, Element)
 cd apps && helmfile -e dev -l tier=apps sync

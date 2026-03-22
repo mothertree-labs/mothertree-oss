@@ -223,8 +223,10 @@ All commands should print a version. If any command prints package metadata, hel
 1. Create a feature branch from `main`
 2. Make your changes with clear, atomic commits
 3. Ensure your changes don't introduce hardcoded domains or credentials
-4. Test your changes in a dev environment if possible
-5. Open a pull request against `main`
+4. Push and open a pull request against `main`
+5. CI automatically: validates, builds images, deploys to dev, runs E2E tests
+6. Once the `mothertree-build` gate passes, the PR is ready for review
+7. On merge to main, CI automatically deploys to prod (all tenants)
 
 ### PR Requirements
 
@@ -232,6 +234,7 @@ All commands should print a version. If any command prints package metadata, hel
 - No hardcoded domains, credentials, or personal information
 - Scripts should read configuration from tenant config files or environment variables
 - New features should follow the existing multi-tenant architecture
+- CI must pass (validate + E2E) before merge
 
 ## Code Style
 
