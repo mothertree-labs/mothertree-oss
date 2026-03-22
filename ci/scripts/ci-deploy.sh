@@ -167,44 +167,99 @@ if [[ "$ALL_TENANTS" != "true" ]] && [[ -n "${CI_VALKEY_PASSWORD:-}" ]] && [[ -n
   echo "Started lease renewal background process (PID: $_LEASE_RENEWAL_PID)"
 fi
 
-# ── Deploy infrastructure ────────────────────────────────────────
-# For dev: use a Valkey lock to prevent concurrent deploy_infra runs
-# (shared infra — Helm conflicts if two PRs modify simultaneously)
+# ── Acquire deploy lock ──────────────────────────────────────────
+# Valkey-based locking to prevent concurrent deploys to the same env.
+#
+# Dev (PRs): Simple sequential lock. Two PRs deploy different tenants
+#   but share deploy_infra, so they wait for each other.
+#
+# Prod (main merges): Smart last-writer-wins. If multiple merges land
+#   while a deploy is running, only the latest one actually deploys.
+#   Intermediate pipelines abort (their code will be deployed by the
+#   latest one anyway). Uses a "pending" key that gets overwritten:
+#     - Pipeline A deploys, acquires lock
+#     - Pipeline B arrives, sets pending=B, waits
+#     - Pipeline C arrives, overwrites pending=C, waits
+#     - A finishes, releases lock
+#     - B checks pending → "C" (not "B") → aborts
+#     - C checks pending → "C" (itself) → acquires lock, deploys
+
 _release_deploy_lock() {
   if [[ -n "${_DEPLOY_LOCK_ACQUIRED:-}" ]]; then
-    echo "Releasing deploy_infra lock..."
+    echo "Releasing deploy lock..."
     $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
       DEL "$LOCK_KEY" >/dev/null 2>&1 || true
   fi
 }
 
 _DEPLOY_LOCK_ACQUIRED=""
-if [[ "$ALL_TENANTS" != "true" ]] && [[ -n "${CI_VALKEY_PASSWORD:-}" ]]; then
+if [[ -n "${CI_VALKEY_PASSWORD:-}" ]]; then
   _CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
-  LOCK_KEY="ci-deploy-infra-${MT_ENV}"
-  LOCK_TTL=900
-  MAX_WAIT=600
+  LOCK_KEY="ci-deploy-${MT_ENV}"
+  PENDING_KEY="ci-deploy-pending-${MT_ENV}"
+  LOCK_TTL=2400  # 40 min (prod deploy can take 20-30 min)
+  MAX_WAIT=2400
   ELAPSED=0
 
-  echo "Acquiring deploy_infra lock ($LOCK_KEY)..."
-  while true; do
-    RESULT=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-      SET "$LOCK_KEY" "$CI_PIPELINE_NUMBER" NX EX "$LOCK_TTL" 2>/dev/null || true)
-    if [[ "$RESULT" == "OK" ]]; then
-      _DEPLOY_LOCK_ACQUIRED=1
-      echo "Acquired deploy_infra lock (pipeline #$CI_PIPELINE_NUMBER)"
-      break
-    fi
+  echo "Acquiring deploy lock ($LOCK_KEY)..."
+  RESULT=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+    SET "$LOCK_KEY" "$CI_PIPELINE_NUMBER" NX EX "$LOCK_TTL" 2>/dev/null || true)
+
+  if [[ "$RESULT" == "OK" ]]; then
+    _DEPLOY_LOCK_ACQUIRED=1
+    echo "Acquired deploy lock (pipeline #$CI_PIPELINE_NUMBER)"
+  else
+    # Lock is held — register as pending (overwrites any previous pending)
     HOLDER=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
       GET "$LOCK_KEY" 2>/dev/null || echo "unknown")
-    echo "deploy_infra lock held by pipeline #$HOLDER, waiting... ($ELAPSED/${MAX_WAIT}s)"
-    if (( ELAPSED >= MAX_WAIT )); then
-      echo "ERROR: Could not acquire deploy_infra lock after ${MAX_WAIT}s"
-      exit 1
+    echo "Deploy lock held by pipeline #$HOLDER"
+
+    if [[ "$ALL_TENANTS" == "true" ]]; then
+      # Prod: smart last-writer-wins
+      $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+        SET "$PENDING_KEY" "$CI_PIPELINE_NUMBER" EX "$MAX_WAIT" >/dev/null 2>&1
+      echo "Registered as pending deploy (pipeline #$CI_PIPELINE_NUMBER)"
     fi
-    sleep 30
-    ELAPSED=$((ELAPSED + 30))
-  done
+
+    # Wait for lock to be released
+    while true; do
+      sleep 30
+      ELAPSED=$((ELAPSED + 30))
+      if (( ELAPSED >= MAX_WAIT )); then
+        echo "ERROR: Could not acquire deploy lock after ${MAX_WAIT}s"
+        exit 1
+      fi
+
+      # Try to acquire the lock
+      RESULT=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+        SET "$LOCK_KEY" "$CI_PIPELINE_NUMBER" NX EX "$LOCK_TTL" 2>/dev/null || true)
+      if [[ "$RESULT" == "OK" ]]; then
+        # Got the lock — but for prod, check if we're still the latest pending
+        if [[ "$ALL_TENANTS" == "true" ]]; then
+          CURRENT_PENDING=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+            GET "$PENDING_KEY" 2>/dev/null || echo "")
+          if [[ -n "$CURRENT_PENDING" ]] && [[ "$CURRENT_PENDING" != "$CI_PIPELINE_NUMBER" ]]; then
+            # A newer pipeline superseded us — release lock and abort
+            $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+              DEL "$LOCK_KEY" >/dev/null 2>&1 || true
+            echo "Superseded by pipeline #$CURRENT_PENDING — skipping deploy"
+            echo "=== Deploy skipped (newer merge will deploy) ==="
+            exit 0
+          fi
+          # We're the latest — clear pending key
+          $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+            DEL "$PENDING_KEY" >/dev/null 2>&1 || true
+        fi
+        _DEPLOY_LOCK_ACQUIRED=1
+        echo "Acquired deploy lock (pipeline #$CI_PIPELINE_NUMBER)"
+        break
+      fi
+
+      HOLDER=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+        GET "$LOCK_KEY" 2>/dev/null || echo "unknown")
+      echo "Deploy lock held by #$HOLDER, waiting... ($ELAPSED/${MAX_WAIT}s)"
+    done
+  fi
 
   # Extend the cleanup trap to also release the lock
   trap '_release_deploy_lock; _cleanup' EXIT
@@ -213,10 +268,6 @@ fi
 echo ""
 echo "=== Running deploy_infra -e $MT_ENV ==="
 "$REPO_ROOT/scripts/deploy_infra" -e "$MT_ENV"
-
-# Release the deploy lock immediately after deploy_infra completes
-# (create_env is per-tenant and safe to run concurrently)
-_release_deploy_lock
 
 echo ""
 echo "=== deploy_infra complete ==="
