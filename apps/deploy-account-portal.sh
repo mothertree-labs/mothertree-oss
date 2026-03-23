@@ -47,6 +47,9 @@ mt_deploy_start "deploy-account-portal"
 
 mt_require_commands kubectl envsubst
 
+# Track config changes to avoid restarting pods unnecessarily
+mt_reset_change_tracker
+
 print_status "Deploying Account Portal for environment: $MT_ENV"
 print_status "Tenant: $TENANT"
 print_status "Admin namespace: $NS_ADMIN"
@@ -118,16 +121,16 @@ print_status "Release version: $RELEASE_VERSION"
 print_status "Deploying account portal manifests..."
 
 # Apply secrets
-envsubst < "$REPO_ROOT/apps/manifests/account-portal/secrets.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+mt_apply kubectl apply -n "$NS_ADMIN" -f <(envsubst < "$REPO_ROOT/apps/manifests/account-portal/secrets.yaml.tpl")
 
 # Apply service
-kubectl apply -n "$NS_ADMIN" -f "$REPO_ROOT/apps/manifests/account-portal/service.yaml"
+mt_apply kubectl apply -n "$NS_ADMIN" -f "$REPO_ROOT/apps/manifests/account-portal/service.yaml"
 
 # Apply ingress
-envsubst < "$REPO_ROOT/apps/manifests/account-portal/ingress.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+mt_apply kubectl apply -n "$NS_ADMIN" -f <(envsubst < "$REPO_ROOT/apps/manifests/account-portal/ingress.yaml.tpl")
 
 # Apply deployment
-envsubst < "$REPO_ROOT/apps/manifests/account-portal/deployment.yaml.tpl" | kubectl apply -n "$NS_ADMIN" -f -
+mt_apply kubectl apply -n "$NS_ADMIN" -f <(envsubst < "$REPO_ROOT/apps/manifests/account-portal/deployment.yaml.tpl")
 
 # Deploy HPA for account-portal auto-scaling (only if min != max replicas)
 if [ "$ACCOUNT_PORTAL_MIN_REPLICAS" != "$ACCOUNT_PORTAL_MAX_REPLICAS" ]; then
@@ -139,13 +142,14 @@ else
 fi
 
 # Restart to pick up any secret or image changes
-print_status "Restarting Account Portal deployment..."
-kubectl rollout restart deployment/account-portal -n "$NS_ADMIN"
+mt_restart_if_changed deployment/account-portal -n "$NS_ADMIN"
 
 # Wait for deployment to be ready
-print_status "Waiting for Account Portal deployment..."
-kubectl rollout status deployment/account-portal -n "$NS_ADMIN" --timeout=120s || {
-  print_warning "Account Portal deployment may not be fully ready"
-}
+if mt_has_changes; then
+    print_status "Waiting for Account Portal deployment..."
+    kubectl rollout status deployment/account-portal -n "$NS_ADMIN" --timeout=120s || {
+      print_warning "Account Portal deployment may not be fully ready"
+    }
+fi
 
 print_status "Account Portal deployed to https://$ACCOUNT_HOST"
