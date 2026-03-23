@@ -432,6 +432,25 @@
         user: woodpecker
         job: 'find /tmp -maxdepth 1 -name "mt-deploy-*" -type d -mmin +120 -exec rm -rf {} + 2>/dev/null'
 
+    - name: Clean stale Woodpecker workspace dirs (cron)
+      ansible.builtin.cron:
+        name: "Clean stale Woodpecker workspaces"
+        minute: "0"
+        hour: "10"
+        user: root
+        job: >-
+          active=$(ps aux | grep -oP '/tmp/woodpecker-local-\d+' | sort -u);
+          find /tmp -maxdepth 1 -name "woodpecker-local-*" -type d -mmin +120 |
+          while read d; do echo "$active" | grep -qF "$d" || rm -rf "$d"; done 2>/dev/null
+
+    - name: Prune unused Docker images and build cache (cron)
+      ansible.builtin.cron:
+        name: "Docker cleanup"
+        minute: "5"
+        hour: "10"
+        user: root
+        job: 'docker image prune -af --filter "until=168h" > /dev/null 2>&1; docker buildx prune -f --keep-storage=2GB > /dev/null 2>&1'
+
   handlers:
     - name: Restart Docker
       ansible.builtin.systemd:
