@@ -183,12 +183,22 @@ NEXTCLOUD_POD=$(kubectl get pods -n "$NS_FILES" -l app.kubernetes.io/name=nextcl
 if [ -z "$NEXTCLOUD_POD" ]; then
     print_warning "Nextcloud pod not found in $NS_FILES, skipping CalDAV token creation"
 else
-    # Ensure app password auth is enabled alongside OIDC
+    # Temporarily enable app password auth alongside OIDC (required for occ user:auth-tokens:add).
+    # CRITICAL: The restore to 0 MUST run no matter what — if allow_multiple_user_backends stays
+    # at 1, the readiness probe fails on ALL pods (oidc-health.php check), causing cluster-wide
+    # 503s. Use a trap to guarantee restore even if the script exits early (set -e / pipefail).
+    _restore_oidc_only() {
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+            php occ config:app:set --type=string --value=0 user_oidc allow_multiple_user_backends
+        print_status "Restored OIDC-only login (allow_multiple_user_backends=0)"
+    }
+    trap _restore_oidc_only EXIT
+
     kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-        php occ config:app:set --type=string --value=1 user_oidc allow_multiple_user_backends 2>/dev/null || true
+        php occ config:app:set --type=string --value=1 user_oidc allow_multiple_user_backends
+    print_status "Temporarily enabled app password auth (allow_multiple_user_backends=1)"
 
     # Ensure admin password matches K8s secret (may drift after Helm upgrades)
-    # Pass password via env flag to avoid shell interpolation in process args
     kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
         env "OC_PASS=${NEXTCLOUD_ADMIN_PASSWORD}" php occ user:resetpassword --password-from-env admin 2>/dev/null || true
 
@@ -202,13 +212,14 @@ else
     TOKEN_COUNT=0
     while IFS= read -r user_email; do
         [ -z "$user_email" ] && continue
-        # Create new app password (pipe empty string to skip interactive password prompt)
-        # Output format: "app password:\n<token>" — password is on the line after the label
+        # Create new app password (pipe empty string to skip interactive password prompt).
+        # Output format: "app password:\n<token>" — password is on the line after the label.
+        # The || true prevents set -e from killing the script if a user doesn't exist or
+        # the command produces unexpected output (grep exit 1 + pipefail would be fatal).
         APP_PASS=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
             sh -c "echo '' | php occ user:auth-tokens:add '$user_email'" 2>/dev/null \
-            | grep -A1 "app password:" | tail -1 | tr -d '[:space:]')
+            | grep -A1 "app password:" | tail -1 | tr -d '[:space:]' || true)
         if [ -n "$APP_PASS" ]; then
-            # Build JSON incrementally using jq
             CALDAV_TOKENS=$(echo "$CALDAV_TOKENS" | jq --arg k "$user_email" --arg v "$APP_PASS" '. + {($k): $v}')
             TOKEN_COUNT=$((TOKEN_COUNT + 1))
         else
@@ -223,10 +234,9 @@ else
         --dry-run=client -o yaml | kubectl apply -f -
     print_success "CalDAV app passwords created for $TOKEN_COUNT user(s)"
 
-    # Restore OIDC-only login (undo the temporary enable from above)
-    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-        php occ config:app:set --type=string --value=0 user_oidc allow_multiple_user_backends 2>/dev/null || true
-    print_status "Restored OIDC-only login (allow_multiple_user_backends=0)"
+    # Restore now (trap is belt-and-suspenders for abnormal exit)
+    _restore_oidc_only
+    trap - EXIT
 fi
 
 # =============================================================================
