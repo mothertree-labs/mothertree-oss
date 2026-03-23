@@ -167,6 +167,16 @@ source "${REPO_ROOT}/scripts/lib/config.sh"
 mt_load_tenant_config
 ```
 
+## Conditional Restart System (mt_apply / mt_restart_if_changed)
+
+Deploy scripts use `mt_apply` (wraps `kubectl apply`, tracks "configured"/"created" output) and `mt_restart_if_changed` (only does `kubectl rollout restart` when changes were detected) to avoid restarting pods unnecessarily during deploys. This prevents disrupting active Jitsi calls, document editing sessions, and user login sessions.
+
+**Per-component tracking**: Jitsi and Admin Portal use separate trackers for different components. For example, a web-config change won't restart Prosody, and an admin-portal image change won't restart Redis. The tracking is scoped via `mt_reset_change_tracker` calls between component groups, with dependency flags like `_jitsi_secrets_changed` carried forward.
+
+**Debugging deploy issues**: If a service isn't picking up new config after a deploy, the conditional restart system may be the cause. The `mt_apply` wrapper detects changes by grepping kubectl output for "configured"/"created" — if `kubectl apply` reports "unchanged" but the pod needs restarting (e.g., a Secret's data changed but its metadata didn't), the restart will be skipped. To force a restart, run `kubectl rollout restart <resource> -n <namespace>` manually.
+
+**When modifying deploy scripts**: If you add a new ConfigMap or Secret that a pod depends on, make sure its `kubectl apply` is wrapped with `mt_apply` so changes are tracked. If you add it with plain `kubectl apply`, config changes won't trigger a pod restart.
+
 ## Key Env Vars (set by config.sh)
 
 `MT_ENV`, `MT_TENANT`, `KUBECONFIG`, `NS_MATRIX`, `NS_FILES`, `NS_INGRESS`, `NS_AUTH`, `NS_DB`, `NS_MONITORING`, `MATRIX_HOST`, `JITSI_HOST`, `FILES_HOST`, `AUTH_HOST`, `TENANT_DOMAIN`, `TENANT_ENV_DNS_LABEL`, `INFRA_DOMAIN`, `PG_HOST`, `S3_CLUSTER`, `RELEASE_VERSION`
