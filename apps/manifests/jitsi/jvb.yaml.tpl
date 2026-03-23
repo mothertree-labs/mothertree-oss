@@ -11,7 +11,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: jitsi-jvb-node-reader
+  name: jitsi-jvb-node-reader-${NS_JITSI}
   labels:
     app: jitsi-jvb
 rules:
@@ -26,13 +26,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: jitsi-jvb-node-reader
+  name: jitsi-jvb-node-reader-${NS_JITSI}
   labels:
     app: jitsi-jvb
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: jitsi-jvb-node-reader
+  name: jitsi-jvb-node-reader-${NS_JITSI}
 subjects:
 - kind: ServiceAccount
   name: jitsi-jvb

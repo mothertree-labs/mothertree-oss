@@ -163,7 +163,11 @@ _prosody_restarted="$_mt_deploy_changed"
 
 # Apply JVB — K8s handles rolling update (with graceful drain) if spec changed
 # JVB uses specific variable substitution to preserve shell variables in init container scripts
+# NS_JITSI is included for tenant-specific ClusterRole/ClusterRoleBinding names (avoids multi-tenant RBAC collision)
 envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+# Clean up old non-namespaced RBAC resources (replaced by tenant-specific names)
+kubectl delete clusterrole jitsi-jvb-node-reader --ignore-not-found >/dev/null 2>&1
+kubectl delete clusterrolebinding jitsi-jvb-node-reader --ignore-not-found >/dev/null 2>&1
 
 # Apply Jicofo — restart if secrets changed, Prosody restarted, or Jicofo spec changed
 mt_reset_change_tracker
