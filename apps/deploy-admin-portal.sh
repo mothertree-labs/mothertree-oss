@@ -46,9 +46,6 @@ mt_deploy_start "deploy-admin-portal"
 
 mt_require_commands kubectl envsubst
 
-# Track config changes to avoid restarting pods unnecessarily
-mt_reset_change_tracker
-
 print_status "Deploying Admin Portal for environment: $MT_ENV"
 print_status "Tenant: $TENANT"
 print_status "Admin namespace: $NS_ADMIN"
@@ -159,23 +156,35 @@ print_status "Release version: $RELEASE_VERSION"
 # =============================================================================
 print_status "Deploying admin portal manifests..."
 
-# Apply secrets FIRST
+# Track secrets separately — Redis only needs restart if secrets or its own manifest changed.
+# A new admin-portal image tag should NOT restart Redis (would wipe all sessions).
+mt_reset_change_tracker
 mt_apply kubectl apply -n "$NS_ADMIN" -f <(envsubst < "$REPO_ROOT/apps/manifests/admin-portal/secrets.yaml.tpl")
+_secrets_changed="$_mt_deploy_changed"
 
-# Deploy Redis for session storage
+# Deploy Redis — restart only if secrets or Redis manifest changed
+mt_reset_change_tracker
+[[ "$_secrets_changed" == "true" ]] && _mt_deploy_changed=true
 print_status "Deploying Redis for session storage to $NS_ADMIN namespace..."
 mt_apply kubectl apply -n "$NS_ADMIN" -f "$REPO_ROOT/apps/manifests/admin-portal/redis.yaml"
 kubectl wait --for=condition=available deployment/redis -n "$NS_ADMIN" --timeout=60s || {
   print_warning "Redis may not be fully ready yet"
 }
+if mt_has_changes; then
+    print_status "Restarting Redis to pick up secret/config changes..."
+    kubectl rollout restart deployment/redis -n "$NS_ADMIN"
+    kubectl rollout status deployment/redis -n "$NS_ADMIN" --timeout=60s || {
+      print_warning "Redis may not be fully ready yet"
+    }
+else
+    print_status "No Redis config changes detected, skipping Redis restart (sessions preserved)"
+fi
 
-# Apply service
+# Deploy admin-portal — restart if secrets, deployment spec, service, or ingress changed
+mt_reset_change_tracker
+[[ "$_secrets_changed" == "true" ]] && _mt_deploy_changed=true
 mt_apply kubectl apply -n "$NS_ADMIN" -f "$REPO_ROOT/apps/manifests/admin-portal/service.yaml"
-
-# Apply ingress
 mt_apply kubectl apply -n "$NS_ADMIN" -f <(envsubst < "$REPO_ROOT/apps/manifests/admin-portal/ingress.yaml.tpl")
-
-# Apply deployment
 mt_apply kubectl apply -n "$NS_ADMIN" -f <(envsubst < "$REPO_ROOT/apps/manifests/admin-portal/deployment.yaml.tpl")
 
 # Deploy HPA for admin-portal auto-scaling (only if min != max replicas)
@@ -187,22 +196,12 @@ else
   print_status "Admin Portal: fixed replicas ($ADMIN_PORTAL_MIN_REPLICAS), HPA removed"
 fi
 
-# Restart ALL secret consumers together to ensure password consistency.
+mt_restart_if_changed deployment/admin-portal -n "$NS_ADMIN"
 if mt_has_changes; then
-    print_status "Restarting Redis and Admin Portal to pick up secrets..."
-    kubectl rollout restart deployment/redis -n "$NS_ADMIN"
-    kubectl rollout status deployment/redis -n "$NS_ADMIN" --timeout=60s || {
-      print_warning "Redis may not be fully ready yet"
-    }
-    kubectl rollout restart deployment/admin-portal -n "$NS_ADMIN"
-
-    # Wait for deployment to be ready
     print_status "Waiting for Admin Portal deployment..."
     kubectl rollout status deployment/admin-portal -n "$NS_ADMIN" --timeout=120s || {
       print_warning "Admin Portal deployment may not be fully ready"
     }
-else
-    print_status "No config changes detected, skipping restart of deployment/redis deployment/admin-portal"
 fi
 
 print_status "Admin Portal deployed to https://$ADMIN_HOST"
