@@ -9,7 +9,7 @@
     "test": "jest --forceExit --detectOpenHandles"
   },
   "devDependencies": {
-    "@tailwindcss/cli": "^4.2.1",
+    "@tailwindcss/cli": "^4.2.2",
     "jest": "^30.3.0",
     "nock": "^14.0.11",
     "supertest": "^7.2.2"
