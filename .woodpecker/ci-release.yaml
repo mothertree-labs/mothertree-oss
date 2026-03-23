@@ -26,8 +26,6 @@ clone:
 steps:
   - name: release-tenant
     image: bash
-    when:
-      - event: pull_request
     environment:
       CI: "true"
       CI_VALKEY_PASSWORD:

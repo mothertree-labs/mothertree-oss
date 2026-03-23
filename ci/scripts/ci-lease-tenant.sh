@@ -22,63 +22,63 @@ _CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
 vcli() { $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
 
 # ── Soft lease for main merges ─────────────────────────────────
-# On main merges, e2e shards still run ci-resolve-tenant.sh which needs
-# the reverse-lookup key to exist. Set pool1 as the default without
-# acquiring a real lease (no deploy or tests run against dev on main).
+# On main merges, e2e shards still run against the default pool without
+# acquiring a real lease. We set pool1 as the default and still create
+# test users so E2E tests can authenticate.
 if [[ "${CI_PIPELINE_EVENT:-}" != "pull_request" ]]; then
+  LEASED_POOL="pool1"
   echo "--- CI Tenant Lease (pipeline #${CI_PIPELINE_NUMBER})"
-  echo "Main merge — setting pool1 as default (no lease acquired)"
-  vcli SET "ci-build-${CI_PIPELINE_NUMBER}" "pool1" EX 300 > /dev/null
-  echo "Reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → pool1 (TTL: 300s)"
-  exit 0
-fi
+  echo "Main merge — using ${LEASED_POOL} as default (no lease acquired)"
+  vcli SET "ci-build-${CI_PIPELINE_NUMBER}" "$LEASED_POOL" EX 300 > /dev/null
+  echo "Reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → ${LEASED_POOL} (TTL: 300s)"
+else
+  LEASE_TTL=600  # 10 minutes (renewed by ci-deploy.sh and e2e shards)
+  RETRY_INTERVAL=60
+  MAX_WAIT=3600  # 1 hour — prod deploys on other slots can take 20-30 min
 
-LEASE_TTL=600  # 10 minutes (renewed by ci-deploy.sh and e2e shards)
-RETRY_INTERVAL=60
-MAX_WAIT=3600  # 1 hour — prod deploys on other slots can take 20-30 min
+  # ── Pool slots (add new slots here when onboarding tenants) ──────
+  POOLS=(pool1 pool2)
 
-# ── Pool slots (add new slots here when onboarding tenants) ──────
-POOLS=(pool1 pool2)
+  echo "--- CI Tenant Lease (pipeline #${CI_PIPELINE_NUMBER})"
+  echo "Pool slots: ${POOLS[*]} | TTL: ${LEASE_TTL}s"
 
-echo "--- CI Tenant Lease (pipeline #${CI_PIPELINE_NUMBER})"
-echo "Pool slots: ${POOLS[*]} | TTL: ${LEASE_TTL}s"
+  # ── Acquire lease ────────────────────────────────────────────────
+  LEASED_POOL=""
+  ELAPSED=0
 
-# ── Acquire lease ────────────────────────────────────────────────
-LEASED_POOL=""
-ELAPSED=0
+  while [[ -z "$LEASED_POOL" ]]; do
+    # Shuffle pool order so concurrent pipelines don't all contend on slot 1
+    mapfile -t SHUFFLED < <(printf '%s\n' "${POOLS[@]}" | sort -R)
+    for pool in "${SHUFFLED[@]}"; do
+      KEY="ci-lease-${pool}"
+      # SET NX EX: atomic "create if not exists" with TTL
+      RESULT=$(vcli SET "$KEY" "$CI_PIPELINE_NUMBER" NX EX "$LEASE_TTL" 2>/dev/null || true)
+      if [[ "$RESULT" == "OK" ]]; then
+        LEASED_POOL="$pool"
+        echo "Leased pool slot: ${pool}"
+        break
+      else
+        HOLDER=$(vcli GET "$KEY" 2>/dev/null || echo "unknown")
+        echo "  ${pool}: occupied by pipeline #${HOLDER}"
+      fi
+    done
 
-while [[ -z "$LEASED_POOL" ]]; do
-  # Shuffle pool order so concurrent pipelines don't all contend on slot 1
-  mapfile -t SHUFFLED < <(printf '%s\n' "${POOLS[@]}" | sort -R)
-  for pool in "${SHUFFLED[@]}"; do
-    KEY="ci-lease-${pool}"
-    # SET NX EX: atomic "create if not exists" with TTL
-    RESULT=$(vcli SET "$KEY" "$CI_PIPELINE_NUMBER" NX EX "$LEASE_TTL" 2>/dev/null || true)
-    if [[ "$RESULT" == "OK" ]]; then
-      LEASED_POOL="$pool"
-      echo "Leased pool slot: ${pool}"
-      break
-    else
-      HOLDER=$(vcli GET "$KEY" 2>/dev/null || echo "unknown")
-      echo "  ${pool}: occupied by pipeline #${HOLDER}"
+    if [[ -z "$LEASED_POOL" ]]; then
+      if (( ELAPSED >= MAX_WAIT )); then
+        echo "ERROR: Could not lease any pool slot after ${MAX_WAIT}s — all occupied"
+        exit 1
+      fi
+      echo "All slots occupied. Retrying in ${RETRY_INTERVAL}s... (${ELAPSED}/${MAX_WAIT}s)"
+      sleep "$RETRY_INTERVAL"
+      ELAPSED=$(( ELAPSED + RETRY_INTERVAL ))
     fi
   done
 
-  if [[ -z "$LEASED_POOL" ]]; then
-    if (( ELAPSED >= MAX_WAIT )); then
-      echo "ERROR: Could not lease any pool slot after ${MAX_WAIT}s — all occupied"
-      exit 1
-    fi
-    echo "All slots occupied. Retrying in ${RETRY_INTERVAL}s... (${ELAPSED}/${MAX_WAIT}s)"
-    sleep "$RETRY_INTERVAL"
-    ELAPSED=$(( ELAPSED + RETRY_INTERVAL ))
-  fi
-done
+  # Write reverse-lookup key so downstream steps can find their pool slot
+  vcli SET "ci-build-${CI_PIPELINE_NUMBER}" "$LEASED_POOL" EX "$LEASE_TTL" > /dev/null
 
-# Write reverse-lookup key so downstream steps can find their pool slot
-vcli SET "ci-build-${CI_PIPELINE_NUMBER}" "$LEASED_POOL" EX "$LEASE_TTL" > /dev/null
-
-echo "Reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → ${LEASED_POOL}"
+  echo "Reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → ${LEASED_POOL}"
+fi
 
 # ── Resolve pool-specific env vars ───────────────────────────────
 POOL_KEY=$(echo "$LEASED_POOL" | tr '[:lower:]-' '[:upper:]_')
@@ -249,8 +249,7 @@ for user_spec in "${FIXED_USERS[@]}"; do
 done
 
 echo ""
-echo "Tenant lease acquired and test users created."
+echo "Test users created."
 echo "  Pool slot: ${LEASED_POOL}"
 echo "  Tenant: ${E2E_TENANT:-unknown}"
 echo "  Pipeline: ${CI_PIPELINE_NUMBER}"
-echo "  Lease TTL: ${LEASE_TTL}s"
