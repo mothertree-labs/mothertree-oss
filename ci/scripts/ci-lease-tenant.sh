@@ -21,6 +21,18 @@ _CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
 # shellcheck disable=SC2086
 vcli() { $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
 
+# ── Soft lease for main merges ─────────────────────────────────
+# On main merges, e2e shards still run ci-resolve-tenant.sh which needs
+# the reverse-lookup key to exist. Set pool1 as the default without
+# acquiring a real lease (no deploy or tests run against dev on main).
+if [[ "${CI_PIPELINE_EVENT:-}" != "pull_request" ]]; then
+  echo "--- CI Tenant Lease (pipeline #${CI_PIPELINE_NUMBER})"
+  echo "Main merge — setting pool1 as default (no lease acquired)"
+  vcli SET "ci-build-${CI_PIPELINE_NUMBER}" "pool1" EX 300 > /dev/null
+  echo "Reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → pool1 (TTL: 300s)"
+  exit 0
+fi
+
 LEASE_TTL=600  # 10 minutes (renewed by ci-deploy.sh and e2e shards)
 RETRY_INTERVAL=60
 MAX_WAIT=3600  # 1 hour — prod deploys on other slots can take 20-30 min
