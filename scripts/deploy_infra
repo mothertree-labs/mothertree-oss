@@ -469,8 +469,11 @@ helm upgrade --install docs-postgresql oci://registry-1.docker.io/bitnamicharts/
 print_status "Waiting for PostgreSQL to be ready..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql -n "$NS_DB" --timeout=300s
 
-# Create Keycloak theme ConfigMap BEFORE deploying Keycloak
+# Create Keycloak theme ConfigMap BEFORE deploying Keycloak.
+# Track whether the ConfigMap actually changed so we can conditionally restart
+# Keycloak below — unnecessary restarts destroy all user sessions (Infinispan).
 print_status "Creating Keycloak theme ConfigMap..."
+mt_reset_change_tracker
 THEMES_DIR="$REPO_ROOT/apps/themes"
 if [ -d "$THEMES_DIR/platform" ]; then
   print_status "Packaging platform theme..."
@@ -481,7 +484,7 @@ if [ -d "$THEMES_DIR/platform" ]; then
 
   kubectl -n "$NS_AUTH" create configmap keycloak-platform-theme \
       --from-file=theme.tar.gz="$TMP_TAR" \
-      --dry-run=client -o yaml | kubectl apply -f -
+      --dry-run=client -o yaml | mt_apply kubectl apply -f -
   rm -f "$TMP_TAR"
   print_status "Platform theme ConfigMap created in namespace $NS_AUTH"
 else
@@ -523,11 +526,15 @@ pushd "$REPO_ROOT/apps" >/dev/null
   helmfile -e "$MT_ENV" -l name=keycloak sync --skip-deps
 popd >/dev/null
 
-# Restart Keycloak to pick up any theme ConfigMap changes.
+# Conditionally restart Keycloak only when theme ConfigMap actually changed.
 # The init container extracts the theme tar.gz on startup, so a restart is needed
-# when theme files change. This is safe — Keycloak handles graceful shutdown.
-print_status "Restarting Keycloak to pick up theme changes..."
-kubectl -n "$NS_AUTH" rollout restart statefulset/keycloak-keycloakx
+# when theme files change — but unnecessary restarts destroy all user sessions
+# (sessions live in Infinispan in-memory cache; persistent-user-sessions is not enabled).
+mt_restart_if_changed statefulset/keycloak-keycloakx -n "$NS_AUTH"
+
+# Always wait for rollout to complete — helmfile sync above may have triggered a
+# rolling update even if we didn't explicitly restart (e.g., chart value changes).
+# This returns immediately if no rollout is in progress.
 kubectl -n "$NS_AUTH" rollout status statefulset/keycloak-keycloakx --timeout=300s
 
 # Sync Keycloak admin password.

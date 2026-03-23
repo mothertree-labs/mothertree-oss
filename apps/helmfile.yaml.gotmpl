@@ -204,6 +204,20 @@ releases:
       - values/keycloak-codecentric.yaml
       - environments/{{ .Environment.Name }}/keycloak.yaml.gotmpl
     createNamespace: false  # Created by create_env
+    # Ensure Infinispan has time to replicate sessions to the new pod before the
+    # next pod in the rolling update is killed. Without this delay, user sessions
+    # can be lost during rolling restarts. KC 26+ supports persistent-user-sessions
+    # (DB-backed), but it's not enabled here — sessions live only in Infinispan.
+    jsonPatches:
+      - target:
+          group: apps
+          version: v1
+          kind: StatefulSet
+          name: keycloak-keycloakx
+        patch:
+          - op: add
+            path: /spec/minReadySeconds
+            value: 90
 
   # Collabora Online (per-tenant document editing server)
   # Stateless — processes documents in-memory via WOPI protocol with Nextcloud
