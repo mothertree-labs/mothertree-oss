@@ -164,7 +164,7 @@ _secrets_changed="$_mt_deploy_changed"
 
 # Deploy Redis — restart only if secrets or Redis manifest changed
 mt_reset_change_tracker
-[[ "$_secrets_changed" == "true" ]] && _mt_deploy_changed=true
+if [[ "$_secrets_changed" == "true" ]]; then _mt_deploy_changed=true; fi
 print_status "Deploying Redis for session storage to $NS_ADMIN namespace..."
 mt_apply kubectl apply -n "$NS_ADMIN" -f "$REPO_ROOT/apps/manifests/admin-portal/redis.yaml"
 kubectl wait --for=condition=available deployment/redis -n "$NS_ADMIN" --timeout=60s || {
@@ -182,7 +182,7 @@ fi
 
 # Deploy admin-portal — restart if secrets, deployment spec, service, or ingress changed
 mt_reset_change_tracker
-[[ "$_secrets_changed" == "true" ]] && _mt_deploy_changed=true
+if [[ "$_secrets_changed" == "true" ]]; then _mt_deploy_changed=true; fi
 mt_apply kubectl apply -n "$NS_ADMIN" -f "$REPO_ROOT/apps/manifests/admin-portal/service.yaml"
 mt_apply kubectl apply -n "$NS_ADMIN" -f <(envsubst < "$REPO_ROOT/apps/manifests/admin-portal/ingress.yaml.tpl")
 mt_apply kubectl apply -n "$NS_ADMIN" -f <(envsubst < "$REPO_ROOT/apps/manifests/admin-portal/deployment.yaml.tpl")

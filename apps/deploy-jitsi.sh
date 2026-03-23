@@ -150,7 +150,7 @@ envsubst < "$REPO_ROOT/apps/manifests/jitsi/web.yaml.tpl" | sed "s/namespace: ma
 
 # Apply Prosody — restart only if secrets or Prosody spec changed
 mt_reset_change_tracker
-[[ "$_jitsi_secrets_changed" == "true" ]] && _mt_deploy_changed=true
+if [[ "$_jitsi_secrets_changed" == "true" ]]; then _mt_deploy_changed=true; fi
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/apps/manifests/jitsi/prosody.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g")
 # StatefulSets with CrashLoopBackOff pods may not auto-restart on apply.
 mt_restart_if_changed statefulset/jitsi-prosody -n "$NS_JITSI"
@@ -167,7 +167,7 @@ envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_J
 
 # Apply Jicofo — restart if secrets changed, Prosody restarted, or Jicofo spec changed
 mt_reset_change_tracker
-[[ "$_jitsi_secrets_changed" == "true" ]] || [[ "$_prosody_restarted" == "true" ]] && _mt_deploy_changed=true
+if [[ "$_jitsi_secrets_changed" == "true" ]] || [[ "$_prosody_restarted" == "true" ]]; then _mt_deploy_changed=true; fi
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/apps/manifests/jitsi/jicofo.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g")
 
 # Restart Jicofo after Prosody so it rejoins the brewery MUC with a fresh XMPP connection.
