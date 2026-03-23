@@ -46,6 +46,9 @@ mt_deploy_start "deploy-roundcube"
 
 mt_require_commands kubectl envsubst
 
+# Track config changes to avoid restarting pods unnecessarily
+mt_reset_change_tracker
+
 # Override NS_MAIL for envsubst templates that use ${NS_MAIL} to mean
 # the tenant mail namespace (roundcube templates reference stalwart service there)
 export NS_MAIL="$NS_STALWART"
@@ -128,15 +131,15 @@ if [ -z "$PG_PASSWORD" ]; then
     exit 1
 fi
 
-kubectl create secret generic docs-postgresql \
+mt_apply kubectl apply -f <(kubectl create secret generic docs-postgresql \
     --namespace="$NS_WEBMAIL" \
     --from-literal=postgres-password="$(echo "$PG_PASSWORD" | base64 -d)" \
-    --dry-run=client -o yaml | kubectl apply -f -
+    --dry-run=client -o yaml)
 print_success "PostgreSQL admin secret copied"
 
 # Apply Roundcube secrets first (needed by db-init job)
 print_status "Applying Roundcube secrets..."
-cat <<EOF | kubectl apply -f -
+mt_apply kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
@@ -192,8 +195,8 @@ print_status "Applying Roundcube manifests..."
 # Apply main Roundcube manifest (Secret, ConfigMap, Deployment, Service).
 # Use explicit variable list to preserve PHP $config variables in the ConfigMap —
 # without it, envsubst would substitute $config with empty strings, breaking Roundcube.
-envsubst '${NS_WEBMAIL} ${NS_MAIL} ${AUTH_HOST} ${KEYCLOAK_REALM} ${KEYCLOAK_INTERNAL_URL} ${ROUNDCUBE_DES_KEY} ${TENANT_DISPLAY_NAME} ${ROUNDCUBE_DB_USER} ${ROUNDCUBE_DB_NAME} ${TENANT_NAME} ${ROUNDCUBE_OIDC_SECRET} ${ROUNDCUBE_DB_PASSWORD} ${ROUNDCUBE_MEMORY_REQUEST} ${ROUNDCUBE_MEMORY_LIMIT} ${ROUNDCUBE_CPU_REQUEST} ${CONFIG_CHECKSUM} ${FILES_HOST} ${ROUNDCUBE_MIN_REPLICAS} ${PG_HOST} ${ROUNDCUBE_IMAGE}' \
-    < "$REPO_ROOT/apps/manifests/roundcube/roundcube.yaml.tpl" | kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_WEBMAIL} ${NS_MAIL} ${AUTH_HOST} ${KEYCLOAK_REALM} ${KEYCLOAK_INTERNAL_URL} ${ROUNDCUBE_DES_KEY} ${TENANT_DISPLAY_NAME} ${ROUNDCUBE_DB_USER} ${ROUNDCUBE_DB_NAME} ${TENANT_NAME} ${ROUNDCUBE_OIDC_SECRET} ${ROUNDCUBE_DB_PASSWORD} ${ROUNDCUBE_MEMORY_REQUEST} ${ROUNDCUBE_MEMORY_LIMIT} ${ROUNDCUBE_CPU_REQUEST} ${CONFIG_CHECKSUM} ${FILES_HOST} ${ROUNDCUBE_MIN_REPLICAS} ${PG_HOST} ${ROUNDCUBE_IMAGE}' \
+    < "$REPO_ROOT/apps/manifests/roundcube/roundcube.yaml.tpl")
 print_success "Roundcube Deployment and Service applied"
 
 # Deploy HorizontalPodAutoscaler (HPA) for auto-scaling (only if min != max replicas)
@@ -207,20 +210,21 @@ else
 fi
 
 # Apply ingress for webmail
-envsubst < "$REPO_ROOT/apps/manifests/roundcube/ingress.yaml.tpl" | kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/apps/manifests/roundcube/ingress.yaml.tpl")
 print_success "Ingress applied for $WEBMAIL_HOST"
 
 # Restart deployment to pick up config changes
-print_status "Restarting Roundcube deployment to apply config changes..."
-kubectl rollout restart deployment/roundcube -n "$NS_WEBMAIL"
+mt_restart_if_changed deployment/roundcube -n "$NS_WEBMAIL"
 
 # Wait for Deployment to be ready
-print_status "Waiting for Roundcube Deployment to be ready..."
-if kubectl rollout status deployment/roundcube -n "$NS_WEBMAIL" --timeout=180s; then
-    print_success "Roundcube Deployment is ready"
-else
-    print_warning "Roundcube Deployment may not be fully ready"
-    print_status "Check logs with: kubectl logs -n $NS_WEBMAIL -l app=roundcube"
+if mt_has_changes; then
+    print_status "Waiting for Roundcube Deployment to be ready..."
+    if kubectl rollout status deployment/roundcube -n "$NS_WEBMAIL" --timeout=180s; then
+        print_success "Roundcube Deployment is ready"
+    else
+        print_warning "Roundcube Deployment may not be fully ready"
+        print_status "Check logs with: kubectl logs -n $NS_WEBMAIL -l app=roundcube"
+    fi
 fi
 
 

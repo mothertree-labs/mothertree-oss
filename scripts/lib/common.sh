@@ -271,3 +271,41 @@ read_k8s_secret() {
     local ns="$1" secret="$2" key="$3"
     kubectl get secret "$secret" -n "$ns" -o jsonpath="{.data.${key}}" 2>/dev/null | base64 -d 2>/dev/null || echo ""
 }
+
+# --- Conditional restart: only restart pods when config actually changed ---
+# Avoids disrupting in-flight work (video calls, editing sessions, active
+# logins) during routine deploys where nothing has actually changed.
+#
+# Usage:
+#   mt_reset_change_tracker            # call once at top of deploy script
+#   mt_apply kubectl apply -f foo.yaml # replaces bare kubectl apply
+#   mt_apply kubectl apply -f <(envsubst < foo.tpl)  # works with process substitution
+#   mt_restart_if_changed deployment/foo -n "$NS"     # replaces kubectl rollout restart
+_mt_deploy_changed=false
+
+mt_reset_change_tracker() {
+    _mt_deploy_changed=false
+}
+
+mt_apply() {
+    local output rc=0
+    output=$("$@" 2>&1) || rc=$?
+    printf '%s\n' "$output"
+    if printf '%s\n' "$output" | grep -qE ' (configured|created)$'; then
+        _mt_deploy_changed=true
+    fi
+    return $rc
+}
+
+mt_has_changes() {
+    [[ "$_mt_deploy_changed" == "true" ]]
+}
+
+mt_restart_if_changed() {
+    if mt_has_changes; then
+        print_status "Config changes detected, restarting $*..."
+        kubectl rollout restart "$@"
+    else
+        print_status "No config changes detected, skipping restart of $*"
+    fi
+}

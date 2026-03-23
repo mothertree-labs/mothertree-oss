@@ -39,6 +39,9 @@ mt_deploy_start "deploy-docs"
 
 mt_require_commands kubectl helm envsubst openssl
 
+# Track config changes to avoid restarting pods unnecessarily
+mt_reset_change_tracker
+
 print_status "Starting LaSuite Docs deployment..."
 print_status "Database namespace: $NS_DB"
 print_status "Docs app namespace: $NS_DOCS"
@@ -114,7 +117,7 @@ if [ -z "$Y_PROVIDER_API_KEY" ]; then
 fi
 
 # Create or update the docs-secrets secret
-kubectl create secret generic docs-secrets \
+mt_apply kubectl apply -f <(kubectl create secret generic docs-secrets \
   --from-literal=DJANGO_SECRET_KEY="$DJANGO_SECRET_KEY" \
   --from-literal=DATABASE_PASSWORD="$DB_PASSWORD" \
   --from-literal=AWS_S3_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -123,15 +126,15 @@ kubectl create secret generic docs-secrets \
   --from-literal=COLLABORATION_SERVER_SECRET="$COLLABORATION_SERVER_SECRET" \
   --from-literal=Y_PROVIDER_API_KEY="$Y_PROVIDER_API_KEY" \
   -n "$NS_DOCS" \
-  --dry-run=client -o yaml | kubectl apply -f -
+  --dry-run=client -o yaml)
 
 print_success "Secrets configured successfully"
 
 # Step 5: Deploy simple Redis service to tenant docs namespace
 # Note: Redis for docs is tenant-specific for data isolation
 print_status "Deploying Redis service for backend to namespace $NS_DOCS..."
-cat "$REPO_ROOT/docs/redis-deployment.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
-cat "$REPO_ROOT/docs/redis-service.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/redis-deployment.yaml")
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/redis-service.yaml")
 poll_pod_ready "$NS_DOCS" "io.kompose.service=redis" 60 5 || true
 print_success "Redis service deployed to namespace $NS_DOCS"
 
@@ -141,61 +144,68 @@ print_status "Using environment: DOCS_HOST=$DOCS_HOST, AUTH_HOST=$AUTH_HOST"
 print_status "Database user: $TENANT_DB_USER, Database: $DOCS_DB_NAME"
 
 # Apply manifests with namespace substitution
-cat "$REPO_ROOT/docs/storage-backends-configmap.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
-cat "$REPO_ROOT/docs/save-status-configmap.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
-envsubst < "$REPO_ROOT/docs/env-d-yprovider-configmap.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
-envsubst < "$REPO_ROOT/docs/docs-config.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/storage-backends-configmap.yaml")
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/save-status-configmap.yaml")
+mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/env-d-yprovider-configmap.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
+mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/docs-config.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 
 # Create invitation patch ConfigMap (patches Docs email links to go through admin portal)
-kubectl -n "$NS_DOCS" create configmap docs-invitation-patch \
+mt_apply kubectl apply -f <(kubectl -n "$NS_DOCS" create configmap docs-invitation-patch \
   --from-file=patch_invitation.py="$REPO_ROOT/docs/patch_invitation.py" \
-  --dry-run=client -o yaml | kubectl apply -f -
+  --dry-run=client -o yaml)
 
 # Update backend deployment to reference PostgreSQL in db namespace
 # Uses envsubst for replica count from tenant config
-envsubst '${DOCS_BACKEND_MIN_REPLICAS} ${DOCS_GUNICORN_WORKERS}' < "$REPO_ROOT/docs/backend-deployment.yaml" | \
+mt_apply kubectl apply -f <(envsubst '${DOCS_BACKEND_MIN_REPLICAS} ${DOCS_GUNICORN_WORKERS}' < "$REPO_ROOT/docs/backend-deployment.yaml" | \
   sed "s/namespace: docs/namespace: $NS_DOCS/g" | \
-  sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g" | \
-  kubectl apply -f -
-cat "$REPO_ROOT/docs/backend-service.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
+  sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g")
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/backend-service.yaml")
 
 # Deploy frontend with environment-specific configuration (includes replica count)
-envsubst < "$REPO_ROOT/docs/frontend-deployment.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
-cat "$REPO_ROOT/docs/frontend-service.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
-envsubst < "$REPO_ROOT/docs/ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/frontend-deployment.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/frontend-service.yaml")
+mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 # Static asset cache ingress (/_next/static/ with immutable cache headers)
-envsubst < "$REPO_ROOT/docs/static-cache-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/static-cache-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 # Y-Provider ingress with document ID-based consistent hashing for WebSocket scaling
 # Use explicit variable list to preserve nginx $request_uri variable
-envsubst '${DOCS_HOST} ${TENANT_NAME}' < "$REPO_ROOT/docs/yprovider-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${DOCS_HOST} ${TENANT_NAME}' < "$REPO_ROOT/docs/yprovider-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 print_success "Docs manifests applied successfully to namespace $NS_DOCS"
 
 # Step 7: Restart deployments to pick up ConfigMap changes, then wait for ready (PARALLEL)
-print_status "Restarting backend and frontend to pick up ConfigMap changes..."
-kubectl -n "$NS_DOCS" rollout restart deployment/backend deployment/frontend
-print_status "Waiting for Docs backend and frontend to be ready (parallel)..."
-# Wait for both in parallel
-kubectl -n "$NS_DOCS" rollout status deployment/backend --timeout=300s &
-BACKEND_PID=$!
-kubectl -n "$NS_DOCS" rollout status deployment/frontend --timeout=300s &
-FRONTEND_PID=$!
-wait $BACKEND_PID $FRONTEND_PID
-print_success "Docs backend and frontend are ready"
+if mt_has_changes; then
+    print_status "Restarting backend and frontend to pick up ConfigMap changes..."
+    kubectl -n "$NS_DOCS" rollout restart deployment/backend deployment/frontend
+    print_status "Waiting for Docs backend and frontend to be ready (parallel)..."
+    # Wait for both in parallel
+    kubectl -n "$NS_DOCS" rollout status deployment/backend --timeout=300s &
+    BACKEND_PID=$!
+    kubectl -n "$NS_DOCS" rollout status deployment/frontend --timeout=300s &
+    FRONTEND_PID=$!
+    wait $BACKEND_PID $FRONTEND_PID
+    print_success "Docs backend and frontend are ready"
+else
+    print_status "No config changes detected, skipping restart of deployment/backend deployment/frontend"
+fi
 
 # Step 8: Deploy/Update y-provider (declarative)
 print_status "Applying y-provider deployment and service to namespace $NS_DOCS..."
-cat "$REPO_ROOT/docs/health-sidecar-configmap.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/health-sidecar-configmap.yaml")
 # Uses envsubst for replica count from tenant config
-envsubst '${YPROVIDER_MIN_REPLICAS}' < "$REPO_ROOT/docs/y-provider-deployment.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
-cat "$REPO_ROOT/docs/y-provider-service.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${YPROVIDER_MIN_REPLICAS}' < "$REPO_ROOT/docs/y-provider-deployment.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/y-provider-service.yaml")
 # Restart to ensure ConfigMap changes are picked up (wait in background, check later)
-# Brief pause to avoid "restart already triggered within past second" race with backend/frontend restart
-sleep 2
-kubectl -n "$NS_DOCS" rollout restart deploy/docs-y-provider
-kubectl -n "$NS_DOCS" rollout status deploy/docs-y-provider --timeout=300s &
-YPROVIDER_PID=$!
-# Wait for y-provider rollout to complete
-wait $YPROVIDER_PID
+if mt_has_changes; then
+    # Brief pause to avoid "restart already triggered within past second" race with backend/frontend restart
+    sleep 2
+    kubectl -n "$NS_DOCS" rollout restart deploy/docs-y-provider
+    kubectl -n "$NS_DOCS" rollout status deploy/docs-y-provider --timeout=300s &
+    YPROVIDER_PID=$!
+    # Wait for y-provider rollout to complete
+    wait $YPROVIDER_PID
+else
+    print_status "No config changes detected, skipping restart of deploy/docs-y-provider"
+fi
 # Quick sanity: short endpoint check (non-fatal; kube liveness covers steady state)
 print_status "Checking y-provider service endpoints..."
 if kubectl -n "$NS_DOCS" get endpoints y-provider -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | grep -qE '[0-9]'; then

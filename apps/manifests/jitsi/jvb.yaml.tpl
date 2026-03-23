@@ -53,8 +53,13 @@ spec:
     matchLabels:
       app: jitsi-jvb
   strategy:
-    # Recreate strategy required when using hostPort to avoid port conflicts during rollout
-    type: Recreate
+    # RollingUpdate (was Recreate): allows graceful drain of in-flight calls.
+    # Pod anti-affinity ensures the surge pod lands on a different node,
+    # avoiding hostPort conflicts. Requires cluster to have a schedulable node.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   template:
     metadata:
       labels:
@@ -62,6 +67,7 @@ spec:
         component: jvb
     spec:
       serviceAccountName: jitsi-jvb
+      terminationGracePeriodSeconds: 3600
       priorityClassName: critical-service  # Evicted last during resource pressure
       # Pod anti-affinity: one JVB per tenant per node (prevents hostPort conflicts)
       affinity:
@@ -187,6 +193,23 @@ spec:
           export DOCKER_HOST_ADDRESS="$PUBLIC_IP"
           export JVB_ADVERTISE_IPS="$PUBLIC_IP"
           exec /init
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/bash
+              - -c
+              - |
+                # Signal JVB to stop accepting new conferences via its shutdown API.
+                # JVB will deregister from Jicofo and drain existing calls gracefully.
+                curl -sf -X POST http://localhost:8080/colibri/shutdown || true
+                # Wait for conferences to drain (JVB exits when the last one ends).
+                # K8s terminationGracePeriodSeconds (3600s) is the hard deadline.
+                while curl -sf http://localhost:8080/colibri/stats 2>/dev/null | python3 -c "import sys,json; c=json.load(sys.stdin).get('conferences',0); sys.exit(0 if c > 0 else 1)" 2>/dev/null; do
+                  echo "Waiting for $(curl -sf http://localhost:8080/colibri/stats 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('conferences',0))" 2>/dev/null || echo '?') conference(s) to end..."
+                  sleep 10
+                done
+                echo "All conferences drained, shutting down"
         volumeMounts:
         - name: shared-data
           mountPath: /shared
