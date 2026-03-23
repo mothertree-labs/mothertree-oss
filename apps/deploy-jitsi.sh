@@ -38,9 +38,6 @@ mt_deploy_start "deploy-jitsi"
 
 mt_require_commands kubectl envsubst openssl
 
-# Track config changes to avoid restarting pods unnecessarily
-mt_reset_change_tracker
-
 print_status "Deploying Jitsi Meet for environment: $MT_ENV"
 print_status "Tenant: $TENANT"
 print_status "Jitsi namespace: $NS_JITSI"
@@ -115,6 +112,9 @@ else
     JIBRI_RECORDER_PASSWORD=$(openssl rand -base64 24)
 fi
 
+# Track secrets separately — Prosody and Jicofo depend on jitsi-secrets,
+# but NOT on web ConfigMaps or adapter resources.
+mt_reset_change_tracker
 mt_apply kubectl apply -f <(kubectl create secret generic jitsi-secrets \
     --namespace="$NS_JITSI" \
     --from-literal=JICOFO_AUTH_PASSWORD="$JICOFO_AUTH_PASSWORD" \
@@ -127,26 +127,31 @@ mt_apply kubectl apply -f <(kubectl create secret generic jitsi-secrets \
     --from-literal=JWT_APP_SECRET="$JWT_APP_SECRET" \
     --from-literal=TURN_SHARED_SECRET="$TURN_SHARED_SECRET" \
     --dry-run=client -o yaml)
+_jitsi_secrets_changed="$_mt_deploy_changed"
 print_success "jitsi-secrets created/updated with strong passwords, JWT_APP_SECRET, and TURN_SHARED_SECRET"
 
 # Apply templated manifests with environment variables
 print_status "Applying templated Jitsi manifests..."
 
-# Apply Keycloak adapter ConfigMaps (non-templated) with namespace substitution
+# Apply web-related resources — these don't affect Prosody/Jicofo.
+# K8s handles rolling updates automatically when the deployment spec changes.
 print_status "Applying Keycloak adapter static files..."
-mt_apply kubectl apply -f <(sed "s/namespace: matrix/namespace: $NS_JITSI/g" "$REPO_ROOT/apps/manifests/jitsi/adapter-static-files.yaml")
+sed "s/namespace: matrix/namespace: $NS_JITSI/g" "$REPO_ROOT/apps/manifests/jitsi/adapter-static-files.yaml" | kubectl apply -f -
 
 print_status "Applying custom meet.conf template..."
-mt_apply kubectl apply -f <(sed "s/namespace: matrix/namespace: $NS_JITSI/g" "$REPO_ROOT/apps/manifests/jitsi/meet-conf-template.yaml")
+sed "s/namespace: matrix/namespace: $NS_JITSI/g" "$REPO_ROOT/apps/manifests/jitsi/meet-conf-template.yaml" | kubectl apply -f -
 
 # Apply Keycloak adapter deployment (templated) with namespace substitution
 print_status "Applying Keycloak adapter deployment..."
-mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/apps/manifests/jitsi/keycloak-adapter.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g")
+envsubst < "$REPO_ROOT/apps/manifests/jitsi/keycloak-adapter.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 
-# Apply services and deployments with namespace substitution
-mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/apps/manifests/jitsi/web.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g")
+# Apply web deployment — K8s handles rolling update if spec changed
+envsubst < "$REPO_ROOT/apps/manifests/jitsi/web.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+
+# Apply Prosody — restart only if secrets or Prosody spec changed
+mt_reset_change_tracker
+[[ "$_jitsi_secrets_changed" == "true" ]] && _mt_deploy_changed=true
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/apps/manifests/jitsi/prosody.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g")
-# Force StatefulSet rollout restart to ensure pods pick up spec changes.
 # StatefulSets with CrashLoopBackOff pods may not auto-restart on apply.
 mt_restart_if_changed statefulset/jitsi-prosody -n "$NS_JITSI"
 # Delete existing pod if stuck in CrashLoopBackOff so the controller creates a new one
@@ -154,8 +159,15 @@ if mt_has_changes && kubectl get pod jitsi-prosody-0 -n "$NS_JITSI" -o jsonpath=
     print_warning "Prosody pod stuck in CrashLoopBackOff — deleting to force recreation with new spec"
     kubectl delete pod jitsi-prosody-0 -n "$NS_JITSI" --grace-period=0 --force 2>/dev/null || true
 fi
+_prosody_restarted="$_mt_deploy_changed"
+
+# Apply JVB — K8s handles rolling update (with graceful drain) if spec changed
 # JVB uses specific variable substitution to preserve shell variables in init container scripts
-mt_apply kubectl apply -f <(envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g")
+envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+
+# Apply Jicofo — restart if secrets changed, Prosody restarted, or Jicofo spec changed
+mt_reset_change_tracker
+[[ "$_jitsi_secrets_changed" == "true" ]] || [[ "$_prosody_restarted" == "true" ]] && _mt_deploy_changed=true
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/apps/manifests/jitsi/jicofo.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g")
 
 # Restart Jicofo after Prosody so it rejoins the brewery MUC with a fresh XMPP connection.
@@ -164,7 +176,7 @@ mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/apps/manifests/jitsi/jicofo.y
 if mt_has_changes; then
     print_status "Waiting for Prosody to be ready before restarting Jicofo..."
     kubectl wait --for=condition=ready pod/jitsi-prosody-0 -n "$NS_JITSI" --timeout=60s 2>/dev/null || true
-    mt_restart_if_changed deployment/jitsi-jicofo -n "$NS_JITSI"
+    kubectl rollout restart deployment/jitsi-jicofo -n "$NS_JITSI"
     kubectl rollout status deployment/jitsi-jicofo -n "$NS_JITSI" --timeout=60s 2>/dev/null || true
 
     # Wait for Jicofo to discover JVB bridges (up to 30s)
@@ -186,8 +198,9 @@ else
     print_status "No config changes detected, skipping Jicofo restart and bridge discovery wait"
 fi
 
-# Apply templated ConfigMap
-mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/apps/manifests/jitsi/web-config.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g")
+# Apply web ConfigMap — K8s does NOT auto-reload ConfigMaps in running pods,
+# but web pods will pick it up on their next restart (e.g., from a spec change above).
+envsubst < "$REPO_ROOT/apps/manifests/jitsi/web-config.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 
 # Apply templated Ingress
 envsubst < "$REPO_ROOT/apps/manifests/jitsi/ingress.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
