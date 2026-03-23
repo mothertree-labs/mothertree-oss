@@ -152,7 +152,11 @@ if kubectl get pod jitsi-prosody-0 -n "$NS_JITSI" -o jsonpath='{.status.containe
     kubectl delete pod jitsi-prosody-0 -n "$NS_JITSI" --grace-period=0 --force 2>/dev/null || true
 fi
 # JVB uses specific variable substitution to preserve shell variables in init container scripts
-envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+# NS_JITSI is included for tenant-specific ClusterRole/ClusterRoleBinding names (avoids multi-tenant RBAC collision)
+envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+# Clean up old non-namespaced RBAC resources (replaced by tenant-specific names)
+kubectl delete clusterrole jitsi-jvb-node-reader --ignore-not-found >/dev/null 2>&1
+kubectl delete clusterrolebinding jitsi-jvb-node-reader --ignore-not-found >/dev/null 2>&1
 envsubst < "$REPO_ROOT/apps/manifests/jitsi/jicofo.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 
 # Restart Jicofo after Prosody so it rejoins the brewery MUC with a fresh XMPP connection.
