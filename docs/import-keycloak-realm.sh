@@ -1075,71 +1075,59 @@ else
     print_status "Skipping admin-portal client configuration (OIDC secret not configured)"
 fi
 
-# Move offline_access from optional to default client scope for long-lived session apps
-# Offline tokens survive SSO session expiry (30-day lifetime vs 10h SSO session max)
-# Uses client object PUT (GET+modify+PUT) because the dedicated scope assignment endpoint
-# (PUT .../default-client-scopes/{scopeId}) is unreliable in Keycloak 26 — returns 204
-# but doesn't always persist. Updating defaultClientScopes in the client object is reliable.
-print_status "Configuring offline_access as default scope for long-lived session clients..."
+# Ensure offline_access is an optional client scope for apps that request it
+# Roundcube and Nextcloud explicitly request offline_access in their OAuth scope parameter,
+# so the Keycloak client must have it as an allowed scope (default or optional).
+# The client creation JSON includes offline_access in defaultClientScopes, but Keycloak's
+# REST API ignores that field during POST /clients — new clients inherit realm defaults
+# instead. Use the dedicated optional-client-scopes endpoint which is reliable and idempotent.
+refresh_token
+print_status "Ensuring offline_access is an allowed scope for OAuth clients..."
 
-# Clients that need offline tokens for long-lived sessions
-for CLIENT_NAME in nextcloud-app docs-app roundcube; do
-    CLIENT_UUID=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
-      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients?clientId=$CLIENT_NAME" \
-      -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.[0].id // empty')
+# Look up the realm-level offline_access scope ID (needed for the scope assignment endpoint)
+OFFLINE_ACCESS_SCOPE_ID=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
+  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/client-scopes" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.[] | select(.name == "offline_access") | .id // empty')
 
-    if [ -z "$CLIENT_UUID" ] || [ "$CLIENT_UUID" = "null" ]; then
-        print_status "Client $CLIENT_NAME not found, skipping offline_access scope update"
-        continue
-    fi
+if [ -z "$OFFLINE_ACCESS_SCOPE_ID" ]; then
+    print_warning "offline_access scope not found at realm level — skipping scope assignment"
+else
+    # Clients that request offline_access in their OAuth scope parameter
+    for CLIENT_NAME in nextcloud-app docs-app roundcube; do
+        CLIENT_UUID=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
+          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients?clientId=$CLIENT_NAME" \
+          -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.[0].id // empty')
 
-    # Get current client config, add offline_access to default scopes, remove from optional
-    CLIENT_CONFIG=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID")
-
-    # Check if already in default scopes
-    HAS_OFFLINE=$(echo "$CLIENT_CONFIG" | jq -r '.defaultClientScopes | index("offline_access") // empty')
-    if [ -n "$HAS_OFFLINE" ]; then
-        print_success "$CLIENT_NAME: offline_access already in default scopes"
-        continue
-    fi
-
-    # Add to default, remove from optional via client object PUT
-    # IMPORTANT: delete the secret field — GET returns a hashed/placeholder value,
-    # and PUTting it back would overwrite the real secret with the hash
-    UPDATED_CONFIG=$(echo "$CLIENT_CONFIG" | jq 'del(.secret) | .defaultClientScopes += ["offline_access"] | .optionalClientScopes -= ["offline_access"]')
-    SCOPE_UPDATE_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /dev/null -X PUT \
-      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID" \
-      -H "Authorization: Bearer $ACCESS_TOKEN" \
-      -H "Content-Type: application/json" \
-      -d "$UPDATED_CONFIG")
-
-    if [ "$SCOPE_UPDATE_RESPONSE" = "204" ]; then
-        # Verify it actually persisted (Keycloak can return 204 without persisting)
-        VERIFY=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
-          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID/default-client-scopes" \
-          -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '[.[].name] | index("offline_access") // empty')
-        if [ -n "$VERIFY" ]; then
-            print_success "$CLIENT_NAME: offline_access set as default scope (verified)"
-        else
-            print_warning "$CLIENT_NAME: PUT returned 204 but offline_access not found in default scopes — retrying via scope endpoint"
-            # Fallback: use the dedicated scope endpoint
-            OFFLINE_ACCESS_SCOPE_ID=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
-              "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/client-scopes" \
-              -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.[] | select(.name == "offline_access") | .id // empty')
-            if [ -n "$OFFLINE_ACCESS_SCOPE_ID" ]; then
-                curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -o /dev/null -X PUT \
-                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID/default-client-scopes/$OFFLINE_ACCESS_SCOPE_ID" \
-                  -H "Authorization: Bearer $ACCESS_TOKEN"
-                curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -o /dev/null -X DELETE \
-                  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID/optional-client-scopes/$OFFLINE_ACCESS_SCOPE_ID" \
-                  -H "Authorization: Bearer $ACCESS_TOKEN"
-                print_status "$CLIENT_NAME: retried via scope endpoint"
-            fi
+        if [ -z "$CLIENT_UUID" ] || [ "$CLIENT_UUID" = "null" ]; then
+            print_status "Client $CLIENT_NAME not found, skipping offline_access scope assignment"
+            continue
         fi
-    else
-        print_warning "$CLIENT_NAME: failed to update client (HTTP $SCOPE_UPDATE_RESPONSE)"
-    fi
-done
+
+        # Check if already assigned (default or optional)
+        HAS_DEFAULT=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
+          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID/default-client-scopes" \
+          -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r "[.[].name] | index(\"offline_access\") // empty")
+        HAS_OPTIONAL=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
+          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID/optional-client-scopes" \
+          -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r "[.[].name] | index(\"offline_access\") // empty")
+
+        if [ -n "$HAS_DEFAULT" ] || [ -n "$HAS_OPTIONAL" ]; then
+            print_success "$CLIENT_NAME: offline_access already assigned"
+            continue
+        fi
+
+        # Add as optional client scope (idempotent PUT)
+        SCOPE_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /dev/null -X PUT \
+          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID/optional-client-scopes/$OFFLINE_ACCESS_SCOPE_ID" \
+          -H "Authorization: Bearer $ACCESS_TOKEN")
+
+        if [ "$SCOPE_RESPONSE" = "204" ]; then
+            print_success "$CLIENT_NAME: offline_access added as optional client scope"
+        else
+            print_warning "$CLIENT_NAME: failed to add offline_access scope (HTTP $SCOPE_RESPONSE)"
+        fi
+    done
+fi
 
 # Configure WebAuthn Passwordless authentication
 print_status "Configuring WebAuthn Passwordless authentication..."
