@@ -29,8 +29,10 @@ if [[ "${CI_PIPELINE_EVENT:-}" != "pull_request" ]]; then
   LEASED_POOL="pool1"
   echo "--- CI Tenant Lease (pipeline #${CI_PIPELINE_NUMBER})"
   echo "Main merge — using ${LEASED_POOL} as default (no lease acquired)"
-  vcli SET "ci-build-${CI_PIPELINE_NUMBER}" "$LEASED_POOL" EX 300 > /dev/null
-  echo "Reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → ${LEASED_POOL} (TTL: 300s)"
+  # Use a long TTL (2 hours) so the key survives until ci-release runs.
+  # There is no contention for main merges — ci-release deletes the key explicitly.
+  vcli SET "ci-build-${CI_PIPELINE_NUMBER}" "$LEASED_POOL" EX 7200 > /dev/null
+  echo "Reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → ${LEASED_POOL} (TTL: 7200s)"
 else
   LEASE_TTL=600  # 10 minutes (renewed by ci-deploy.sh and e2e shards)
   RETRY_INTERVAL=60

@@ -18,8 +18,16 @@ echo "--- CI Tenant Release (pipeline #${CI_PIPELINE_NUMBER})"
 POOL=$(vcli GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || true)
 
 if [[ -z "$POOL" ]]; then
-  echo "No pool lease found for pipeline #${CI_PIPELINE_NUMBER} — nothing to release"
-  exit 0
+  # Reverse-lookup key expired — fall back to pool1 for main merges so
+  # user cleanup still runs.  This is a safety net; the primary fix is
+  # the longer TTL set by ci-lease-tenant.sh and renewal by ci-renew-lease.sh.
+  if [[ "${CI_PIPELINE_EVENT:-}" != "pull_request" ]]; then
+    POOL="pool1"
+    echo "WARNING: Reverse-lookup key expired — falling back to ${POOL} for user cleanup"
+  else
+    echo "No pool lease found for pipeline #${CI_PIPELINE_NUMBER} — nothing to release"
+    exit 0
+  fi
 fi
 
 LEASE_KEY="ci-lease-${POOL}"
@@ -44,29 +52,37 @@ E2E_KC_CLIENT_SECRET=$(resolve_var E2E_KC_CLIENT_SECRET)
 # ── Clean up Keycloak test users ─────────────────────────────────
 PREFIX="e2e-${CI_PIPELINE_NUMBER}-"
 
-if [[ -n "$E2E_BASE_DOMAIN" && -n "$E2E_KC_REALM" && -n "$E2E_KC_CLIENT_SECRET" ]]; then
-  KEYCLOAK_URL="https://auth.${E2E_BASE_DOMAIN}"
-  REALM="${E2E_KC_REALM}"
-  CLIENT_ID="admin-portal"
+if [[ -z "$E2E_BASE_DOMAIN" || -z "$E2E_KC_REALM" || -z "$E2E_KC_CLIENT_SECRET" ]]; then
+  echo "ERROR: Missing Keycloak config for user cleanup (BASE_DOMAIN=${E2E_BASE_DOMAIN:-}, REALM=${E2E_KC_REALM:-})"
+  echo "Users with prefix '${PREFIX}' will NOT be cleaned up — this will cause user accumulation."
+  exit 1
+fi
 
-  echo "Cleaning up users with prefix: ${PREFIX}"
-  echo "Keycloak: ${KEYCLOAK_URL} | Realm: ${REALM}"
+KEYCLOAK_URL="https://auth.${E2E_BASE_DOMAIN}"
+REALM="${E2E_KC_REALM}"
+CLIENT_ID="admin-portal"
 
-  # Get service account token
-  TOKEN=$(curl -sf --connect-timeout 10 --max-time 30 -X POST \
-    "${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${E2E_KC_CLIENT_SECRET}" \
-    | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])" 2>/dev/null || true)
+echo "Cleaning up users with prefix: ${PREFIX}"
+echo "Keycloak: ${KEYCLOAK_URL} | Realm: ${REALM}"
 
-  if [[ -z "$TOKEN" ]]; then
-    echo "WARNING: Failed to get Keycloak token — skipping user cleanup"
-  else
-    # List and delete pipeline-scoped users
-    USERS_TO_DELETE=$(curl -sf --connect-timeout 10 --max-time 30 \
-      "${KEYCLOAK_URL}/admin/realms/${REALM}/users?search=e2e-${CI_PIPELINE_NUMBER}-&max=100" \
-      -H "Authorization: Bearer $TOKEN" \
-      | PREFIX="$PREFIX" python3 -c "
+# Get service account token — fail loudly if this doesn't work
+TOKEN=$(curl -sf --connect-timeout 10 --max-time 30 -X POST \
+  "${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${E2E_KC_CLIENT_SECRET}" \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+
+if [[ -z "$TOKEN" ]]; then
+  echo "ERROR: Failed to get Keycloak service account token"
+  echo "Users with prefix '${PREFIX}' will NOT be cleaned up — this will cause user accumulation."
+  exit 1
+fi
+
+# List and delete pipeline-scoped users
+USERS_TO_DELETE=$(curl -sf --connect-timeout 10 --max-time 30 \
+  "${KEYCLOAK_URL}/admin/realms/${REALM}/users?search=e2e-${CI_PIPELINE_NUMBER}-&max=100" \
+  -H "Authorization: Bearer $TOKEN" \
+  | PREFIX="$PREFIX" python3 -c "
 import json, sys, os
 users = json.load(sys.stdin)
 prefix = os.environ['PREFIX']
@@ -77,29 +93,25 @@ for u in users:
         print(u['id'] + '\t' + (email or username))
 " 2>/dev/null || true)
 
-    if [[ -z "$USERS_TO_DELETE" ]]; then
-      echo "No ephemeral users to clean up."
-    else
-      DELETED=0
-      FAILED=0
-
-      while IFS=$'\t' read -r uid desc; do
-        if curl -sf --connect-timeout 10 --max-time 10 -X DELETE \
-          "${KEYCLOAK_URL}/admin/realms/${REALM}/users/${uid}" \
-          -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1; then
-          echo "  Deleted: $desc"
-          DELETED=$(( DELETED + 1 ))
-        else
-          echo "  Failed:  $desc"
-          FAILED=$(( FAILED + 1 ))
-        fi
-      done <<< "$USERS_TO_DELETE"
-
-      echo "Cleanup: ${DELETED} deleted, ${FAILED} failed."
-    fi
-  fi
+if [[ -z "$USERS_TO_DELETE" ]]; then
+  echo "No ephemeral users to clean up."
 else
-  echo "WARNING: Missing Keycloak config — skipping user cleanup"
+  DELETED=0
+  FAILED=0
+
+  while IFS=$'\t' read -r uid desc; do
+    if curl -sf --connect-timeout 10 --max-time 10 -X DELETE \
+      "${KEYCLOAK_URL}/admin/realms/${REALM}/users/${uid}" \
+      -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1; then
+      echo "  Deleted: $desc"
+      DELETED=$(( DELETED + 1 ))
+    else
+      echo "  Failed:  $desc"
+      FAILED=$(( FAILED + 1 ))
+    fi
+  done <<< "$USERS_TO_DELETE"
+
+  echo "Cleanup: ${DELETED} deleted, ${FAILED} failed."
 fi
 
 # ── Release Valkey lease ─────────────────────────────────────────

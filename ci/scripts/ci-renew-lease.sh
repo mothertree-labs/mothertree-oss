@@ -23,14 +23,22 @@ fi
 
 KEY="ci-lease-${POOL}"
 
-# Verify we still own this lease
+# Verify we still own the lease (if one exists).
+# On main merges, only a reverse-lookup key is set (soft lease) — there is
+# no ci-lease-{pool} key, so HOLDER will be empty.  That's fine; we still
+# need to renew the reverse-lookup key so ci-release can find it later.
 HOLDER=$(vcli GET "$KEY" 2>/dev/null || true)
-if [[ "$HOLDER" != "$CI_PIPELINE_NUMBER" ]]; then
+if [[ -n "$HOLDER" && "$HOLDER" != "$CI_PIPELINE_NUMBER" ]]; then
   echo "WARNING: Lease for ${POOL} is held by pipeline #${HOLDER}, not #${CI_PIPELINE_NUMBER}"
   exit 0
 fi
 
-vcli EXPIRE "$KEY" "$LEASE_TTL" > /dev/null
-vcli EXPIRE "ci-build-${CI_PIPELINE_NUMBER}" "$LEASE_TTL" > /dev/null
+# Renew the actual lease if we own it
+if [[ -n "$HOLDER" ]]; then
+  vcli EXPIRE "$KEY" "$LEASE_TTL" > /dev/null
+  echo "Renewed lease: ${KEY} (TTL: ${LEASE_TTL}s)"
+fi
 
-echo "Renewed lease: ${POOL} for pipeline #${CI_PIPELINE_NUMBER} (TTL: ${LEASE_TTL}s)"
+# Always renew the reverse-lookup key — ci-release needs it for cleanup
+vcli EXPIRE "ci-build-${CI_PIPELINE_NUMBER}" "$LEASE_TTL" > /dev/null
+echo "Renewed reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → ${POOL} (TTL: ${LEASE_TTL}s)"
