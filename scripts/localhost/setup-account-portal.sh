@@ -9,7 +9,7 @@
 #   --restart-keycloak, -r  Restart Keycloak and recreate realm/client
 #   --help, -h             Show this help message
 #
-# Without options: just start the account-portal (assumes Keycloak is running)
+# Without options: start account-portal (starts Keycloak if not running)
 
 set -euo pipefail
 
@@ -44,7 +44,7 @@ Options:
   --restart-keycloak, -r  Restart Keycloak and recreate realm/client
   --help, -h             Show this help message
 
-Without options: just start the account-portal (assumes Keycloak is running)
+Without options: start account-portal (starts Keycloak if not running)
 EOF
     exit 1
 }
@@ -64,33 +64,31 @@ for arg in "$@"; do
     esac
 done
 
+ENV_FILE="$REPO_ROOT/apps/account-portal/.env"
+if [ ! -f "$ENV_FILE" ]; then
+    print_status "No .env file found, creating from .env.example..."
+    cp "$REPO_ROOT/apps/account-portal/.env.example" "$ENV_FILE"
+    print_success "Created $ENV_FILE from .env.example"
+fi
+
 ACCOUNT_PID=""
+KEYCLOAK_STARTED=false
 cleanup() {
     print_status "Cleaning up..."
     if [ -n "$ACCOUNT_PID" ] && kill -0 "$ACCOUNT_PID" 2>/dev/null; then
         kill "$ACCOUNT_PID" 2>/dev/null || true
         print_status "Stopped account-portal (PID: $ACCOUNT_PID)"
     fi
-    if [ "$RESTART_KEYCLOAK" = true ] && docker ps -q -f name="$CONTAINER_NAME" >/dev/null 2>&1; then
-        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-        print_status "Removed Keycloak container"
+    if [ "$KEYCLOAK_STARTED" = true ]; then
+        docker stop "$CONTAINER_NAME" 2>/dev/null || true
+        print_status "Stopped Keycloak container"
     fi
     print_status "Cleanup complete"
 }
 trap cleanup EXIT INT TERM
 
-if [[ "$RESTART_KEYCLOAK" == "true" ]]; then
-    print_status "================================================"
-    print_status "=== RESTARTING KEYCLOAK (--restart-keycloak) ==="
-    print_status "================================================"
-
-    print_status "Stopping and removing Keycloak container..."
-    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-
-    print_status "Removing any associated volumes..."
-    docker volume rm "$(docker volume ls -q -f name=keycloak 2>/dev/null | tr '\n' ' ')" 2>/dev/null || true
-
-    print_status "Starting fresh Keycloak container..."
+start_keycloak_container() {
+    KEYCLOAK_STARTED=true
     docker run -d --name "$CONTAINER_NAME" -p 8080:8080 -p 9000:9000 \
         -e KEYCLOAK_ADMIN="$ADMIN_USER" \
         -e KEYCLOAK_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
@@ -98,9 +96,11 @@ if [[ "$RESTART_KEYCLOAK" == "true" ]]; then
         -e KC_BOOTSTRAP_ADMIN_USERNAME="$ADMIN_USER" \
         -e KC_BOOTSTRAP_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
         "quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}" start-dev
+}
 
+wait_for_keycloak() {
     print_status "Waiting for Keycloak to be ready..."
-    MAX_WAIT=150  # 5 minutes (150 * 2 seconds)
+    MAX_WAIT=150
     COUNT=0
     until curl -sf "http://localhost:9000/health/ready" 2>/dev/null; do
         if [ $COUNT -ge $MAX_WAIT ]; then
@@ -112,18 +112,23 @@ if [[ "$RESTART_KEYCLOAK" == "true" ]]; then
         COUNT=$((COUNT + 1))
     done
     print_success "Keycloak is ready at $KEYCLOAK_URL"
+}
 
-    print_status "Getting admin token..."
-    ADMIN_TOKEN=$(curl -s -X POST "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
+get_admin_token() {
+    curl -s -X POST "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
         -H "Content-Type: application/x-www-form-urlencoded" \
         -d "username=$ADMIN_USER" \
         -d "password=$ADMIN_PASSWORD" \
         -d "grant_type=password" \
-        -d "client_id=admin-cli" | jq -r '.access_token')
+        -d "client_id=admin-cli" | jq -r '.access_token'
+}
+
+setup_keycloak_realm() {
+    local admin_token="$1"
 
     print_status "Creating realm '$REALM'..."
     curl -s -X POST "$KEYCLOAK_URL/admin/realms" \
-        -H "Authorization: Bearer $ADMIN_TOKEN" \
+        -H "Authorization: Bearer $admin_token" \
         -H "Content-Type: application/json" \
         -d "{
             \"realm\": \"$REALM\",
@@ -133,7 +138,7 @@ if [[ "$RESTART_KEYCLOAK" == "true" ]]; then
 
     print_status "Creating test user '$TEST_USER'..."
     curl -s -X POST "$KEYCLOAK_URL/admin/realms/$REALM/users" \
-        -H "Authorization: Bearer $ADMIN_TOKEN" \
+        -H "Authorization: Bearer $admin_token" \
         -H "Content-Type: application/json" \
         -d "{
             \"username\": \"$TEST_USER\",
@@ -147,7 +152,7 @@ if [[ "$RESTART_KEYCLOAK" == "true" ]]; then
 
     print_status "Creating client '$CLIENT_ID'..."
     curl -s -X POST "$KEYCLOAK_URL/admin/realms/$REALM/clients" \
-        -H "Authorization: Bearer $ADMIN_TOKEN" \
+        -H "Authorization: Bearer $admin_token" \
         -H "Content-Type: application/json" \
         -d "{
             \"clientId\": \"$CLIENT_ID\",
@@ -166,11 +171,11 @@ if [[ "$RESTART_KEYCLOAK" == "true" ]]; then
 
     print_status "Getting client UUID..."
     CLIENT_UUID=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients?clientId=$CLIENT_ID" \
-        -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.[0].id')
+        -H "Authorization: Bearer $admin_token" | jq -r '.[0].id')
 
     print_status "Resetting client secret..."
     NEW_SECRET=$(curl -s -X POST "$KEYCLOAK_URL/admin/realms/$REALM/clients/$CLIENT_UUID/client-secret" \
-        -H "Authorization: Bearer $ADMIN_TOKEN" \
+        -H "Authorization: Bearer $admin_token" \
         -H "Content-Type: application/json" \
         -d '{}' | jq -r '.value')
 
@@ -178,6 +183,75 @@ if [[ "$RESTART_KEYCLOAK" == "true" ]]; then
 
     print_status "Updating account-portal .env with new secret..."
     sed -i "s/KEYCLOAK_CLIENT_SECRET=.*/KEYCLOAK_CLIENT_SECRET=$NEW_SECRET/" "$REPO_ROOT/apps/account-portal/.env"
+}
+
+if [[ "$RESTART_KEYCLOAK" == "true" ]]; then
+    print_status "================================================"
+    print_status "=== RESTARTING KEYCLOAK (--restart-keycloak) ==="
+    print_status "================================================"
+
+    print_status "Stopping and removing Keycloak container..."
+    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+
+    print_status "Removing any associated volumes..."
+    docker volume rm "$(docker volume ls -q -f name=keycloak 2>/dev/null | tr '\n' ' ')" 2>/dev/null || true
+
+    print_status "Starting fresh Keycloak container..."
+    start_keycloak_container
+
+    wait_for_keycloak
+
+    ADMIN_TOKEN=$(get_admin_token)
+    setup_keycloak_realm "$ADMIN_TOKEN"
+else
+    if docker ps -q -f name="$CONTAINER_NAME" | grep -q .; then
+        print_status "Keycloak is already running"
+        ADMIN_TOKEN=$(get_admin_token)
+        CLIENT_UUID=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients?clientId=$CLIENT_ID" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.[0].id')
+        CURRENT_SECRET=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients/$CLIENT_UUID/client-secret" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.value')
+        sed -i "s/KEYCLOAK_CLIENT_SECRET=.*/KEYCLOAK_CLIENT_SECRET=$CURRENT_SECRET/" "$ENV_FILE"
+        print_success "Updated KEYCLOAK_CLIENT_SECRET in .env"
+    else
+        if docker ps -aq -f name="$CONTAINER_NAME" | grep -q .; then
+            print_status "Starting existing Keycloak container..."
+            KEYCLOAK_STARTED=true
+            docker start "$CONTAINER_NAME"
+            wait_for_keycloak
+            print_status "Keycloak started"
+            ADMIN_TOKEN=$(get_admin_token)
+            CLIENT_UUID=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients?clientId=$CLIENT_ID" \
+                -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.[0].id')
+            CURRENT_SECRET=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients/$CLIENT_UUID/client-secret" \
+                -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.value')
+            sed -i "s/KEYCLOAK_CLIENT_SECRET=.*/KEYCLOAK_CLIENT_SECRET=$CURRENT_SECRET/" "$ENV_FILE"
+            print_success "Updated KEYCLOAK_CLIENT_SECRET in .env"
+        else
+            print_status "================================================"
+            print_status "=== STARTING KEYCLOAK (not running) ==="
+            print_status "================================================"
+
+            print_status "Starting Keycloak container..."
+            start_keycloak_container
+
+            wait_for_keycloak
+
+            ADMIN_TOKEN=$(get_admin_token)
+
+            if ! curl -sf "$KEYCLOAK_URL/admin/realms/$REALM" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null 2>&1; then
+                setup_keycloak_realm "$ADMIN_TOKEN"
+            else
+                print_status "Realm '$REALM' already exists, fetching client secret..."
+                CLIENT_UUID=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients?clientId=$CLIENT_ID" \
+                    -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.[0].id')
+                CURRENT_SECRET=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients/$CLIENT_UUID/client-secret" \
+                    -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.value')
+                sed -i "s/KEYCLOAK_CLIENT_SECRET=.*/KEYCLOAK_CLIENT_SECRET=$CURRENT_SECRET/" "$ENV_FILE"
+                print_success "Updated KEYCLOAK_CLIENT_SECRET in .env"
+            fi
+        fi
+    fi
 fi
 
 print_status "Building Tailwind CSS..."
@@ -190,11 +264,17 @@ pkill -f "node server.js" 2>/dev/null || true
 sleep 1
 
 cd "$REPO_ROOT/apps/account-portal"
-nohup env $(grep -v '^#' .env | xargs) NODE_ENV=development node server.js > /tmp/account-portal.log 2>&1 &
-ACCOUNT_PID=$!
+setsid env $(grep -v '^#' .env | xargs) NODE_ENV=development node server.js > /tmp/account-portal.log 2>&1 &
 
 sleep 2
-print_success "Account portal started (PID: $ACCOUNT_PID)"
+
+if ! pgrep -f "node server.js" > /dev/null; then
+    print_error "Failed to start account-portal"
+    cat /tmp/account-portal.log
+    exit 1
+fi
+
+print_success "Account portal started"
 echo ""
 echo "=========================================="
 echo "Keycloak: http://localhost:8080"
@@ -203,7 +283,9 @@ echo "  Test User: $TEST_USER / $TEST_PASSWORD"
 echo "Account Portal: http://localhost:3000"
 echo "=========================================="
 echo ""
-echo "Cleanup will happen automatically on script exit."
+echo "Account portal is running in the background."
 echo "Press Ctrl+C to stop."
 
-wait
+while pgrep -f "node server.js" > /dev/null 2>&1; do
+    sleep 1
+done
