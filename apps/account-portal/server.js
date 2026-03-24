@@ -130,9 +130,9 @@ app.use(session({
   saveUninitialized: false, // Don't create session until something is stored
   cookie: {
     domain: cookieDomain,   // Shared parent domain so logout clears both portals
-    secure: true,
+    secure: process.env.NODE_ENV === 'development' ? false : true,
     httpOnly: true,
-    sameSite: 'lax',        // Permits cross-origin GET (OIDC redirects) but blocks cross-origin POST
+    sameSite: process.env.NODE_ENV === 'development' ? false : 'lax',
     maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days (matches Remember Me / offline token lifespan)
   }
 }));

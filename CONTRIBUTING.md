@@ -42,17 +42,25 @@ Thank you for your interest in contributing to Mothertree! This document provide
 
 ### Running Locally
 
+**Account Portal (with Keycloak):**
+```bash
+# First-time setup: starts Keycloak and account-portal
+./scripts/localhost/setup-account-portal.sh --restart-keycloak
+
+# Subsequent runs: just start the account-portal (assumes Keycloak is running)
+./scripts/localhost/setup-account-portal.sh
+```
+
+The script:
+- Starts a local Keycloak container (version synced with prod)
+- Creates a dev realm with a test user
+- Configures the account-portal client
+- Starts the account-portal on http://localhost:3000
+- Test credentials: `testuser` / `testpassword`
+
 **Admin Portal:**
 ```bash
 cd apps/admin-portal
-npm install
-cp .env.example .env  # Edit with your settings
-npm start
-```
-
-**Account Portal:**
-```bash
-cd apps/account-portal
 npm install
 cp .env.example .env  # Edit with your settings
 npm start
