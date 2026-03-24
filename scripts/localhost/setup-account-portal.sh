@@ -18,6 +18,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 source "${REPO_ROOT}/scripts/lib/common.sh"
 
+KEYCLOAK_VERSION=$(grep -E "^  tag:" "$REPO_ROOT/apps/values/keycloak-codecentric.yaml" | awk '{print $2}' | tr -d '"')
+if [ -z "$KEYCLOAK_VERSION" ]; then
+    print_error "Could not determine Keycloak version from apps/values/keycloak-codecentric.yaml"
+    exit 1
+fi
+print_status "Using Keycloak version: $KEYCLOAK_VERSION"
+
 CONTAINER_NAME="keycloak-dev"
 KEYCLOAK_URL="http://localhost:8080"
 ADMIN_USER="admin"
@@ -57,10 +64,25 @@ for arg in "$@"; do
     esac
 done
 
+ACCOUNT_PID=""
+cleanup() {
+    print_status "Cleaning up..."
+    if [ -n "$ACCOUNT_PID" ] && kill -0 "$ACCOUNT_PID" 2>/dev/null; then
+        kill "$ACCOUNT_PID" 2>/dev/null || true
+        print_status "Stopped account-portal (PID: $ACCOUNT_PID)"
+    fi
+    if [ "$RESTART_KEYCLOAK" = true ] && docker ps -q -f name="$CONTAINER_NAME" >/dev/null 2>&1; then
+        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+        print_status "Removed Keycloak container"
+    fi
+    print_status "Cleanup complete"
+}
+trap cleanup EXIT INT TERM
+
 if [[ "$RESTART_KEYCLOAK" == "true" ]]; then
-    print_status "=========================================="
+    print_status "================================================"
     print_status "=== RESTARTING KEYCLOAK (--restart-keycloak) ==="
-    print_status "=========================================="
+    print_status "================================================"
 
     print_status "Stopping and removing Keycloak container..."
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
@@ -75,12 +97,19 @@ if [[ "$RESTART_KEYCLOAK" == "true" ]]; then
         -e KC_HEALTH_ENABLED=true \
         -e KC_BOOTSTRAP_ADMIN_USERNAME="$ADMIN_USER" \
         -e KC_BOOTSTRAP_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-        quay.io/keycloak/keycloak:26.5.1 start-dev
+        "quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}" start-dev
 
     print_status "Waiting for Keycloak to be ready..."
+    MAX_WAIT=150  # 5 minutes (150 * 2 seconds)
+    COUNT=0
     until curl -sf "http://localhost:9000/health/ready" 2>/dev/null; do
-        print_status "Waiting for Keycloak..."
+        if [ $COUNT -ge $MAX_WAIT ]; then
+            print_error "Timed out waiting for Keycloak after 5 minutes"
+            exit 1
+        fi
+        print_status "Waiting for Keycloak... ($((COUNT * 2))s)"
         sleep 2
+        COUNT=$((COUNT + 1))
     done
     print_success "Keycloak is ready at $KEYCLOAK_URL"
 
@@ -174,6 +203,7 @@ echo "  Test User: $TEST_USER / $TEST_PASSWORD"
 echo "Account Portal: http://localhost:3000"
 echo "=========================================="
 echo ""
-echo "To stop:"
-echo "  kill $ACCOUNT_PID"
-echo "  docker rm -f $CONTAINER_NAME"
+echo "Cleanup will happen automatically on script exit."
+echo "Press Ctrl+C to stop."
+
+wait
