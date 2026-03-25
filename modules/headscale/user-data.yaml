@@ -1,0 +1,221 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - jq
+  - ufw
+  - sqlite3
+
+write_files:
+  # Headscale systemd unit
+  - path: /etc/systemd/system/headscale.service
+    content: |
+      [Unit]
+      Description=Headscale - Tailscale control server
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=headscale
+      Group=headscale
+      ExecStart=/usr/local/bin/headscale serve
+      Restart=always
+      RestartSec=5
+      LimitNOFILE=65536
+
+      # Hardening
+      ProtectSystem=strict
+      ProtectHome=true
+      ReadWritePaths=/var/lib/headscale /var/run/headscale /etc/headscale
+      PrivateTmp=true
+      NoNewPrivileges=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # -------------------------------------------------------------------
+  # 1. Install Headscale binary from GitHub releases
+  # -------------------------------------------------------------------
+  - |
+    HEADSCALE_VERSION="${headscale_version}"
+    echo "[cloud-init] Installing Headscale v$HEADSCALE_VERSION..."
+    curl -fsSL -o /tmp/headscale.deb \
+      "https://github.com/juanfont/headscale/releases/download/v$${HEADSCALE_VERSION}/headscale_$${HEADSCALE_VERSION}_linux_amd64.deb"
+    dpkg -i /tmp/headscale.deb
+    rm -f /tmp/headscale.deb
+
+  # -------------------------------------------------------------------
+  # 2. Create headscale system user and directories
+  # -------------------------------------------------------------------
+  - useradd --system --no-create-home --shell /usr/sbin/nologin headscale || true
+  - mkdir -p /etc/headscale /var/lib/headscale /var/run/headscale
+  - chown -R headscale:headscale /var/lib/headscale /var/run/headscale
+
+  # -------------------------------------------------------------------
+  # 3. Mount persistent volume for Headscale data (SQLite DB, keys)
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Waiting for data volume..."
+    timeout=300
+    elapsed=0
+    while [ $elapsed -lt $timeout ]; do
+      # Linode attaches volumes as /dev/sdc (first additional volume)
+      if [ -b /dev/sdc ]; then
+        echo "[cloud-init] Volume device /dev/sdc found."
+        break
+      fi
+      sleep 5
+      elapsed=$((elapsed + 5))
+    done
+    if [ ! -b /dev/sdc ]; then
+      echo "[cloud-init] ERROR: Volume device /dev/sdc not found after $${timeout}s"
+      exit 1
+    fi
+
+    # Format if new (no filesystem)
+    if ! blkid /dev/sdc >/dev/null 2>&1; then
+      echo "[cloud-init] Formatting volume..."
+      mkfs.ext4 /dev/sdc
+    fi
+
+    # Mount volume
+    mkdir -p /mnt/headscale-data
+    mount /dev/sdc /mnt/headscale-data
+
+    # Add to fstab for persistence across reboots
+    if ! grep -q '/mnt/headscale-data' /etc/fstab; then
+      echo '/dev/sdc /mnt/headscale-data ext4 defaults 0 2' >> /etc/fstab
+    fi
+
+    # Create data subdirectory on volume
+    mkdir -p /mnt/headscale-data/lib
+    chown -R headscale:headscale /mnt/headscale-data
+
+    # Symlink /var/lib/headscale to volume for persistent state
+    rm -rf /var/lib/headscale
+    ln -sf /mnt/headscale-data/lib /var/lib/headscale
+
+  # -------------------------------------------------------------------
+  # 4. Write Headscale config (Ansible will overwrite with full config)
+  # -------------------------------------------------------------------
+  - |
+    SERVER_IP=$(curl -s https://ipv4.icanhazip.com/)
+    cat > /etc/headscale/config.yaml << 'HSEOF'
+    server_url: "https://${domain}:8080"
+    listen_addr: "0.0.0.0:8080"
+    grpc_listen_addr: "0.0.0.0:50443"
+
+    noise:
+      private_key_path: /var/lib/headscale/noise_private.key
+
+    prefixes:
+      v4: "100.64.0.0/10"
+      v6: "fd7a:115c:a1e0::/48"
+      allocation: "sequential"
+
+    database:
+      type: sqlite
+      sqlite:
+        path: /var/lib/headscale/db.sqlite
+        write_ahead_log: true
+
+    derp:
+      urls: []
+      server:
+        enabled: true
+        region_id: 999
+        region_code: "mt"
+        region_name: "Mothertree DERP"
+        stun_listen_addr: "0.0.0.0:3478"
+        automatically_add_embedded_derp_region: true
+        ipv4: REPLACE_WITH_SERVER_IP
+        verify_clients: true
+
+    dns:
+      magic_dns: true
+      base_domain: "${base_domain}"
+      nameservers:
+        global:
+          - 1.1.1.1
+          - 1.0.0.1
+
+    policy:
+      path: /etc/headscale/acl-policy.json
+
+    log:
+      level: info
+    HSEOF
+
+    # Replace the server IP placeholder
+    sed -i "s/REPLACE_WITH_SERVER_IP/$SERVER_IP/" /etc/headscale/config.yaml
+
+    chown headscale:headscale /etc/headscale/config.yaml
+    chmod 600 /etc/headscale/config.yaml
+
+  # -------------------------------------------------------------------
+  # 5. Write initial ACL policy (deny-all until Ansible deploys real policy)
+  # -------------------------------------------------------------------
+  - |
+    cat > /etc/headscale/acl-policy.json << 'ACLEOF'
+    {
+      "tagOwners": {
+        "tag:pgbouncer": ["autogroup:admin"],
+        "tag:postgres": ["autogroup:admin"],
+        "tag:postfix-k8s": ["autogroup:admin"],
+        "tag:postfix-relay": ["autogroup:admin"],
+        "tag:monitoring": ["autogroup:admin"],
+        "tag:operator": ["autogroup:admin"],
+        "tag:k8s-node": ["autogroup:admin"],
+        "tag:ci": ["autogroup:admin"]
+      },
+      "acls": [
+        {"action": "accept", "src": ["tag:operator"], "dst": ["*:*"]}
+      ]
+    }
+    ACLEOF
+
+    chown headscale:headscale /etc/headscale/acl-policy.json
+    chmod 600 /etc/headscale/acl-policy.json
+
+  # -------------------------------------------------------------------
+  # 6. Configure UFW firewall
+  # -------------------------------------------------------------------
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp comment "SSH"
+  - ufw allow 443/tcp comment "DERP relay"
+  - ufw allow 3478/udp comment "STUN"
+  - ufw allow 8080/tcp comment "Headscale API"
+  - ufw --force enable
+
+  # -------------------------------------------------------------------
+  # 7. Enable and start Headscale
+  # -------------------------------------------------------------------
+  - systemctl daemon-reload
+  - systemctl enable headscale
+  - systemctl start headscale
+
+  # -------------------------------------------------------------------
+  # 8. Wait for Headscale to start, then create initial users
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Waiting for Headscale to become ready..."
+    attempts=0
+    max_attempts=30
+    while [ $attempts -lt $max_attempts ]; do
+      if headscale users list 2>/dev/null | grep -q "ID"; then
+        echo "[cloud-init] Headscale is ready."
+        break
+      fi
+      attempts=$((attempts + 1))
+      sleep 2
+    done
+
+    # Create users for infrastructure nodes and human operators
+    headscale users create infra 2>/dev/null || true
+    headscale users create operators 2>/dev/null || true
+    echo "[cloud-init] Headscale users created: infra, operators"

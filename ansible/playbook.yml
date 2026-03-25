@@ -451,3 +451,284 @@
       systemd:
         name: coturn
         state: restarted
+
+# =============================================================================
+# Headscale: Self-hosted Tailscale control plane
+# Manages WireGuard mesh networking: key exchange, DERP relay, ACLs, MagicDNS.
+# Runs on dedicated VMs (one per environment for hard network isolation).
+# =============================================================================
+- name: Configure Headscale Server
+  hosts: headscale_servers
+  become: yes
+  vars:
+    headscale_version: "0.28.0"
+    # headscale_base_domain: REQUIRED - e.g., ts.example.com (MagicDNS base domain)
+    # headscale_domain: REQUIRED - e.g., hs-prod.example.com
+    # tls_email: REQUIRED - for Let's Encrypt certificate
+
+  tasks:
+    - name: Validate required variables
+      fail:
+        msg: "{{ item.name }} must be passed via --extra-vars"
+      when: item.var is not defined or item.var | length == 0
+      loop:
+        - { name: "headscale_domain", var: "{{ headscale_domain | default('') }}" }
+        - { name: "headscale_base_domain", var: "{{ headscale_base_domain | default('') }}" }
+        - { name: "tls_email", var: "{{ tls_email | default('') }}" }
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    # -------------------------------------------------------------------
+    # Install Headscale
+    # -------------------------------------------------------------------
+    - name: Check if Headscale is already installed at target version
+      command: headscale version
+      register: headscale_current_version
+      changed_when: false
+      failed_when: false
+
+    - name: Download Headscale .deb package
+      get_url:
+        url: "https://github.com/juanfont/headscale/releases/download/v{{ headscale_version }}/headscale_{{ headscale_version }}_linux_amd64.deb"
+        dest: "/tmp/headscale_{{ headscale_version }}_linux_amd64.deb"
+        mode: '0644'
+      when: headscale_current_version.rc != 0 or headscale_version not in (headscale_current_version.stdout | default(''))
+
+    - name: Install Headscale .deb package
+      apt:
+        deb: "/tmp/headscale_{{ headscale_version }}_linux_amd64.deb"
+      when: headscale_current_version.rc != 0 or headscale_version not in (headscale_current_version.stdout | default(''))
+      notify: restart headscale
+
+    - name: Ensure headscale directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: headscale
+        group: headscale
+        mode: '0750'
+      loop:
+        - /etc/headscale
+        - /var/lib/headscale
+        - /var/run/headscale
+
+    # -------------------------------------------------------------------
+    # TLS certificate for DERP relay (port 443)
+    # -------------------------------------------------------------------
+    - name: Install Certbot
+      apt:
+        name: certbot
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Create Certbot renewal-hooks directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /etc/letsencrypt/renewal-hooks/pre
+        - /etc/letsencrypt/renewal-hooks/post
+        - /etc/letsencrypt/renewal-hooks/deploy
+
+    - name: Deploy Certbot pre-hook (allow port 80 for HTTP-01)
+      copy:
+        content: |
+          #!/bin/bash
+          ufw allow 80/tcp comment 'Certbot HTTP-01 temporary'
+        dest: /etc/letsencrypt/renewal-hooks/pre/allow-port-80.sh
+        mode: '0755'
+
+    - name: Deploy Certbot post-hook (deny port 80 after renewal)
+      copy:
+        content: |
+          #!/bin/bash
+          yes | ufw delete allow 80/tcp 2>/dev/null || true
+        dest: /etc/letsencrypt/renewal-hooks/post/deny-port-80.sh
+        mode: '0755'
+
+    - name: Deploy Certbot deploy-hook (restart Headscale after cert renewal)
+      copy:
+        content: |
+          #!/bin/bash
+          # Copy renewed certs to Headscale directory and restart
+          cp /etc/letsencrypt/live/{{ headscale_domain }}/fullchain.pem /etc/headscale/tls-cert.pem
+          cp /etc/letsencrypt/live/{{ headscale_domain }}/privkey.pem /etc/headscale/tls-key.pem
+          chown headscale:headscale /etc/headscale/tls-cert.pem /etc/headscale/tls-key.pem
+          chmod 600 /etc/headscale/tls-cert.pem /etc/headscale/tls-key.pem
+          systemctl restart headscale
+        dest: /etc/letsencrypt/renewal-hooks/deploy/headscale-restart.sh
+        mode: '0755'
+
+    - name: Check if Let's Encrypt cert already exists
+      stat:
+        path: "/etc/letsencrypt/live/{{ headscale_domain }}/fullchain.pem"
+      register: hs_cert_file
+
+    - name: Obtain Let's Encrypt certificate for Headscale domain
+      block:
+        - name: Allow port 80 temporarily for Certbot
+          ufw:
+            rule: allow
+            port: '80'
+            proto: tcp
+            comment: 'Certbot HTTP-01 temporary'
+
+        - name: Run certbot certonly (standalone)
+          command: >
+            certbot certonly --standalone --non-interactive --agree-tos
+            --email {{ tls_email }}
+            -d {{ headscale_domain }}
+            --preferred-challenges http
+          register: certbot_result
+          changed_when: certbot_result.rc == 0 and 'Successfully received certificate' in certbot_result.stdout
+          failed_when: certbot_result.rc != 0
+
+        - name: Remove temporary UFW allow 80
+          ufw:
+            rule: allow
+            port: '80'
+            proto: tcp
+            delete: yes
+      when: not hs_cert_file.stat.exists
+
+    - name: Copy TLS certs to Headscale directory
+      copy:
+        src: "/etc/letsencrypt/live/{{ headscale_domain }}/{{ item.src }}"
+        dest: "/etc/headscale/{{ item.dest }}"
+        remote_src: yes
+        owner: headscale
+        group: headscale
+        mode: '0600'
+      loop:
+        - { src: "fullchain.pem", dest: "tls-cert.pem" }
+        - { src: "privkey.pem", dest: "tls-key.pem" }
+      notify: restart headscale
+
+    # -------------------------------------------------------------------
+    # Headscale configuration
+    # -------------------------------------------------------------------
+    - name: Get server public IP
+      uri:
+        url: https://ipv4.icanhazip.com/
+        return_content: yes
+      register: server_public_ip
+
+    - name: Deploy Headscale configuration
+      template:
+        src: headscale-config.yaml.j2
+        dest: /etc/headscale/config.yaml
+        owner: headscale
+        group: headscale
+        mode: '0600'
+      notify: restart headscale
+
+    - name: Deploy ACL policy
+      template:
+        src: headscale-acl-policy.json.j2
+        dest: /etc/headscale/acl-policy.json
+        owner: headscale
+        group: headscale
+        mode: '0600'
+      notify: restart headscale
+
+    # -------------------------------------------------------------------
+    # Systemd and startup
+    # -------------------------------------------------------------------
+    - name: Deploy Headscale systemd unit
+      copy:
+        content: |
+          [Unit]
+          Description=Headscale - Tailscale control server
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=headscale
+          Group=headscale
+          ExecStart=/usr/local/bin/headscale serve
+          Restart=always
+          RestartSec=5
+          LimitNOFILE=65536
+
+          ProtectSystem=strict
+          ProtectHome=true
+          ReadWritePaths=/var/lib/headscale /var/run/headscale /etc/headscale
+          PrivateTmp=true
+          NoNewPrivileges=true
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/headscale.service
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart headscale
+
+    - name: Enable and start Headscale
+      systemd:
+        name: headscale
+        enabled: yes
+        state: started
+
+    # -------------------------------------------------------------------
+    # UFW firewall rules
+    # -------------------------------------------------------------------
+    - name: Configure UFW rules for Headscale
+      ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        comment: "{{ item.comment }}"
+      loop:
+        - { port: '443', proto: 'tcp', comment: 'DERP relay' }
+        - { port: '3478', proto: 'udp', comment: 'STUN' }
+        - { port: '8080', proto: 'tcp', comment: 'Headscale API' }
+
+    # -------------------------------------------------------------------
+    # Create users and generate pre-auth keys
+    # -------------------------------------------------------------------
+    - name: Wait for Headscale to be ready
+      command: headscale users list -o json
+      register: hs_ready
+      retries: 15
+      delay: 2
+      until: hs_ready.rc == 0
+      changed_when: false
+
+    - name: Create Headscale users
+      command: "headscale users create {{ item }}"
+      loop:
+        - infra
+        - operators
+      register: hs_user_create
+      changed_when: "'already exists' not in (hs_user_create.stderr | default(''))"
+      failed_when: hs_user_create.rc != 0 and 'already exists' not in (hs_user_create.stderr | default(''))
+
+    - name: Display post-setup instructions
+      debug:
+        msg: |
+          Headscale is running at https://{{ headscale_domain }}:8080
+
+          To generate a pre-auth key for infrastructure nodes:
+            ssh root@{{ headscale_domain }} \
+              headscale preauthkeys create --user infra --reusable --expiration 87600h --tags tag:k8s-node
+
+          To register an operator (OIDC or CLI):
+            headscale users create <username>
+            headscale preauthkeys create --user operators --expiration 24h --tags tag:operator
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart headscale
+      systemd:
+        name: headscale
+        state: restarted

@@ -9,6 +9,7 @@
 #   - turn[.dev].<domain> A            → TURN server IP
 #   - mail[.dev].<domain> A            → VPN server IP
 #   - vpn.{prod|dev}.<domain> A        → VPN server IP
+#   - hs-{prod|dev}.<domain> A         → Headscale server IP
 #   - @ CNAME → www.<domain>           (prod only)
 #   - mail MX → mail.<domain>          (prod only)
 #   - _matrix._tcp SRV                 → synapse[.dev].<domain>:443
@@ -112,6 +113,7 @@ print_status "Managing infrastructure DNS records (env: $MT_ENV)"
 print_status "  Domain: $DOMAIN"
 print_status "  VPN server IP: $VPN_SERVER_IP"
 print_status "  TURN server IP: ${TURN_SERVER_IP:-<not set>}"
+print_status "  Headscale server IP: ${HEADSCALE_SERVER_IP:-<not set>}"
 print_status "  Ingress LB IP: ${INGRESS_LB_IP:-<not available>}"
 
 # =============================================================================
@@ -148,19 +150,30 @@ if [ -n "$VPN_SERVER_IP" ]; then
   create_dns_record "${local_vpn_label}.${DOMAIN}" "A" "$VPN_SERVER_IP"
 fi
 
-# 5. Base domain CNAME → www (prod only)
+# 5. Headscale server A record
+if [ -n "${HEADSCALE_SERVER_IP:-}" ]; then
+  local_hs_label=""
+  if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
+    local_hs_label="hs-prod"
+  else
+    local_hs_label="hs-${INFRA_ENV_DNS_LABEL}"
+  fi
+  create_dns_record "${local_hs_label}.${DOMAIN}" "A" "$HEADSCALE_SERVER_IP"
+fi
+
+# 6. Base domain CNAME → www (prod only)
 # Cloudflare handles CNAME flattening at the root domain automatically
 if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
   create_dns_record "${DOMAIN}" "CNAME" "www.${DOMAIN}" "true"
 fi
 
-# 6. Mail MX record (prod only)
+# 7. Mail MX record (prod only)
 # Points mail subdomain to the mail A record
 if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
   create_mx_record "mail.${DOMAIN}" "mail.${DOMAIN}" 10
 fi
 
-# 7. Matrix federation SRV records
+# 8. Matrix federation SRV records
 # SRV domain must match the Matrix server_name:
 #   prod: _matrix._tcp.mother-tree.org → synapse.mother-tree.org
 #   dev:  _matrix._tcp.dev.mother-tree.org → synapse.dev.mother-tree.org

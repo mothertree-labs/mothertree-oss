@@ -245,6 +245,7 @@ VPN_SERVER_TUNNEL_IP="$(terraform output -raw vpn_server_tunnel_ip 2>/dev/null |
 VPN_NETWORK_CIDR="$(terraform output -raw vpn_network_cidr 2>/dev/null || echo "")"
 TURN_SERVER_IP="$(terraform output -raw turn_server_ip 2>/dev/null || echo "")"
 LKE_CLUSTER_ID="$(terraform output -raw cluster_id 2>/dev/null || echo "")"
+HEADSCALE_SERVER_IP="$(terraform output -raw headscale_server_ip 2>/dev/null || echo "")"
 TFEOF
         print_status "Terraform outputs file written — include in CI deploy vault when updating secrets"
       else

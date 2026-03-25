@@ -381,7 +381,7 @@ _mt_infra_load_terraform_outputs() {
   echo "[INFO] Loading Terraform outputs from $_tf_outputs_file"
   # shellcheck disable=SC1090
   source "$_tf_outputs_file"
-  export VPN_SERVER_IP VPN_SERVER_PRIVATE_IP VPN_SERVER_TUNNEL_IP VPN_NETWORK_CIDR TURN_SERVER_IP LKE_CLUSTER_ID
+  export VPN_SERVER_IP VPN_SERVER_PRIVATE_IP VPN_SERVER_TUNNEL_IP VPN_NETWORK_CIDR TURN_SERVER_IP LKE_CLUSTER_ID HEADSCALE_SERVER_IP
 
   echo "[INFO] VPN server private IP: ${VPN_SERVER_PRIVATE_IP:-<not set>}"
   echo "[INFO] VPN network CIDR: ${VPN_NETWORK_CIDR:-<not set>}"

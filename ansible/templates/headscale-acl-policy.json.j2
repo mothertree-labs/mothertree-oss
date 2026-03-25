@@ -1,0 +1,20 @@
+{
+  "tagOwners": {
+    "tag:pgbouncer": ["autogroup:admin"],
+    "tag:postgres": ["autogroup:admin"],
+    "tag:postfix-k8s": ["autogroup:admin"],
+    "tag:postfix-relay": ["autogroup:admin"],
+    "tag:monitoring": ["autogroup:admin"],
+    "tag:operator": ["autogroup:admin"],
+    "tag:k8s-node": ["autogroup:admin"],
+    "tag:ci": ["autogroup:admin"]
+  },
+  "acls": [
+    {"action": "accept", "src": ["tag:pgbouncer"], "dst": ["tag:postgres:5432"]},
+    {"action": "accept", "src": ["tag:monitoring"], "dst": ["tag:postgres:9187"]},
+    {"action": "accept", "src": ["tag:postfix-k8s"], "dst": ["tag:postfix-relay:25"]},
+    {"action": "accept", "src": ["tag:postfix-relay"], "dst": ["tag:postfix-k8s:25"]},
+    {"action": "accept", "src": ["tag:ci"], "dst": ["tag:k8s-node:6443", "tag:postgres:5432"]},
+    {"action": "accept", "src": ["tag:operator"], "dst": ["*:*"]}
+  ]
+}
