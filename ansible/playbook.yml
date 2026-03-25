@@ -732,3 +732,519 @@
       systemd:
         name: headscale
         state: restarted
+
+# =============================================================================
+# PostgreSQL: Self-managed database on dedicated VM with Tailscale networking
+# Replaces in-cluster Bitnami PostgreSQL. Listens on all interfaces with
+# pg_hba.conf restricting to Tailscale CGNAT range. Backups via pgBackRest
+# to S3. Monitoring via postgres_exporter over the tailnet.
+# =============================================================================
+- name: Configure PostgreSQL Server
+  hosts: postgres_servers
+  become: yes
+  vars:
+    pg_version: "16"
+    pgbackrest_stanza: "main"
+    # REQUIRED — must be passed via --extra-vars:
+    # pg_shared_buffers, pg_effective_cache_size, pg_max_connections
+    # pg_work_mem, pg_maintenance_work_mem
+    # pgbackrest_s3_endpoint, pgbackrest_s3_bucket, pgbackrest_s3_region
+    # pgbackrest_s3_key, pgbackrest_s3_secret, pgbackrest_cipher_pass
+    # postgres_exporter_password
+    # headscale_url, tailscale_auth_key
+    # pg_databases (list of {name, owner, password} dicts)
+
+  tasks:
+    # -------------------------------------------------------------------
+    # Validate required variables
+    # -------------------------------------------------------------------
+    - name: Validate required variables
+      fail:
+        msg: "{{ item.name }} must be passed via --extra-vars"
+      when: item.var is not defined or item.var | length == 0
+      loop:
+        - { name: "pg_shared_buffers", var: "{{ pg_shared_buffers | default('') }}" }
+        - { name: "pg_effective_cache_size", var: "{{ pg_effective_cache_size | default('') }}" }
+        - { name: "pgbackrest_s3_bucket", var: "{{ pgbackrest_s3_bucket | default('') }}" }
+        - { name: "pgbackrest_s3_region", var: "{{ pgbackrest_s3_region | default('') }}" }
+        - { name: "pgbackrest_s3_endpoint", var: "{{ pgbackrest_s3_endpoint | default('') }}" }
+        - { name: "pgbackrest_s3_key", var: "{{ pgbackrest_s3_key | default('') }}" }
+        - { name: "pgbackrest_s3_secret", var: "{{ pgbackrest_s3_secret | default('') }}" }
+        - { name: "pgbackrest_cipher_pass", var: "{{ pgbackrest_cipher_pass | default('') }}" }
+        - { name: "postgres_exporter_password", var: "{{ postgres_exporter_password | default('') }}" }
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    # -------------------------------------------------------------------
+    # Tailscale client (should already be installed via cloud-init,
+    # but ensure it's present and running)
+    # -------------------------------------------------------------------
+    - name: Check if Tailscale is installed
+      command: tailscale version
+      register: ts_version
+      changed_when: false
+      failed_when: false
+
+    - name: Install Tailscale if not present
+      shell: curl -fsSL https://tailscale.com/install.sh | sh
+      when: ts_version.rc != 0
+
+    - name: Ensure Tailscale is enabled and running
+      systemd:
+        name: tailscaled
+        enabled: yes
+        state: started
+
+    - name: Check Tailscale status
+      command: tailscale status --json
+      register: ts_status
+      changed_when: false
+      failed_when: false
+
+    - name: Join tailnet if not connected
+      command: >
+        tailscale up
+        --login-server={{ headscale_url }}
+        --authkey={{ tailscale_auth_key }}
+        --advertise-tags=tag:postgres
+        --accept-routes=false
+        --ssh
+      when: >
+        ts_status.rc != 0 or
+        (ts_status.stdout | from_json).BackendState != "Running"
+
+    - name: Get Tailscale IP
+      command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+
+    - name: Display Tailscale IP
+      debug:
+        msg: "PostgreSQL server Tailscale IP: {{ tailscale_ip.stdout }}"
+
+    # -------------------------------------------------------------------
+    # PostgreSQL installation (should already be installed via cloud-init)
+    # -------------------------------------------------------------------
+    - name: Add PostgreSQL APT repository key
+      apt_key:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        keyring: /usr/share/keyrings/postgresql-archive-keyring.gpg
+        state: present
+
+    - name: Add PostgreSQL APT repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] http://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+        filename: pgdg
+        state: present
+
+    - name: Install PostgreSQL and contrib
+      apt:
+        name:
+          - "postgresql-{{ pg_version }}"
+          - "postgresql-contrib-{{ pg_version }}"
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    # -------------------------------------------------------------------
+    # Ensure data directory is on persistent volume
+    # -------------------------------------------------------------------
+    - name: Check if data directory exists on volume
+      stat:
+        path: "/mnt/pgdata/{{ pg_version }}/main/PG_VERSION"
+      register: pgdata_on_volume
+
+    - name: Stop PostgreSQL for data migration
+      systemd:
+        name: postgresql
+        state: stopped
+      when: not pgdata_on_volume.stat.exists
+
+    - name: Create volume data directory
+      file:
+        path: "/mnt/pgdata/{{ pg_version }}"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0700'
+      when: not pgdata_on_volume.stat.exists
+
+    - name: Move data directory to volume
+      command: "mv /var/lib/postgresql/{{ pg_version }}/main /mnt/pgdata/{{ pg_version }}/main"
+      when: not pgdata_on_volume.stat.exists
+
+    - name: Ensure symlink from default path to volume
+      file:
+        src: "/mnt/pgdata/{{ pg_version }}/main"
+        dest: "/var/lib/postgresql/{{ pg_version }}/main"
+        state: link
+        owner: postgres
+        group: postgres
+        force: yes
+
+    # -------------------------------------------------------------------
+    # PostgreSQL systemd override: start after Tailscale
+    # -------------------------------------------------------------------
+    - name: Create PostgreSQL systemd override directory
+      file:
+        path: /etc/systemd/system/postgresql.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Deploy PostgreSQL systemd override (after Tailscale)
+      copy:
+        content: |
+          [Unit]
+          After=tailscaled.service
+          Wants=tailscaled.service
+        dest: /etc/systemd/system/postgresql.service.d/after-tailscale.conf
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart postgresql
+
+    # -------------------------------------------------------------------
+    # PostgreSQL configuration
+    # -------------------------------------------------------------------
+    - name: Deploy postgresql.conf
+      template:
+        src: postgresql.conf.j2
+        dest: "/etc/postgresql/{{ pg_version }}/main/postgresql.conf"
+        owner: postgres
+        group: postgres
+        mode: '0644'
+      notify: restart postgresql
+
+    - name: Deploy pg_hba.conf
+      template:
+        src: pg_hba.conf.j2
+        dest: "/etc/postgresql/{{ pg_version }}/main/pg_hba.conf"
+        owner: postgres
+        group: postgres
+        mode: '0640'
+      notify: reload postgresql
+
+    # -------------------------------------------------------------------
+    # Enable and start PostgreSQL
+    # -------------------------------------------------------------------
+    - name: Enable and start PostgreSQL
+      systemd:
+        name: postgresql
+        enabled: yes
+        state: started
+
+    - name: Wait for PostgreSQL to accept connections
+      command: "pg_isready -p 5432"
+      register: pg_ready
+      retries: 15
+      delay: 2
+      until: pg_ready.rc == 0
+      changed_when: false
+
+    # -------------------------------------------------------------------
+    # Enable pg_stat_statements extension
+    # -------------------------------------------------------------------
+    - name: Enable pg_stat_statements extension
+      become_user: postgres
+      command: psql -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
+      register: ext_result
+      changed_when: "'CREATE EXTENSION' in ext_result.stdout"
+
+    # -------------------------------------------------------------------
+    # Database and role initialization
+    # -------------------------------------------------------------------
+    - name: Create database roles
+      become_user: postgres
+      command: >
+        psql -v ON_ERROR_STOP=1 -c
+        "DO $$ BEGIN
+          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ item.owner }}') THEN
+            CREATE ROLE \"{{ item.owner }}\" LOGIN PASSWORD '{{ item.password }}';
+          ELSE
+            ALTER ROLE \"{{ item.owner }}\" WITH PASSWORD '{{ item.password }}';
+          END IF;
+        END $$;"
+      loop: "{{ pg_databases | default([]) }}"
+      loop_control:
+        label: "{{ item.owner }}"
+      no_log: true
+
+    - name: Create databases
+      become_user: postgres
+      command: >
+        psql -v ON_ERROR_STOP=1 -c
+        "SELECT 'exists' FROM pg_database WHERE datname = '{{ item.name }}'"
+      register: db_check
+      loop: "{{ pg_databases | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+
+    - name: Create missing databases
+      become_user: postgres
+      command: >
+        psql -v ON_ERROR_STOP=1 -c
+        "CREATE DATABASE \"{{ item.item.name }}\" OWNER \"{{ item.item.owner }}\"
+        {{ item.item.extra_opts | default('') }}"
+      when: "'exists' not in item.stdout"
+      loop: "{{ db_check.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Configure database privileges
+      become_user: postgres
+      command: >
+        psql -v ON_ERROR_STOP=1 -c
+        "REVOKE CONNECT ON DATABASE \"{{ item.name }}\" FROM PUBLIC;
+         GRANT CONNECT ON DATABASE \"{{ item.name }}\" TO \"{{ item.owner }}\";"
+      loop: "{{ pg_databases | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Grant schema privileges
+      become_user: postgres
+      command: >
+        psql -v ON_ERROR_STOP=1 -d "{{ item.name }}" -c
+        "REVOKE ALL ON SCHEMA public FROM PUBLIC;
+         GRANT ALL PRIVILEGES ON SCHEMA public TO \"{{ item.owner }}\";"
+      loop: "{{ pg_databases | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Create extensions on databases
+      become_user: postgres
+      command: >
+        psql -v ON_ERROR_STOP=1 -d "{{ item.0.name }}" -c
+        "CREATE EXTENSION IF NOT EXISTS {{ item.1 }}"
+      loop: "{{ pg_databases | default([]) | subelements('extensions', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }}: {{ item.1 }}"
+      register: ext_result
+      changed_when: "'CREATE EXTENSION' in ext_result.stdout"
+
+    # -------------------------------------------------------------------
+    # postgres_exporter for Prometheus monitoring
+    # -------------------------------------------------------------------
+    - name: Create postgres_exporter monitoring role
+      become_user: postgres
+      command: >
+        psql -v ON_ERROR_STOP=1 -c
+        "DO $$ BEGIN
+          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres_exporter') THEN
+            CREATE ROLE postgres_exporter LOGIN PASSWORD '{{ postgres_exporter_password }}';
+          ELSE
+            ALTER ROLE postgres_exporter WITH PASSWORD '{{ postgres_exporter_password }}';
+          END IF;
+        END $$;"
+      no_log: true
+
+    - name: Grant monitoring permissions to postgres_exporter
+      become_user: postgres
+      command: >
+        psql -v ON_ERROR_STOP=1 -c
+        "GRANT pg_monitor TO postgres_exporter;"
+      register: grant_result
+      changed_when: false
+
+    - name: Deploy postgres_exporter systemd unit
+      template:
+        src: postgres-exporter.service.j2
+        dest: /etc/systemd/system/postgres_exporter.service
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart postgres_exporter
+
+    - name: Enable and start postgres_exporter
+      systemd:
+        name: postgres_exporter
+        enabled: yes
+        state: started
+
+    # -------------------------------------------------------------------
+    # pgBackRest backup configuration
+    # -------------------------------------------------------------------
+    - name: Install pgBackRest
+      apt:
+        name: pgbackrest
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Ensure pgBackRest directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0750'
+      loop:
+        - /var/log/pgbackrest
+        - /var/lib/pgbackrest
+        - /etc/pgbackrest
+
+    - name: Deploy pgBackRest configuration
+      template:
+        src: pgbackrest.conf.j2
+        dest: /etc/pgbackrest/pgbackrest.conf
+        owner: postgres
+        group: postgres
+        mode: '0600'
+
+    - name: Create pgBackRest stanza
+      become_user: postgres
+      command: "pgbackrest --stanza={{ pgbackrest_stanza }} stanza-create"
+      register: stanza_create
+      changed_when: "'already exists' not in (stanza_create.stderr | default(''))"
+      failed_when: stanza_create.rc != 0 and 'already exists' not in (stanza_create.stderr | default(''))
+
+    - name: Verify pgBackRest stanza
+      become_user: postgres
+      command: "pgbackrest --stanza={{ pgbackrest_stanza }} check"
+      changed_when: false
+
+    # -------------------------------------------------------------------
+    # pgBackRest scheduled backups via systemd timers
+    # -------------------------------------------------------------------
+    - name: Deploy pgBackRest full backup service
+      copy:
+        content: |
+          [Unit]
+          Description=pgBackRest Full Backup
+
+          [Service]
+          Type=oneshot
+          User=postgres
+          Group=postgres
+          ExecStart=/usr/bin/pgbackrest --stanza={{ pgbackrest_stanza }} --type=full backup
+          IOSchedulingClass=idle
+          Nice=19
+        dest: /etc/systemd/system/pgbackrest-full.service
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Deploy pgBackRest full backup timer (weekly)
+      copy:
+        content: |
+          [Unit]
+          Description=pgBackRest Full Backup - Weekly
+
+          [Timer]
+          OnCalendar=Sun *-*-* 02:00:00
+          Persistent=true
+          RandomizedDelaySec=600
+
+          [Install]
+          WantedBy=timers.target
+        dest: /etc/systemd/system/pgbackrest-full.timer
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Deploy pgBackRest differential backup service
+      copy:
+        content: |
+          [Unit]
+          Description=pgBackRest Differential Backup
+
+          [Service]
+          Type=oneshot
+          User=postgres
+          Group=postgres
+          ExecStart=/usr/bin/pgbackrest --stanza={{ pgbackrest_stanza }} --type=diff backup
+          IOSchedulingClass=idle
+          Nice=19
+        dest: /etc/systemd/system/pgbackrest-diff.service
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Deploy pgBackRest differential backup timer (daily)
+      copy:
+        content: |
+          [Unit]
+          Description=pgBackRest Differential Backup - Daily
+
+          [Timer]
+          OnCalendar=Mon..Sat *-*-* 02:00:00
+          Persistent=true
+          RandomizedDelaySec=600
+
+          [Install]
+          WantedBy=timers.target
+        dest: /etc/systemd/system/pgbackrest-diff.timer
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Enable pgBackRest backup timers
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop:
+        - pgbackrest-full.timer
+        - pgbackrest-diff.timer
+
+    # -------------------------------------------------------------------
+    # UFW firewall rules
+    # -------------------------------------------------------------------
+    - name: Configure UFW rules for PostgreSQL server
+      ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        comment: "{{ item.comment }}"
+      loop:
+        - { port: '41641', proto: 'udp', comment: 'Tailscale WireGuard' }
+
+    # -------------------------------------------------------------------
+    # Run initial full backup
+    # -------------------------------------------------------------------
+    - name: Check if any backup exists
+      become_user: postgres
+      command: "pgbackrest --stanza={{ pgbackrest_stanza }} info --output=json"
+      register: backup_info
+      changed_when: false
+      failed_when: false
+
+    - name: Run initial full backup if none exists
+      become_user: postgres
+      command: "pgbackrest --stanza={{ pgbackrest_stanza }} --type=full backup"
+      when: backup_info.rc != 0 or (backup_info.stdout | from_json)[0].backup | default([]) | length == 0
+      async: 3600
+      poll: 30
+
+    - name: Display post-setup instructions
+      debug:
+        msg: |
+          PostgreSQL {{ pg_version }} is running on {{ tailscale_ip.stdout }}:5432
+
+          Tailscale IP: {{ tailscale_ip.stdout }}
+          Data directory: /mnt/pgdata/{{ pg_version }}/main (persistent volume)
+          Backups: pgBackRest to S3 ({{ pgbackrest_s3_bucket }})
+            Full: weekly (Sundays 02:00)
+            Differential: daily (Mon-Sat 02:00)
+          Monitoring: postgres_exporter on {{ tailscale_ip.stdout }}:9187
+
+          Connect from PgBouncer or operator:
+            psql -h {{ tailscale_ip.stdout }} -U <role> -d <database>
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart postgresql
+      systemd:
+        name: postgresql
+        state: restarted
+
+    - name: reload postgresql
+      become_user: postgres
+      command: "pg_ctlcluster {{ pg_version }} main reload"
+
+    - name: restart postgres_exporter
+      systemd:
+        name: postgres_exporter
+        state: restarted

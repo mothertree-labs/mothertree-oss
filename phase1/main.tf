@@ -351,4 +351,39 @@ resource "linode_instance" "jitsi_tester" {
   ]
 }
 
+# Headscale Server Module (self-hosted Tailscale control plane)
+module "headscale_server" {
+  source = "../modules/headscale"
+  count  = var.headscale_enabled ? 1 : 0
 
+  headscale_label   = "${var.headscale_label}-${var.env}"
+  headscale_type    = var.headscale_type
+  headscale_image   = var.headscale_image
+  headscale_version = var.headscale_version
+  region            = var.linode_region
+  ssh_public_key    = var.ssh_public_key
+  domain            = var.headscale_domain
+  base_domain       = var.headscale_base_domain
+  env               = var.env
+  admin_ssh_cidrs   = var.admin_ssh_cidrs
+  tags              = sort(concat(var.common_tags, [var.env]))
+}
+
+# PostgreSQL Server Module (dedicated database VM on Tailscale mesh)
+module "postgres_server" {
+  source = "../modules/postgres-server"
+  count  = var.postgres_enabled ? 1 : 0
+
+  postgres_label     = "${var.postgres_label}-${var.env}"
+  postgres_type      = var.postgres_type
+  postgres_image     = var.postgres_image
+  postgres_version   = var.postgres_version
+  region             = var.linode_region
+  ssh_public_key     = var.ssh_public_key
+  volume_size        = var.postgres_volume_size
+  headscale_url      = var.headscale_url
+  tailscale_auth_key = var.tailscale_auth_key
+  env                = var.env
+  admin_ssh_cidrs    = var.admin_ssh_cidrs
+  tags               = sort(concat(var.common_tags, [var.env]))
+}

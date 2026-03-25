@@ -14,3 +14,7 @@ all:
       # Headscale control plane servers (one per environment)
       # Hosts are added dynamically by deploy_infra based on environment
       hosts: {}
+    postgres_servers:
+      # PostgreSQL database servers (one per environment/region)
+      # Hosts are added dynamically by manage_infra based on environment
+      hosts: {}

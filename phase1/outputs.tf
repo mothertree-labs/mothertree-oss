@@ -188,3 +188,35 @@ output "jitsi_tester_label" {
   description = "Label of the Jitsi tester instance"
   value       = var.jitsi_tester_enabled ? linode_instance.jitsi_tester[0].label : null
 }
+
+# Headscale Server Outputs
+output "headscale_server_ip" {
+  description = "Public IP address of the Headscale server"
+  value       = var.headscale_enabled ? module.headscale_server[0].headscale_server_ip : null
+}
+
+output "headscale_server_id" {
+  description = "ID of the Headscale server"
+  value       = var.headscale_enabled ? module.headscale_server[0].headscale_server_id : null
+}
+
+output "headscale_api_url" {
+  description = "Headscale API/coordination URL"
+  value       = var.headscale_enabled ? module.headscale_server[0].headscale_api_url : null
+}
+
+# PostgreSQL Server Outputs
+output "postgres_server_ip" {
+  description = "Public IP address of the PostgreSQL server (for provisioning only — DB traffic goes through Tailscale)"
+  value       = var.postgres_enabled ? module.postgres_server[0].postgres_server_ip : null
+}
+
+output "postgres_server_id" {
+  description = "ID of the PostgreSQL server"
+  value       = var.postgres_enabled ? module.postgres_server[0].postgres_server_id : null
+}
+
+output "postgres_server_label" {
+  description = "Label of the PostgreSQL server"
+  value       = var.postgres_enabled ? module.postgres_server[0].postgres_server_label : null
+}

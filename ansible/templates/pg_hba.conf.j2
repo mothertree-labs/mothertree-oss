@@ -1,0 +1,23 @@
+# PostgreSQL host-based authentication — managed by Ansible
+#
+# Two-layer defense:
+#   1. This file restricts connections to localhost and the Tailscale CGNAT range
+#   2. Linode Cloud Firewall drops all inbound traffic except Tailscale UDP and SSH
+#
+# TYPE  DATABASE    USER        ADDRESS             METHOD
+
+# Local connections (Unix socket)
+local   all         postgres                        peer
+local   all         all                             peer
+
+# Localhost (IPv4 and IPv6)
+host    all         all         127.0.0.1/32        scram-sha-256
+host    all         all         ::1/128             scram-sha-256
+
+# Tailscale CGNAT range (100.64.0.0/10) — all mesh peers
+# PgBouncer pods, monitoring, and operator access come through here
+host    all         all         100.64.0.0/10       scram-sha-256
+
+# Reject everything else
+host    all         all         0.0.0.0/0           reject
+host    all         all         ::/0                reject

@@ -246,6 +246,7 @@ VPN_NETWORK_CIDR="$(terraform output -raw vpn_network_cidr 2>/dev/null || echo "
 TURN_SERVER_IP="$(terraform output -raw turn_server_ip 2>/dev/null || echo "")"
 LKE_CLUSTER_ID="$(terraform output -raw cluster_id 2>/dev/null || echo "")"
 HEADSCALE_SERVER_IP="$(terraform output -raw headscale_server_ip 2>/dev/null || echo "")"
+POSTGRES_SERVER_IP="$(terraform output -raw postgres_server_ip 2>/dev/null || echo "")"
 TFEOF
         print_status "Terraform outputs file written — include in CI deploy vault when updating secrets"
       else
@@ -519,6 +520,30 @@ EOF
       print_status "No TURN server IP found — skipping TURN server provisioning"
     fi
 
+    # Add Headscale server to inventory if available
+    if [ -n "${HEADSCALE_SERVER_IP:-}" ] && [ "$HEADSCALE_SERVER_IP" != "null" ]; then
+      cat >> "$TEMP_INVENTORY" <<EOF
+
+[headscale_servers]
+headscale-server ansible_host=${HEADSCALE_SERVER_IP} ansible_user=root
+EOF
+      print_status "Headscale server ${HEADSCALE_SERVER_IP} added to inventory"
+    else
+      print_status "No Headscale server IP found — skipping Headscale provisioning"
+    fi
+
+    # Add PostgreSQL server to inventory if available
+    if [ -n "${POSTGRES_SERVER_IP:-}" ] && [ "$POSTGRES_SERVER_IP" != "null" ]; then
+      cat >> "$TEMP_INVENTORY" <<EOF
+
+[postgres_servers]
+postgres-server ansible_host=${POSTGRES_SERVER_IP} ansible_user=root
+EOF
+      print_status "PostgreSQL server ${POSTGRES_SERVER_IP} added to inventory"
+    else
+      print_status "No PostgreSQL server IP found — skipping PostgreSQL provisioning"
+    fi
+
     # Source env-specific secrets if available (for tls_email, etc.)
     if [ -f "$REPO_ROOT/secrets.$MT_ENV.tfvars.env" ]; then
       # shellcheck disable=SC1090
@@ -594,7 +619,63 @@ EOF
       echo "vpn_network_cidr: \"${VPN_NETWORK_CIDR}\"" >> "$TEMP_EXTRA_VARS"
     fi
 
-    print_status "=== VPN POSTFIX CONFIGURATION ==="
+    # Headscale configuration
+    if [ -n "${HEADSCALE_DOMAIN:-}" ]; then
+      echo "headscale_domain: \"${HEADSCALE_DOMAIN}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${HEADSCALE_BASE_DOMAIN:-}" ]; then
+      echo "headscale_base_domain: \"${HEADSCALE_BASE_DOMAIN}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+
+    # PostgreSQL server configuration
+    if [ -n "${PG_SHARED_BUFFERS:-}" ]; then
+      echo "pg_shared_buffers: \"${PG_SHARED_BUFFERS}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${PG_EFFECTIVE_CACHE_SIZE:-}" ]; then
+      echo "pg_effective_cache_size: \"${PG_EFFECTIVE_CACHE_SIZE}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${PG_MAX_CONNECTIONS:-}" ]; then
+      echo "pg_max_connections: \"${PG_MAX_CONNECTIONS}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${PG_WORK_MEM:-}" ]; then
+      echo "pg_work_mem: \"${PG_WORK_MEM}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${PG_MAINTENANCE_WORK_MEM:-}" ]; then
+      echo "pg_maintenance_work_mem: \"${PG_MAINTENANCE_WORK_MEM}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+
+    # PostgreSQL backup (pgBackRest to S3)
+    if [ -n "${PGBACKREST_S3_ENDPOINT:-}" ]; then
+      echo "pgbackrest_s3_endpoint: \"${PGBACKREST_S3_ENDPOINT}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${PGBACKREST_S3_BUCKET:-}" ]; then
+      echo "pgbackrest_s3_bucket: \"${PGBACKREST_S3_BUCKET}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${PGBACKREST_S3_REGION:-}" ]; then
+      echo "pgbackrest_s3_region: \"${PGBACKREST_S3_REGION}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${PGBACKREST_S3_KEY:-}" ]; then
+      echo "pgbackrest_s3_key: \"${PGBACKREST_S3_KEY}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${PGBACKREST_S3_SECRET:-}" ]; then
+      echo "pgbackrest_s3_secret: \"${PGBACKREST_S3_SECRET}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${PGBACKREST_CIPHER_PASS:-}" ]; then
+      echo "pgbackrest_cipher_pass: \"${PGBACKREST_CIPHER_PASS}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${POSTGRES_EXPORTER_PASSWORD:-}" ]; then
+      echo "postgres_exporter_password: \"${POSTGRES_EXPORTER_PASSWORD}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+
+    # Headscale/Tailscale auth for PostgreSQL server
+    if [ -n "${HEADSCALE_URL:-}" ]; then
+      echo "headscale_url: \"${HEADSCALE_URL}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+    if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
+      echo "tailscale_auth_key: \"${TAILSCALE_AUTH_KEY}\"" >> "$TEMP_EXTRA_VARS"
+    fi
+
+    print_status "=== ANSIBLE CONFIGURATION ==="
     print_status "Environment:        $MT_ENV"
     print_status "VPN Host:           $VPN_HOST"
     print_status "VPN IP:             ${VPN_SERVER_IP:-<resolving from DNS>}"
@@ -602,7 +683,9 @@ EOF
     print_status "TLS email:          ${TF_VAR_tls_email:-<not set, Certbot/TLS skipped>}"
     print_status "Tenant Domains:     ${TENANT_DOMAINS:-<none>}"
     print_status "K8s LB Host:        lb1.${MT_ENV}.${INFRA_DOMAIN}"
-    print_status "==================================="
+    print_status "Headscale IP:       ${HEADSCALE_SERVER_IP:-<not deployed>}"
+    print_status "PostgreSQL IP:      ${POSTGRES_SERVER_IP:-<not deployed>}"
+    print_status "==============================="
 
     # Run playbook
     set +e
@@ -615,7 +698,7 @@ EOF
     rm -f "$TEMP_INVENTORY" "$TEMP_EXTRA_VARS"
 
     if [ $ANSIBLE_EXIT -eq 0 ]; then
-      print_success "Ansible playbook completed — VPN server ($VPN_HOST)${TURN_SERVER_IP:+ + TURN server ($TURN_SERVER_IP)}"
+      print_success "Ansible playbook completed — VPN server ($VPN_HOST)${TURN_SERVER_IP:+ + TURN ($TURN_SERVER_IP)}${HEADSCALE_SERVER_IP:+ + Headscale ($HEADSCALE_SERVER_IP)}${POSTGRES_SERVER_IP:+ + PostgreSQL ($POSTGRES_SERVER_IP)}"
     else
       print_error "Ansible playbook failed with exit code $ANSIBLE_EXIT"
       exit 1

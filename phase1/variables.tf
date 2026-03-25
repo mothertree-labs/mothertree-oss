@@ -251,3 +251,100 @@ variable "jitsi_tester_region" {
     error_message = "Invalid Linode region. Please choose a valid region."
   }
 }
+
+# Headscale Server Configuration
+variable "headscale_enabled" {
+  description = "Whether to deploy a Headscale server (self-hosted Tailscale control plane)"
+  type        = bool
+  default     = false
+}
+
+variable "headscale_label" {
+  description = "Label for the Headscale server"
+  type        = string
+  default     = "headscale"
+}
+
+variable "headscale_type" {
+  description = "Linode instance type for Headscale server"
+  type        = string
+  default     = "g6-nanode-1" # 1GB RAM, 1 vCPU - sufficient for coordination server
+}
+
+variable "headscale_image" {
+  description = "OS image for Headscale server"
+  type        = string
+  default     = "linode/ubuntu24.04"
+}
+
+variable "headscale_version" {
+  description = "Headscale version to install"
+  type        = string
+  default     = "0.28.0"
+}
+
+variable "headscale_domain" {
+  description = "FQDN for the Headscale server (e.g., hs-prod.example.com)"
+  type        = string
+  default     = ""
+}
+
+variable "headscale_base_domain" {
+  description = "Base domain for MagicDNS (e.g., ts.example.com)"
+  type        = string
+  default     = ""
+}
+
+# PostgreSQL Server Configuration
+variable "postgres_enabled" {
+  description = "Whether to deploy a dedicated PostgreSQL VM (replaces in-cluster Bitnami PostgreSQL)"
+  type        = bool
+  default     = false
+}
+
+variable "postgres_label" {
+  description = "Label for the PostgreSQL server"
+  type        = string
+  default     = "postgres"
+}
+
+variable "postgres_type" {
+  description = "Linode instance type for PostgreSQL server (Dedicated CPU recommended)"
+  type        = string
+  default     = "g6-dedicated-2" # Dedicated 4GB RAM, 2 vCPU ($36/mo)
+}
+
+variable "postgres_image" {
+  description = "OS image for PostgreSQL server"
+  type        = string
+  default     = "linode/ubuntu24.04"
+}
+
+variable "postgres_version" {
+  description = "PostgreSQL major version to install"
+  type        = string
+  default     = "16"
+}
+
+variable "postgres_volume_size" {
+  description = "Size of the PostgreSQL data volume in GB"
+  type        = number
+  default     = 80
+  validation {
+    condition     = var.postgres_volume_size >= 10 && var.postgres_volume_size <= 1000
+    error_message = "PostgreSQL volume size must be between 10 and 1000 GB."
+  }
+}
+
+variable "headscale_url" {
+  description = "URL of the Headscale instance for Tailscale mesh (e.g., https://hs-prod.example.com:8080)"
+  type        = string
+  default     = ""
+}
+
+variable "tailscale_auth_key" {
+  description = "Pre-authenticated key from Headscale for infrastructure nodes to join the tailnet"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
