@@ -1,0 +1,15 @@
+controller:
+  service:
+    annotations:
+      # No PROXY protocol — prod-eu uses gray cloud (DNS only, no Cloudflare proxy).
+      # Two-level subdomains (*.funder-forum.mother-tree.org) can't use Cloudflare
+      # Universal SSL. When the tenant moves to their own domain, switch to orange
+      # cloud and re-enable PROXY protocol.
+      service.beta.kubernetes.io/linode-loadbalancer-default-proxy-protocol: "none"
+  config:
+    # Disable PROXY protocol decoding (no Cloudflare, traffic hits NodeBalancer directly)
+    use-proxy-protocol: "false"
+    # Use standard forwarded headers instead of CF-Connecting-IP
+    real-ip-header: "X-Forwarded-For"
+    # No Cloudflare geo-blocking (traffic is direct, not proxied)
+    # server-snippet intentionally omitted — no $deny_non_cloudflare check
