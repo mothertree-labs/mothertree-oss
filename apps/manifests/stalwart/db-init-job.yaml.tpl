@@ -48,7 +48,7 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: docs-postgresql
+                  name: postgres-credentials
                   key: postgres-password
             - name: STALWART_PASSWORD
               valueFrom:

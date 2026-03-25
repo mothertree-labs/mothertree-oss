@@ -85,7 +85,7 @@ spec:
         - name: POSTGRES_ADMIN_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: docs-postgresql
+              name: postgres-credentials
               key: postgres-password
         - name: ROUNDCUBE_DB_PASSWORD
           valueFrom:

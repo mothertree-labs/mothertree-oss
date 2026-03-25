@@ -67,12 +67,9 @@ export HEADSCALE_URL
 # Required: PgBouncer auth password (for auth_query bootstrap)
 : "${PGBOUNCER_AUTH_PASSWORD:?PGBOUNCER_AUTH_PASSWORD not set. Add pgbouncer.auth_password to infra secrets.}"
 
-# Required: PostgreSQL superuser password (for auth_query fallback)
-PG_SUPERUSER_PASSWORD=$(kubectl get secret docs-postgresql -n "$NS_DB" -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d || true)
-if [ -z "$PG_SUPERUSER_PASSWORD" ]; then
-  : "${PG_SUPERUSER_PASSWORD:?Could not read PostgreSQL superuser password from cluster and PG_SUPERUSER_PASSWORD not set.}"
-fi
-export PG_SUPERUSER_PASSWORD
+# Required: PostgreSQL superuser password (from infra secrets, same as on the PG VM)
+: "${TF_VAR_postgres_password:?TF_VAR_postgres_password not set. Add database.postgres_password to infra secrets.}"
+export PG_SUPERUSER_PASSWORD="$TF_VAR_postgres_password"
 
 # Pool sizing (defaults can be overridden in infra config)
 export PGBOUNCER_MAX_CLIENT_CONN="${PGBOUNCER_MAX_CLIENT_CONN:-400}"
@@ -127,6 +124,13 @@ kubectl create configmap pgbouncer-config -n "$NS_DB" \
 print_status "Applying PgBouncer Secrets..."
 envsubst '${NS_DB} ${PGBOUNCER_AUTH_PASSWORD} ${PG_SUPERUSER_PASSWORD} ${TAILSCALE_AUTHKEY}' \
   < "$MANIFESTS_DIR/pgbouncer-secret.yaml.tpl" | mt_apply kubectl apply -f -
+
+# Create postgres-credentials Secret for deploy scripts (mt_psql / mt_pg_password helpers).
+# This replaces the Bitnami-generated docs-postgresql secret that scripts previously read.
+print_status "Applying postgres-credentials Secret..."
+kubectl create secret generic postgres-credentials -n "$NS_DB" \
+  --from-literal=postgres-password="$PG_SUPERUSER_PASSWORD" \
+  --dry-run=client -o yaml | mt_apply kubectl apply -f -
 
 # =============================================================================
 # Apply Deployment

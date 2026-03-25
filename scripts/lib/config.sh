@@ -392,15 +392,11 @@ _mt_detect_pg() {
     return 0
   fi
 
-  # Prefer PgBouncer (external PG VM via Tailscale mesh) over in-cluster PostgreSQL
+  # PgBouncer is the sole database entrypoint (connects to external PG VM via Tailscale mesh)
   if kubectl get service pgbouncer -n "$NS_DB" >/dev/null 2>&1; then
     export PG_SERVICE_NAME="pgbouncer"
-  elif kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
-    export PG_SERVICE_NAME="docs-postgresql-primary"
-  elif kubectl get service docs-postgresql -n "$NS_DB" >/dev/null 2>&1; then
-    export PG_SERVICE_NAME="docs-postgresql"
   else
-    echo "[WARNING] PostgreSQL service not found in $NS_DB namespace." >&2
+    echo "[WARNING] PgBouncer service not found in $NS_DB namespace." >&2
     echo "[WARNING] PG_HOST will not be set. Run 'deploy_infra $MT_ENV' first if needed." >&2
     return 0
   fi

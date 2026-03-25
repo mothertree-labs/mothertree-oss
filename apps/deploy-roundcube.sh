@@ -123,19 +123,19 @@ print_success "Namespace ready: $NS_WEBMAIL"
 # =============================================================================
 print_status "Initializing PostgreSQL database for Roundcube..."
 
-# Copy the PostgreSQL admin secret from infra-db namespace
-print_status "Copying PostgreSQL admin secret to $NS_WEBMAIL namespace..."
-PG_PASSWORD=$(kubectl get secret docs-postgresql -n infra-db -o jsonpath='{.data.postgres-password}')
+# Copy PostgreSQL credentials to webmail namespace
+print_status "Copying PostgreSQL credentials to $NS_WEBMAIL namespace..."
+PG_PASSWORD=$(mt_pg_password)
 if [ -z "$PG_PASSWORD" ]; then
-    print_error "Could not retrieve PostgreSQL admin password from infra-db namespace"
+    print_error "Could not retrieve postgres-credentials secret from $NS_DB namespace"
     exit 1
 fi
 
-mt_apply kubectl apply -f <(kubectl create secret generic docs-postgresql \
+mt_apply kubectl apply -f <(kubectl create secret generic postgres-credentials \
     --namespace="$NS_WEBMAIL" \
-    --from-literal=postgres-password="$(echo "$PG_PASSWORD" | base64 -d)" \
+    --from-literal=postgres-password="$PG_PASSWORD" \
     --dry-run=client -o yaml)
-print_success "PostgreSQL admin secret copied"
+print_success "PostgreSQL credentials copied"
 
 # Apply Roundcube secrets first (needed by db-init job)
 print_status "Applying Roundcube secrets..."

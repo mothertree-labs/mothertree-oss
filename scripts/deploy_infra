@@ -414,73 +414,15 @@ envsubst '${TLS_EMAIL}' < "$REPO_ROOT/apps/manifests/cert-manager/clusterissuer-
 envsubst '${TLS_EMAIL}' < "$REPO_ROOT/apps/manifests/cert-manager/clusterissuer-dns01.yaml.tpl" | kubectl apply -f -
 print_status "ClusterIssuers and Cloudflare API token deployed"
 
-# Deploy PostgreSQL to shared database namespace
-print_status "Deploying PostgreSQL to $NS_DB namespace..."
-
-# SAFETY CHECK: Detect existing PostgreSQL PVC to prevent data loss
-EXISTING_PVC=$(kubectl get pvc -n "$NS_DB" -l app.kubernetes.io/name=postgresql -o name 2>/dev/null | head -1 || echo "")
-if [ -z "$EXISTING_PVC" ]; then
-  RELEASED_PVS=$(kubectl get pv -o json 2>/dev/null | jq -r '.items[] | select(.status.phase=="Released") | select(.spec.claimRef.namespace=="'"$NS_DB"'") | select(.spec.claimRef.name | startswith("data-docs-postgresql")) | .metadata.name' || echo "")
-  if [ -n "$RELEASED_PVS" ]; then
-    print_error "No PostgreSQL PVC found in $NS_DB but Released PVs exist with postgres data!"
-    print_error "Released PVs: $RELEASED_PVS"
-    print_error "This may indicate a namespace issue that would cause DATA LOSS."
-    print_error "Set ALLOW_NEW_PVC=true to proceed (data will NOT be migrated)"
-    if [ "${ALLOW_NEW_PVC:-}" != "true" ]; then
-      exit 1
-    fi
-    print_warning "ALLOW_NEW_PVC=true set - proceeding with new PVC"
-  else
-    print_status "No existing PostgreSQL PVC - this appears to be a fresh install"
-  fi
-else
-  print_status "Existing PostgreSQL PVC found: $EXISTING_PVC"
-fi
-
-# Check for existing PostgreSQL secret and add replication-password if missing
-if kubectl get secret docs-postgresql -n "$NS_DB" &>/dev/null; then
-  if ! kubectl get secret docs-postgresql -n "$NS_DB" -o jsonpath='{.data.replication-password}' 2>/dev/null | grep -q .; then
-    print_status "PostgreSQL: patching existing secret to add replication-password"
-    REPL_PASSWORD=$(openssl rand -base64 18)
-    kubectl patch secret docs-postgresql -n "$NS_DB" --type='json' \
-      -p="[{\"op\": \"add\", \"path\": \"/data/replication-password\", \"value\": \"$(echo -n "$REPL_PASSWORD" | base64)\"}]"
-  fi
-fi
-
-# Deploy with replication enabled
-PG_READ_REPLICAS="${PG_READ_REPLICAS:-1}"
-PG_ENV_VALUES=""
-if [ -f "$REPO_ROOT/apps/environments/${MT_ENV}/docs-postgresql.yaml" ]; then
-  PG_ENV_VALUES="--values $REPO_ROOT/apps/environments/${MT_ENV}/docs-postgresql.yaml"
-fi
-
-helm upgrade --install docs-postgresql oci://registry-1.docker.io/bitnamicharts/postgresql \
-  --version 18.2.3 \
-  --namespace "$NS_DB" \
-  --values "$REPO_ROOT/apps/values/docs-postgresql.yaml" \
-  $PG_ENV_VALUES \
-  --set "architecture=replication" \
-  --set "readReplicas.replicaCount=${PG_READ_REPLICAS}" \
-  --set "global.security.allowInsecureImages=true" \
-  --wait \
-  --timeout 600s
-
-print_status "Waiting for PostgreSQL to be ready..."
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql -n "$NS_DB" --timeout=300s
-
 # =============================================================================
-# Deploy PgBouncer + Tailscale sidecar (conditional — external PG VM connectivity)
+# Deploy PgBouncer + Tailscale sidecar (connects to external PG VM via mesh)
 # =============================================================================
-if [ "${PGBOUNCER_ENABLED:-false}" = "true" ]; then
-  print_status "Deploying PgBouncer + Tailscale sidecar..."
-  if [ -x "$REPO_ROOT/apps/deploy-pgbouncer.sh" ]; then
-    "$REPO_ROOT/apps/deploy-pgbouncer.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
-  else
-    print_error "deploy-pgbouncer.sh not found"
-    exit 1
-  fi
+print_status "Deploying PgBouncer to $NS_DB namespace..."
+if [ -x "$REPO_ROOT/apps/deploy-pgbouncer.sh" ]; then
+  "$REPO_ROOT/apps/deploy-pgbouncer.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
 else
-  print_status "PgBouncer not enabled for this environment (set pgbouncer.enabled: true in infra config)"
+  print_error "deploy-pgbouncer.sh not found or not executable"
+  exit 1
 fi
 
 # Create Keycloak theme ConfigMap BEFORE deploying Keycloak.
@@ -505,19 +447,10 @@ else
   print_warning "Theme directory not found at $THEMES_DIR/platform, skipping theme ConfigMap"
 fi
 
-# Detect PostgreSQL service hostname from cluster state
-# Prefer PgBouncer (external PG VM via Tailscale mesh) over in-cluster PostgreSQL
-if kubectl get service pgbouncer -n "$NS_DB" >/dev/null 2>&1; then
-  export PG_SERVICE_NAME="pgbouncer"
-  print_status "PostgreSQL: using PgBouncer (external PG VM via Tailscale mesh)"
-elif kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
-  export PG_SERVICE_NAME="docs-postgresql-primary"
-  print_status "PostgreSQL: detected replication mode (docs-postgresql-primary)"
-else
-  export PG_SERVICE_NAME="docs-postgresql"
-  print_status "PostgreSQL: detected standalone mode (docs-postgresql)"
-fi
+# PgBouncer is the sole database entrypoint (connects to external PG VM via Tailscale mesh)
+export PG_SERVICE_NAME="pgbouncer"
 export PG_HOST="${PG_SERVICE_NAME}.${NS_DB}.svc.cluster.local"
+print_status "PostgreSQL: using PgBouncer at $PG_HOST (external PG VM via Tailscale mesh)"
 
 # Verify shared infra secrets were loaded by infra-config.sh
 # (KEYCLOAK_ADMIN_PASSWORD, KEYCLOAK_DB_PASSWORD, TF_VAR_grafana_admin_password)
@@ -528,17 +461,10 @@ if [ -z "${KEYCLOAK_ADMIN_PASSWORD:-}" ] || [ "${KEYCLOAK_ADMIN_PASSWORD}" = "nu
   exit 1
 fi
 
-# Sync Keycloak DB password in PostgreSQL to match secrets file.
-# The password may have been set to a different value during initial DB creation,
-# so we always ensure it matches the current secrets file value.
-# Note: sed escapes single quotes in the password to prevent SQL injection.
-print_status "Syncing Keycloak DB password in PostgreSQL..."
-PG_SUPERUSER_PASS=$(kubectl get secret docs-postgresql -n "$NS_DB" --kubeconfig="$KUBECONFIG" -o jsonpath='{.data.postgres-password}' | base64 -d)
-kubectl exec -i "${PG_SERVICE_NAME}-0" -n "$NS_DB" --kubeconfig="$KUBECONFIG" -- \
-  env PGPASSWORD="$PG_SUPERUSER_PASS" psql -U postgres -c "ALTER ROLE keycloak WITH PASSWORD '$(echo "$KEYCLOAK_DB_PASSWORD" | sed "s/'/''/g")';" 2>/dev/null || \
-  print_warning "Could not update keycloak DB password — PostgreSQL may not be ready yet"
+# NOTE: Keycloak DB password is managed on the external PG VM (created by Ansible).
+# No in-cluster password sync needed — PgBouncer uses auth_query to authenticate.
 
-# Deploy Keycloak (needs PostgreSQL)
+# Deploy Keycloak (connects to PG VM via PgBouncer)
 print_status "Deploying Keycloak to $NS_AUTH namespace (replicas: $KEYCLOAK_REPLICAS)..."
 pushd "$REPO_ROOT/apps" >/dev/null
   helmfile -e "$MT_ENV" -l name=keycloak sync --skip-deps
@@ -679,11 +605,7 @@ echo ""
 print_success "Shared infrastructure deployed for $MT_ENV!"
 echo ""
 echo "Infrastructure namespaces:"
-if [ "${PGBOUNCER_ENABLED:-false}" = "true" ]; then
-  echo "  - $NS_DB (PostgreSQL + PgBouncer)"
-else
-  echo "  - $NS_DB (PostgreSQL)"
-fi
+echo "  - $NS_DB (PgBouncer → external PG VM)"
 echo "  - $NS_AUTH (Keycloak)"
 echo "  - $NS_MONITORING (Prometheus, Grafana)"
 echo "  - $NS_INGRESS (Public ingress)"

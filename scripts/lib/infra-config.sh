@@ -88,9 +88,8 @@ _mt_infra_load_env_config() {
   local infra_config="${MT_INFRA_CONFIG:-}"
   if [ -n "$infra_config" ] && [ -f "$infra_config" ]; then
     echo "[INFO] Loading infrastructure config from $infra_config"
-    PG_READ_REPLICAS=$(yq '.postgresql.read_replicas // 1' "$infra_config")
     KEYCLOAK_REPLICAS=$(yq '.keycloak.replicas // 2' "$infra_config")
-    export PG_READ_REPLICAS KEYCLOAK_REPLICAS
+    export KEYCLOAK_REPLICAS
 
     # PostgreSQL version and VM tuning (passed to Ansible for postgresql.conf)
     POSTGRES_VERSION=$(yq '.postgresql.version // ""' "$infra_config")
