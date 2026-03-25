@@ -125,43 +125,6 @@ output "turn_server_label" {
   value       = var.turn_server_enabled ? linode_instance.turn_server[0].label : null
 }
 
-# OpenVPN Server Outputs
-output "openvpn_server_ip" {
-  description = "Public IP address of the OpenVPN server"
-  value       = module.openvpn_server.openvpn_server_ip
-}
-
-output "openvpn_server_private_ip" {
-  description = "Private IP address of the OpenVPN server"
-  value       = module.openvpn_server.openvpn_server_private_ip
-}
-
-output "openvpn_server_id" {
-  description = "ID of the OpenVPN server"
-  value       = module.openvpn_server.openvpn_server_id
-}
-
-output "vpn_network_cidr" {
-  description = "VPN network CIDR block"
-  value       = module.openvpn_server.vpn_network_cidr
-}
-
-output "vpn_server_tunnel_ip" {
-  description = "VPN server's tunnel IP address (for SSH over VPN)"
-  value       = module.openvpn_server.vpn_server_tunnel_ip
-}
-
-# VPC/LAN CIDR used by the OpenVPN server NIC (support subnet)
-output "vpn_server_vpc_cidr" {
-  description = "VPC/LAN CIDR used by the OpenVPN server NIC"
-  value       = linode_vpc_subnet.support_subnet.ipv4
-}
-
-# Support subnet ID (for CI server terraform)
-output "support_subnet_id" {
-  description = "ID of the VPC support subnet (for CI server)"
-  value       = linode_vpc_subnet.support_subnet.id
-}
 
 # Jitsi Tester Outputs
 output "jitsi_tester_enabled" {

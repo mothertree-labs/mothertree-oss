@@ -33,6 +33,7 @@ derp:
     stun_listen_addr: "0.0.0.0:3478"
     automatically_add_embedded_derp_region: true
     ipv4: "{{ server_public_ip.content | trim }}"
+    private_key_path: /var/lib/headscale/derp_server_private.key
     verify_clients: true
 
 # MagicDNS — nodes get FQDNs like pgvm.{{ headscale_base_domain }}
@@ -44,9 +45,12 @@ dns:
       - 1.1.1.1
       - 1.0.0.1
 
-# ACL policy — deny-by-default with tag-based rules
-policy:
-  path: /etc/headscale/acl-policy.json
+# ACL policy — disabled until Headscale v0.28 tag ownership format is resolved.
+# Without ACL, all nodes on the mesh can communicate freely (traffic is still
+# encrypted via WireGuard). Re-enable once we determine the correct tagOwners
+# format for Headscale v0.28 (which requires email-style usernames with @).
+# policy:
+#   path: /etc/headscale/acl-policy.json
 
 log:
   level: info

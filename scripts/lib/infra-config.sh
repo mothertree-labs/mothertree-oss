@@ -91,11 +91,43 @@ _mt_infra_load_env_config() {
     PG_READ_REPLICAS=$(yq '.postgresql.read_replicas // 1' "$infra_config")
     KEYCLOAK_REPLICAS=$(yq '.keycloak.replicas // 2' "$infra_config")
     export PG_READ_REPLICAS KEYCLOAK_REPLICAS
+
+    # PostgreSQL version and VM tuning (passed to Ansible for postgresql.conf)
+    POSTGRES_VERSION=$(yq '.postgresql.version // ""' "$infra_config")
+    export POSTGRES_VERSION
+    PG_SHARED_BUFFERS=$(yq '.postgresql.shared_buffers // ""' "$infra_config")
+    PG_EFFECTIVE_CACHE_SIZE=$(yq '.postgresql.effective_cache_size // ""' "$infra_config")
+    PG_MAX_CONNECTIONS=$(yq '.postgresql.max_connections // ""' "$infra_config")
+    PG_WORK_MEM=$(yq '.postgresql.work_mem // ""' "$infra_config")
+    PG_MAINTENANCE_WORK_MEM=$(yq '.postgresql.maintenance_work_mem // ""' "$infra_config")
+    export PG_SHARED_BUFFERS PG_EFFECTIVE_CACHE_SIZE PG_MAX_CONNECTIONS
+    export PG_WORK_MEM PG_MAINTENANCE_WORK_MEM
+
+    # pgBackRest backup config (non-secret parts)
+    PGBACKREST_S3_ENDPOINT=$(yq '.pgbackrest.s3_endpoint // ""' "$infra_config")
+    PGBACKREST_S3_BUCKET=$(yq '.pgbackrest.s3_bucket // ""' "$infra_config")
+    PGBACKREST_S3_REGION=$(yq '.pgbackrest.s3_region // ""' "$infra_config")
+    export PGBACKREST_S3_ENDPOINT PGBACKREST_S3_BUCKET PGBACKREST_S3_REGION
+
+    # PgBouncer + Tailscale sidecar (external PG VM connectivity)
+    PGBOUNCER_ENABLED=$(yq '.pgbouncer.enabled // false' "$infra_config")
+    PG_VM_TAILSCALE_IP=$(yq '.pgbouncer.pg_vm_tailscale_ip // ""' "$infra_config")
+    PGBOUNCER_MAX_CLIENT_CONN=$(yq '.pgbouncer.max_client_conn // 400' "$infra_config")
+    PGBOUNCER_DEFAULT_POOL_SIZE=$(yq '.pgbouncer.default_pool_size // 50' "$infra_config")
+    export PGBOUNCER_ENABLED PG_VM_TAILSCALE_IP
+    export PGBOUNCER_MAX_CLIENT_CONN PGBOUNCER_DEFAULT_POOL_SIZE
+
+    # Headscale coordination server
+    HEADSCALE_URL=$(yq '.headscale.url // ""' "$infra_config")
+    HEADSCALE_DOMAIN=$(yq '.headscale.domain // ""' "$infra_config")
+    HEADSCALE_BASE_DOMAIN=$(yq '.headscale.base_domain // ""' "$infra_config")
+    export HEADSCALE_URL HEADSCALE_DOMAIN HEADSCALE_BASE_DOMAIN
   else
     echo "[WARNING] Infrastructure config not found: $infra_config"
     echo "[WARNING] Using defaults: PG_READ_REPLICAS=1, KEYCLOAK_REPLICAS=2"
     export PG_READ_REPLICAS=1
     export KEYCLOAK_REPLICAS=2
+    export PGBOUNCER_ENABLED=false
   fi
 }
 
@@ -307,6 +339,42 @@ _mt_infra_load_shared_secrets() {
     export SES_SMTP_PASSWORD="$_ses_password"
     echo "[INFO] AWS SES SMTP relay credentials loaded from infra tenant secrets"
   fi
+
+  # Tailscale pre-auth key (used by PG VM and PgBouncer sidecars to join mesh)
+  local _ts_authkey
+  _ts_authkey=$(yq '.tailscale.authkey // ""' "$_infra_secrets")
+  if [ -n "$_ts_authkey" ] && [ "$_ts_authkey" != "null" ]; then
+    export TAILSCALE_AUTHKEY="$_ts_authkey"
+    echo "[INFO] Tailscale auth key loaded from infra tenant secrets"
+  fi
+
+  # PgBouncer auth password (optional — only when PGBOUNCER_ENABLED=true)
+  if [ "${PGBOUNCER_ENABLED:-false}" = "true" ]; then
+    local _pgb_auth_pw
+    _pgb_auth_pw=$(yq '.pgbouncer.auth_password // ""' "$_infra_secrets")
+    [ -n "$_pgb_auth_pw" ] && [ "$_pgb_auth_pw" != "null" ] && export PGBOUNCER_AUTH_PASSWORD="$_pgb_auth_pw"
+    echo "[INFO] PgBouncer auth password loaded from infra tenant secrets"
+  fi
+
+  # pgBackRest secrets (S3 credentials + encryption)
+  local _pgb_s3_key _pgb_s3_secret _pgb_cipher
+  _pgb_s3_key=$(yq '.pgbackrest.s3_key // ""' "$_infra_secrets")
+  _pgb_s3_secret=$(yq '.pgbackrest.s3_secret // ""' "$_infra_secrets")
+  _pgb_cipher=$(yq '.pgbackrest.cipher_pass // ""' "$_infra_secrets")
+  [ -n "$_pgb_s3_key" ] && [ "$_pgb_s3_key" != "null" ] && export PGBACKREST_S3_KEY="$_pgb_s3_key"
+  [ -n "$_pgb_s3_secret" ] && [ "$_pgb_s3_secret" != "null" ] && export PGBACKREST_S3_SECRET="$_pgb_s3_secret"
+  [ -n "$_pgb_cipher" ] && [ "$_pgb_cipher" != "null" ] && export PGBACKREST_CIPHER_PASS="$_pgb_cipher"
+  if [ -n "${PGBACKREST_S3_KEY:-}" ]; then
+    echo "[INFO] pgBackRest S3 credentials loaded from infra tenant secrets"
+  fi
+
+  # PostgreSQL monitoring exporter password
+  local _pg_exporter_pw
+  _pg_exporter_pw=$(yq '.postgres_exporter.password // ""' "$_infra_secrets")
+  [ -n "$_pg_exporter_pw" ] && [ "$_pg_exporter_pw" != "null" ] && export POSTGRES_EXPORTER_PASSWORD="$_pg_exporter_pw"
+  if [ -n "${POSTGRES_EXPORTER_PASSWORD:-}" ]; then
+    echo "[INFO] PostgreSQL exporter password loaded from infra tenant secrets"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -381,8 +449,9 @@ _mt_infra_load_terraform_outputs() {
   echo "[INFO] Loading Terraform outputs from $_tf_outputs_file"
   # shellcheck disable=SC1090
   source "$_tf_outputs_file"
-  export VPN_SERVER_IP VPN_SERVER_PRIVATE_IP VPN_SERVER_TUNNEL_IP VPN_NETWORK_CIDR TURN_SERVER_IP LKE_CLUSTER_ID HEADSCALE_SERVER_IP
+  export TURN_SERVER_IP LKE_CLUSTER_ID HEADSCALE_SERVER_IP POSTGRES_SERVER_IP
 
-  echo "[INFO] VPN server private IP: ${VPN_SERVER_PRIVATE_IP:-<not set>}"
-  echo "[INFO] VPN network CIDR: ${VPN_NETWORK_CIDR:-<not set>}"
+  echo "[INFO] TURN server IP: ${TURN_SERVER_IP:-<not set>}"
+  echo "[INFO] Headscale server IP: ${HEADSCALE_SERVER_IP:-<not set>}"
+  echo "[INFO] PostgreSQL server IP: ${POSTGRES_SERVER_IP:-<not set>}"
 }

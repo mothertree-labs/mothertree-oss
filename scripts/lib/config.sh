@@ -392,7 +392,10 @@ _mt_detect_pg() {
     return 0
   fi
 
-  if kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
+  # Prefer PgBouncer (external PG VM via Tailscale mesh) over in-cluster PostgreSQL
+  if kubectl get service pgbouncer -n "$NS_DB" >/dev/null 2>&1; then
+    export PG_SERVICE_NAME="pgbouncer"
+  elif kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
     export PG_SERVICE_NAME="docs-postgresql-primary"
   elif kubectl get service docs-postgresql -n "$NS_DB" >/dev/null 2>&1; then
     export PG_SERVICE_NAME="docs-postgresql"

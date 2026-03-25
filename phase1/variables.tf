@@ -26,14 +26,7 @@ variable "linode_region" {
   description = "Linode region for the cluster"
   type        = string
   default     = "us-lax"
-  validation {
-    condition = contains([
-      "us-east", "us-central", "us-west", "us-southeast", "us-southwest",
-      "ca-central", "ap-west", "ap-southeast", "ap-south", "ap-northeast",
-      "eu-central", "eu-west", "ap-southeast-1", "us-central-1", "us-lax"
-    ], var.linode_region)
-    error_message = "Invalid Linode region. Please choose a valid region."
-  }
+  # No validation — Linode adds regions regularly, let the API reject invalid ones
 }
 
 variable "linode_k8s_version" {
@@ -189,35 +182,6 @@ variable "admin_ssh_cidrs" {
 }
 
 
-# OpenVPN Server Configuration
-variable "openvpn_label" {
-  description = "Label for the OpenVPN server"
-  type        = string
-  default     = "openvpn-server"
-}
-
-variable "openvpn_type" {
-  description = "Linode instance type for OpenVPN server"
-  type        = string
-  default     = "g6-nanode-1" # 1GB RAM, 1 vCPU - cost effective for VPN
-}
-
-variable "openvpn_image" {
-  description = "OS image for OpenVPN server"
-  type        = string
-  default     = "linode/ubuntu22.04"
-}
-
-variable "vpn_network_cidr" {
-  description = "CIDR block for VPN network (prod: 10.8.0.0/24, dev: 10.9.0.0/24)"
-  type        = string
-}
-
-variable "openvpn_disk_size" {
-  description = "Disk size for OpenVPN server in GB"
-  type        = number
-  default     = 25
-}
 
 # Jitsi Tester Configuration
 variable "jitsi_tester_enabled" {
@@ -242,14 +206,7 @@ variable "jitsi_tester_region" {
   description = "Linode region for the Jitsi tester instance"
   type        = string
   default     = "us-east"
-  validation {
-    condition = contains([
-      "us-east", "us-central", "us-west", "us-southeast", "us-southwest",
-      "ca-central", "ap-west", "ap-southeast", "ap-south", "ap-northeast",
-      "eu-central", "eu-west", "ap-southeast-1", "us-central-1", "us-lax"
-    ], var.jitsi_tester_region)
-    error_message = "Invalid Linode region. Please choose a valid region."
-  }
+  # No validation — Linode adds regions regularly, let the API reject invalid ones
 }
 
 # Headscale Server Configuration

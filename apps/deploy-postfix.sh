@@ -38,7 +38,7 @@ mt_usage() {
 mt_parse_args "$@"
 mt_require_env
 
-# Load infrastructure configuration (sets SMTP_DOMAIN, VPN_SERVER_PRIVATE_IP, NS_MAIL, etc.)
+# Load infrastructure configuration (sets SMTP_DOMAIN, NS_MAIL, etc.)
 source "${REPO_ROOT}/scripts/lib/infra-config.sh"
 mt_load_infra_config
 
@@ -56,13 +56,14 @@ export SMTP_HOSTNAME="relay.${SMTP_DOMAIN}"
 
 export DKIM_SELECTOR="default"
 
-# SECURITY: Only trust specific VPN server IP, not entire datacenter
+# SECURITY: Trusted relay networks for K8s Postfix
 # Components:
 #   - 127.0.0.0/8: localhost
-#   - 10.0.0.0/8: K8s pod network (Cilium)
+#   - 10.0.0.0/8: K8s pod network (Cilium) + legacy VPN CIDRs (10.8.0.0/24, 10.9.0.0/24)
 #   - 172.16.0.0/12: K8s service network
-#   - VPN server specific IP/32: Only the VPN server can relay through K8s Postfix
-export POSTFIX_MYNETWORKS="127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,${VPN_SERVER_PRIVATE_IP}/32"
+# NOTE: When Tailscale Postfix relay is deployed, add its specific 100.64.x.x/32 IP here.
+# Do NOT trust the entire 100.64.0.0/10 — that would let any Tailscale peer relay mail.
+export POSTFIX_MYNETWORKS="127.0.0.0/8,10.0.0.0/8,172.16.0.0/12"
 
 # Compute SMTP_ALLOWED_SENDER_DOMAINS from tenant configs if not already set
 if [ -z "${SMTP_ALLOWED_SENDER_DOMAINS:-}" ]; then
@@ -91,7 +92,7 @@ export SMTP_ALLOWED_SENDER_DOMAINS
 print_status "Deploying Postfix to $NS_MAIL (env: $MT_ENV)"
 print_status "  SMTP domain: $SMTP_DOMAIN"
 print_status "  SMTP hostname: $SMTP_HOSTNAME"
-print_status "  VPN server: $VPN_SERVER_PRIVATE_IP"
+print_status "  Trusted networks: $POSTFIX_MYNETWORKS"
 print_status "  Allowed sender domains: ${SMTP_ALLOWED_SENDER_DOMAINS:-<none>}"
 
 # =============================================================================
@@ -103,7 +104,7 @@ trap "rm -rf $WORK_DIR" EXIT
 
 # Process Postfix main.cf template
 # Only substitute our variables — leave Postfix $variables (e.g. $myhostname) intact
-envsubst '${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${POSTFIX_MYNETWORKS} ${VPN_SERVER_PRIVATE_IP}' \
+envsubst '${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${POSTFIX_MYNETWORKS}' \
   < "$MANIFESTS_DIR/postfix-main.cf.tpl" > "$WORK_DIR/main.cf"
 
 # Process aliases template
@@ -173,7 +174,7 @@ kubectl create configmap postfix-init-scripts -n "$NS_MAIL" \
 # create_env patches the Deployment to add per-tenant DKIM key volumes and volume mounts.
 # SSA ensures those fields (owned by kubectl-patch) are not removed when we re-apply.
 print_status "Applying Postfix Deployment..."
-envsubst '${NS_MAIL} ${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${SMTP_ALLOWED_SENDER_DOMAINS} ${POSTFIX_MYNETWORKS} ${VPN_SERVER_PRIVATE_IP} ${CHECKSUM_POSTFIX_CONFIG} ${CHECKSUM_OPENDKIM_CONFIG} ${CHECKSUM_INIT_SCRIPTS}' \
+envsubst '${NS_MAIL} ${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${SMTP_ALLOWED_SENDER_DOMAINS} ${POSTFIX_MYNETWORKS} ${CHECKSUM_POSTFIX_CONFIG} ${CHECKSUM_OPENDKIM_CONFIG} ${CHECKSUM_INIT_SCRIPTS}' \
   < "$MANIFESTS_DIR/deployment.yaml.tpl" \
   | kubectl apply -f - --server-side --field-manager=deploy-postfix --force-conflicts
 

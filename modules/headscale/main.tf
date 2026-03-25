@@ -88,6 +88,10 @@ resource "linode_volume" "headscale_data" {
   region = var.region
   size   = 10 # 10GB minimum
   tags   = var.tags
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # Headscale Server Instance

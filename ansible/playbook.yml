@@ -651,7 +651,7 @@
           Type=simple
           User=headscale
           Group=headscale
-          ExecStart=/usr/local/bin/headscale serve
+          ExecStart=/usr/bin/headscale serve
           Restart=always
           RestartSec=5
           LimitNOFILE=65536
@@ -701,14 +701,21 @@
       until: hs_ready.rc == 0
       changed_when: false
 
+    - name: Get existing Headscale users
+      command: headscale users list -o json
+      register: hs_existing_users
+      changed_when: false
+
+    - name: Parse existing user names
+      set_fact:
+        hs_user_names: "{{ (hs_existing_users.stdout | from_json) | map(attribute='name') | list }}"
+
     - name: Create Headscale users
       command: "headscale users create {{ item }}"
       loop:
         - infra
         - operators
-      register: hs_user_create
-      changed_when: "'already exists' not in (hs_user_create.stderr | default(''))"
-      failed_when: hs_user_create.rc != 0 and 'already exists' not in (hs_user_create.stderr | default(''))
+      when: item not in hs_user_names
 
     - name: Display post-setup instructions
       debug:
@@ -743,7 +750,7 @@
   hosts: postgres_servers
   become: yes
   vars:
-    pg_version: "16"
+    pg_version: "{{ postgres_version | default('17') }}"
     pgbackrest_stanza: "main"
     # REQUIRED — must be passed via --extra-vars:
     # pg_shared_buffers, pg_effective_cache_size, pg_max_connections
@@ -807,9 +814,9 @@
     - name: Join tailnet if not connected
       command: >
         tailscale up
+        --reset
         --login-server={{ headscale_url }}
         --authkey={{ tailscale_auth_key }}
-        --advertise-tags=tag:postgres
         --accept-routes=false
         --ssh
       when: >
@@ -876,6 +883,23 @@
       command: "mv /var/lib/postgresql/{{ pg_version }}/main /mnt/pgdata/{{ pg_version }}/main"
       when: not pgdata_on_volume.stat.exists
 
+    - name: Check if default data path is already a symlink
+      stat:
+        path: "/var/lib/postgresql/{{ pg_version }}/main"
+      register: pgdata_default_path
+
+    - name: Stop PostgreSQL before replacing data dir with symlink
+      systemd:
+        name: postgresql
+        state: stopped
+      when: pgdata_on_volume.stat.exists and pgdata_default_path.stat.islnk is defined and not pgdata_default_path.stat.islnk
+
+    - name: Remove default data directory (data is on volume)
+      file:
+        path: "/var/lib/postgresql/{{ pg_version }}/main"
+        state: absent
+      when: pgdata_on_volume.stat.exists and pgdata_default_path.stat.islnk is defined and not pgdata_default_path.stat.islnk
+
     - name: Ensure symlink from default path to volume
       file:
         src: "/mnt/pgdata/{{ pg_version }}/main"
@@ -883,7 +907,6 @@
         state: link
         owner: postgres
         group: postgres
-        force: yes
 
     # -------------------------------------------------------------------
     # PostgreSQL systemd override: start after Tailscale

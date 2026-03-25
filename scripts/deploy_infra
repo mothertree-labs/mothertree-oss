@@ -11,10 +11,10 @@
 #   - Keycloak (shared authentication)
 #   - Postfix SMTP server (via deploy-postfix.sh)
 #   - nginx TCP proxy for SMTP
-#   - VPN route DaemonSet
+#   - PgBouncer + Tailscale sidecar (when enabled)
 #
-# Does NOT require: VPN connectivity, Ansible, Linode API (except CFW K8s secret)
-# For VPN/Ansible/firewall, use: ./scripts/manage_infra -e <env>
+# Does NOT require: Ansible, Linode API (except CFW K8s secret)
+# For Ansible/firewall, use: ./scripts/manage_infra -e <env>
 #
 # Run this ONCE per environment, not per tenant.
 # For tenant deployments, use: ./scripts/create_env -e <env> -t <tenant>
@@ -113,16 +113,15 @@ print_status "Helm repo update complete"
 # =============================================================================
 # Internal ingress allowlist (stable CIDRs; not dependent on node churn)
 # =============================================================================
-# The internal ingress is exposed via NodePort and is reachable via VPN.
-# VPN-to-cluster traffic may be NAT'd through different private subnets over time
-# (VPN server subnet changes, node pool churn). Enumerating current node /24s is
-# brittle and leads to unexpected 403s. We allow:
-#   - VPN_NETWORK_CIDR: VPN client network (10.8.0.0/24 prod, 10.9.0.0/24 dev)
-#   - 192.168.0.0/16: Linode private networking range (covers VPN/private subnets)
+# The internal ingress is exposed via NodePort and reachable via Tailscale mesh
+# (and legacy VPN during migration). We allow:
+#   - 100.64.0.0/10: Tailscale/Headscale CGNAT range (mesh traffic)
+#   - 10.8.0.0/24, 10.9.0.0/24: Legacy VPN CIDRs (prod/dev, kept during migration)
+#   - 192.168.0.0/16: Linode private networking range
 #   - 10.2.0.0/16: pod CIDR (Linode LKE default)
 print_status "Setting internal ingress whitelist CIDRs (stable)..."
 
-STABLE_CIDRS="${VPN_NETWORK_CIDR:-10.8.0.0/24},192.168.0.0/16,10.2.0.0/16"
+STABLE_CIDRS="100.64.0.0/10,10.8.0.0/24,10.9.0.0/24,192.168.0.0/16,10.2.0.0/16"
 export INGRESS_INTERNAL_WHITELIST="$STABLE_CIDRS"
 export INGRESS_INTERNAL_REAL_IP_FROM="$STABLE_CIDRS"
 print_status "Internal ingress whitelist: $STABLE_CIDRS"
@@ -469,6 +468,21 @@ helm upgrade --install docs-postgresql oci://registry-1.docker.io/bitnamicharts/
 print_status "Waiting for PostgreSQL to be ready..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql -n "$NS_DB" --timeout=300s
 
+# =============================================================================
+# Deploy PgBouncer + Tailscale sidecar (conditional — external PG VM connectivity)
+# =============================================================================
+if [ "${PGBOUNCER_ENABLED:-false}" = "true" ]; then
+  print_status "Deploying PgBouncer + Tailscale sidecar..."
+  if [ -x "$REPO_ROOT/apps/deploy-pgbouncer.sh" ]; then
+    "$REPO_ROOT/apps/deploy-pgbouncer.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+  else
+    print_error "deploy-pgbouncer.sh not found"
+    exit 1
+  fi
+else
+  print_status "PgBouncer not enabled for this environment (set pgbouncer.enabled: true in infra config)"
+fi
+
 # Create Keycloak theme ConfigMap BEFORE deploying Keycloak.
 # Track whether the ConfigMap actually changed so we can conditionally restart
 # Keycloak below — unnecessary restarts destroy all user sessions (Infinispan).
@@ -492,7 +506,11 @@ else
 fi
 
 # Detect PostgreSQL service hostname from cluster state
-if kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
+# Prefer PgBouncer (external PG VM via Tailscale mesh) over in-cluster PostgreSQL
+if kubectl get service pgbouncer -n "$NS_DB" >/dev/null 2>&1; then
+  export PG_SERVICE_NAME="pgbouncer"
+  print_status "PostgreSQL: using PgBouncer (external PG VM via Tailscale mesh)"
+elif kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
   export PG_SERVICE_NAME="docs-postgresql-primary"
   print_status "PostgreSQL: detected replication mode (docs-postgresql-primary)"
 else
@@ -603,7 +621,7 @@ fi
 # =============================================================================
 # Configure nginx TCP proxy for inbound SMTP (port 30025 -> Postfix:25)
 # =============================================================================
-# Routes VPN Postfix inbound mail through the ingress-nginx NodeBalancer TCP proxy.
+# Routes inbound mail through the ingress-nginx NodeBalancer TCP proxy.
 # The NodeBalancer has a stable IP (lb1.<env>.<domain>) and its subnet is permanently
 # allowed through the LKE firewall. This avoids reliance on hardcoded K8s node VPC IPs.
 # Two things are needed:
@@ -628,21 +646,8 @@ else
   print_status "Port 30025 already present on ingress-nginx LB service"
 fi
 
-# =============================================================================
-# Deploy VPN Route DaemonSet
-# =============================================================================
-if [ -n "$VPN_SERVER_PRIVATE_IP" ]; then
-  print_status "Deploying VPN route DaemonSet for VPN server: $VPN_SERVER_PRIVATE_IP"
-
-  sed "s|\${VPN_SERVER_PRIVATE_IP}|$VPN_SERVER_PRIVATE_IP|g" \
-    "$REPO_ROOT/apps/manifests/vpn-route-daemonset.yaml.tpl" | kubectl apply -f -
-
-  print_status "VPN route DaemonSet deployed - pods can now reach $VPN_SERVER_PRIVATE_IP"
-else
-  print_warning "VPN server private IP not found in Terraform outputs, skipping route DaemonSet"
-fi
-
-# NOTE: Ansible (VPN Postfix, TURN, Unbound) is now managed by manage_infra --ansible. See issue #244.
+# NOTE: VPN route DaemonSet removed — replaced by Tailscale mesh (Headscale).
+# NOTE: Ansible (TURN, Headscale, PostgreSQL) is managed by manage_infra --ansible.
 
 # Wait for linkeditor build that was started in background at the beginning
 if [ -n "$LINKEDITOR_BUILD_PID" ]; then
@@ -674,11 +679,15 @@ echo ""
 print_success "Shared infrastructure deployed for $MT_ENV!"
 echo ""
 echo "Infrastructure namespaces:"
-echo "  - $NS_DB (PostgreSQL)"
+if [ "${PGBOUNCER_ENABLED:-false}" = "true" ]; then
+  echo "  - $NS_DB (PostgreSQL + PgBouncer)"
+else
+  echo "  - $NS_DB (PostgreSQL)"
+fi
 echo "  - $NS_AUTH (Keycloak)"
 echo "  - $NS_MONITORING (Prometheus, Grafana)"
 echo "  - $NS_INGRESS (Public ingress)"
-echo "  - $NS_INGRESS_INTERNAL (VPN-only ingress)"
+echo "  - $NS_INGRESS_INTERNAL (Internal ingress)"
 echo "  - $NS_CERTMANAGER (Cert-manager)"
 echo "  - $NS_MAIL (Postfix SMTP)"
 echo ""
