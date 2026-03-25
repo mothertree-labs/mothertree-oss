@@ -148,15 +148,19 @@ passport.deserializeUser((user, done) => done(null, user));
 // Origin verification middleware for CSRF protection on state-changing requests.
 // iOS ASWebAuthenticationSession (used by Nextcloud Login Flow v2) strips
 // Origin and Referer headers for privacy. When both are missing, fall back to
-// checking for a valid session — SameSite=Lax cookies are not sent on cross-site
-// POSTs, so a valid session proves the request is same-site.
+// checking for our session cookie — SameSite=Lax cookies are not sent on
+// cross-site POSTs, so cookie presence proves the request is same-site.
+// The corresponding GET handlers must touch the session to ensure the cookie exists.
 function verifyOrigin(req, res, next) {
   const origin = req.get('Origin');
   const referer = req.get('Referer');
   const source = origin || referer;
   if (!source) {
-    // Allow if the request has a valid session (same-site proof via SameSite cookie)
-    if (req.session && req.sessionID) {
+    // Allow if the request includes our session cookie (same-site proof via SameSite=Lax).
+    // Note: req.session/req.sessionID are always set by express-session middleware even
+    // without a cookie, so we check the raw Cookie header instead.
+    const cookieHeader = req.get('Cookie') || '';
+    if (cookieHeader.includes('account.sid=')) {
       return next();
     }
     return res.status(403).json({ error: 'Forbidden' });
@@ -771,6 +775,7 @@ app.get('/magic-link-landing', (req, res) => {
 
 // Magic-link login — public pages for returning users to sign in via email link
 app.get('/magic-link-login', (req, res) => {
+  req.session._csrfInit = true; // Force session save so cookie is set for POST
   res.render('magic-link-login', {
     title: 'Sign In with Email Link',
     error: null,
@@ -853,6 +858,7 @@ app.post('/magic-link-login', verifyOrigin, async (req, res) => {
 
 // Account Recovery - public pages (no auth required)
 app.get('/recover', (req, res) => {
+  req.session._csrfInit = true; // Force session save so cookie is set for POST
   res.render('recover', {
     title: 'Account Recovery',
     error: null,
