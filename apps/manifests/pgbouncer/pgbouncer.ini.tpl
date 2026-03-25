@@ -22,9 +22,9 @@ reserve_pool_timeout = 3
 ; on the PG VM are immediately reflected in PgBouncer.
 auth_type = md5
 auth_file = /etc/pgbouncer/userlist.txt
-; If auth_query is configured, PgBouncer will use it as a fallback when
-; the user is not found in auth_file. The pgbouncer user in auth_file
-; bootstraps the auth_query connection itself.
+; auth_user: the user PgBouncer connects as to run auth_query.
+; Must exist in auth_file (for bootstrapping) and have SELECT on pg_shadow in PostgreSQL.
+auth_user = pgbouncer
 auth_query = SELECT usename, passwd FROM pg_shadow WHERE usename=$1
 
 ; Admin/stats access (localhost only)
