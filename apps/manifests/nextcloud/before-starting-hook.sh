@@ -81,6 +81,25 @@ php /var/www/html/occ config:app:set files_sharing incoming_server2server_share_
 php /var/www/html/occ config:app:set files_sharing outgoing_server2server_group_share_enabled --value='no' 2>/dev/null || true
 php /var/www/html/occ config:app:set files_sharing incoming_server2server_group_share_enabled --value='no' 2>/dev/null || true
 
+# Patch user_oidc Safari workaround for Login Flow v2 compatibility.
+# user_oidc PR #358 added a meta-refresh redirect for Safari to preserve PHP sessions.
+# But iOS Nextcloud app's Login Flow v2 uses ASWebAuthenticationSession which doesn't
+# process <meta http-equiv="refresh">. The redirect to Keycloak never happens, and
+# the user sees "Forbidden". Skip the workaround for Login Flow v2 requests (identified
+# by redirectUrl containing /login/v2/) — they use token-based auth, not cookies.
+LOGIN_CONTROLLER="/var/www/html/custom_apps/user_oidc/lib/Controller/LoginController.php"
+if [ -f "$LOGIN_CONTROLLER" ]; then
+    if grep -q "isUserAgent.*Safari.*DataDisplayResponse.*meta http-equiv" "$LOGIN_CONTROLLER" 2>/dev/null; then
+        echo "[before-starting] Patching user_oidc Safari workaround for Login Flow v2..."
+        sed -i 's|if ($this->request->isUserAgent(\['"'"'/Safari/'"'"'\]) \&\& !$this->request->isUserAgent(\['"'"'/Chrome/'"'"'\])) {|$isLoginFlowV2 = $redirectUrl !== null \&\& str_contains($redirectUrl, '"'"'/login/v2/'"'"');\n\t\tif (!$isLoginFlowV2 \&\& $this->request->isUserAgent(['"'"'/Safari/'"'"']) \&\& !$this->request->isUserAgent(['"'"'/Chrome/'"'"'])) {|' "$LOGIN_CONTROLLER"
+        echo "[before-starting] user_oidc Login Flow v2 patch applied"
+    else
+        echo "[before-starting] user_oidc Safari workaround already patched or not found, skipping"
+    fi
+else
+    echo "[before-starting] user_oidc not installed yet, skipping Login Flow v2 patch"
+fi
+
 # Install OIDC health check script (exec readiness probe uses this via CLI)
 cp /docker-entrypoint-hooks.d/before-starting/oidc-health.php /var/www/html/oidc-health.php 2>/dev/null || true
 

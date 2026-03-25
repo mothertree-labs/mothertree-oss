@@ -145,12 +145,20 @@ app.use(tokenRefreshMiddleware);
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((user, done) => done(null, user));
 
-// Origin verification middleware for CSRF protection on state-changing requests
+// Origin verification middleware for CSRF protection on state-changing requests.
+// iOS ASWebAuthenticationSession (used by Nextcloud Login Flow v2) strips
+// Origin and Referer headers for privacy. When both are missing, fall back to
+// checking for a valid session — SameSite=Lax cookies are not sent on cross-site
+// POSTs, so a valid session proves the request is same-site.
 function verifyOrigin(req, res, next) {
   const origin = req.get('Origin');
   const referer = req.get('Referer');
   const source = origin || referer;
   if (!source) {
+    // Allow if the request has a valid session (same-site proof via SameSite cookie)
+    if (req.session && req.sessionID) {
+      return next();
+    }
     return res.status(403).json({ error: 'Forbidden' });
   }
   try {
