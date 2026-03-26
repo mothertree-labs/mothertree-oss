@@ -13,8 +13,8 @@ pool_mode = session
 
 max_client_conn = ${PGBOUNCER_MAX_CLIENT_CONN}
 default_pool_size = ${PGBOUNCER_DEFAULT_POOL_SIZE}
-min_pool_size = 5
-reserve_pool_size = 5
+min_pool_size = ${PGBOUNCER_MIN_POOL_SIZE}
+reserve_pool_size = ${PGBOUNCER_RESERVE_POOL_SIZE}
 reserve_pool_timeout = 3
 
 ; Use auth_query to look up credentials from PostgreSQL directly.

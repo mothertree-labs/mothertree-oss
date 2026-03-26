@@ -88,7 +88,7 @@ print_status "  Default pool size: $PGBOUNCER_DEFAULT_POOL_SIZE"
 WORK_DIR=$(mktemp -d)
 trap "rm -rf $WORK_DIR" EXIT
 
-envsubst '${PG_VM_TAILSCALE_IP} ${PGBOUNCER_MAX_CLIENT_CONN} ${PGBOUNCER_DEFAULT_POOL_SIZE}' \
+envsubst '${PG_VM_TAILSCALE_IP} ${PGBOUNCER_MAX_CLIENT_CONN} ${PGBOUNCER_DEFAULT_POOL_SIZE} ${PGBOUNCER_MIN_POOL_SIZE} ${PGBOUNCER_RESERVE_POOL_SIZE}' \
   < "$MANIFESTS_DIR/pgbouncer.ini.tpl" > "$WORK_DIR/pgbouncer.ini"
 
 # =============================================================================
