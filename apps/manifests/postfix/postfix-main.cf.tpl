@@ -18,10 +18,10 @@ myorigin = ${SMTP_DOMAIN}
 mydestination = $myhostname, localhost, localhost.localdomain
 mynetworks = ${POSTFIX_MYNETWORKS}
 
-# Relay host - forward all outbound mail through the SMTP relay
+# Relay host — forward all outbound mail through the Postfix relay VM
 # This ensures a consistent source IP for SPF compliance
-# The relay server is the VPN server (mail.* = MX host)
-relayhost = [${VPN_SERVER_PRIVATE_IP}]:25
+# The relay VM is on the Tailscale mesh (reached via Tailscale sidecar)
+relayhost = [${POSTFIX_RELAY_IP}]:25
 
 # =============================================================================
 # Inbound Mail Routing (Multi-Tenant)

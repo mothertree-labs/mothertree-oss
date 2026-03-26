@@ -20,7 +20,7 @@ reserve_pool_timeout = 3
 ; Use auth_query to look up credentials from PostgreSQL directly.
 ; This avoids maintaining a separate userlist.txt — new database users
 ; on the PG VM are immediately reflected in PgBouncer.
-auth_type = md5
+auth_type = scram-sha-256
 auth_file = /etc/pgbouncer/userlist.txt
 ; auth_user: the user PgBouncer connects as to run auth_query.
 ; Must exist in auth_file (for bootstrapping) and have SELECT on pg_shadow in PostgreSQL.

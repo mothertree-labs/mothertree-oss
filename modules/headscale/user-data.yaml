@@ -48,6 +48,13 @@ runcmd:
     dpkg -i /tmp/headscale.deb
     rm -f /tmp/headscale.deb
 
+    # The deb package installs to /usr/bin/headscale but our systemd unit
+    # references /usr/local/bin/headscale. Symlink to keep both working.
+    if [ -f /usr/bin/headscale ] && [ ! -f /usr/local/bin/headscale ]; then
+      ln -sf /usr/bin/headscale /usr/local/bin/headscale
+      echo "[cloud-init] Symlinked /usr/bin/headscale -> /usr/local/bin/headscale"
+    fi
+
   # -------------------------------------------------------------------
   # 2. Create headscale system user and directories
   # -------------------------------------------------------------------
@@ -133,6 +140,7 @@ runcmd:
         stun_listen_addr: "0.0.0.0:3478"
         automatically_add_embedded_derp_region: true
         ipv4: REPLACE_WITH_SERVER_IP
+        private_key_path: /var/lib/headscale/derp_server_private.key
         verify_clients: true
 
     dns:
@@ -143,8 +151,12 @@ runcmd:
           - 1.1.1.1
           - 1.0.0.1
 
-    policy:
-      path: /etc/headscale/acl-policy.json
+    # ACL policy — intentionally omitted from initial bootstrap config.
+    # Headscale v0.28 tagOwners requires user@ format (e.g., "infra@") which
+    # depends on users existing. Ansible deploys the full ACL policy after
+    # creating users. Without a policy path, Headscale defaults to allow-all.
+    # policy:
+    #   path: /etc/headscale/acl-policy.json
 
     log:
       level: info
@@ -157,50 +169,26 @@ runcmd:
     chmod 600 /etc/headscale/config.yaml
 
   # -------------------------------------------------------------------
-  # 5. Write initial ACL policy (deny-all until Ansible deploys real policy)
-  # -------------------------------------------------------------------
-  - |
-    cat > /etc/headscale/acl-policy.json << 'ACLEOF'
-    {
-      "tagOwners": {
-        "tag:pgbouncer": ["autogroup:admin"],
-        "tag:postgres": ["autogroup:admin"],
-        "tag:postfix-k8s": ["autogroup:admin"],
-        "tag:postfix-relay": ["autogroup:admin"],
-        "tag:monitoring": ["autogroup:admin"],
-        "tag:operator": ["autogroup:admin"],
-        "tag:k8s-node": ["autogroup:admin"],
-        "tag:ci": ["autogroup:admin"]
-      },
-      "acls": [
-        {"action": "accept", "src": ["tag:operator"], "dst": ["*:*"]}
-      ]
-    }
-    ACLEOF
-
-    chown headscale:headscale /etc/headscale/acl-policy.json
-    chmod 600 /etc/headscale/acl-policy.json
-
-  # -------------------------------------------------------------------
-  # 6. Configure UFW firewall
+  # 5. Configure UFW firewall
   # -------------------------------------------------------------------
   - ufw default deny incoming
   - ufw default allow outgoing
   - ufw allow 22/tcp comment "SSH"
   - ufw allow 443/tcp comment "DERP relay"
   - ufw allow 3478/udp comment "STUN"
+  - ufw allow 80/tcp comment "Certbot HTTP-01"
   - ufw allow 8080/tcp comment "Headscale API"
   - ufw --force enable
 
   # -------------------------------------------------------------------
-  # 7. Enable and start Headscale
+  # 6. Enable and start Headscale
   # -------------------------------------------------------------------
   - systemctl daemon-reload
   - systemctl enable headscale
   - systemctl start headscale
 
   # -------------------------------------------------------------------
-  # 8. Wait for Headscale to start, then create initial users
+  # 7. Wait for Headscale to start, then create initial users
   # -------------------------------------------------------------------
   - |
     echo "[cloud-init] Waiting for Headscale to become ready..."

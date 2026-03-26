@@ -1271,3 +1271,172 @@
       systemd:
         name: postgres_exporter
         state: restarted
+
+# =============================================================================
+# Postfix Relay VM on Tailscale Mesh
+# Replaces the VPN server's mail relay role. Same Postfix configuration
+# (Certbot TLS, transport maps, relay domains) without OpenVPN/Unbound/Microsocks.
+# Inbound MX mail → this relay → K8s Postfix (via NodeBalancer TCP proxy)
+# Outbound mail ← K8s Postfix (via Tailscale mesh) → this relay → internet
+# =============================================================================
+- name: Configure Postfix Relay on Tailscale Mesh
+  hosts: postfix_relay_servers
+  become: yes
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Postfix
+      apt:
+        name: postfix
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    # Certbot + Postfix inbound TLS (Let's Encrypt HTTP-01)
+    - name: Install Certbot (apt)
+      apt:
+        name: certbot
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when: tls_email is defined and tls_email | length > 0
+
+    - name: Create Certbot renewal-hooks directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /etc/letsencrypt/renewal-hooks/pre
+        - /etc/letsencrypt/renewal-hooks/post
+        - /etc/letsencrypt/renewal-hooks/deploy
+      when: tls_email is defined and tls_email | length > 0
+
+    - name: Deploy Certbot deploy-hook (reload Postfix after renewal)
+      copy:
+        content: |
+          #!/bin/bash
+          systemctl reload postfix
+        dest: /etc/letsencrypt/renewal-hooks/deploy/postfix-reload.sh
+        mode: '0755'
+      when: tls_email is defined and tls_email | length > 0
+
+    - name: Check if Let's Encrypt cert already exists
+      stat:
+        path: "/etc/letsencrypt/live/{{ mx_mail_host_fqdn }}/fullchain.pem"
+      register: cert_file
+      when: tls_email is defined and tls_email | length > 0
+
+    - name: Obtain Let's Encrypt certificate for MX mail host (HTTP-01)
+      block:
+        - name: Run certbot certonly (standalone)
+          command: >
+            certbot certonly --standalone --non-interactive --agree-tos
+            --email {{ tls_email }}
+            -d {{ mx_mail_host_fqdn }}
+            --preferred-challenges http
+          register: certbot_result
+          changed_when: certbot_result.rc == 0 and 'Successfully received certificate' in certbot_result.stdout
+          failed_when: certbot_result.rc != 0
+      when: tls_email is defined and tls_email | length > 0 and not (cert_file is defined and cert_file.stat.exists)
+
+    - name: Configure Postfix as SMTP relay
+      template:
+        src: postfix-relay-main.cf.j2
+        dest: /etc/postfix/main.cf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart postfix relay
+
+    - name: Deploy SASL credentials for SES SMTP relay
+      copy:
+        content: "[{{ ses_smtp_endpoint }}]:587 {{ ses_smtp_username }}:{{ ses_smtp_password }}\n"
+        dest: /etc/postfix/sasl_passwd
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+      notify: postmap sasl credentials relay
+      when: ses_smtp_endpoint is defined and ses_smtp_endpoint | length > 0
+
+    - name: Deploy TLS policy map (enforce strict TLS for SES only)
+      copy:
+        content: "[{{ ses_smtp_endpoint }}]:587    secure\n"
+        dest: /etc/postfix/tls_policy
+        owner: root
+        group: root
+        mode: '0644'
+      notify: postmap tls policy relay
+      when: ses_smtp_endpoint is defined and ses_smtp_endpoint | length > 0
+
+    - name: Remove SES config files when SES is not configured
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/postfix/sasl_passwd
+        - /etc/postfix/sasl_passwd.db
+        - /etc/postfix/tls_policy
+        - /etc/postfix/tls_policy.db
+      when: ses_smtp_endpoint is not defined or ses_smtp_endpoint | length == 0
+
+    - name: Deploy transport map for inbound mail routing
+      template:
+        src: postfix-transport.j2
+        dest: /etc/postfix/transport
+        owner: root
+        group: root
+        mode: '0644'
+      notify: rebuild postfix maps relay
+      when: tenant_domains is defined and tenant_domains | length > 0
+
+    - name: Deploy relay_domains for inbound mail
+      template:
+        src: postfix-relay-domains.j2
+        dest: /etc/postfix/relay_domains
+        owner: root
+        group: root
+        mode: '0644'
+      notify: rebuild postfix maps relay
+      when: tenant_domains is defined and tenant_domains | length > 0
+
+    - name: Ensure Postfix is enabled and started
+      systemd:
+        name: postfix
+        enabled: yes
+        state: started
+
+    # UFW rules — cloud-init already configured basic rules (SSH, SMTP, Tailscale, Certbot)
+    # Add Tailscale CGNAT range for K8s Postfix relay traffic over the mesh
+    - name: Allow SMTP from Tailscale mesh (K8s Postfix sidecar)
+      ufw:
+        rule: allow
+        port: '25'
+        proto: tcp
+        from_ip: 100.64.0.0/10
+        comment: 'SMTP from Tailscale mesh'
+
+  handlers:
+    - name: postmap sasl credentials relay
+      command: postmap /etc/postfix/sasl_passwd
+      notify: restart postfix relay
+
+    - name: postmap tls policy relay
+      command: postmap /etc/postfix/tls_policy
+      notify: restart postfix relay
+
+    - name: rebuild postfix maps relay
+      shell: |
+        postmap /etc/postfix/transport 2>/dev/null || true
+        postmap /etc/postfix/relay_domains 2>/dev/null || true
+      notify: restart postfix relay
+
+    - name: restart postfix relay
+      systemd:
+        name: postfix
+        state: restarted

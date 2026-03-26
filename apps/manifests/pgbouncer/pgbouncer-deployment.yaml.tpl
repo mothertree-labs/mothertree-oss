@@ -96,7 +96,7 @@ spec:
             - name: TS_KUBE_SECRET
               value: "pgbouncer-tailscale-state-$(POD_NAME)"
             - name: TS_ACCEPT_DNS
-              value: "true"
+              value: "false"
             - name: TS_USERSPACE
               value: "false"
           securityContext:

@@ -99,8 +99,16 @@ runcmd:
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y "postgresql-$PG_VERSION"
 
-    # Stop PostgreSQL — Ansible will configure and start it properly
+    # Stop PostgreSQL and re-initialize with C locale.
+    # The apt package runs initdb with the system locale (en_US.UTF-8), but
+    # Synapse requires LC_COLLATE=C and other apps benefit from consistent
+    # collation. Reinitializing the cluster ensures all new databases default
+    # to C collation without needing explicit LC_COLLATE on every CREATE DATABASE.
     systemctl stop postgresql
+    sudo -u postgres rm -rf "/var/lib/postgresql/$PG_VERSION/main"
+    sudo -u postgres /usr/lib/postgresql/$PG_VERSION/bin/initdb \
+      -D "/var/lib/postgresql/$PG_VERSION/main" \
+      --locale=C --encoding=UTF8
 
   # -------------------------------------------------------------------
   # 5. Move PostgreSQL data directory to persistent volume

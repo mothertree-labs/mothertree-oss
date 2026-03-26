@@ -266,3 +266,20 @@ module "postgres_server" {
   admin_ssh_cidrs    = var.admin_ssh_cidrs
   tags               = sort(concat(var.common_tags, [var.env]))
 }
+
+# Postfix Relay Server Module (SMTP relay on Tailscale mesh)
+module "postfix_relay" {
+  source = "../modules/postfix-relay"
+  count  = var.postfix_relay_enabled ? 1 : 0
+
+  postfix_relay_label = "${var.postfix_relay_label}-${var.env}"
+  postfix_relay_type  = var.postfix_relay_type
+  postfix_relay_image = var.postfix_relay_image
+  region              = var.linode_region
+  ssh_public_key      = var.ssh_public_key
+  headscale_url       = var.headscale_url
+  tailscale_auth_key  = var.tailscale_auth_key
+  env                 = var.env
+  admin_ssh_cidrs     = var.admin_ssh_cidrs
+  tags                = sort(concat(var.common_tags, [var.env]))
+}

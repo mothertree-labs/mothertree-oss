@@ -121,6 +121,10 @@ _mt_infra_load_env_config() {
     HEADSCALE_DOMAIN=$(yq '.headscale.domain // ""' "$infra_config")
     HEADSCALE_BASE_DOMAIN=$(yq '.headscale.base_domain // ""' "$infra_config")
     export HEADSCALE_URL HEADSCALE_DOMAIN HEADSCALE_BASE_DOMAIN
+
+    # Postfix relay VM on Tailscale mesh (replaces VPN server mail relay)
+    POSTFIX_RELAY_IP=$(yq '.postfix_relay.tailscale_ip // ""' "$infra_config")
+    export POSTFIX_RELAY_IP
   else
     echo "[WARNING] Infrastructure config not found: $infra_config"
     echo "[WARNING] Using defaults: PG_READ_REPLICAS=1, KEYCLOAK_REPLICAS=2"
@@ -448,9 +452,11 @@ _mt_infra_load_terraform_outputs() {
   echo "[INFO] Loading Terraform outputs from $_tf_outputs_file"
   # shellcheck disable=SC1090
   source "$_tf_outputs_file"
-  export TURN_SERVER_IP LKE_CLUSTER_ID HEADSCALE_SERVER_IP POSTGRES_SERVER_IP
+  export TURN_SERVER_IP LKE_CLUSTER_ID HEADSCALE_SERVER_IP POSTGRES_SERVER_IP POSTFIX_RELAY_SERVER_IP
 
   echo "[INFO] TURN server IP: ${TURN_SERVER_IP:-<not set>}"
   echo "[INFO] Headscale server IP: ${HEADSCALE_SERVER_IP:-<not set>}"
   echo "[INFO] PostgreSQL server IP: ${POSTGRES_SERVER_IP:-<not set>}"
+  echo "[INFO] Postfix relay server IP: ${POSTFIX_RELAY_SERVER_IP:-<not set>}"
+  echo "[INFO] Postfix relay Tailscale IP: ${POSTFIX_RELAY_IP:-<not set>}"
 }

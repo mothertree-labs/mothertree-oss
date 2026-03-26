@@ -1,0 +1,81 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - jq
+  - ufw
+  - gnupg
+  - lsb-release
+
+runcmd:
+  # -------------------------------------------------------------------
+  # 1. Install Tailscale client
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Installing Tailscale..."
+    curl -fsSL https://tailscale.com/install.sh | sh
+
+  # -------------------------------------------------------------------
+  # 2. Join the Headscale tailnet
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Joining Headscale tailnet..."
+    tailscale up \
+      --login-server="${headscale_url}" \
+      --authkey="${tailscale_auth_key}" \
+      --advertise-tags=tag:postfix-relay \
+      --accept-routes=false \
+      --ssh
+
+    # Wait for Tailscale to get an IP
+    timeout=120
+    elapsed=0
+    while [ $elapsed -lt $timeout ]; do
+      TS_IP=$(tailscale ip -4 2>/dev/null || true)
+      if [ -n "$TS_IP" ]; then
+        echo "[cloud-init] Tailscale IP: $TS_IP"
+        break
+      fi
+      sleep 2
+      elapsed=$((elapsed + 2))
+    done
+    if [ -z "$TS_IP" ]; then
+      echo "[cloud-init] WARNING: Tailscale IP not assigned after $${timeout}s"
+    fi
+
+  # -------------------------------------------------------------------
+  # 3. Install Postfix (Ansible will configure it fully)
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Installing Postfix..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y postfix
+
+    # Stop Postfix — Ansible will configure and start it properly
+    systemctl stop postfix
+
+  # -------------------------------------------------------------------
+  # 4. Install Certbot for Let's Encrypt TLS certificates
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Installing Certbot..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y certbot
+
+  # -------------------------------------------------------------------
+  # 5. Configure UFW firewall
+  # -------------------------------------------------------------------
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp comment "SSH"
+  - ufw allow 25/tcp comment "SMTP inbound"
+  - ufw allow 80/tcp comment "Certbot HTTP-01"
+  - ufw allow 41641/udp comment "Tailscale WireGuard"
+  - ufw --force enable
+
+  # -------------------------------------------------------------------
+  # 6. Done — Ansible handles Postfix configuration
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Postfix relay server bootstrap complete."
+    echo "[cloud-init] Run Ansible to finalize Postfix configuration (TLS, transport maps, relay domains)."
