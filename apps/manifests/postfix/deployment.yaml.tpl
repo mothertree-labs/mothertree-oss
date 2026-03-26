@@ -133,6 +133,12 @@ spec:
               memory: 64Mi
             limits:
               memory: 256Mi
+          # Graceful shutdown: let K8s endpoint removal propagate before SIGTERM
+          # so in-flight mail delivery completes without new connections arriving.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
           # Liveness probe - check SMTP port
           livenessProbe:
             tcpSocket:
@@ -146,11 +152,19 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
 
-        # Tailscale sidecar — WireGuard mesh connectivity to Postfix relay VM
+      # Init containers:
+      # - tailscale: native sidecar (restartPolicy: Always) — starts before main
+      #   containers, terminated AFTER them. Keeps the WireGuard tunnel alive while
+      #   Postfix drains queued mail on shutdown.
+      # - prepare-routing: one-shot init that copies routing files and runs postmap
+      # Copies routing files from read-only ConfigMap to writable emptyDir,
+      # then runs postmap to generate .db files
+      initContainers:
         - name: tailscale
           # tailscale/tailscale:v1.94.2 — stable release, multi-arch
           # https://hub.docker.com/r/tailscale/tailscale
           image: tailscale/tailscale:v1.94.2
+          restartPolicy: Always
           env:
             - name: POD_NAME
               valueFrom:
@@ -180,11 +194,6 @@ spec:
               memory: 64Mi
             limits:
               memory: 128Mi
-
-      # Init container to prepare routing hash databases
-      # Copies routing files from read-only ConfigMap to writable emptyDir,
-      # then runs postmap to generate .db files
-      initContainers:
         - name: prepare-routing
           image: boky/postfix:v5.1.0
           command:
@@ -248,3 +257,6 @@ spec:
             defaultMode: 0755
         # NOTE: DKIM keys are mounted per-tenant by create_env at /etc/dkim-keys/<tenant>/
         # Each tenant's volume is added via kubectl patch when running create_env
+      # Budget: Postfix preStop (5s) + graceful shutdown (up to 40s).
+      # Tailscale (native sidecar) is terminated after main containers exit.
+      terminationGracePeriodSeconds: 45
