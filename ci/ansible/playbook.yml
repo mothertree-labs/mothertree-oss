@@ -60,6 +60,35 @@
         - woodpecker-agent
         - woodpecker-cli
 
+    # ── Install Tailscale (mesh networking for SSH access) ─────────
+    - name: Install Tailscale
+      ansible.builtin.shell: |
+        curl -fsSL https://tailscale.com/install.sh | sh
+      args:
+        creates: /usr/bin/tailscale
+
+    - name: Join prod Tailscale mesh
+      ansible.builtin.shell: |
+        tailscale up \
+          --login-server={{ headscale_url_prod }} \
+          --authkey={{ tailscale_auth_key_prod }} \
+          --accept-routes=false \
+          --ssh \
+          --timeout=30s
+      register: tailscale_up
+      changed_when: "'already' not in (tailscale_up.stdout | default(''))"
+      failed_when: tailscale_up.rc != 0 and 'already' not in (tailscale_up.stderr | default(''))
+      no_log: true
+
+    - name: Get Tailscale IP
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+
+    - name: Show Tailscale IP
+      ansible.builtin.debug:
+        msg: "CI server Tailscale IP: {{ tailscale_ip.stdout }}"
+
     # ── Install plugin-git (local backend clone step) ──────────────
     - name: Download plugin-git binary
       ansible.builtin.get_url:

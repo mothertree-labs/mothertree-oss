@@ -125,43 +125,6 @@ output "turn_server_label" {
   value       = var.turn_server_enabled ? linode_instance.turn_server[0].label : null
 }
 
-# OpenVPN Server Outputs
-output "openvpn_server_ip" {
-  description = "Public IP address of the OpenVPN server"
-  value       = module.openvpn_server.openvpn_server_ip
-}
-
-output "openvpn_server_private_ip" {
-  description = "Private IP address of the OpenVPN server"
-  value       = module.openvpn_server.openvpn_server_private_ip
-}
-
-output "openvpn_server_id" {
-  description = "ID of the OpenVPN server"
-  value       = module.openvpn_server.openvpn_server_id
-}
-
-output "vpn_network_cidr" {
-  description = "VPN network CIDR block"
-  value       = module.openvpn_server.vpn_network_cidr
-}
-
-output "vpn_server_tunnel_ip" {
-  description = "VPN server's tunnel IP address (for SSH over VPN)"
-  value       = module.openvpn_server.vpn_server_tunnel_ip
-}
-
-# VPC/LAN CIDR used by the OpenVPN server NIC (support subnet)
-output "vpn_server_vpc_cidr" {
-  description = "VPC/LAN CIDR used by the OpenVPN server NIC"
-  value       = linode_vpc_subnet.support_subnet.ipv4
-}
-
-# Support subnet ID (for CI server terraform)
-output "support_subnet_id" {
-  description = "ID of the VPC support subnet (for CI server)"
-  value       = linode_vpc_subnet.support_subnet.id
-}
 
 # Jitsi Tester Outputs
 output "jitsi_tester_enabled" {
@@ -187,4 +150,52 @@ output "jitsi_tester_id" {
 output "jitsi_tester_label" {
   description = "Label of the Jitsi tester instance"
   value       = var.jitsi_tester_enabled ? linode_instance.jitsi_tester[0].label : null
+}
+
+# Headscale Server Outputs
+output "headscale_server_ip" {
+  description = "Public IP address of the Headscale server"
+  value       = var.headscale_enabled ? module.headscale_server[0].headscale_server_ip : null
+}
+
+output "headscale_server_id" {
+  description = "ID of the Headscale server"
+  value       = var.headscale_enabled ? module.headscale_server[0].headscale_server_id : null
+}
+
+output "headscale_api_url" {
+  description = "Headscale API/coordination URL"
+  value       = var.headscale_enabled ? module.headscale_server[0].headscale_api_url : null
+}
+
+# PostgreSQL Server Outputs
+output "postgres_server_ip" {
+  description = "Public IP address of the PostgreSQL server (for provisioning only — DB traffic goes through Tailscale)"
+  value       = var.postgres_enabled ? module.postgres_server[0].postgres_server_ip : null
+}
+
+output "postgres_server_id" {
+  description = "ID of the PostgreSQL server"
+  value       = var.postgres_enabled ? module.postgres_server[0].postgres_server_id : null
+}
+
+output "postgres_server_label" {
+  description = "Label of the PostgreSQL server"
+  value       = var.postgres_enabled ? module.postgres_server[0].postgres_server_label : null
+}
+
+# Postfix Relay Server Outputs
+output "postfix_relay_ip" {
+  description = "Public IP address of the Postfix relay server (for DNS MX records and Ansible provisioning)"
+  value       = var.postfix_relay_enabled ? module.postfix_relay[0].postfix_relay_ip : null
+}
+
+output "postfix_relay_id" {
+  description = "ID of the Postfix relay server"
+  value       = var.postfix_relay_enabled ? module.postfix_relay[0].postfix_relay_id : null
+}
+
+output "postfix_relay_label" {
+  description = "Label of the Postfix relay server"
+  value       = var.postfix_relay_enabled ? module.postfix_relay[0].postfix_relay_label : null
 }

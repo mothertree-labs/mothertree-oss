@@ -309,3 +309,34 @@ mt_restart_if_changed() {
         print_status "No config changes detected, skipping restart of $*"
     fi
 }
+
+# ---------------------------------------------------------------------------
+# PostgreSQL helpers (connects via PgBouncer to external PG VM)
+# ---------------------------------------------------------------------------
+
+# Read the PostgreSQL superuser password from the postgres-credentials K8s Secret.
+# This secret is created by deploy-pgbouncer.sh during deploy_infra.
+mt_pg_password() {
+    kubectl get secret postgres-credentials -n "${NS_DB:-infra-db}" \
+        -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d
+}
+
+# Run psql against the external PG VM via PgBouncer.
+# Uses a temporary pod with the postgres:17-alpine image.
+# Usage: mt_psql [-d dbname] -c "SQL..."
+#        echo "SQL" | mt_psql [-d dbname]
+mt_psql() {
+    local ns="${NS_DB:-infra-db}"
+    local pg_pass
+    pg_pass=$(mt_pg_password)
+    if [ -z "$pg_pass" ]; then
+        print_error "Could not read postgres-credentials secret in $ns"
+        return 1
+    fi
+    kubectl run -i --rm "psql-$(date +%s)" \
+        --namespace="$ns" \
+        --image=postgres:17-alpine \
+        --restart=Never \
+        --env="PGPASSWORD=$pg_pass" \
+        --command -- psql -h pgbouncer -U postgres -v ON_ERROR_STOP=1 "$@" 2>/dev/null
+}

@@ -1,6 +1,7 @@
 environments:
   dev: {}
   prod: {}
+  prod-eu: {}
 
 ---
 
@@ -57,10 +58,13 @@ releases:
     createNamespace: false  # Created by create_env
 
   # Cert Manager
+  # needs kube-prometheus-stack because ServiceMonitor CRDs must exist first
   - name: cert-manager
     namespace: {{ requiredEnv "NS_CERTMANAGER" }}
     chart: jetstack/cert-manager
     version: v1.13.3
+    needs:
+      - {{ requiredEnv "NS_MONITORING" }}/kube-prometheus-stack
     wait: true
     timeout: 600
     labels:
@@ -91,7 +95,10 @@ releases:
     disableValidation: true
     needs:
       - {{ requiredEnv "NS_INGRESS" }}/ingress-nginx
-      - {{ requiredEnv "NS_CERTMANAGER" }}/cert-manager
+      # NOTE: cert-manager removed from needs to break circular dependency.
+      # cert-manager uses ServiceMonitor CRDs from this chart, so this chart
+      # must be installable without cert-manager. Ingress dependency is kept
+      # because Grafana ingress needs the ingress controller.
     wait: false
     atomic: false
     labels:

@@ -1,0 +1,31 @@
+# pgBackRest configuration — managed by Ansible
+# Backups to Linode Object Storage (S3-compatible)
+
+[{{ pgbackrest_stanza }}]
+pg1-path=/var/lib/postgresql/{{ pg_version }}/main
+
+[global]
+repo1-type=s3
+repo1-s3-endpoint={{ pgbackrest_s3_endpoint }}
+repo1-s3-bucket={{ pgbackrest_s3_bucket }}
+repo1-s3-region={{ pgbackrest_s3_region }}
+repo1-s3-key={{ pgbackrest_s3_key }}
+repo1-s3-key-secret={{ pgbackrest_s3_secret }}
+repo1-path=/pgbackrest/{{ pgbackrest_stanza }}
+
+repo1-retention-full={{ pgbackrest_retention_full | default(4) }}
+repo1-retention-diff={{ pgbackrest_retention_diff | default(14) }}
+
+repo1-cipher-type=aes-256-cbc
+repo1-cipher-pass={{ pgbackrest_cipher_pass }}
+
+process-max=2
+compress-type=zst
+compress-level=3
+
+log-level-console=info
+log-level-file=detail
+
+start-fast=y
+stop-auto=y
+delta=y

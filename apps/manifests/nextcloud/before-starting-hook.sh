@@ -9,6 +9,14 @@
 
 set -e
 
+# Guard: skip if Nextcloud isn't fully installed yet (first boot race condition).
+# The entrypoint generates config.php from env vars, but the app may not be
+# fully bootstrapped when this hook runs on a fresh emptyDir pod.
+if ! php /var/www/html/occ status --output=json 2>/dev/null | grep -q '"installed":true'; then
+    echo "[before-starting] Nextcloud not yet installed, skipping hook (will run on next restart)"
+    exit 0
+fi
+
 # Only run occ upgrade when the database actually needs it. Running upgrade
 # unconditionally sets maintenance=true in the shared DB, which causes all
 # other pods to return 503 during HPA scale-up (even when no upgrade is needed).

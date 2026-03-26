@@ -84,18 +84,18 @@ kubectl create namespace "$NS_MATRIX" --dry-run=client -o yaml | kubectl apply -
 print_status "Initializing Synapse database on shared PostgreSQL..."
 print_status "Synapse DB: $SYNAPSE_DB_NAME (user: $SYNAPSE_DB_USER)"
 
-# Copy the PostgreSQL admin secret from infra-db namespace
-print_status "Copying PostgreSQL admin secret to $NS_MATRIX namespace..."
-PG_PASSWORD=$(kubectl get secret docs-postgresql -n "$NS_DB" -o jsonpath='{.data.postgres-password}')
+# Copy PostgreSQL credentials to matrix namespace
+print_status "Copying PostgreSQL credentials to $NS_MATRIX namespace..."
+PG_PASSWORD=$(mt_pg_password)
 if [ -z "$PG_PASSWORD" ]; then
-  print_error "Could not retrieve PostgreSQL admin password from $NS_DB namespace"
+  print_error "Could not retrieve postgres-credentials secret from $NS_DB namespace"
   exit 1
 fi
-kubectl create secret generic docs-postgresql \
+kubectl create secret generic postgres-credentials \
     --namespace="$NS_MATRIX" \
-    --from-literal=postgres-password="$(echo "$PG_PASSWORD" | base64 -d)" \
+    --from-literal=postgres-password="$PG_PASSWORD" \
     --dry-run=client -o yaml | kubectl apply -f -
-print_status "PostgreSQL admin secret copied to $NS_MATRIX"
+print_status "PostgreSQL credentials copied to $NS_MATRIX"
 
 # Create synapse-db-secrets for the db-init job
 cat <<EOF | kubectl apply -f -

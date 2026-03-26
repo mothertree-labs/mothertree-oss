@@ -5,15 +5,12 @@
 #          for shared infrastructure (not per-tenant records).
 #
 # Records managed:
-#   - lb1.{prod|dev}.<domain> A        → Ingress LB IP (proxied in prod)
-#   - turn[.dev].<domain> A            → TURN server IP
-#   - mail[.dev].<domain> A            → VPN server IP
-#   - vpn.{prod|dev}.<domain> A        → VPN server IP
-#   - @ CNAME → www.<domain>           (prod only)
-#   - mail MX → mail.<domain>          (prod only)
-#   - _matrix._tcp SRV                 → synapse[.dev].<domain>:443
-#   - _matrix-fed._tcp SRV             → synapse[.dev].<domain>:8448
-#   - PTR (rDNS) for VPN server IP     → mail[.dev].<domain>
+#   - lb1.{prod|dev|prod-eu}.<domain> A  → Ingress LB IP (proxied in prod)
+#   - turn[.dev].<domain> A              → TURN server IP
+#   - hs-{prod|dev|prod-eu}.<domain> A   → Headscale server IP
+#   - @ CNAME → www.<domain>             (prod only)
+#   - _matrix._tcp SRV                   → synapse[.dev].<domain>:443
+#   - _matrix-fed._tcp SRV               → synapse[.dev].<domain>:8448
 #
 # Called by: manage_infra (after phase1 Terraform)
 # Can also be run standalone.
@@ -45,7 +42,7 @@ mt_usage() {
 mt_parse_args "$@"
 mt_require_env
 
-# Load infrastructure configuration (sets INFRA_DOMAIN, VPN_SERVER_IP, TURN_SERVER_IP, etc.)
+# Load infrastructure configuration (sets INFRA_DOMAIN, TURN_SERVER_IP, HEADSCALE_SERVER_IP, etc.)
 source "${REPO_ROOT}/scripts/lib/infra-config.sh"
 mt_load_infra_config
 
@@ -110,8 +107,8 @@ fi
 
 print_status "Managing infrastructure DNS records (env: $MT_ENV)"
 print_status "  Domain: $DOMAIN"
-print_status "  VPN server IP: $VPN_SERVER_IP"
 print_status "  TURN server IP: ${TURN_SERVER_IP:-<not set>}"
+print_status "  Headscale server IP: ${HEADSCALE_SERVER_IP:-<not set>}"
 print_status "  Ingress LB IP: ${INGRESS_LB_IP:-<not available>}"
 
 # =============================================================================
@@ -132,35 +129,24 @@ else
   print_warning "Skipping TURN A record — TURN server IP not available"
 fi
 
-# 3. Mail A record — VPN server (accepts inbound mail)
-if [ -n "$VPN_SERVER_IP" ]; then
-  create_dns_record "mail.${ENV_DOT}${DOMAIN}" "A" "$VPN_SERVER_IP"
-fi
-
-# 4. VPN server A record
-if [ -n "$VPN_SERVER_IP" ]; then
-  local_vpn_label=""
+# 3. Headscale server A record
+if [ -n "${HEADSCALE_SERVER_IP:-}" ]; then
+  local_hs_label=""
   if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
-    local_vpn_label="vpn.prod"
+    local_hs_label="hs-prod"
   else
-    local_vpn_label="vpn.${INFRA_ENV_DNS_LABEL}"
+    local_hs_label="hs-${INFRA_ENV_DNS_LABEL}"
   fi
-  create_dns_record "${local_vpn_label}.${DOMAIN}" "A" "$VPN_SERVER_IP"
+  create_dns_record "${local_hs_label}.${DOMAIN}" "A" "$HEADSCALE_SERVER_IP"
 fi
 
-# 5. Base domain CNAME → www (prod only)
+# 4. Base domain CNAME → www (prod only)
 # Cloudflare handles CNAME flattening at the root domain automatically
 if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
   create_dns_record "${DOMAIN}" "CNAME" "www.${DOMAIN}" "true"
 fi
 
-# 6. Mail MX record (prod only)
-# Points mail subdomain to the mail A record
-if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
-  create_mx_record "mail.${DOMAIN}" "mail.${DOMAIN}" 10
-fi
-
-# 7. Matrix federation SRV records
+# 5. Matrix federation SRV records
 # SRV domain must match the Matrix server_name:
 #   prod: _matrix._tcp.mother-tree.org → synapse.mother-tree.org
 #   dev:  _matrix._tcp.dev.mother-tree.org → synapse.dev.mother-tree.org
@@ -168,17 +154,5 @@ SYNAPSE_TARGET="${SYNAPSE_CNAME}.${ENV_DOT}${DOMAIN}"
 SRV_DOMAIN="${ENV_DOT}${DOMAIN}"
 create_srv_record "_matrix" "_tcp" "$SRV_DOMAIN" 10 5 443 "$SYNAPSE_TARGET"
 create_srv_record "_matrix-fed" "_tcp" "$SRV_DOMAIN" 10 5 8448 "$SYNAPSE_TARGET"
-
-# =============================================================================
-# Set Linode reverse DNS (PTR) for VPN server
-# =============================================================================
-# rDNS must be set AFTER the mail A record exists (Linode validates forward DNS)
-if [ -n "$VPN_SERVER_IP" ] && [ -n "${TF_VAR_linode_token:-}" ]; then
-  MAIL_RDNS="mail.${ENV_DOT}${DOMAIN}"
-  print_status "Setting reverse DNS for $VPN_SERVER_IP -> $MAIL_RDNS"
-  set_linode_rdns "$VPN_SERVER_IP" "$MAIL_RDNS"
-else
-  print_warning "Skipping rDNS — VPN server IP or Linode token not available"
-fi
 
 print_success "Infrastructure DNS records configured for $MT_ENV"

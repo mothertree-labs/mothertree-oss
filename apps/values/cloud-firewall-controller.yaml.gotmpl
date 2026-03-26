@@ -27,23 +27,26 @@ resources:
 # Custom rules below are APPENDED to the defaults.
 firewall:
   inbound:
-    # SSH restricted to VPN network only (no public SSH)
-    - label: "ssh-vpn-only"
+    # SSH + internal ingress restricted to Tailscale mesh + legacy VPN CIDRs
+    - label: "ssh-tailscale"
       action: "ACCEPT"
       protocol: "TCP"
       ports: "22"
       addresses:
         ipv4:
-          - '{{ env "VPN_NETWORK_CIDR" | default "10.8.0.0/24" }}'
-    # Internal ingress NodePort (Grafana, Prometheus, AlertManager) from VPN only
-    # VPN traffic is masqueraded to the VPN server's private IP before reaching nodes
-    - label: "monitoring-vpn"
+          - "100.64.0.0/10"
+          - "10.8.0.0/24"
+          - "10.9.0.0/24"
+    # Internal ingress NodePort (Grafana, Prometheus, AlertManager) from mesh
+    - label: "monitoring-mesh"
       action: "ACCEPT"
       protocol: "TCP"
       ports: "30443"
       addresses:
         ipv4:
-          - "{{ env "VPN_SERVER_PRIVATE_IP" }}/32"
+          - "100.64.0.0/10"
+          - "10.8.0.0/24"
+          - "10.9.0.0/24"
     # Node exporter metrics (port 9100) - allow Prometheus to scrape across nodes
     # Uses the same private subnet as the chart's default rules (kubelet, Calico, etc.)
     - label: "node-exporter"

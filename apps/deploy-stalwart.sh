@@ -138,18 +138,17 @@ print_status "Initializing PostgreSQL database for Stalwart..."
 # This is needed for the db-init job to connect as postgres admin
 print_status "Copying PostgreSQL admin secret to $NS_MAIL namespace..."
 
-# Extract just the password data and create a clean secret (avoids metadata conflicts)
-PG_PASSWORD=$(kubectl get secret docs-postgresql -n infra-db -o jsonpath='{.data.postgres-password}')
+PG_PASSWORD=$(mt_pg_password)
 if [ -z "$PG_PASSWORD" ]; then
-    print_error "Could not retrieve PostgreSQL admin password from infra-db namespace"
+    print_error "Could not retrieve postgres-credentials secret from $NS_DB namespace"
     exit 1
 fi
 
-kubectl create secret generic docs-postgresql \
+kubectl create secret generic postgres-credentials \
     --namespace="$NS_MAIL" \
-    --from-literal=postgres-password="$(echo "$PG_PASSWORD" | base64 -d)" \
+    --from-literal=postgres-password="$PG_PASSWORD" \
     --dry-run=client -o yaml | kubectl apply -f -
-print_success "PostgreSQL admin secret copied"
+print_success "PostgreSQL credentials copied"
 
 # Apply Stalwart secrets for db-init job
 cat <<EOF | kubectl apply -f -
