@@ -2,7 +2,7 @@ controller:
   service:
     annotations:
       # No PROXY protocol — prod-eu uses gray cloud (DNS only, no Cloudflare proxy).
-      # Two-level subdomains (*.funder-forum.mother-tree.org) can't use Cloudflare
+      # Two-level subdomains (*.tenant.infra-domain) can't use Cloudflare
       # Universal SSL. When the tenant moves to their own domain, switch to orange
       # cloud and re-enable PROXY protocol.
       service.beta.kubernetes.io/linode-loadbalancer-default-proxy-protocol: "none"
