@@ -3,6 +3,9 @@ set -euo pipefail
 
 # Release the pool lease and clean up pipeline-scoped test users.
 # This runs as the final pipeline step (on both success and failure).
+#
+# IMPORTANT: The Valkey lease MUST be released even if user cleanup fails.
+# We use a trap to guarantee this.
 
 : "${CI_PIPELINE_NUMBER:?CI_PIPELINE_NUMBER is required}"
 : "${CI_VALKEY_PASSWORD:?CI_VALKEY_PASSWORD is required}"
@@ -35,6 +38,29 @@ BUILD_KEY="ci-build-${CI_PIPELINE_NUMBER}"
 
 echo "Pool slot: ${POOL}"
 
+# ── Guarantee lease release via trap ───────────────────────────────
+# The lease MUST be released even if Keycloak cleanup fails, otherwise
+# the pool slot stays locked until TTL expires, blocking other pipelines.
+release_lease() {
+  echo ""
+  echo "--- Releasing Valkey lease"
+  # Only release if we still own it (avoid releasing a re-leased key)
+  local holder
+  holder=$(vcli GET "$LEASE_KEY" 2>/dev/null || true)
+  if [[ "$holder" == "$CI_PIPELINE_NUMBER" ]]; then
+    vcli DEL "$LEASE_KEY" > /dev/null
+    echo "Released lease: ${LEASE_KEY}"
+  else
+    echo "Lease ${LEASE_KEY} held by pipeline #${holder:-unknown} — not releasing"
+  fi
+
+  vcli DEL "$BUILD_KEY" > /dev/null 2>&1 || true
+  echo "Cleaned up: ${BUILD_KEY}"
+  echo ""
+  echo "Tenant release complete for pipeline #${CI_PIPELINE_NUMBER}."
+}
+trap release_lease EXIT
+
 # ── Resolve pool-specific env vars for Keycloak cleanup ──────────
 POOL_KEY=$(echo "$POOL" | tr '[:lower:]-' '[:upper:]_')
 
@@ -50,12 +76,14 @@ E2E_KC_REALM=$(resolve_var E2E_KC_REALM)
 E2E_KC_CLIENT_SECRET=$(resolve_var E2E_KC_CLIENT_SECRET)
 
 # ── Clean up Keycloak test users ─────────────────────────────────
+# This section is best-effort — user cleanup failure must NOT prevent
+# lease release. The EXIT trap handles the lease.
 PREFIX="e2e-${CI_PIPELINE_NUMBER}-"
 
 if [[ -z "$E2E_BASE_DOMAIN" || -z "$E2E_KC_REALM" || -z "$E2E_KC_CLIENT_SECRET" ]]; then
-  echo "ERROR: Missing Keycloak config for user cleanup (BASE_DOMAIN=${E2E_BASE_DOMAIN:-}, REALM=${E2E_KC_REALM:-})"
-  echo "Users with prefix '${PREFIX}' will NOT be cleaned up — this will cause user accumulation."
-  exit 1
+  echo "WARNING: Missing Keycloak config for user cleanup (BASE_DOMAIN=${E2E_BASE_DOMAIN:-}, REALM=${E2E_KC_REALM:-})"
+  echo "Users with prefix '${PREFIX}' will NOT be cleaned up — manual cleanup may be needed."
+  exit 0  # EXIT trap will still release lease
 fi
 
 KEYCLOAK_URL="https://auth.${E2E_BASE_DOMAIN}"
@@ -65,21 +93,34 @@ CLIENT_ID="admin-portal"
 echo "Cleaning up users with prefix: ${PREFIX}"
 echo "Keycloak: ${KEYCLOAK_URL} | Realm: ${REALM}"
 
-# Get service account token — fail loudly if this doesn't work
-TOKEN=$(curl -sf --connect-timeout 10 --max-time 30 -X POST \
+# Get service account token — capture response to diagnose failures.
+TOKEN_RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 -w "\n%{http_code}" -X POST \
   "${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${E2E_KC_CLIENT_SECRET}" \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+  2>&1) || true
+
+HTTP_CODE=$(echo "$TOKEN_RESPONSE" | tail -1)
+TOKEN_BODY=$(echo "$TOKEN_RESPONSE" | sed '$d')
+
+if [[ "$HTTP_CODE" != "200" ]]; then
+  echo "WARNING: Keycloak token request failed (HTTP ${HTTP_CODE})"
+  echo "Response: ${TOKEN_BODY:-(empty)}"
+  echo "Users with prefix '${PREFIX}' will NOT be cleaned up — manual cleanup may be needed."
+  exit 0  # EXIT trap will still release lease
+fi
+
+TOKEN=$(echo "$TOKEN_BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])" 2>/dev/null || true)
 
 if [[ -z "$TOKEN" ]]; then
-  echo "ERROR: Failed to get Keycloak service account token"
-  echo "Users with prefix '${PREFIX}' will NOT be cleaned up — this will cause user accumulation."
-  exit 1
+  echo "WARNING: Failed to extract access_token from Keycloak response"
+  echo "Response: ${TOKEN_BODY:-(empty)}"
+  echo "Users with prefix '${PREFIX}' will NOT be cleaned up — manual cleanup may be needed."
+  exit 0  # EXIT trap will still release lease
 fi
 
 # List and delete pipeline-scoped users
-USERS_TO_DELETE=$(curl -sf --connect-timeout 10 --max-time 30 \
+USERS_TO_DELETE=$(curl -s --connect-timeout 10 --max-time 30 \
   "${KEYCLOAK_URL}/admin/realms/${REALM}/users?search=e2e-${CI_PIPELINE_NUMBER}-&max=100" \
   -H "Authorization: Bearer $TOKEN" \
   | PREFIX="$PREFIX" python3 -c "
@@ -114,18 +155,4 @@ else
   echo "Cleanup: ${DELETED} deleted, ${FAILED} failed."
 fi
 
-# ── Release Valkey lease ─────────────────────────────────────────
-# Only release if we still own it (avoid releasing a re-leased key)
-HOLDER=$(vcli GET "$LEASE_KEY" 2>/dev/null || true)
-if [[ "$HOLDER" == "$CI_PIPELINE_NUMBER" ]]; then
-  vcli DEL "$LEASE_KEY" > /dev/null
-  echo "Released lease: ${LEASE_KEY}"
-else
-  echo "Lease ${LEASE_KEY} held by pipeline #${HOLDER} — not releasing"
-fi
-
-vcli DEL "$BUILD_KEY" > /dev/null
-echo "Cleaned up: ${BUILD_KEY}"
-
-echo ""
-echo "Tenant release complete for pipeline #${CI_PIPELINE_NUMBER}."
+# Lease release happens in EXIT trap — no need for explicit release here
