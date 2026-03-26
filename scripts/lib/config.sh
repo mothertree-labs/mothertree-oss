@@ -316,7 +316,7 @@ _mt_load_scaling_config() {
     "SYNAPSE_REPLICAS=" + (.resources.synapse.replicas // 1 | tostring | @sh) + "\n" +
     "NEXTCLOUD_MIN_REPLICAS=" + (.resources.nextcloud.min_replicas | tostring | @sh) + "\n" +
     "NEXTCLOUD_MAX_REPLICAS=" + (.resources.nextcloud.max_replicas | tostring | @sh) + "\n" +
-    "NEXTCLOUD_CPU_REQUEST=" + (.resources.nextcloud.cpu_request // "500m" | tostring | @sh) + "\n" +
+    "NEXTCLOUD_CPU_REQUEST=" + (.resources.nextcloud.cpu_request // "200m" | tostring | @sh) + "\n" +
     "NEXTCLOUD_HPA_SCALEDOWN_WINDOW=" + (.resources.nextcloud.hpa_scaledown_window // 300 | tostring | @sh) + "\n" +
     "EMAIL_PROBE_MEMORY_REQUEST=" + (.resources.email_probe.memory_request // "32Mi" | tostring | @sh) + "\n" +
     "EMAIL_PROBE_MEMORY_LIMIT=" + (.resources.email_probe.memory_limit // "64Mi" | tostring | @sh) + "\n" +
