@@ -105,7 +105,7 @@ spec:
 
               # Wait for Nextcloud pod to be ready
               echo "Waiting for Nextcloud pod to be ready in namespace $POD_NAMESPACE..."
-              if ! kubectl wait --for=condition=ready pod -l app.kubernetes.io/instance=nextcloud -n "$POD_NAMESPACE" --timeout=600s; then
+              if ! kubectl wait --for=condition=ready pod -l app.kubernetes.io/instance=nextcloud,app.kubernetes.io/component=app -n "$POD_NAMESPACE" --timeout=600s; then
                 echo "ERROR: Nextcloud pod did not become ready within 600s"
                 echo ""
                 echo "Nextcloud pods:"
