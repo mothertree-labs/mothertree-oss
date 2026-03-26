@@ -119,15 +119,30 @@ echo ""
 echo "--- Creating test users (prefix: ${PREFIX})"
 echo "Keycloak: ${KEYCLOAK_URL} | Realm: ${REALM}"
 
-# Get service account token
-TOKEN=$(curl -sf --connect-timeout 10 --max-time 30 -X POST \
+# Get service account token — capture response first to diagnose failures.
+# The previous curl -sf | python3 pipe crashed on empty input (curl suppresses
+# error bodies with -f, python3 gets empty stdin, JSONDecodeError kills the
+# script before the TOKEN check is reached due to set -eo pipefail).
+TOKEN_RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 -w "\n%{http_code}" -X POST \
   "${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${E2E_KC_CLIENT_SECRET}" \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+  2>&1) || true
+
+HTTP_CODE=$(echo "$TOKEN_RESPONSE" | tail -1)
+TOKEN_BODY=$(echo "$TOKEN_RESPONSE" | sed '$d')
+
+if [[ "$HTTP_CODE" != "200" ]]; then
+  echo "ERROR: Keycloak token request failed (HTTP ${HTTP_CODE})"
+  echo "Response: ${TOKEN_BODY:-(empty)}"
+  exit 1
+fi
+
+TOKEN=$(echo "$TOKEN_BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])" 2>/dev/null || true)
 
 if [[ -z "$TOKEN" ]]; then
-  echo "ERROR: Failed to get Keycloak service account token"
+  echo "ERROR: Failed to extract access_token from Keycloak response"
+  echo "Response: ${TOKEN_BODY:-(empty)}"
   exit 1
 fi
 
