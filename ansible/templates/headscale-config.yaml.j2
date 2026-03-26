@@ -45,12 +45,12 @@ dns:
       - 1.1.1.1
       - 1.0.0.1
 
-# ACL policy — disabled until Headscale v0.28 tag ownership format is resolved.
-# Without ACL, all nodes on the mesh can communicate freely (traffic is still
-# encrypted via WireGuard). Re-enable once we determine the correct tagOwners
-# format for Headscale v0.28 (which requires email-style usernames with @).
-# policy:
-#   path: /etc/headscale/acl-policy.json
+# ACL policy — enforces least-privilege network segmentation on the mesh.
+# The policy file (acl-policy.json) is deployed by the same Ansible play.
+# Note: cloud-init omits ACLs on first boot because users don't exist yet.
+# ACLs take effect on the first Ansible run after cloud-init bootstrap.
+policy:
+  path: /etc/headscale/acl-policy.json
 
 log:
   level: info
