@@ -459,6 +459,17 @@ EOF
         source "$REPO_ROOT/secrets.$MT_ENV.tfvars.env"
       fi
 
+      # Resolve NodeBalancer's real hostname for mail routing.
+      # Cloudflare-proxied lb1.* FQDNs block SMTP (port 30025) — must use the
+      # NodeBalancer's direct IP/hostname from the LoadBalancer service.
+      K8S_LB_DIRECT_HOST=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress \
+        get svc ingress-nginx-controller \
+        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+      if [ -z "$K8S_LB_DIRECT_HOST" ]; then
+        K8S_LB_DIRECT_HOST="lb1.${MT_ENV}.${INFRA_DOMAIN}"
+        print_warning "Could not resolve NodeBalancer IP — using $K8S_LB_DIRECT_HOST (may fail if Cloudflare-proxied)"
+      fi
+
       # Create Ansible extra vars file
       TEMP_EXTRA_VARS=$(mktemp)
       cat > "$TEMP_EXTRA_VARS" <<EOF
@@ -472,8 +483,10 @@ EOF
       cat >> "$TEMP_EXTRA_VARS" <<EOF
 
 # K8s Postfix inbound mail routing via NodeBalancer TCP proxy
+# Use the NodeBalancer's real IP (not Cloudflare-proxied lb1.* FQDN)
+# because Cloudflare only proxies HTTP/HTTPS — SMTP port 30025 is blocked.
 k8s_postfix_nodeport: 30025
-k8s_lb_host: "lb1.${MT_ENV}.${INFRA_DOMAIN}"
+k8s_lb_host: "${K8S_LB_DIRECT_HOST}"
 EOF
       if [ -n "${TF_VAR_tls_email:-}" ]; then
         echo "tls_email: \"${TF_VAR_tls_email}\"" >> "$TEMP_EXTRA_VARS"
