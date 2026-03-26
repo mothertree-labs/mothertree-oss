@@ -11,7 +11,7 @@ allowed-tools: ["Read", "Glob", "Grep"]
 ```
 Internet -> Cloudflare DNS -> Linode LKE (3 nodes)
                               |-- infra-ingress (nginx, LoadBalancer)
-                              |-- infra-ingress-internal (nginx, NodePort, VPN-only)
+                              |-- infra-ingress-internal (nginx, NodePort, Tailscale-restricted)
                               |-- infra-cert-manager (Let's Encrypt)
                               |-- infra-db (PostgreSQL, shared)
                               |-- infra-auth (Keycloak, OIDC)
@@ -74,7 +74,7 @@ apps/environments/<env>/<comp>.yaml.gotmpl -> Environment overrides (Go-template
 4. **Stalwart uses hostPort** — unique ports per tenant, uses DaemonSet-like scheduling
 5. **Terraform workspaces** — always check you're in the right workspace before applying
 6. **env_dns_label** — empty string for prod (not "prod"), "dev" for dev
-7. **PG_HOST** changes between standalone and replication mode — check which is active
+7. **PG_HOST** points to `pgbouncer.infra-db.svc.cluster.local` — PgBouncer connects to external PG VM via Tailscale sidecar
 8. **cert-manager uses DNS-01** for wildcard certs, HTTP-01 for standard certs
-9. **Internal ingress** is VPN-only (whitelist 10.8.0.0/24) — accessible through OpenVPN tunnel
+9. **Internal ingress** is Tailscale-restricted (whitelist 100.64.0.0/10) — accessible through Headscale/Tailscale mesh
 10. **Admin Portal Docker image** only rebuilds if source files changed (hash-based check in create_env)

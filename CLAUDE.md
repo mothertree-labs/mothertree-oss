@@ -7,12 +7,13 @@ Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Docs,
 ## Tech Stack
 
 - **Cloud**: Linode (LKE cluster, g6-standard-4, us-lax region, autoscaler min=1 max=5)
-- **IaC**: Terraform (workspaces per env) + Ansible (VPN/Postfix on VPN server)
+- **IaC**: Terraform (workspaces per env) + Ansible (Headscale, PostgreSQL VM, Postfix relay VM, TURN server)
 - **K8s Deployment**: Helmfile + Helm charts + raw manifests (apps/manifests/)
 - **DNS**: Cloudflare API (A, CNAME, MX, TXT, SRV records)
-- **Storage**: PostgreSQL (shared, per-tenant DBs), S3 (Linode Objects, us-lax-1), Redis (per-tenant)
+- **Storage**: PostgreSQL (dedicated external VM per env, connected via Tailscale mesh; PgBouncer in K8s), S3 (Linode Objects, us-lax-1), Redis (per-tenant)
 - **Auth**: Keycloak (OIDC, per-tenant realms)
-- **Email**: VPN Postfix -> K8s Postfix+OpenDKIM -> per-tenant Stalwart
+- **Email**: Postfix relay VM (inbound MX, on Tailscale mesh) -> K8s Postfix+OpenDKIM -> per-tenant Stalwart; outbound via SES (optional)
+- **Mesh Network**: Headscale (self-hosted Tailscale control plane) — all VMs and K8s PgBouncer pods join the WireGuard mesh (100.64.0.0/10 CGNAT)
 - **Monitoring**: Prometheus + Grafana + AlertManager + Vector (logs)
 - **Tools**: helmfile, yq, kubectl, terraform, ansible, gh (GitHub CLI)
 
@@ -22,8 +23,8 @@ Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Docs,
 config/          Private config submodules (optional, for operators)
   platform/      Container registry, infra sizing, theme overrides, CLAUDE.private.md
   tenants/       Per-tenant configs (domains, databases, S3 buckets, resources)
-phase1/          Terraform: LKE cluster, VPN server, TURN server, base DNS
-modules/         Terraform modules: lke-cluster/, openvpn-server/, helm-bootstrap/
+phase1/          Terraform: LKE cluster, Headscale, PostgreSQL VM, Postfix relay VM, TURN server
+modules/         Terraform modules: lke-cluster/, headscale/, postgres-server/, postfix-relay/, helm-bootstrap/
 apps/            Application deployment layer
   helmfile.yaml.gotmpl   Main helmfile (Go-templated, env-aware)
   values/                Base Helm values (all environments)
@@ -37,7 +38,7 @@ scripts/         Orchestration scripts (manage_infra, deploy_infra, create_env)
   build-deploy-vaults.sh   Build encrypted CI deploy vault archives
 tenants/         Per-tenant config (or use config/tenants/ submodule)
   .example/      Template for new tenants
-ansible/         VPN server config (OpenVPN, Postfix relay, Unbound DNS)
+ansible/         VM configuration (Headscale, PostgreSQL, Postfix relay, TURN/CoTURN)
 ci/              CI server (Woodpecker)
   terraform/     CI VM provisioning (Linode)
   ansible/       CI VM configuration (tools, vaults, deploy keys)
@@ -47,8 +48,8 @@ ci/              CI server (Woodpecker)
 
 ## Three-Phase Deployment
 
-1. **`./scripts/manage_infra -e <env>`** — Terraform, DNS, LKE firewall, Ansible (runs locally, requires VPN). Generates `terraform-outputs.<env>.env` after phase1 apply.
-2. **`./scripts/deploy_infra -e <env>`** — Shared K8s infra (ingress, certs, PostgreSQL, Keycloak, Postfix, monitoring) — CI-able. Requires `terraform-outputs.<env>.env` from step 1.
+1. **`./scripts/manage_infra -e <env>`** — Terraform, DNS, LKE firewall, Ansible (runs locally, requires Tailscale mesh access). Generates `terraform-outputs.<env>.env` after phase1 apply.
+2. **`./scripts/deploy_infra -e <env>`** — Shared K8s infra (ingress, certs, PgBouncer, Keycloak, Postfix, monitoring) — CI-able. Requires `terraform-outputs.<env>.env` from step 1.
 3. **`./scripts/create_env -e <env> -t <tenant> [--create-alert-user]`** — Tenant apps (Synapse, Element, Docs, Files, Jitsi, Stalwart, Roundcube, Admin Portal) — CI-able
 
 `manage_infra` supports phase selectors: `--phase1`, `--dns`, `--firewall`, `--ansible` (default: all).
@@ -56,10 +57,10 @@ ci/              CI server (Woodpecker)
 
 On initial setup of a new environment, DNS must run after deploy_infra creates the ingress:
 ```bash
-manage_infra -e <env> --phase1          # Create cluster, VPN, TURN
-deploy_infra -e <env>                   # Deploy K8s infra (creates ingress LB)
+manage_infra -e <env> --phase1          # Create cluster, Headscale, PG VM, relay VM, TURN
+deploy_infra -e <env>                   # Deploy K8s infra (creates ingress LB, PgBouncer)
 manage_infra -e <env> --dns             # Create DNS records (needs LB IP)
-manage_infra -e <env> --firewall --ansible  # Firewall rules + VPN config
+manage_infra -e <env> --firewall --ansible  # Firewall rules + configure VMs via Ansible
 ```
 
 Sub-scripts are fully self-contained and independently runnable:
@@ -111,8 +112,8 @@ deploy-prod → deploy_infra -e prod + create_env -e prod -t <all tenants>
 
 - **Prod**: `matrix.example.com`, `mail.example.com`, `lb1.prod.example.com`
 - **Dev**: `matrix.dev.example.com`, `mail.dev.example.com`, `lb1.dev.example.com`
-- **Prod VPN/internal**: `grafana.prod.example.com`, `prometheus.prod.example.com` (prefix is `prod`, NOT `internal`)
-- **Dev VPN/internal**: `grafana.internal.dev.example.com`, `prometheus.internal.dev.example.com` (prefix is `internal.dev`)
+- **Prod internal**: `grafana.prod.example.com`, `prometheus.prod.example.com` (prefix is `prod`, NOT `internal`)
+- **Dev internal**: `grafana.internal.dev.example.com`, `prometheus.internal.dev.example.com` (prefix is `internal.dev`)
 - Tenant subdomains CNAME to `lb1.{env_label}.example.com`
 - `env_dns_label`: empty string for prod, `"dev"` for dev
 
@@ -179,7 +180,7 @@ Deploy scripts use `mt_apply` (wraps `kubectl apply`, tracks "configured"/"creat
 
 ## Key Env Vars (set by config.sh)
 
-`MT_ENV`, `MT_TENANT`, `KUBECONFIG`, `NS_MATRIX`, `NS_FILES`, `NS_INGRESS`, `NS_AUTH`, `NS_DB`, `NS_MONITORING`, `MATRIX_HOST`, `JITSI_HOST`, `FILES_HOST`, `AUTH_HOST`, `TENANT_DOMAIN`, `TENANT_ENV_DNS_LABEL`, `INFRA_DOMAIN`, `PG_HOST`, `S3_CLUSTER`, `RELEASE_VERSION`
+`MT_ENV`, `MT_TENANT`, `KUBECONFIG`, `NS_MATRIX`, `NS_FILES`, `NS_INGRESS`, `NS_AUTH`, `NS_DB`, `NS_MONITORING`, `MATRIX_HOST`, `JITSI_HOST`, `FILES_HOST`, `AUTH_HOST`, `TENANT_DOMAIN`, `TENANT_ENV_DNS_LABEL`, `INFRA_DOMAIN`, `PG_HOST` (points to PgBouncer in-cluster, not the external PG VM directly), `S3_CLUSTER`, `RELEASE_VERSION`
 
 ## Build/Test Commands
 
@@ -234,7 +235,9 @@ Never skip this step, even if the changes seem trivial.
 
 ## Troubleshooting
 
-- **`deploy_infra` fails with "Connection closed by UNKNOWN port 65535" for turn-server**: This means the SSH host key for the VPN tunnel IP in `~/.ssh/known_hosts` is stale (e.g., VPN server was rebuilt). The ProxyJump through the VPN fails host key verification, producing the misleading port 65535 error. **Fix**: `ssh-keygen -R <tunnel-ip>` (prod: `10.8.0.1`, dev: `10.9.0.1`), then re-run `deploy_infra`.
+- **Tailscale connectivity issues**: If K8s pods can't reach the PostgreSQL VM, check that the PgBouncer pod's Tailscale sidecar is connected to the Headscale mesh. Verify with `tailscale status` inside the sidecar. Ensure the pre-auth key hasn't expired.
+- **PgBouncer SCRAM-SHA-256**: PgBouncer requires `auth_type = scram-sha-256` to match PostgreSQL's default. If auth fails, check that `userlist.txt` has the correct SCRAM hashes, not plaintext passwords.
+- **Stale SSH host keys**: If Ansible fails with SSH errors against a VM that was rebuilt, remove the old key: `ssh-keygen -R <ip>`, then re-run `manage_infra --ansible`.
 
 ## Release Versioning
 
@@ -255,4 +258,4 @@ To cut a release: update `VERSION`, add a `CHANGELOG.md` entry, commit, tag `v<v
 - Keycloak image: `quay.io/keycloak/keycloak:26.5.1`
 - DKIM selector: `default` (e.g., `default._domainkey.example.com`)
 - Stalwart ports are unique per tenant (hostPort mapping): SMTPS 465xx, Submission 587xx, IMAPS 993x
-- PostgreSQL supports standalone and replication modes (PG_HOST switches between them)
+- PostgreSQL runs on a dedicated external Linode VM per environment, connected to the K8s cluster via the Headscale/Tailscale WireGuard mesh. K8s pods connect through PgBouncer (in `infra-db` namespace) which has a Tailscale sidecar. `PG_HOST` points to `pgbouncer.infra-db.svc.cluster.local`.

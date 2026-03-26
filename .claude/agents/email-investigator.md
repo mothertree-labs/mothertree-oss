@@ -18,7 +18,7 @@ Investigate the email system to answer the user's question. Trace the full mail 
 INBOUND MAIL:
 External Sender
     -> Cloudflare MX (mail.example.com)
-    -> VPN Postfix (Linode VM, port 25)
+    -> Postfix relay VM (Linode VM, port 25, on Tailscale mesh)
     -> K8s Postfix (infra-mail, NodePort 25)
     -> OpenDKIM verification (sidecar, port 8891)
     -> Postfix transport map lookup
@@ -29,20 +29,20 @@ OUTBOUND MAIL:
 Stalwart (authenticated user sends)
     -> K8s Postfix (infra-mail, port 587 submission)
     -> OpenDKIM signing (sidecar, port 8891, per-tenant key)
-    -> VPN Postfix (relayhost, port 25)
+    -> Postfix relay VM (relayhost, port 25) or SES (optional)
     -> External recipient
 
 APP-GENERATED MAIL (Keycloak, AlertManager, Synapse):
 Application
     -> K8s Postfix (infra-mail, port 587 submission)
     -> OpenDKIM signing
-    -> VPN Postfix -> External
+    -> Postfix relay VM (or SES) -> External
 ```
 
 ### Port Mappings
 
 #### K8s Postfix (infra-mail)
-- Port 25 (SMTP): Inbound from VPN Postfix, strict recipient verification
+- Port 25 (SMTP): Inbound from Postfix relay VM, strict recipient verification
 - Port 587 (Submission): Internal apps + Stalwart outbound, permit_mynetworks
 
 #### Stalwart (per-tenant, unique hostPorts)
@@ -54,9 +54,9 @@ Application
 
 Ports are configured per-tenant in `tenants/<name>/<env>.config.yaml` under `resources.stalwart`.
 
-#### VPN Postfix (Ansible-managed)
+#### Postfix Relay VM (Ansible-managed, on Tailscale mesh)
 - Port 25 (SMTP): Receives from internet, forwards to K8s
-- Relays to K8s Postfix NodePort
+- Relays to K8s Postfix NodePort via Tailscale mesh
 - Configured via `ansible/playbook.yml`
 
 ### DNS Records (per email domain)
@@ -106,8 +106,8 @@ Ports are configured per-tenant in `tenants/<name>/<env>.config.yaml` under `res
 
 1. **Mail not delivered**: Check transport map -> Stalwart pod status -> DNS MX record
 2. **DKIM failure**: Check OpenDKIM logs -> verify DNS TXT record matches key -> check key mount
-3. **SPF failure**: Ensure mail.example.com A record points to VPN server IP
-4. **Outbound blocked**: Check VPN Postfix relay -> check Stalwart outbound config
+3. **SPF failure**: Ensure mail.example.com A record points to Postfix relay VM IP
+4. **Outbound blocked**: Check Postfix relay VM -> check Stalwart outbound config
 5. **Autodiscovery failing**: Verify SRV records match Stalwart hostPorts
 
 ## Investigation Patterns
