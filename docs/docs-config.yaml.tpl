@@ -13,10 +13,9 @@ data:
   DJANGO_CONFIGURATION: "Production"
   DJANGO_DEBUG: "False"
   
-  # Database settings (cross-namespace: PostgreSQL is in infra-db)
+  # Database settings (cross-namespace: PgBouncer in infra-db routes to external PG VM)
   # Database name and user are tenant-specific to avoid conflicts
-  # Using -primary service for write operations (Bitnami replication architecture)
-  DB_HOST: "docs-postgresql-primary.infra-db.svc.cluster.local"
+  DB_HOST: "${PG_HOST}"
   DB_PORT: "5432"
   DB_NAME: "${DOCS_DB_NAME}"
   DB_USER: "${TENANT_DB_USER}"

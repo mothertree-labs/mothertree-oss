@@ -1,0 +1,188 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - jq
+  - ufw
+  - gnupg
+  - lsb-release
+
+runcmd:
+  # -------------------------------------------------------------------
+  # 1. Install Tailscale client
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Installing Tailscale..."
+    curl -fsSL https://tailscale.com/install.sh | sh
+
+  # -------------------------------------------------------------------
+  # 2. Join the Headscale tailnet
+  # Must happen early so the Tailscale interface is up before PostgreSQL starts.
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Joining Headscale tailnet..."
+    tailscale up \
+      --login-server="${headscale_url}" \
+      --authkey="${tailscale_auth_key}" \
+      --advertise-tags=tag:postgres \
+      --accept-routes=false \
+      --ssh
+
+    # Wait for Tailscale to get an IP
+    timeout=120
+    elapsed=0
+    while [ $elapsed -lt $timeout ]; do
+      TS_IP=$(tailscale ip -4 2>/dev/null || true)
+      if [ -n "$TS_IP" ]; then
+        echo "[cloud-init] Tailscale IP: $TS_IP"
+        break
+      fi
+      sleep 2
+      elapsed=$((elapsed + 2))
+    done
+    if [ -z "$TS_IP" ]; then
+      echo "[cloud-init] WARNING: Tailscale IP not assigned after $${timeout}s"
+    fi
+
+  # -------------------------------------------------------------------
+  # 3. Mount persistent volume for PostgreSQL data
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Waiting for data volume..."
+    timeout=300
+    elapsed=0
+    while [ $elapsed -lt $timeout ]; do
+      # Linode attaches volumes as /dev/sdc (first additional volume)
+      if [ -b /dev/sdc ]; then
+        echo "[cloud-init] Volume device /dev/sdc found."
+        break
+      fi
+      sleep 5
+      elapsed=$((elapsed + 5))
+    done
+    if [ ! -b /dev/sdc ]; then
+      echo "[cloud-init] ERROR: Volume device /dev/sdc not found after $${timeout}s"
+      exit 1
+    fi
+
+    # Format if new (no filesystem)
+    if ! blkid /dev/sdc >/dev/null 2>&1; then
+      echo "[cloud-init] Formatting volume..."
+      mkfs.ext4 /dev/sdc
+    fi
+
+    # Mount volume
+    mkdir -p /mnt/pgdata
+    mount /dev/sdc /mnt/pgdata
+
+    # Add to fstab for persistence across reboots
+    if ! grep -q '/mnt/pgdata' /etc/fstab; then
+      echo '/dev/sdc /mnt/pgdata ext4 defaults 0 2' >> /etc/fstab
+    fi
+
+  # -------------------------------------------------------------------
+  # 4. Install PostgreSQL from official APT repository
+  # -------------------------------------------------------------------
+  - |
+    PG_VERSION="${postgres_version}"
+    echo "[cloud-init] Installing PostgreSQL $PG_VERSION..."
+
+    # Add PostgreSQL APT repository
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+      gpg --dearmor -o /usr/share/keyrings/postgresql-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] \
+      http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list
+
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "postgresql-$PG_VERSION"
+
+    # Stop PostgreSQL and re-initialize with C locale.
+    # The apt package runs initdb with the system locale (en_US.UTF-8), but
+    # Synapse requires LC_COLLATE=C and other apps benefit from consistent
+    # collation. Reinitializing the cluster ensures all new databases default
+    # to C collation without needing explicit LC_COLLATE on every CREATE DATABASE.
+    systemctl stop postgresql
+    sudo -u postgres rm -rf "/var/lib/postgresql/$PG_VERSION/main"
+    sudo -u postgres /usr/lib/postgresql/$PG_VERSION/bin/initdb \
+      -D "/var/lib/postgresql/$PG_VERSION/main" \
+      --locale=C --encoding=UTF8
+
+  # -------------------------------------------------------------------
+  # 5. Move PostgreSQL data directory to persistent volume
+  # -------------------------------------------------------------------
+  - |
+    PG_VERSION="${postgres_version}"
+    PG_DATA="/mnt/pgdata/$PG_VERSION/main"
+
+    # Only initialize if the data directory doesn't already exist on the volume
+    if [ ! -d "$PG_DATA" ]; then
+      echo "[cloud-init] Initializing PostgreSQL data directory on volume..."
+      mkdir -p "/mnt/pgdata/$PG_VERSION"
+      # Move the initialized data directory to the volume
+      mv "/var/lib/postgresql/$PG_VERSION/main" "$PG_DATA"
+    else
+      echo "[cloud-init] PostgreSQL data directory already exists on volume."
+      # Remove the default data directory created by apt install
+      rm -rf "/var/lib/postgresql/$PG_VERSION/main"
+    fi
+
+    # Symlink so PostgreSQL finds its data where it expects
+    ln -sf "$PG_DATA" "/var/lib/postgresql/$PG_VERSION/main"
+    chown -R postgres:postgres "/mnt/pgdata"
+
+  # -------------------------------------------------------------------
+  # 6. Install pgBackRest
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Installing pgBackRest..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y pgbackrest
+    mkdir -p /var/log/pgbackrest /var/lib/pgbackrest /etc/pgbackrest
+    chown -R postgres:postgres /var/log/pgbackrest /var/lib/pgbackrest
+
+  # -------------------------------------------------------------------
+  # 7. Install postgres_exporter for Prometheus monitoring
+  # -------------------------------------------------------------------
+  - |
+    echo "[cloud-init] Installing postgres_exporter..."
+    PGE_VERSION="0.16.0"
+    curl -fsSL -o /tmp/postgres_exporter.tar.gz \
+      "https://github.com/prometheus-community/postgres_exporter/releases/download/v$${PGE_VERSION}/postgres_exporter-$${PGE_VERSION}.linux-amd64.tar.gz"
+    tar -xzf /tmp/postgres_exporter.tar.gz -C /tmp
+    mv "/tmp/postgres_exporter-$${PGE_VERSION}.linux-amd64/postgres_exporter" /usr/local/bin/
+    rm -rf /tmp/postgres_exporter*
+    chmod +x /usr/local/bin/postgres_exporter
+
+    # Create system user for exporter
+    useradd --system --no-create-home --shell /usr/sbin/nologin postgres_exporter || true
+
+  # -------------------------------------------------------------------
+  # 8. Configure UFW firewall
+  # -------------------------------------------------------------------
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp comment "SSH"
+  - ufw allow 41641/udp comment "Tailscale WireGuard"
+  - ufw --force enable
+
+  # -------------------------------------------------------------------
+  # 9. Start PostgreSQL (minimal config — Ansible will finalize)
+  # -------------------------------------------------------------------
+  - |
+    PG_VERSION="${postgres_version}"
+    # Ensure PostgreSQL starts after Tailscale on reboot
+    mkdir -p /etc/systemd/system/postgresql.service.d
+    cat > /etc/systemd/system/postgresql.service.d/after-tailscale.conf << 'EOF'
+    [Unit]
+    After=tailscaled.service
+    Wants=tailscaled.service
+    EOF
+
+    systemctl daemon-reload
+    systemctl enable postgresql
+    systemctl start postgresql
+
+    echo "[cloud-init] PostgreSQL server bootstrap complete."
+    echo "[cloud-init] Run Ansible to finalize configuration (tuning, pg_hba, pgBackRest, monitoring)."

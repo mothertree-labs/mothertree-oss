@@ -1,0 +1,22 @@
+collabora:
+  server_name: '{{ env "OFFICE_HOST" }}'
+  aliasgroups:
+    - host: 'https://{{ env "FILES_HOST" }}:443'
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$arg_WOPISrc"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  hosts:
+    - host: '{{ env "OFFICE_HOST" }}'
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: 'wildcard-tls-{{ env "TENANT_NAME" }}'
+      hosts:
+        - '{{ env "OFFICE_HOST" }}'

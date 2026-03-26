@@ -23,12 +23,13 @@ always_add_missing_headers = no
 
 # Network settings - accept from internal networks only
 # These ranges cover:
-# - 10.0.0.0/8: K8s pod networks, VPN clients
+# - 10.0.0.0/8: K8s pod networks
 # - 172.16.0.0/12: Docker networks, some K8s networks
 # - 192.168.0.0/16: VPC private networks
+# - 100.64.0.0/10: Tailscale CGNAT range (K8s Postfix sidecar connects via mesh)
 inet_interfaces = all
 inet_protocols = ipv4
-mynetworks = 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+mynetworks = 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10
 
 # Relay configuration:
 # 1. permit_mynetworks: Allow relay from trusted internal networks (outbound mail)

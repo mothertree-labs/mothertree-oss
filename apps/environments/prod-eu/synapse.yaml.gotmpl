@@ -1,0 +1,124 @@
+serverName: '{{ env "MATRIX_HOST" }}'
+ingress:
+  host: '{{ env "MATRIX_HOST" }}'
+  tls:
+    - secretName: 'wildcard-tls-{{ env "TENANT_NAME" }}'
+      hosts:
+        - '{{ env "MATRIX_HOST" }}'
+
+# Stable secrets — prevents the chart from regenerating random values on every upgrade
+config:
+  registrationSharedSecret: {{ env "SYNAPSE_REGISTRATION_SHARED_SECRET" | quote }}
+  macaroonSecretKey: {{ env "SYNAPSE_MACAROON_SECRET_KEY" | quote }}
+
+# External PostgreSQL (shared instance in infra-db namespace)
+externalPostgresql:
+  host: {{ env "PG_HOST" | quote }}
+  port: 5432
+  username: {{ env "SYNAPSE_DB_USER" | quote }}
+  password: {{ env "SYNAPSE_DB_PASSWORD" | quote }}
+  database: {{ env "SYNAPSE_DB_NAME" | quote }}
+
+redis:
+  password: {{ env "SYNAPSE_REDIS_PASSWORD" | quote }}
+  auth:
+    password: {{ env "SYNAPSE_REDIS_PASSWORD" | quote }}
+
+# Override extraConfig to update OIDC issuer for prod environment
+# Note: This replaces the entire extraConfig section, so we must include all settings
+# TURN server IP is extracted from phase1 outputs in create_env script
+extraConfig:
+  max_upload_size: 100M
+  turn_uris:
+    - 'turn:{{ env "TURN_SERVER_IP" }}:3478?transport=udp'
+    - 'turn:{{ env "TURN_SERVER_IP" }}:3478?transport=tcp'
+    - 'turn:{{ env "TURN_SERVER_IP" }}:3479?transport=udp'
+    - 'turn:{{ env "TURN_SERVER_IP" }}:3479?transport=tcp'
+  turn_shared_secret: {{ env "TURN_SHARED_SECRET" | quote }}
+  # Explicitly disable email delegation (deprecated feature)
+  account_threepid_delegates: {}
+  # User directory — search_all_users enables Slack-like people search
+  # (find any user on the homeserver, not just users sharing a room with you)
+  user_directory:
+    enabled: true
+    search_all_users: true
+    prefer_local_users: true
+  # Email configuration - Postfix SMTP (prod)
+  # Per Synapse homeserver.yaml documentation
+  email:
+    smtp_host: "postfix-internal.infra-mail.svc.cluster.local"
+    smtp_port: 587
+    notif_from: 'Matrix Notifications <noreply@{{ env "TENANT_DOMAIN" }}>'
+    enable_notifs: true
+    require_transport_security: false
+  # Disable password login - all auth goes through Keycloak OIDC
+  password_config:
+    enabled: false
+  # OIDC provider configuration for Keycloak (prod environment)
+  # Uses explicit endpoints instead of discover: true to avoid PROXY protocol issues.
+  # Browser-facing endpoint (authorization) uses the external URL; server-to-server
+  # endpoints (token, userinfo, jwks) use the internal K8s service URL (HTTP).
+  # skip_verification bypasses RFC 8414 HTTPS requirement for internal endpoints.
+  oidc_providers:
+    - idp_id: keycloak
+      idp_name: "Sign in with MotherTree"
+      discover: false
+      skip_verification: true
+      issuer: 'https://{{ env "AUTH_HOST" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}'
+      authorization_endpoint: 'https://{{ env "AUTH_HOST" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/auth'
+      token_endpoint: '{{ env "KEYCLOAK_INTERNAL_URL" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/token'
+      userinfo_endpoint: '{{ env "KEYCLOAK_INTERNAL_URL" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/userinfo'
+      jwks_uri: '{{ env "KEYCLOAK_INTERNAL_URL" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/certs'
+      client_id: "matrix-synapse"
+      client_secret: {{ env "SYNAPSE_OIDC_CLIENT_SECRET" | quote }}
+      scopes: ["openid", "profile", "email"]
+      user_mapping_provider:
+        config:
+          # Use email directly for stable user identification across deployments
+          # Note: These are Synapse Jinja2 templates, not Go templates
+          localpart_template: "{{ "{{" }} user.email {{ "}}" }}"
+          display_name_template: "{{ "{{" }} user.name {{ "}}" }}"
+          email_template: "{{ "{{" }} user.email {{ "}}" }}"
+  rc_message:
+    per_second: 2
+    burst_count: 50
+  rc_login:
+    address:
+      per_second: 1
+      burst_count: 10
+    account:
+      per_second: 0.5
+      burst_count: 5
+    failed_attempts:
+      per_second: 1
+      burst_count: 10
+  rc_joins:
+    local:
+      per_second: 0.5
+      burst_count: 20
+    remote:
+      per_second: 0.1
+      burst_count: 10
+
+# Prod Synapse resources — must be under synapse: key for the ananace/matrix-synapse chart
+synapse:
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+
+# S3 credentials in extraSecrets (rendered as K8s Secret, not ConfigMap)
+extraSecrets:
+  media_storage_providers:
+    - module: s3_storage_provider.S3StorageProviderBackend
+      store_local: true
+      store_remote: true
+      store_synchronous: true
+      config:
+        bucket: {{ env "S3_MATRIX_BUCKET" }}
+        region_name: {{ env "S3_CLUSTER" }}
+        endpoint_url: 'https://{{ env "S3_CLUSTER" }}.linodeobjects.com'
+        access_key_id: {{ env "S3_MATRIX_ACCESS_KEY" }}
+        secret_access_key: {{ env "S3_MATRIX_SECRET_KEY" }}

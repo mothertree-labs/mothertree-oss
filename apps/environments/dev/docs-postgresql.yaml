@@ -1,7 +1,0 @@
-# Dev PostgreSQL override — increase max_connections to match prod
-# Default of 100 is too low: 5 backend replicas x gunicorn workers exhaust
-# the pool during rolling deploys, causing cascade pod failures.
-
-primary:
-  extendedConfiguration: |
-    max_connections = 200

@@ -4,7 +4,7 @@
 # Usage: ./ci/scripts/provision-ci.sh [--plan|--apply|--ansible-only]
 #
 # Prerequisites:
-#   - VPN connection active
+#   - SSH access to CI server (direct or via Tailscale mesh)
 #   - config/platform/ci/terraform.tfvars exists
 #   - config/platform/ci/ansible-vars.yml exists
 
@@ -58,10 +58,6 @@ generate_inventory() {
   local ci_public_ip
   ci_public_ip=$(terraform output -raw ci_server_ip 2>/dev/null || echo "<ci-server-public-ip>")
 
-  # Use VPN tunnel IP for ProxyJump (requires active VPN connection)
-  local vpn_tunnel_ip
-  vpn_tunnel_ip=$(cd "$REPO_ROOT/phase1" && terraform output -raw vpn_server_tunnel_ip 2>/dev/null || echo "10.8.0.1")
-
   cat > "$ANSIBLE_DIR/inventory.yml" <<EOF
 all:
   children:
@@ -70,7 +66,7 @@ all:
         ci:
           ansible_host: ${ci_public_ip}
           ansible_user: root
-          ansible_ssh_common_args: "-o ProxyJump=root@${vpn_tunnel_ip} -o StrictHostKeyChecking=accept-new"
+          ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new"
 EOF
   print_status "Generated ansible inventory at ci/ansible/inventory.yml"
 }

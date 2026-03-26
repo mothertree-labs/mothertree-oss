@@ -69,11 +69,11 @@ if ! kubectl get pod -n "$NS_DB" -l app.kubernetes.io/name=postgresql -o name 2>
 fi
 print_success "PostgreSQL is ready"
 
-# Step 3: Get database password
+# Step 3: Get database superuser password
 print_status "Retrieving database password..."
-DB_PASSWORD=$(kubectl get secret docs-postgresql -n "$NS_DB" -o jsonpath='{.data.postgres-password}' | base64 -d)
+DB_PASSWORD=$(mt_pg_password)
 if [ -z "$DB_PASSWORD" ]; then
-    print_error "Failed to retrieve database password"
+    print_error "Failed to retrieve postgres-credentials secret from $NS_DB"
     exit 1
 fi
 print_success "Database password retrieved"
@@ -238,14 +238,14 @@ print_success "Docs Grafana dashboard deployed"
 # The db-init job runs in NS_DOCS (where docs-secrets is) and connects to PostgreSQL cross-namespace
 print_status "Ensuring docs role/database exist and privileges set..."
 
-# Copy postgres-password from NS_DB to NS_DOCS so the job can access it
+# Copy postgres credentials to docs namespace so the db-init job can access them
 print_status "Copying PostgreSQL credentials to docs namespace for db-init job..."
-POSTGRES_PASSWORD=$(kubectl get secret docs-postgresql -n "$NS_DB" -o jsonpath='{.data.postgres-password}' | base64 -d 2>/dev/null || echo "")
+POSTGRES_PASSWORD=$(mt_pg_password)
 if [ -z "$POSTGRES_PASSWORD" ]; then
-    print_error "Could not get postgres-password from docs-postgresql secret in $NS_DB"
+    print_error "Could not get postgres-credentials secret from $NS_DB"
     exit 1
 fi
-kubectl create secret generic docs-postgresql \
+kubectl create secret generic postgres-credentials \
     --from-literal=postgres-password="$POSTGRES_PASSWORD" \
     -n "$NS_DOCS" \
     --dry-run=client -o yaml | kubectl apply -f -
@@ -266,24 +266,8 @@ if ! poll_job_complete "$NS_DOCS" "docs-db-init" 180 5; then
 fi
 print_success "Database role/database verified"
 
-# Step 9b: Sync password from docs-secrets to docs-postgresql secret
-# This ensures the docs-postgresql secret has the correct password matching docs-secrets.DATABASE_PASSWORD
-# The db-init-job sets the actual PostgreSQL password, this step syncs the Kubernetes secret
-print_status "Syncing database password to docs-postgresql secret..."
-DOCS_USER_PASSWORD=$(kubectl get secret docs-secrets -n "$NS_DOCS" -o jsonpath='{.data.DATABASE_PASSWORD}' | base64 -d 2>/dev/null || echo "")
-if [ -n "$DOCS_USER_PASSWORD" ]; then
-    # Get the existing postgres-password (superuser) to preserve it
-    POSTGRES_PASSWORD=$(kubectl get secret docs-postgresql -n "$NS_DB" -o jsonpath='{.data.postgres-password}' | base64 -d)
-    # Recreate the secret with the correct password for the docs user
-    kubectl create secret generic docs-postgresql \
-        --namespace "$NS_DB" \
-        --from-literal=postgres-password="$POSTGRES_PASSWORD" \
-        --from-literal=password="$DOCS_USER_PASSWORD" \
-        --dry-run=client -o yaml | kubectl apply -f -
-    print_success "docs-postgresql secret synced with correct password"
-else
-    print_warning "Could not retrieve DATABASE_PASSWORD from docs-secrets, skipping sync"
-fi
+# NOTE: Database user passwords are managed on the external PG VM.
+# No in-cluster password sync needed — PgBouncer uses auth_query.
 
 # Step 10: Run database migrations
 print_status "Running Django database migrations..."

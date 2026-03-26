@@ -1,0 +1,56 @@
+# Headscale configuration — managed by Ansible
+# https://github.com/juanfont/headscale/blob/main/config-example.yaml
+
+server_url: "https://{{ headscale_domain }}:8080"
+listen_addr: "0.0.0.0:8080"
+grpc_listen_addr: "0.0.0.0:50443"
+
+tls_cert_path: /etc/headscale/tls-cert.pem
+tls_key_path: /etc/headscale/tls-key.pem
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: "100.64.0.0/10"
+  v6: "fd7a:115c:a1e0::/48"
+  allocation: "sequential"
+
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+
+# DERP relay — fully self-hosted, no Tailscale public infrastructure
+derp:
+  urls: []
+  server:
+    enabled: true
+    region_id: 999
+    region_code: "mt"
+    region_name: "Mothertree DERP"
+    stun_listen_addr: "0.0.0.0:3478"
+    automatically_add_embedded_derp_region: true
+    ipv4: "{{ server_public_ip.content | trim }}"
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    verify_clients: true
+
+# MagicDNS — nodes get FQDNs like pgvm.{{ headscale_base_domain }}
+dns:
+  magic_dns: true
+  base_domain: "{{ headscale_base_domain }}"
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 1.0.0.1
+
+# ACL policy — disabled until Headscale v0.28 tag ownership format is resolved.
+# Without ACL, all nodes on the mesh can communicate freely (traffic is still
+# encrypted via WireGuard). Re-enable once we determine the correct tagOwners
+# format for Headscale v0.28 (which requires email-style usernames with @).
+# policy:
+#   path: /etc/headscale/acl-policy.json
+
+log:
+  level: info

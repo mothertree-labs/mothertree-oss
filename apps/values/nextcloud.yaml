@@ -92,11 +92,10 @@ nextcloud:
       authtype: LOGIN
       name: ""
       password: ""
-  # Regenerate .htaccess on every pod start (writes front-controller rewrite rules).
-  # Requires overwrite.cli.url to be set (done in environment-specific values).
+  # NOTE: NEXTCLOUD_INIT_HTACCESS disabled — the entrypoint's maintenance:update:htaccess
+  # fails on fresh emptyDir pods when the app bootstrap hasn't completed yet.
+  # The .htaccess is configured via ConfigMap mount instead (pretty-urls.config.php).
   extraEnv:
-    - name: NEXTCLOUD_INIT_HTACCESS
-      value: "true"
     # guest_bridge config — injected from secret so every pod has it on startup.
     # The before-starting hook reads these and writes to per-pod config.php.
     - name: GUEST_BRIDGE_API_URL

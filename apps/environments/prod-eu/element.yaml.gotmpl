@@ -1,0 +1,29 @@
+# Replica count from tenant config (HPA will manage scaling)
+replicaCount: {{ env "ELEMENT_MIN_REPLICAS" }}
+
+defaultServer:
+  url: 'https://{{ env "MATRIX_HOST" }}'
+  name: '{{ env "MATRIX_HOST" }}'
+
+config:
+  # Suppress default vector.im identity server — not needed since user
+  # discovery is handled by Synapse's user directory
+  default_identity_server_url: ""
+  setting_defaults:
+    useAuthenticatedMedia: true
+  jitsi:
+    preferredDomain: '{{ env "JITSI_HOST" }}'
+  sso_redirect_options:
+    immediate: true
+
+ingress:
+  hosts:
+    - '{{ env "MATRIX_HOST" }}'
+  tls:
+    - secretName: 'wildcard-tls-{{ env "TENANT_NAME" }}'
+      hosts:
+        - '{{ env "MATRIX_HOST" }}'
+  annotations:
+    nginx.ingress.kubernetes.io/server-snippet: |
+      more_clear_headers "X-Frame-Options";
+      add_header Content-Security-Policy "frame-ancestors 'self' https://home.{{ env "TENANT_DOMAIN" }}" always;

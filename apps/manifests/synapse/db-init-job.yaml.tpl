@@ -8,7 +8,7 @@
 #   NS_MATRIX - Tenant matrix namespace (e.g., tn-example-matrix)
 #   SYNAPSE_DB_NAME - Database name (e.g., synapse_example)
 #   SYNAPSE_DB_USER - Database user (e.g., synapse_example)
-#   PG_HOST - PostgreSQL host (e.g., docs-postgresql-primary.infra-db.svc.cluster.local)
+#   PG_HOST - PostgreSQL host (e.g., pgbouncer.infra-db.svc.cluster.local)
 
 apiVersion: batch/v1
 kind: Job
@@ -52,7 +52,7 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: docs-postgresql
+                  name: postgres-credentials
                   key: postgres-password
             - name: SYNAPSE_PASSWORD
               valueFrom:

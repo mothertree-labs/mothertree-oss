@@ -224,14 +224,14 @@ print_success "Redis deployed to $NS_FILES"
 # Step 5: Run Nextcloud database initialization job (in files namespace where secrets are accessible)
 print_status "Running Nextcloud database initialization..."
 
-# Copy postgres-password from NS_DB to NS_FILES so the job can access it
+# Copy postgres credentials to files namespace so the db-init job can access them
 print_status "Copying PostgreSQL credentials to files namespace for db-init job..."
-POSTGRES_PASSWORD=$(kubectl get secret docs-postgresql -n "$NS_DB" -o jsonpath='{.data.postgres-password}' | base64 -d 2>/dev/null || echo "")
+POSTGRES_PASSWORD=$(mt_pg_password)
 if [ -z "$POSTGRES_PASSWORD" ]; then
-    print_error "Could not get postgres-password from docs-postgresql secret in $NS_DB"
+    print_error "Could not get postgres-credentials secret from $NS_DB"
     exit 1
 fi
-kubectl create secret generic docs-postgresql \
+kubectl create secret generic postgres-credentials \
     --from-literal=postgres-password="$POSTGRES_PASSWORD" \
     -n "$NS_FILES" \
     --dry-run=client -o yaml | kubectl apply -f -
@@ -262,15 +262,9 @@ print_success "Nextcloud database initialized"
 # change, so autoanalyze never fires and the planner uses stale stats from
 # table creation — causing full sequential scans on every request.
 print_status "Updating PostgreSQL table statistics (ANALYZE)..."
-PGPW=$(kubectl get secret docs-postgresql -n "$NS_DB" -o jsonpath='{.data.postgres-password}' | base64 -d 2>/dev/null || echo "")
-if [ -n "$PGPW" ]; then
-    kubectl exec -n "$NS_DB" docs-postgresql-primary-0 -c postgresql -- \
-        env PGPASSWORD="$PGPW" psql -U postgres -d "$NEXTCLOUD_DB_NAME" -c "ANALYZE;" 2>/dev/null \
-        && print_success "ANALYZE completed for $NEXTCLOUD_DB_NAME" \
-        || print_warning "ANALYZE failed (non-critical, will retry on next deploy)"
-else
-    print_warning "Could not retrieve postgres password, skipping ANALYZE"
-fi
+echo "ANALYZE;" | mt_psql -d "$NEXTCLOUD_DB_NAME" \
+    && print_success "ANALYZE completed for $NEXTCLOUD_DB_NAME" \
+    || print_warning "ANALYZE failed (non-critical, will retry on next deploy)"
 
 # Step 5c: Auto-migration from PVC to emptyDir
 # If a PVC exists but the identity secret doesn't, extract identity values from the running pod

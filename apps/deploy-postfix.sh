@@ -1,11 +1,13 @@
 #!/bin/bash
 
 # Deploy Postfix K8s Resources
-# Purpose: Deploy Postfix SMTP server with OpenDKIM sidecar to infra-mail namespace
+# Purpose: Deploy Postfix SMTP server with OpenDKIM + Tailscale sidecars to infra-mail namespace
 #
 # Creates:
+#   - ServiceAccount + RBAC (for Tailscale state Secret management)
 #   - ConfigMaps (postfix-config, opendkim-config, postfix-init-scripts)
-#   - Deployment (Postfix + OpenDKIM sidecar + prepare-routing init container)
+#   - Secrets (Tailscale auth key)
+#   - Deployment (Postfix + OpenDKIM sidecar + Tailscale sidecar + prepare-routing init container)
 #   - Services (ClusterIP port 25, NodePort 30025, ClusterIP port 587)
 #   - NetworkPolicy
 #
@@ -38,13 +40,28 @@ mt_usage() {
 mt_parse_args "$@"
 mt_require_env
 
-# Load infrastructure configuration (sets SMTP_DOMAIN, VPN_SERVER_PRIVATE_IP, NS_MAIL, etc.)
+# Load infrastructure configuration (sets SMTP_DOMAIN, NS_MAIL, etc.)
 source "${REPO_ROOT}/scripts/lib/infra-config.sh"
 mt_load_infra_config
 
 mt_require_commands kubectl envsubst shasum
 
 MANIFESTS_DIR="$REPO_ROOT/apps/manifests/postfix"
+
+# =============================================================================
+# Load Postfix-specific config
+# =============================================================================
+
+# Required: Postfix relay VM Tailscale IP
+: "${POSTFIX_RELAY_IP:?POSTFIX_RELAY_IP not set. Add postfix_relay.tailscale_ip to infra config.}"
+export POSTFIX_RELAY_IP
+
+# Required: Headscale URL (for Tailscale sidecar)
+: "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
+export HEADSCALE_URL
+
+# Required: Tailscale pre-auth key (from infra secrets)
+: "${TAILSCALE_AUTHKEY:?TAILSCALE_AUTHKEY not set. Add tailscale.authkey to infra secrets.}"
 
 # =============================================================================
 # Compute derived variables
@@ -56,13 +73,14 @@ export SMTP_HOSTNAME="relay.${SMTP_DOMAIN}"
 
 export DKIM_SELECTOR="default"
 
-# SECURITY: Only trust specific VPN server IP, not entire datacenter
+# SECURITY: Trusted relay networks for K8s Postfix
 # Components:
 #   - 127.0.0.0/8: localhost
 #   - 10.0.0.0/8: K8s pod network (Cilium)
 #   - 172.16.0.0/12: K8s service network
-#   - VPN server specific IP/32: Only the VPN server can relay through K8s Postfix
-export POSTFIX_MYNETWORKS="127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,${VPN_SERVER_PRIVATE_IP}/32"
+#   - Postfix relay VM's Tailscale IP: allows relay to submit mail back to K8s Postfix
+# Do NOT trust the entire 100.64.0.0/10 — that would let any Tailscale peer relay mail.
+export POSTFIX_MYNETWORKS="127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,${POSTFIX_RELAY_IP}/32"
 
 # Compute SMTP_ALLOWED_SENDER_DOMAINS from tenant configs if not already set
 if [ -z "${SMTP_ALLOWED_SENDER_DOMAINS:-}" ]; then
@@ -91,7 +109,9 @@ export SMTP_ALLOWED_SENDER_DOMAINS
 print_status "Deploying Postfix to $NS_MAIL (env: $MT_ENV)"
 print_status "  SMTP domain: $SMTP_DOMAIN"
 print_status "  SMTP hostname: $SMTP_HOSTNAME"
-print_status "  VPN server: $VPN_SERVER_PRIVATE_IP"
+print_status "  Relay VM (Tailscale): $POSTFIX_RELAY_IP"
+print_status "  Headscale URL: $HEADSCALE_URL"
+print_status "  Trusted networks: $POSTFIX_MYNETWORKS"
 print_status "  Allowed sender domains: ${SMTP_ALLOWED_SENDER_DOMAINS:-<none>}"
 
 # =============================================================================
@@ -103,7 +123,7 @@ trap "rm -rf $WORK_DIR" EXIT
 
 # Process Postfix main.cf template
 # Only substitute our variables — leave Postfix $variables (e.g. $myhostname) intact
-envsubst '${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${POSTFIX_MYNETWORKS} ${VPN_SERVER_PRIVATE_IP}' \
+envsubst '${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${POSTFIX_MYNETWORKS} ${POSTFIX_RELAY_IP}' \
   < "$MANIFESTS_DIR/postfix-main.cf.tpl" > "$WORK_DIR/main.cf"
 
 # Process aliases template
@@ -134,6 +154,23 @@ CHECKSUM_INIT_SCRIPTS=$(shasum -a 256 "$MANIFESTS_DIR/10-master-cf-overrides.sh"
 export CHECKSUM_POSTFIX_CONFIG CHECKSUM_OPENDKIM_CONFIG CHECKSUM_INIT_SCRIPTS
 
 # =============================================================================
+# Apply RBAC (ServiceAccount, Role, RoleBinding for Tailscale state Secrets)
+# =============================================================================
+
+print_status "Applying Postfix RBAC..."
+mt_reset_change_tracker
+envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/postfix-rbac.yaml.tpl" | mt_apply kubectl apply -f -
+
+# =============================================================================
+# Apply Tailscale auth Secret
+# =============================================================================
+
+print_status "Applying Postfix Tailscale auth Secret..."
+kubectl create secret generic postfix-tailscale-auth -n "$NS_MAIL" \
+  --from-literal=TS_AUTHKEY="$TAILSCALE_AUTHKEY" \
+  --dry-run=client -o yaml | mt_apply kubectl apply -f -
+
+# =============================================================================
 # Create/update ConfigMaps
 # =============================================================================
 
@@ -143,7 +180,7 @@ kubectl create configmap postfix-config -n "$NS_MAIL" \
   --from-file=main.cf="$WORK_DIR/main.cf" \
   --from-file=master.cf="$MANIFESTS_DIR/postfix-master.cf" \
   --from-file=aliases="$WORK_DIR/aliases" \
-  --dry-run=client -o yaml | kubectl apply -f -
+  --dry-run=client -o yaml | mt_apply kubectl apply -f -
 
 # OpenDKIM config ConfigMap
 # IMPORTANT: Preserve existing KeyTable and SigningTable (managed by create_env per-tenant)
@@ -158,13 +195,13 @@ kubectl create configmap opendkim-config -n "$NS_MAIL" \
   --from-literal=KeyTable="$EXISTING_KEYTABLE" \
   --from-literal=SigningTable="$EXISTING_SIGNINGTABLE" \
   --from-file=TrustedHosts="$WORK_DIR/TrustedHosts" \
-  --dry-run=client -o yaml | kubectl apply -f -
+  --dry-run=client -o yaml | mt_apply kubectl apply -f -
 
 # Init scripts ConfigMap
 print_status "Applying postfix-init-scripts ConfigMap..."
 kubectl create configmap postfix-init-scripts -n "$NS_MAIL" \
   --from-file=10-master-cf-overrides.sh="$MANIFESTS_DIR/10-master-cf-overrides.sh" \
-  --dry-run=client -o yaml | kubectl apply -f -
+  --dry-run=client -o yaml | mt_apply kubectl apply -f -
 
 # =============================================================================
 # Apply Deployment
@@ -173,7 +210,7 @@ kubectl create configmap postfix-init-scripts -n "$NS_MAIL" \
 # create_env patches the Deployment to add per-tenant DKIM key volumes and volume mounts.
 # SSA ensures those fields (owned by kubectl-patch) are not removed when we re-apply.
 print_status "Applying Postfix Deployment..."
-envsubst '${NS_MAIL} ${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${SMTP_ALLOWED_SENDER_DOMAINS} ${POSTFIX_MYNETWORKS} ${VPN_SERVER_PRIVATE_IP} ${CHECKSUM_POSTFIX_CONFIG} ${CHECKSUM_OPENDKIM_CONFIG} ${CHECKSUM_INIT_SCRIPTS}' \
+envsubst '${NS_MAIL} ${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${SMTP_ALLOWED_SENDER_DOMAINS} ${POSTFIX_MYNETWORKS} ${POSTFIX_RELAY_IP} ${HEADSCALE_URL} ${CHECKSUM_POSTFIX_CONFIG} ${CHECKSUM_OPENDKIM_CONFIG} ${CHECKSUM_INIT_SCRIPTS}' \
   < "$MANIFESTS_DIR/deployment.yaml.tpl" \
   | kubectl apply -f - --server-side --field-manager=deploy-postfix --force-conflicts
 
@@ -190,6 +227,12 @@ envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/service-internal.yaml.tpl" | kubectl app
 # =============================================================================
 print_status "Applying Postfix NetworkPolicy..."
 envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/networkpolicy.yaml.tpl" | kubectl apply -f -
+
+# =============================================================================
+# Conditional restart (only if config/secrets changed)
+# =============================================================================
+
+mt_restart_if_changed deployment/postfix -n "$NS_MAIL"
 
 # =============================================================================
 # Wait for rollout

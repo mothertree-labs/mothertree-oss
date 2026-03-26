@@ -11,10 +11,10 @@
 #   - Keycloak (shared authentication)
 #   - Postfix SMTP server (via deploy-postfix.sh)
 #   - nginx TCP proxy for SMTP
-#   - VPN route DaemonSet
+#   - PgBouncer + Tailscale sidecar (when enabled)
 #
-# Does NOT require: VPN connectivity, Ansible, Linode API (except CFW K8s secret)
-# For VPN/Ansible/firewall, use: ./scripts/manage_infra -e <env>
+# Does NOT require: Ansible, Linode API (except CFW K8s secret)
+# For Ansible/firewall, use: ./scripts/manage_infra -e <env>
 #
 # Run this ONCE per environment, not per tenant.
 # For tenant deployments, use: ./scripts/create_env -e <env> -t <tenant>
@@ -113,16 +113,15 @@ print_status "Helm repo update complete"
 # =============================================================================
 # Internal ingress allowlist (stable CIDRs; not dependent on node churn)
 # =============================================================================
-# The internal ingress is exposed via NodePort and is reachable via VPN.
-# VPN-to-cluster traffic may be NAT'd through different private subnets over time
-# (VPN server subnet changes, node pool churn). Enumerating current node /24s is
-# brittle and leads to unexpected 403s. We allow:
-#   - VPN_NETWORK_CIDR: VPN client network (10.8.0.0/24 prod, 10.9.0.0/24 dev)
-#   - 192.168.0.0/16: Linode private networking range (covers VPN/private subnets)
+# The internal ingress is exposed via NodePort and reachable via Tailscale mesh
+# (and legacy VPN during migration). We allow:
+#   - 100.64.0.0/10: Tailscale/Headscale CGNAT range (mesh traffic)
+#   - 10.8.0.0/24, 10.9.0.0/24: Legacy VPN CIDRs (prod/dev, kept during migration)
+#   - 192.168.0.0/16: Linode private networking range
 #   - 10.2.0.0/16: pod CIDR (Linode LKE default)
 print_status "Setting internal ingress whitelist CIDRs (stable)..."
 
-STABLE_CIDRS="${VPN_NETWORK_CIDR:-10.8.0.0/24},192.168.0.0/16,10.2.0.0/16"
+STABLE_CIDRS="100.64.0.0/10,10.8.0.0/24,10.9.0.0/24,192.168.0.0/16,10.2.0.0/16"
 export INGRESS_INTERNAL_WHITELIST="$STABLE_CIDRS"
 export INGRESS_INTERNAL_REAL_IP_FROM="$STABLE_CIDRS"
 print_status "Internal ingress whitelist: $STABLE_CIDRS"
@@ -415,59 +414,16 @@ envsubst '${TLS_EMAIL}' < "$REPO_ROOT/apps/manifests/cert-manager/clusterissuer-
 envsubst '${TLS_EMAIL}' < "$REPO_ROOT/apps/manifests/cert-manager/clusterissuer-dns01.yaml.tpl" | kubectl apply -f -
 print_status "ClusterIssuers and Cloudflare API token deployed"
 
-# Deploy PostgreSQL to shared database namespace
-print_status "Deploying PostgreSQL to $NS_DB namespace..."
-
-# SAFETY CHECK: Detect existing PostgreSQL PVC to prevent data loss
-EXISTING_PVC=$(kubectl get pvc -n "$NS_DB" -l app.kubernetes.io/name=postgresql -o name 2>/dev/null | head -1 || echo "")
-if [ -z "$EXISTING_PVC" ]; then
-  RELEASED_PVS=$(kubectl get pv -o json 2>/dev/null | jq -r '.items[] | select(.status.phase=="Released") | select(.spec.claimRef.namespace=="'"$NS_DB"'") | select(.spec.claimRef.name | startswith("data-docs-postgresql")) | .metadata.name' || echo "")
-  if [ -n "$RELEASED_PVS" ]; then
-    print_error "No PostgreSQL PVC found in $NS_DB but Released PVs exist with postgres data!"
-    print_error "Released PVs: $RELEASED_PVS"
-    print_error "This may indicate a namespace issue that would cause DATA LOSS."
-    print_error "Set ALLOW_NEW_PVC=true to proceed (data will NOT be migrated)"
-    if [ "${ALLOW_NEW_PVC:-}" != "true" ]; then
-      exit 1
-    fi
-    print_warning "ALLOW_NEW_PVC=true set - proceeding with new PVC"
-  else
-    print_status "No existing PostgreSQL PVC - this appears to be a fresh install"
-  fi
+# =============================================================================
+# Deploy PgBouncer + Tailscale sidecar (connects to external PG VM via mesh)
+# =============================================================================
+print_status "Deploying PgBouncer to $NS_DB namespace..."
+if [ -x "$REPO_ROOT/apps/deploy-pgbouncer.sh" ]; then
+  "$REPO_ROOT/apps/deploy-pgbouncer.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
 else
-  print_status "Existing PostgreSQL PVC found: $EXISTING_PVC"
+  print_error "deploy-pgbouncer.sh not found or not executable"
+  exit 1
 fi
-
-# Check for existing PostgreSQL secret and add replication-password if missing
-if kubectl get secret docs-postgresql -n "$NS_DB" &>/dev/null; then
-  if ! kubectl get secret docs-postgresql -n "$NS_DB" -o jsonpath='{.data.replication-password}' 2>/dev/null | grep -q .; then
-    print_status "PostgreSQL: patching existing secret to add replication-password"
-    REPL_PASSWORD=$(openssl rand -base64 18)
-    kubectl patch secret docs-postgresql -n "$NS_DB" --type='json' \
-      -p="[{\"op\": \"add\", \"path\": \"/data/replication-password\", \"value\": \"$(echo -n "$REPL_PASSWORD" | base64)\"}]"
-  fi
-fi
-
-# Deploy with replication enabled
-PG_READ_REPLICAS="${PG_READ_REPLICAS:-1}"
-PG_ENV_VALUES=""
-if [ -f "$REPO_ROOT/apps/environments/${MT_ENV}/docs-postgresql.yaml" ]; then
-  PG_ENV_VALUES="--values $REPO_ROOT/apps/environments/${MT_ENV}/docs-postgresql.yaml"
-fi
-
-helm upgrade --install docs-postgresql oci://registry-1.docker.io/bitnamicharts/postgresql \
-  --version 18.2.3 \
-  --namespace "$NS_DB" \
-  --values "$REPO_ROOT/apps/values/docs-postgresql.yaml" \
-  $PG_ENV_VALUES \
-  --set "architecture=replication" \
-  --set "readReplicas.replicaCount=${PG_READ_REPLICAS}" \
-  --set "global.security.allowInsecureImages=true" \
-  --wait \
-  --timeout 600s
-
-print_status "Waiting for PostgreSQL to be ready..."
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql -n "$NS_DB" --timeout=300s
 
 # Create Keycloak theme ConfigMap BEFORE deploying Keycloak.
 # Track whether the ConfigMap actually changed so we can conditionally restart
@@ -491,15 +447,10 @@ else
   print_warning "Theme directory not found at $THEMES_DIR/platform, skipping theme ConfigMap"
 fi
 
-# Detect PostgreSQL service hostname from cluster state
-if kubectl get service docs-postgresql-primary -n "$NS_DB" >/dev/null 2>&1; then
-  export PG_SERVICE_NAME="docs-postgresql-primary"
-  print_status "PostgreSQL: detected replication mode (docs-postgresql-primary)"
-else
-  export PG_SERVICE_NAME="docs-postgresql"
-  print_status "PostgreSQL: detected standalone mode (docs-postgresql)"
-fi
+# PgBouncer is the sole database entrypoint (connects to external PG VM via Tailscale mesh)
+export PG_SERVICE_NAME="pgbouncer"
 export PG_HOST="${PG_SERVICE_NAME}.${NS_DB}.svc.cluster.local"
+print_status "PostgreSQL: using PgBouncer at $PG_HOST (external PG VM via Tailscale mesh)"
 
 # Verify shared infra secrets were loaded by infra-config.sh
 # (KEYCLOAK_ADMIN_PASSWORD, KEYCLOAK_DB_PASSWORD, TF_VAR_grafana_admin_password)
@@ -510,17 +461,10 @@ if [ -z "${KEYCLOAK_ADMIN_PASSWORD:-}" ] || [ "${KEYCLOAK_ADMIN_PASSWORD}" = "nu
   exit 1
 fi
 
-# Sync Keycloak DB password in PostgreSQL to match secrets file.
-# The password may have been set to a different value during initial DB creation,
-# so we always ensure it matches the current secrets file value.
-# Note: sed escapes single quotes in the password to prevent SQL injection.
-print_status "Syncing Keycloak DB password in PostgreSQL..."
-PG_SUPERUSER_PASS=$(kubectl get secret docs-postgresql -n "$NS_DB" --kubeconfig="$KUBECONFIG" -o jsonpath='{.data.postgres-password}' | base64 -d)
-kubectl exec -i "${PG_SERVICE_NAME}-0" -n "$NS_DB" --kubeconfig="$KUBECONFIG" -- \
-  env PGPASSWORD="$PG_SUPERUSER_PASS" psql -U postgres -c "ALTER ROLE keycloak WITH PASSWORD '$(echo "$KEYCLOAK_DB_PASSWORD" | sed "s/'/''/g")';" 2>/dev/null || \
-  print_warning "Could not update keycloak DB password — PostgreSQL may not be ready yet"
+# NOTE: Keycloak DB password is managed on the external PG VM (created by Ansible).
+# No in-cluster password sync needed — PgBouncer uses auth_query to authenticate.
 
-# Deploy Keycloak (needs PostgreSQL)
+# Deploy Keycloak (connects to PG VM via PgBouncer)
 print_status "Deploying Keycloak to $NS_AUTH namespace (replicas: $KEYCLOAK_REPLICAS)..."
 pushd "$REPO_ROOT/apps" >/dev/null
   helmfile -e "$MT_ENV" -l name=keycloak sync --skip-deps
@@ -603,7 +547,7 @@ fi
 # =============================================================================
 # Configure nginx TCP proxy for inbound SMTP (port 30025 -> Postfix:25)
 # =============================================================================
-# Routes VPN Postfix inbound mail through the ingress-nginx NodeBalancer TCP proxy.
+# Routes inbound mail through the ingress-nginx NodeBalancer TCP proxy.
 # The NodeBalancer has a stable IP (lb1.<env>.<domain>) and its subnet is permanently
 # allowed through the LKE firewall. This avoids reliance on hardcoded K8s node VPC IPs.
 # Two things are needed:
@@ -628,21 +572,8 @@ else
   print_status "Port 30025 already present on ingress-nginx LB service"
 fi
 
-# =============================================================================
-# Deploy VPN Route DaemonSet
-# =============================================================================
-if [ -n "$VPN_SERVER_PRIVATE_IP" ]; then
-  print_status "Deploying VPN route DaemonSet for VPN server: $VPN_SERVER_PRIVATE_IP"
-
-  sed "s|\${VPN_SERVER_PRIVATE_IP}|$VPN_SERVER_PRIVATE_IP|g" \
-    "$REPO_ROOT/apps/manifests/vpn-route-daemonset.yaml.tpl" | kubectl apply -f -
-
-  print_status "VPN route DaemonSet deployed - pods can now reach $VPN_SERVER_PRIVATE_IP"
-else
-  print_warning "VPN server private IP not found in Terraform outputs, skipping route DaemonSet"
-fi
-
-# NOTE: Ansible (VPN Postfix, TURN, Unbound) is now managed by manage_infra --ansible. See issue #244.
+# NOTE: VPN route DaemonSet removed — replaced by Tailscale mesh (Headscale).
+# NOTE: Ansible (TURN, Headscale, PostgreSQL) is managed by manage_infra --ansible.
 
 # Wait for linkeditor build that was started in background at the beginning
 if [ -n "$LINKEDITOR_BUILD_PID" ]; then
@@ -674,11 +605,11 @@ echo ""
 print_success "Shared infrastructure deployed for $MT_ENV!"
 echo ""
 echo "Infrastructure namespaces:"
-echo "  - $NS_DB (PostgreSQL)"
+echo "  - $NS_DB (PgBouncer → external PG VM)"
 echo "  - $NS_AUTH (Keycloak)"
 echo "  - $NS_MONITORING (Prometheus, Grafana)"
 echo "  - $NS_INGRESS (Public ingress)"
-echo "  - $NS_INGRESS_INTERNAL (VPN-only ingress)"
+echo "  - $NS_INGRESS_INTERNAL (Internal ingress)"
 echo "  - $NS_CERTMANAGER (Cert-manager)"
 echo "  - $NS_MAIL (Postfix SMTP)"
 echo ""

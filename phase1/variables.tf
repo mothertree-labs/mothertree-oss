@@ -26,14 +26,7 @@ variable "linode_region" {
   description = "Linode region for the cluster"
   type        = string
   default     = "us-lax"
-  validation {
-    condition = contains([
-      "us-east", "us-central", "us-west", "us-southeast", "us-southwest",
-      "ca-central", "ap-west", "ap-southeast", "ap-south", "ap-northeast",
-      "eu-central", "eu-west", "ap-southeast-1", "us-central-1", "us-lax"
-    ], var.linode_region)
-    error_message = "Invalid Linode region. Please choose a valid region."
-  }
+  # No validation — Linode adds regions regularly, let the API reject invalid ones
 }
 
 variable "linode_k8s_version" {
@@ -189,35 +182,6 @@ variable "admin_ssh_cidrs" {
 }
 
 
-# OpenVPN Server Configuration
-variable "openvpn_label" {
-  description = "Label for the OpenVPN server"
-  type        = string
-  default     = "openvpn-server"
-}
-
-variable "openvpn_type" {
-  description = "Linode instance type for OpenVPN server"
-  type        = string
-  default     = "g6-nanode-1" # 1GB RAM, 1 vCPU - cost effective for VPN
-}
-
-variable "openvpn_image" {
-  description = "OS image for OpenVPN server"
-  type        = string
-  default     = "linode/ubuntu22.04"
-}
-
-variable "vpn_network_cidr" {
-  description = "CIDR block for VPN network (prod: 10.8.0.0/24, dev: 10.9.0.0/24)"
-  type        = string
-}
-
-variable "openvpn_disk_size" {
-  description = "Disk size for OpenVPN server in GB"
-  type        = number
-  default     = 25
-}
 
 # Jitsi Tester Configuration
 variable "jitsi_tester_enabled" {
@@ -242,12 +206,127 @@ variable "jitsi_tester_region" {
   description = "Linode region for the Jitsi tester instance"
   type        = string
   default     = "us-east"
+  # No validation — Linode adds regions regularly, let the API reject invalid ones
+}
+
+# Headscale Server Configuration
+variable "headscale_enabled" {
+  description = "Whether to deploy a Headscale server (self-hosted Tailscale control plane)"
+  type        = bool
+  default     = false
+}
+
+variable "headscale_label" {
+  description = "Label for the Headscale server"
+  type        = string
+  default     = "headscale"
+}
+
+variable "headscale_type" {
+  description = "Linode instance type for Headscale server"
+  type        = string
+  default     = "g6-nanode-1" # 1GB RAM, 1 vCPU - sufficient for coordination server
+}
+
+variable "headscale_image" {
+  description = "OS image for Headscale server"
+  type        = string
+  default     = "linode/ubuntu24.04"
+}
+
+variable "headscale_version" {
+  description = "Headscale version to install"
+  type        = string
+  default     = "0.28.0"
+}
+
+variable "headscale_domain" {
+  description = "FQDN for the Headscale server (e.g., hs-prod.example.com)"
+  type        = string
+  default     = ""
+}
+
+variable "headscale_base_domain" {
+  description = "Base domain for MagicDNS (e.g., ts.example.com)"
+  type        = string
+  default     = ""
+}
+
+# PostgreSQL Server Configuration
+variable "postgres_enabled" {
+  description = "Whether to deploy a dedicated PostgreSQL VM (replaces in-cluster Bitnami PostgreSQL)"
+  type        = bool
+  default     = false
+}
+
+variable "postgres_label" {
+  description = "Label for the PostgreSQL server"
+  type        = string
+  default     = "postgres"
+}
+
+variable "postgres_type" {
+  description = "Linode instance type for PostgreSQL server (Dedicated CPU recommended)"
+  type        = string
+  default     = "g6-dedicated-2" # Dedicated 4GB RAM, 2 vCPU ($36/mo)
+}
+
+variable "postgres_image" {
+  description = "OS image for PostgreSQL server"
+  type        = string
+  default     = "linode/ubuntu24.04"
+}
+
+variable "postgres_version" {
+  description = "PostgreSQL major version to install"
+  type        = string
+  default     = "16"
+}
+
+variable "postgres_volume_size" {
+  description = "Size of the PostgreSQL data volume in GB"
+  type        = number
+  default     = 80
   validation {
-    condition = contains([
-      "us-east", "us-central", "us-west", "us-southeast", "us-southwest",
-      "ca-central", "ap-west", "ap-southeast", "ap-south", "ap-northeast",
-      "eu-central", "eu-west", "ap-southeast-1", "us-central-1", "us-lax"
-    ], var.jitsi_tester_region)
-    error_message = "Invalid Linode region. Please choose a valid region."
+    condition     = var.postgres_volume_size >= 10 && var.postgres_volume_size <= 1000
+    error_message = "PostgreSQL volume size must be between 10 and 1000 GB."
   }
+}
+
+variable "headscale_url" {
+  description = "URL of the Headscale instance for Tailscale mesh (e.g., https://hs-prod.example.com:8080)"
+  type        = string
+  default     = ""
+}
+
+variable "tailscale_auth_key" {
+  description = "Pre-authenticated key from Headscale for infrastructure nodes to join the tailnet"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+# Postfix Relay Server Configuration
+variable "postfix_relay_enabled" {
+  description = "Whether to deploy a Postfix relay VM on the Tailscale mesh (replaces VPN server mail relay)"
+  type        = bool
+  default     = false
+}
+
+variable "postfix_relay_label" {
+  description = "Label for the Postfix relay server"
+  type        = string
+  default     = "postfix-relay"
+}
+
+variable "postfix_relay_type" {
+  description = "Linode instance type for Postfix relay server"
+  type        = string
+  default     = "g6-nanode-1" # 1GB RAM, 1 vCPU ($5/mo) — sufficient for mail relay
+}
+
+variable "postfix_relay_image" {
+  description = "OS image for Postfix relay server"
+  type        = string
+  default     = "linode/ubuntu24.04"
 }

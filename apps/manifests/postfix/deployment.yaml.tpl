@@ -20,6 +20,7 @@ spec:
         checksum/opendkim-config: "${CHECKSUM_OPENDKIM_CONFIG}"
         checksum/postfix-init-scripts: "${CHECKSUM_INIT_SCRIPTS}"
     spec:
+      serviceAccountName: postfix
       # OpenDKIM sidecar container
       containers:
         - name: opendkim
@@ -74,7 +75,6 @@ spec:
             - name: POSTFIX_myorigin
               value: "${SMTP_DOMAIN}"
             - name: POSTFIX_mynetworks
-              # SECURITY: Use specific VPN IP, not broad datacenter range
               value: "${POSTFIX_MYNETWORKS}"
             # Connect to OpenDKIM sidecar for DKIM signing
             - name: POSTFIX_smtpd_milters
@@ -85,9 +85,10 @@ spec:
               value: accept
             - name: POSTFIX_milter_protocol
               value: "6"
-            # SMTP relay - forward all mail through VPN server for consistent source IP (SPF)
+            # SMTP relay — forward outbound mail through relay VM for consistent source IP (SPF)
+            # The relay VM is on the Tailscale mesh; the Tailscale sidecar provides connectivity
             - name: RELAYHOST
-              value: "[${VPN_SERVER_PRIVATE_IP}]:25"
+              value: "[${POSTFIX_RELAY_IP}]:25"
             # Inbound mail routing - transport_maps and relay_domains
             # These files are managed by deploy-stalwart.sh for each tenant
             # Init container copies them to /etc/postfix/tables/ and runs postmap
@@ -144,6 +145,42 @@ spec:
               port: 25
             initialDelaySeconds: 10
             periodSeconds: 10
+
+        # Tailscale sidecar — WireGuard mesh connectivity to Postfix relay VM
+        - name: tailscale
+          # tailscale/tailscale:v1.94.2 — stable release, multi-arch
+          # https://hub.docker.com/r/tailscale/tailscale
+          image: tailscale/tailscale:v1.94.2
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: postfix-tailscale-auth
+                  key: TS_AUTHKEY
+            - name: TS_EXTRA_ARGS
+              value: "--login-server=${HEADSCALE_URL}"
+            - name: TS_KUBE_SECRET
+              value: "postfix-tailscale-state-$(POD_NAME)"
+            - name: TS_ACCEPT_DNS
+              value: "false"
+            - name: TS_USERSPACE
+              value: "false"
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+
       # Init container to prepare routing hash databases
       # Copies routing files from read-only ConfigMap to writable emptyDir,
       # then runs postmap to generate .db files

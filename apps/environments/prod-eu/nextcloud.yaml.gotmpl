@@ -1,0 +1,135 @@
+# Nextcloud Prod Environment Configuration
+# Uses environment variables for multi-tenant support
+
+# HPA scaling bounds from tenant config
+hpa:
+  minPods: {{ env "NEXTCLOUD_MIN_REPLICAS" }}
+  maxPods: {{ env "NEXTCLOUD_MAX_REPLICAS" }}
+
+# Resource requests from tenant config (overrides base values)
+resources:
+  requests:
+    cpu: '{{ env "NEXTCLOUD_CPU_REQUEST" }}'
+
+# Database configuration - tenant-specific database and user (required, no default)
+# Host varies based on PostgreSQL architecture (standalone vs replication)
+externalDatabase:
+  host: '{{ env "PG_HOST" }}'
+  database: '{{ requiredEnv "NEXTCLOUD_DB_NAME" }}'
+  user: '{{ requiredEnv "TENANT_DB_USER" }}'
+
+# Hostname and S3 Object Storage
+nextcloud:
+  host: '{{ env "FILES_HOST" }}'
+  mail:
+    domain: '{{ env "SMTP_DOMAIN" }}'
+  configs:
+    # Pretty URLs: overwrite.cli.url enables Apache .htaccess front-controller
+    # rewrites (e.g. /apps/files → index.php). Without this, Apache returns 403
+    # for any URL that isn't directly handled by a RewriteRule.
+    pretty-urls.config.php: |-
+      <?php
+      $CONFIG = array (
+        'overwrite.cli.url' => 'https://{{ env "FILES_HOST" }}',
+        'htaccess.RewriteBase' => '/',
+      );
+  trustedDomains:
+    - '{{ env "FILES_HOST" }}'
+    - '{{ env "CALENDAR_HOST" }}'
+  # S3 Primary Object Storage (Linode Object Storage)
+  objectStore:
+    s3:
+      enabled: true
+      host: '{{ env "S3_CLUSTER" }}.linodeobjects.com'
+      ssl: true
+      port: "443"
+      region: '{{ env "S3_CLUSTER" }}'
+      bucket: '{{ env "S3_FILES_BUCKET" }}'
+      usePathStyle: false
+      autoCreate: false
+      existingSecret: "nextcloud-s3-credentials"
+      secretKeys:
+        accessKey: "access_key"
+        secretKey: "secret_key"
+
+# Ingress configuration (files subdomain only)
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 4G
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+  hosts:
+    - host: '{{ env "FILES_HOST" }}'
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: 'wildcard-tls-{{ env "TENANT_NAME" }}'
+      hosts:
+        - '{{ env "FILES_HOST" }}'
+
+# Calendar subdomain ingress with redirect to /apps/calendar
+extraManifests:
+  - apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: nextcloud-calendar
+      annotations:
+        nginx.ingress.kubernetes.io/proxy-body-size: 4G
+        nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+        nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+        # Redirect root and /apps/files to /apps/calendar
+        nginx.ingress.kubernetes.io/configuration-snippet: |
+          if ($request_uri = /) {
+            return 302 /apps/calendar;
+          }
+          if ($request_uri ~ ^/apps/files) {
+            return 302 /apps/calendar;
+          }
+    spec:
+      ingressClassName: nginx
+      tls:
+        - hosts:
+            - '{{ env "CALENDAR_HOST" }}'
+          secretName: 'wildcard-tls-{{ env "TENANT_NAME" }}'
+      rules:
+        - host: '{{ env "CALENDAR_HOST" }}'
+          http:
+            paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: nextcloud
+                    port:
+                      number: 8080
+  # notify_push WebSocket proxy — routes /push/ to the Rust binary
+  # Long timeouts keep WebSocket connections alive (default 60s would kill them)
+  - apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: nextcloud-push
+      annotations:
+        nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+        nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+        nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+        nginx.ingress.kubernetes.io/upstream-hash-by: "$remote_addr"
+    spec:
+      ingressClassName: nginx
+      tls:
+        - hosts:
+            - '{{ env "FILES_HOST" }}'
+          secretName: 'wildcard-tls-{{ env "TENANT_NAME" }}'
+      rules:
+        - host: '{{ env "FILES_HOST" }}'
+          http:
+            paths:
+              - path: /push/
+                pathType: Prefix
+                backend:
+                  service:
+                    name: notify-push
+                    port:
+                      number: 7867
