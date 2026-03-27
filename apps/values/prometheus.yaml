@@ -72,6 +72,15 @@ prometheus:
             interval: 30s
         namespaceSelector:
           any: true
+      - name: pg-metrics-bridge
+        selector:
+          matchLabels:
+            app: pg-metrics-bridge
+        endpoints:
+          - port: metrics
+            interval: 30s
+        namespaceSelector:
+          matchNames: [infra-db]
     # Additional PrometheusRule configurations
     additionalPrometheusRules:
       - name: matrix-alerts
@@ -359,6 +368,15 @@ additionalPrometheusRulesMap:
             for: 5m
             labels:
               severity: warning
+          - alert: PostgreSQLVMDown
+            annotations:
+              summary: PostgreSQL VM is unreachable
+              description: 'postgres_exporter on the external PG VM reports pg_up=0 (or metrics bridge is down). All tenant databases may be unavailable.'
+            expr: |-
+              pg_up{job="pg-metrics-bridge"} == 0 or absent(pg_up{job="pg-metrics-bridge"})
+            for: 2m
+            labels:
+              severity: critical
           - alert: CertificateExpiringSoon
             annotations:
               summary: 'Certificate {{ $labels.namespace }}/{{ $labels.name }} expiring soon'
