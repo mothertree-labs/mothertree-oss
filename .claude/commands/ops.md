@@ -49,18 +49,18 @@ Mothertree is a multi-tenant platform. Each tenant gets its own isolated set of 
 ├─────────────────────────────────────────────────────────┤
 │  Layer 1: Cloud Resources (per-env)                     │
 │  Script: manage_infra                                   │
-│  Tools: Terraform (phase1/), Ansible (VPN/TURN)         │
+│  Tools: Terraform (phase1/), Ansible (Headscale/PG/Postfix/TURN) │
 └─────────────────────────────────────────────────────────┘
 ```
 
 **Layer 1 — Cloud Resources** (`./scripts/manage_infra -e <env>`):
-- Terraform in `phase1/`: LKE cluster, VPN server (Linode nanode), TURN server, base DNS
+- Terraform in `phase1/`: LKE cluster, Headscale VM, PostgreSQL VM, Postfix relay VM, TURN server, base DNS
 - Terraform workspaces: one per environment (dev, prod)
-- Ansible in `ansible/`: VPN server config (OpenVPN, Postfix relay, Unbound DNS, UFW)
-- Outputs: kubeconfig files, VPN server IP, TURN server IP
+- Ansible in `ansible/`: VM configuration (Headscale, PostgreSQL, Postfix relay, TURN/CoTURN)
+- Outputs: kubeconfig files, Headscale IP, PostgreSQL VM IP, Postfix relay VM IP, TURN server IP
 
 **Layer 2 — Shared Infra** (`./scripts/deploy_infra -e <env>`):
-- Terraform in `infra/`: K8s Postfix + OpenDKIM, cert-manager, DNS records, NodeBalancer firewall, VPN route DaemonSet, Unbound DNS updates
+- Terraform in `infra/`: K8s Postfix + OpenDKIM, cert-manager, DNS records, NodeBalancer firewall, PgBouncer with Tailscale sidecar
 - Helmfile (`apps/helmfile.yaml.gotmpl`, tier=system): ingress-nginx (public + internal), kube-prometheus-stack, Vector, Loki, blackbox-exporter
 - Helmfile (tier=infra): Keycloak
 - Result: shared services running in `infra-*` namespaces
@@ -125,8 +125,7 @@ without running the full `create_env`.
 | Cloudflare proxy | `false` (DNS-only) | `true` (proxied, DDoS/WAF) |
 | Wildcard cert | `*.dev.example.com` + `*.internal.dev.example.com` | `*.example.com` + `*.prod.example.com` |
 | Cookie domain | `.dev.example.com` | `.example.com` |
-| VPN CIDR | `10.9.0.0/24` | `10.8.0.0/24` |
-| VPN tunnel IP | `10.9.0.1` | `10.8.0.1` |
+| Tailscale CGNAT | `100.64.0.0/10` | `100.64.0.0/10` |
 | Matrix server_name | `dev.example.com` | `example.com` |
 | Kubeconfig | `kubeconfig.dev.yaml` | `kubeconfig.prod.yaml` |
 | Terraform workspace | `dev` | `prod` |
@@ -166,29 +165,31 @@ cd infra && terraform workspace show
 External Users:
   Browser → Cloudflare (DDoS/WAF) → NodeBalancer (cloud firewall) → ingress-nginx (infra-ingress) → pod
 
-VPN Users (internal services):
-  Browser → VPN tunnel → Unbound DNS → Node IP:30443 → ingress-nginx-internal (infra-ingress-internal) → pod
+Tailscale Users (internal services):
+  Browser → Tailscale mesh → Node IP:30443 → ingress-nginx-internal (infra-ingress-internal) → pod
 
 Email Inbound:
-  Internet MTA → VPN Postfix:25 → K8s Postfix:25 (via VPN tunnel) → Stalwart:25
+  Internet MTA → Postfix relay VM:25 → K8s Postfix:25 (via Tailscale mesh) → Stalwart:25
 
 Email Outbound:
-  Stalwart:587 → K8s Postfix:587 (DKIM signing) → VPN Postfix:25 → Internet
+  Stalwart:587 → K8s Postfix:587 (DKIM signing) → Postfix relay VM:25 (or SES) → Internet
+
+PostgreSQL:
+  K8s pods → PgBouncer (infra-db, with Tailscale sidecar) → PostgreSQL VM (via WireGuard mesh)
 ```
 
-### VPN Setup
+### Headscale / Tailscale Mesh
 
-- **Server**: Linode nanode, OpenVPN UDP:1194, AES-256-GCM
-- **Prod tunnel**: `10.8.0.0/24`, server at `10.8.0.1`
-- **Dev tunnel**: `10.9.0.0/24`, server at `10.9.0.1`
-- **Pushed routes**: VPN CIDR, K8s service CIDR (`10.96.0.0/16`), K8s node subnet
-- **Pushed DNS**: VPN server's Unbound at `10.8.0.1:53` (or `10.9.0.1`)
-- **PKI**: Persistent volume at `/mnt/openvpn-pki/` on VPN server
+- **Headscale**: Self-hosted Tailscale control plane on a dedicated Linode VM
+- **CGNAT range**: `100.64.0.0/10` (all mesh nodes get addresses in this range)
+- **Members**: Headscale VM, PostgreSQL VM, Postfix relay VM, TURN server, CI server, K8s PgBouncer pods (via Tailscale sidecar)
+- **K8s integration**: PgBouncer pods in `infra-db` namespace have a Tailscale sidecar container that joins the mesh
+- **Pre-auth keys**: Used for automated node registration (expire after use or time)
 
-**VPN ↔ K8s connectivity**:
-- VPN server: NAT masquerade (`10.8.0.0/24 → 192.168.x.0/24 via eth0`)
-- K8s nodes: VPN route DaemonSet adds route to VPN server private IP
-- Both need each other's routes for bidirectional traffic
+**Mesh ↔ K8s connectivity**:
+- PgBouncer pod has a Tailscale sidecar that maintains a WireGuard tunnel to the mesh
+- PgBouncer connects to the PostgreSQL VM via its Tailscale IP
+- K8s pods connect to PgBouncer via `pgbouncer.infra-db.svc.cluster.local`
 
 ### Dual Ingress
 
@@ -202,26 +203,33 @@ Email Outbound:
 **Internal Ingress** (`infra-ingress-internal`):
 - DaemonSet (runs on all nodes)
 - Service: NodePort (30080 HTTP, 30443 HTTPS)
-- Whitelist: VPN CIDR only
+- Whitelist: Tailscale CGNAT range (100.64.0.0/10)
 - IngressClass: `nginx-internal`
 - Handles: Grafana, Prometheus, AlertManager, Synapse Admin
 
 ### Cloud Firewalls
 
 **NodeBalancer firewall** (infra/main.tf):
-- HTTP/S (80, 443): Only from Cloudflare IPs + VPN server IP
+- HTTP/S (80, 443): Only from Cloudflare IPs + Tailscale mesh IPs
 - Other TCP (1-79, 81-442, 444-65535): Open (mail ports)
 
-**VPN server firewall** (modules/openvpn-server):
-- OpenVPN 1194/UDP: Open
-- SMTP 25: Open (inbound mail)
+**Headscale VM firewall** (modules/headscale/):
+- Headscale HTTPS: Open (control plane API)
+- WireGuard/DERP: Open
 - SSH 22: Admin CIDR only
-- K8s API 6443: VPN CIDR only
+
+**Postfix relay VM firewall** (modules/postfix-relay/):
+- SMTP 25: Open (inbound mail from internet)
+- SSH 22: Admin CIDR only
+
+**PostgreSQL VM firewall**:
+- PostgreSQL 5432: Tailscale mesh only (via WireGuard)
+- SSH 22: Admin CIDR only
 
 **TURN server firewall** (phase1/main.tf):
 - TURN 3478-3479 UDP/TCP: Open
 - Media relay 49152-65535 UDP: Open
-- SSH 22: Admin CIDR + VPN server
+- SSH 22: Admin CIDR + Tailscale mesh
 
 ### Network Policies
 
@@ -245,9 +253,8 @@ Per-tenant namespace policies (`apps/manifests/network-policies/`):
 **Terraform-managed** (modules/dns/ and infra/main.tf) — DO NOT create in scripts:
 - Base domain CNAME (`example.com` → `www.example.com`) — NEVER modify
 - `lb1` A record → cluster ingress IP
-- `mail` A record → VPN server IP
+- `mail` A record → Postfix relay VM IP
 - `turn` A record → TURN server IP
-- `vpn` A record → VPN server public IP
 - Matrix federation SRV records
 
 **Script-managed** (create_env via Cloudflare API):
@@ -267,14 +274,12 @@ matrix.dev.example.com  →  CNAME  →  lb1.dev.example.com  →  A  →  <ingr
 - Proxied (Cloudflare): matrix, element, docs, files, auth, home, admin, account, webmail, calendar, jitsi
 - DNS-only (bypass Cloudflare): imap, smtp, office
 
-### Internal DNS (Unbound on VPN Server)
+### Internal DNS (Headscale MagicDNS / Tailscale)
 
-VPN clients get different resolution than public DNS:
-- Monitoring services → node internal IP (for NodePort access)
-- Web services → cluster ingress IP
-- `cluster.local.` → stub zone forwarding to kube-dns (10.96.0.10)
-
-Updated by Terraform `null_resource.update_vpn_unbound` after ingress deployment.
+Tailscale mesh clients can resolve mesh nodes by Tailscale hostname. For K8s internal services:
+- Monitoring services → node internal IP (for NodePort access via Tailscale)
+- PostgreSQL VM → reachable via Tailscale IP from PgBouncer sidecar
+- Postfix relay VM → reachable via Tailscale IP from K8s Postfix
 
 ### TLS Certificates
 
@@ -291,9 +296,9 @@ Per-tenant wildcard cert via cert-manager DNS-01 challenge:
 
 **Inbound** (receiving mail from internet):
 ```
-1. Sender → DNS MX lookup → mail.example.com (VPN server IP)
-2. VPN Postfix receives on port 25
-3. Transport map routes domain → K8s Postfix (via VPN tunnel)
+1. Sender → DNS MX lookup → mail.example.com (Postfix relay VM IP)
+2. Postfix relay VM receives on port 25
+3. Transport map routes domain → K8s Postfix (via Tailscale mesh)
 4. K8s Postfix (infra-mail:25) performs recipient verification against Stalwart
 5. Routes via transport_maps to stalwart.<tenant-ns>.svc.cluster.local:25
 6. Stalwart stores: metadata in PostgreSQL, blobs in S3
@@ -304,23 +309,24 @@ Per-tenant wildcard cert via cert-manager DNS-01 challenge:
 1. User in Roundcube → Stalwart:587 (XOAUTH2 auth via Keycloak)
 2. Stalwart relays to K8s Postfix:587 (submission, permit_mynetworks)
 3. OpenDKIM sidecar signs with tenant DKIM key (selector: "default")
-4. K8s Postfix forwards to VPN Postfix:25 (relayhost)
-5. VPN Postfix delivers to internet (consistent source IP for SPF)
+4. K8s Postfix forwards to Postfix relay VM:25 (relayhost) or SES (optional)
+5. Postfix relay VM delivers to internet (consistent source IP for SPF)
 ```
 
 ### Two Postfixes
 
-**VPN Postfix** (Ansible-managed, on VPN server):
+**Postfix Relay VM** (Ansible-managed, on Tailscale mesh):
 - Role: Internet-facing MX, outbound relay
 - Why separate: Consistent public IP for SPF, separate from K8s lifecycle
 - Config: transport maps + relay_domains per tenant
-- TLS: Let's Encrypt cert (Certbot HTTP-01 with UFW hooks)
+- TLS: Let's Encrypt cert (Certbot)
 - Hostname: `relay.example.com` (avoids "loops back to myself")
+- Optional SES outbound relay for improved deliverability
 
 **K8s Postfix** (Terraform-managed, infra-mail namespace):
 - Image: `boky/postfix:v5.1.0` + OpenDKIM sidecar `instrumentisto/opendkim:2.10`
 - Role: DKIM signing, recipient verification, internal relay
-- Port 25: Inbound from VPN Postfix (reject_unverified_recipient for backscatter prevention)
+- Port 25: Inbound from Postfix relay VM (reject_unverified_recipient for backscatter prevention)
 - Port 587: Submission from internal pods (permit_mynetworks only)
 - ConfigMaps: `postfix-config` (main.cf, master.cf), `postfix-routing` (transport, relay_domains), `opendkim-config`
 
@@ -856,7 +862,7 @@ Displayed in: Keycloak login footer, email templates, Admin Portal, Account Port
 |---------|-------|-------------|
 | Inbound mail rejected | Stalwart logs, domain registration | Local domain not registered in Stalwart API |
 | DKIM signature missing | OpenDKIM logs, ConfigMap | SigningTable/KeyTable not updated, key not mounted |
-| SPF fails | `dig TXT <domain>` | SPF record doesn't include VPN server IP |
+| SPF fails | `dig TXT <domain>` | SPF record doesn't include Postfix relay VM IP |
 | Mail stuck in queue | `kubectl exec postfix -- mailq` | Stalwart unreachable, transport map wrong |
 | Auth fails in Roundcube | Keycloak + Stalwart logs | OIDC token invalid, Stalwart directory config |
 | Port unreachable | `tcp-services` ConfigMap | Port mapping not added to nginx + LB service |
@@ -894,10 +900,10 @@ Displayed in: Keycloak login footer, email templates, Admin Portal, Account Port
 
 | Symptom | Check | Likely Cause |
 |---------|-------|-------------|
-| VPN can't reach cluster | Routes, NAT, DaemonSet | VPN route DaemonSet not running, NAT rule missing |
-| Internal services unreachable | Unbound config, VPN connection | Unbound not updated, VPN disconnected |
+| PgBouncer can't reach PG VM | Tailscale sidecar status, PgBouncer logs | Tailscale sidecar disconnected, pre-auth key expired |
+| Internal services unreachable | Tailscale status, ingress whitelist | Not connected to mesh, IP not in CGNAT range |
 | Cert not renewing | cert-manager logs, DNS challenge | Cloudflare API token expired, DNS propagation |
-| deploy_infra SSH fails (port 65535) | `~/.ssh/known_hosts` | Stale SSH host key for VPN tunnel IP |
+| Ansible SSH fails | `~/.ssh/known_hosts` | Stale SSH host key for rebuilt VM |
 
 ---
 
@@ -1008,7 +1014,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 | **Deploy scripts** | `apps/deploy-*.sh` |
 | **Manifests** | `apps/manifests/<component>/` |
 | **Tenant config** | `tenants/<name>/<env>.config.yaml` |
-| **Terraform L1** | `phase1/main.tf`, `modules/lke-cluster/`, `modules/openvpn-server/`, `modules/dns/` |
+| **Terraform L1** | `phase1/main.tf`, `modules/lke-cluster/`, `modules/headscale/`, `modules/postgres-server/`, `modules/postfix-relay/`, `modules/dns/` |
 | **Terraform L2** | `infra/main.tf`, `infra/templates/` |
 | **Ansible** | `ansible/playbook.yml` |
 | **Network policies** | `apps/manifests/network-policies/` |

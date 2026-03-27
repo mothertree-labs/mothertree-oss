@@ -28,11 +28,11 @@ Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Eleme
 ### Tech Stack
 
 - **Cloud**: Linode (LKE cluster, g6-standard-2 nodes)
-- **IaC**: Terraform (workspaces per env) + Ansible (VPN/Postfix relay)
+- **IaC**: Terraform (workspaces per env) + Ansible (Headscale, PostgreSQL VM, Postfix relay VM, TURN)
 - **K8s Deployment**: Helmfile + Helm charts + raw manifests
 - **DNS**: Cloudflare API
 - **Auth**: Keycloak (OIDC, per-tenant realms, passkey support)
-- **Email**: VPN Postfix -> K8s Postfix+OpenDKIM -> per-tenant Stalwart
+- **Email**: Postfix relay VM (inbound MX, on Tailscale mesh) -> K8s Postfix+OpenDKIM -> per-tenant Stalwart; outbound via SES (optional)
 - **Monitoring**: Prometheus + Grafana + AlertManager + Vector (logs)
 
 ## Quick Start
@@ -48,7 +48,7 @@ Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Eleme
 
 | Tool | Min Version | Purpose |
 |------|-------------|---------|
-| `terraform` | >= 1.0 | Infrastructure provisioning (LKE, DNS, VPN) |
+| `terraform` | >= 1.0 | Infrastructure provisioning (LKE, DNS, Headscale, PostgreSQL VM, Postfix relay VM) |
 | `kubectl` | >= 1.27 | Kubernetes cluster management |
 | `helm` | >= 3.0 | Kubernetes package management |
 | `helmfile` | >= 1.0 | Multi-chart Helm orchestration (v0.x will **not** work) |
@@ -66,7 +66,7 @@ Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Eleme
 
 | Tool | When needed |
 |------|-------------|
-| `ansible-playbook` | VPN/Postfix relay setup (required by `deploy_infra` VPN section) |
+| `ansible-playbook` | VM configuration — Headscale, PostgreSQL, Postfix relay, TURN (required by `manage_infra --ansible`) |
 | `docker` | Building container images |
 | `gh` | GitHub CLI (PR workflows) |
 | `dig` | DNS verification in `deploy_infra` and `verify-endpoints` (skipped if missing) |
@@ -97,7 +97,7 @@ cp secrets.tfvars.env.example secrets.tfvars.env
 Deployment follows three phases:
 
 ```bash
-# Phase 1: LKE cluster, VPN server, TURN server, base DNS
+# Phase 1: LKE cluster, Headscale, PostgreSQL VM, Postfix relay VM, TURN server
 ./scripts/manage_infra dev
 
 # Phase 2: Shared infra (ingress, certs, PostgreSQL, Keycloak, Postfix, monitoring)
@@ -119,8 +119,8 @@ kubectl get pods -A | grep -E 'infra-|tn-my-org'
 config/          Private config submodules (optional, for operators with access)
   platform/      Container registry, infra sizing, theme overrides
   tenants/       Real tenant configs (domains, databases, S3 buckets)
-phase1/          Terraform: LKE cluster, VPN server, TURN server, base DNS
-modules/         Terraform modules: lke-cluster/, openvpn-server/, helm-bootstrap/
+phase1/          Terraform: LKE cluster, Headscale, PostgreSQL VM, Postfix relay VM, TURN server
+modules/         Terraform modules: lke-cluster/, headscale/, postgres-server/, postfix-relay/, helm-bootstrap/
 apps/            Application deployment layer
   helmfile.yaml.gotmpl   Main helmfile (Go-templated, env-aware)
   values/                Base Helm values
@@ -133,7 +133,7 @@ apps/            Application deployment layer
 scripts/         Orchestration scripts (manage_infra, deploy_infra, create_env)
   lib/             Shared libraries (common.sh, config.sh, paths.sh, etc.)
 tenants/         Tenant config template (.example/) or local configs
-ansible/         VPN server config (OpenVPN, Postfix relay)
+ansible/         VM configuration (Headscale, PostgreSQL, Postfix relay, TURN/CoTURN)
 ci/              CI server (Woodpecker) — Terraform, Ansible, pipeline scripts
 .woodpecker/     CI pipeline definitions
 ```

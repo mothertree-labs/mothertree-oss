@@ -43,7 +43,7 @@ dig SRV _submissions._tcp.<domain> +short
 - DMARC -> `v=DMARC1; p=quarantine; ...`
 - SRV records -> `mail.example.com` with tenant-specific ports
 
-### Step 2: VPN Postfix -> K8s Postfix Connectivity
+### Step 2: Postfix Relay VM -> K8s Postfix Connectivity
 
 ```bash
 # Check K8s Postfix pod

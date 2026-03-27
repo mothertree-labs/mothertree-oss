@@ -32,9 +32,9 @@ Investigate the Kubernetes cluster to answer the user's question. Focus on:
 | Namespace | Components | Key Pods |
 |-----------|-----------|----------|
 | `infra-ingress` | Public NGINX ingress controller | ingress-nginx-controller (LoadBalancer, ports 80/443) |
-| `infra-ingress-internal` | VPN-only NGINX ingress | ingress-nginx-controller (DaemonSet, NodePort 30080/30443, whitelist 10.8.0.0/24) |
+| `infra-ingress-internal` | Internal NGINX ingress (Tailscale-restricted) | ingress-nginx-controller (DaemonSet, NodePort 30080/30443, whitelist 100.64.0.0/10) |
 | `infra-cert-manager` | Certificate management | cert-manager, cert-manager-webhook, cert-manager-cainjector |
-| `infra-db` | Shared PostgreSQL | docs-postgresql (primary + replicas), per-tenant databases inside |
+| `infra-db` | PgBouncer (connects to external PostgreSQL VM via Tailscale) | pgbouncer (with Tailscale sidecar), per-tenant databases on external PG VM |
 | `infra-auth` | Keycloak OIDC | keycloakx (2+ replicas), per-tenant realms |
 | `infra-monitoring` | Observability stack | prometheus, grafana, alertmanager, vector (DaemonSet) |
 | `infra-mail` | Shared SMTP relay | postfix (with opendkim sidecar), handles all tenant email routing |
@@ -69,7 +69,7 @@ Investigate the Kubernetes cluster to answer the user's question. Focus on:
 - Keycloak -> `infra-auth`
 - Postfix/OpenDKIM -> `infra-mail`
 - Ingress (public) -> `infra-ingress`
-- Ingress (VPN) -> `infra-ingress-internal`
+- Ingress (internal/mesh) -> `infra-ingress-internal`
 - Prometheus/Grafana -> `infra-monitoring`
 - Cert-Manager -> `infra-cert-manager`
 
