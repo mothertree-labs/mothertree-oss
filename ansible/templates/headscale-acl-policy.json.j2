@@ -19,5 +19,13 @@
     {"action": "accept", "src": ["tag:postfix-relay"], "dst": ["tag:postfix-k8s:25"]},
     {"action": "accept", "src": ["tag:ci"], "dst": ["tag:k8s-node:6443", "tag:postgres:5432"]},
     {"action": "accept", "src": ["tag:operator"], "dst": ["*:*"]}
+  ],
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["tag:operator"],
+      "dst": ["tag:ci", "tag:postgres", "tag:postfix-relay"],
+      "users": ["root"]
+    }
   ]
 }
