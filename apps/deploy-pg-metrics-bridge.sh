@@ -10,7 +10,7 @@
 #   - Deployment (socat proxy + Tailscale sidecar, 1 replica)
 #   - Service (ClusterIP port 9187)
 #
-# Called by: deploy_infra (when PGBOUNCER_ENABLED=true)
+# Called by: deploy_infra (after PgBouncer deployment)
 # Can also be run standalone.
 #
 # Usage:
