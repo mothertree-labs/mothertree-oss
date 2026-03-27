@@ -775,6 +775,77 @@
       when: headscale_s3_key is defined and headscale_s3_key | length > 0
 
     # -------------------------------------------------------------------
+    # Log shipping — Vector to Loki via internal ingress
+    # -------------------------------------------------------------------
+    - name: Check if Vector is installed
+      command: vector --version
+      register: vector_version
+      changed_when: false
+      failed_when: false
+
+    - name: Install Vector
+      shell: curl -fsSL https://sh.vector.dev | bash -s -- -y --prefix /usr/local
+      when: vector_version.rc != 0
+
+    - name: Create Vector config directory
+      file:
+        path: /etc/vector
+        state: directory
+        mode: '0755'
+
+    - name: Create Vector data directory
+      file:
+        path: /var/lib/vector
+        state: directory
+        mode: '0755'
+
+    - name: Add Loki internal hostname to /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        regexp: 'loki\.'
+        line: "{{ loki_internal_ip }} {{ loki_push_url | regex_replace('https?://', '') }}"
+        state: present
+      when: loki_push_url is defined and loki_internal_ip is defined
+
+    - name: Deploy Vector configuration
+      template:
+        src: headscale-vector.yaml.j2
+        dest: /etc/vector/vector.yaml
+        mode: '0644'
+      when: loki_push_url is defined and loki_push_url | length > 0
+      notify: restart vector
+
+    - name: Deploy Vector systemd unit
+      copy:
+        dest: /etc/systemd/system/vector.service
+        content: |
+          [Unit]
+          Description=Vector log agent
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          ExecStart=/usr/local/bin/vector --config /etc/vector/vector.yaml
+          Restart=always
+          RestartSec=5
+          User=root
+          Group=root
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart vector
+
+    - name: Enable and start Vector
+      systemd:
+        name: vector
+        enabled: yes
+        state: started
+      when: loki_push_url is defined and loki_push_url | length > 0
+
+    # -------------------------------------------------------------------
     # Create users and generate pre-auth keys
     # -------------------------------------------------------------------
     - name: Wait for Headscale to be ready
@@ -833,7 +904,7 @@
         --reset
         --login-server=https://{{ headscale_domain }}:8080
         --authkey={{ tailscale_auth_key }}
-        --accept-routes=false
+        --accept-routes=true
       when: >
         tailscale_auth_key is defined and tailscale_auth_key | length > 0 and
         (hs_ts_status.rc != 0 or
@@ -876,6 +947,11 @@
     - name: restart sshd
       systemd:
         name: ssh
+        state: restarted
+
+    - name: restart vector
+      systemd:
+        name: vector
         state: restarted
 
 # =============================================================================

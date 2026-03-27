@@ -521,6 +521,19 @@ EOF
       if [ -n "${HEADSCALE_BASE_DOMAIN:-}" ]; then
         echo "headscale_base_domain: \"${HEADSCALE_BASE_DOMAIN}\"" >> "$TEMP_EXTRA_VARS"
       fi
+      # Headscale log shipping — Vector to Loki via internal ingress
+      if [ -n "${HEADSCALE_DOMAIN:-}" ]; then
+        _loki_host="loki.${INFRA_ENV_DNS_LABEL}.${INFRA_DOMAIN}"
+        echo "loki_push_url: \"http://${_loki_host}\"" >> "$TEMP_EXTRA_VARS"
+        # Internal ingress ClusterIP — resolved via subnet router route
+        _internal_ingress_ip=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress-internal \
+          get svc ingress-nginx-controller \
+          -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+        if [ -n "$_internal_ingress_ip" ]; then
+          echo "loki_internal_ip: \"${_internal_ingress_ip}\"" >> "$TEMP_EXTRA_VARS"
+        fi
+      fi
+
       # Headscale backup to S3 — reuse pgBackRest S3 credentials (same Linode Object Storage account)
       if [ -n "${PGBACKREST_S3_ENDPOINT:-}" ] && [ -n "${PGBACKREST_S3_KEY:-}" ]; then
         echo "headscale_s3_endpoint: \"${PGBACKREST_S3_ENDPOINT}\"" >> "$TEMP_EXTRA_VARS"
