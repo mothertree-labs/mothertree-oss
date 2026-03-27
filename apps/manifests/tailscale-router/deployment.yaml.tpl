@@ -18,8 +18,23 @@ spec:
         checksum/unbound-config: "${CHECKSUM_UNBOUND_CONFIG}"
     spec:
       serviceAccountName: tailscale-router
-      # Tailscale subnet router — native sidecar, starts before Unbound.
+      # IP forwarding must be enabled for subnet routing. LKE forbids pod-level
+      # sysctls, so we use a privileged init container to set it at runtime.
       initContainers:
+        - name: enable-ip-forward
+          image: tailscale/tailscale:v1.94.2
+          command:
+            - sh
+            - -c
+            - |
+              sysctl -w net.ipv4.ip_forward=1
+              # NAT/masquerade traffic forwarded from tailscale0 to eth0.
+              # Without this, the internal ingress sees the laptop's Tailscale IP
+              # as the source and can't route the response back (no route for 100.64.0.0/10).
+              iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+          securityContext:
+            privileged: true
+        # Tailscale subnet router — native sidecar, starts after ip_forward is set.
         - name: tailscale
           image: tailscale/tailscale:v1.94.2
           restartPolicy: Always
@@ -36,7 +51,7 @@ spec:
             - name: TS_ACCEPT_DNS
               value: "false"
             - name: TS_USERSPACE
-              value: "true"
+              value: "false"
           securityContext:
             capabilities:
               add:
@@ -53,10 +68,10 @@ spec:
           # NLnet Labs Unbound — lightweight recursive DNS resolver
           image: mvance/unbound:1.22.0
           ports:
-            - containerPort: 5353
+            - containerPort: 53
               name: dns
               protocol: UDP
-            - containerPort: 5353
+            - containerPort: 53
               name: dns-tcp
               protocol: TCP
           volumeMounts:
@@ -66,7 +81,7 @@ spec:
               readOnly: true
           livenessProbe:
             exec:
-              command: ["drill", "@127.0.0.1", "-p", "5353", "localhost"]
+              command: ["drill", "@127.0.0.1", "-p", "53", "localhost"]
             initialDelaySeconds: 5
             periodSeconds: 30
           resources:

@@ -7,7 +7,7 @@
 
 server:
   interface: 0.0.0.0
-  port: 5353
+  port: 53
   access-control: 0.0.0.0/0 allow
   do-daemonize: no
 
