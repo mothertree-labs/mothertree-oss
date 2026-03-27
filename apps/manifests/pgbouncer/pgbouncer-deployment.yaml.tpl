@@ -55,6 +55,12 @@ spec:
               mountPath: /etc/pgbouncer/userlist.txt
               subPath: userlist.txt
               readOnly: true
+          # Graceful shutdown: sleep lets K8s endpoint removal propagate (no new
+          # connections routed here) before SIGTERM triggers PgBouncer smart shutdown.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
           livenessProbe:
             tcpSocket:
               port: 5432
@@ -76,11 +82,15 @@ spec:
             limits:
               memory: 256Mi
 
-        # Tailscale sidecar — WireGuard mesh connectivity to PG VM
+      # Native sidecar (K8s 1.28+): starts before main containers, terminated AFTER
+      # them. This guarantees the WireGuard tunnel stays alive while PgBouncer drains
+      # client connections on shutdown — no fixed sleep needed.
+      initContainers:
         - name: tailscale
           # tailscale/tailscale:v1.94.2 — stable release, multi-arch
           # https://hub.docker.com/r/tailscale/tailscale
           image: tailscale/tailscale:v1.94.2
+          restartPolicy: Always
           env:
             - name: POD_NAME
               valueFrom:
@@ -119,4 +129,7 @@ spec:
           secret:
             secretName: pgbouncer-userlist
 
-      terminationGracePeriodSeconds: 30
+      # Budget: PgBouncer preStop (5s) + smart shutdown drain (up to 40s) = 45s.
+      # Tailscale (native sidecar) is terminated after PgBouncer exits, so the
+      # tunnel stays alive for the entire drain — no fixed sleep needed.
+      terminationGracePeriodSeconds: 45
