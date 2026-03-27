@@ -60,8 +60,3 @@ variable "admin_ssh_cidrs" {
   default     = []
 }
 
-variable "headscale_api_cidrs" {
-  description = "List of CIDR blocks allowed access to Headscale API (port 8080). Defaults to empty (blocked by DROP policy)."
-  type        = list(string)
-  default     = []
-}

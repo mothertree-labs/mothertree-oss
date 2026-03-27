@@ -1,0 +1,27 @@
+sources:
+  journald:
+    type: journald
+    include_units:
+      - headscale
+      - tailscaled
+      - sshd
+
+transforms:
+  enrich:
+    type: remap
+    inputs: ["journald"]
+    source: |
+      .host = "{{ headscale_domain }}"
+      .job = "headscale-vm"
+
+sinks:
+  loki:
+    type: loki
+    inputs: ["enrich"]
+    endpoint: "{{ loki_push_url }}"
+    encoding:
+      codec: text
+    labels:
+      host: "{{ '{{' }} .host {{ '}}' }}"
+      job: "headscale-vm"
+      unit: "{{ '{{' }} ._SYSTEMD_UNIT {{ '}}' }}"

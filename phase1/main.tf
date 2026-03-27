@@ -80,13 +80,17 @@ resource "linode_firewall" "turn_server_firewall" {
   inbound_policy  = "DROP"
   outbound_policy = "ACCEPT"
 
-  # SSH access - restricted to admin IPs (access via Tailscale mesh)
-  inbound {
-    label    = "SSH"
-    action   = "ACCEPT"
-    protocol = "TCP"
-    ports    = "22"
-    ipv4     = var.admin_ssh_cidrs
+  # SSH access - restricted to admin IPs
+  # When admin_ssh_cidrs is empty, no SSH rule is created (SSH blocked by DROP policy)
+  dynamic "inbound" {
+    for_each = length(var.admin_ssh_cidrs) > 0 ? [1] : []
+    content {
+      label    = "SSH"
+      action   = "ACCEPT"
+      protocol = "TCP"
+      ports    = "22"
+      ipv4     = var.admin_ssh_cidrs
+    }
   }
 
   # TURN control ports
