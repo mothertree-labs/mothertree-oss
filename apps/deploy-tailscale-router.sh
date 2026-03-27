@@ -191,8 +191,48 @@ else
   print_warning "  Headscale server IP not available — approve route manually"
 fi
 
+if [[ -n "$HS_IP" ]]; then
+  # ── Configure split DNS in Headscale ──────────────────────────────
+  # Route internal domain queries to this router's Unbound DNS.
+  # The router's Tailscale IP is discovered from the Headscale node list.
+  ROUTER_TS_IP=$(ssh -n -o ConnectTimeout=10 "root@${HS_IP}" \
+    "headscale nodes list --output json" 2>/dev/null \
+    | ROUTER_NAME="$ROUTER_NAME" python3 -c "
+import json, sys, os
+target = os.environ['ROUTER_NAME']
+for n in json.load(sys.stdin):
+    name = n.get('given_name') or n.get('name', '')
+    if name == target:
+        ips = n.get('ip_addresses', [])
+        print(ips[0] if ips else '')
+        break
+" 2>/dev/null || true)
+
+  if [[ -n "$ROUTER_TS_IP" ]]; then
+    # Determine the split DNS domain for this environment
+    case "$MT_ENV" in
+      dev)     SPLIT_DOMAIN="internal.dev.${INFRA_DOMAIN}" ;;
+      prod-eu) SPLIT_DOMAIN="prod-eu.${INFRA_DOMAIN}" ;;
+      *)       SPLIT_DOMAIN="${MT_ENV}.${INFRA_DOMAIN}" ;;
+    esac
+
+    print_status "Configuring split DNS: ${SPLIT_DOMAIN} → ${ROUTER_TS_IP}"
+    ssh -n -o ConnectTimeout=10 "root@${HS_IP}" \
+      "DOMAIN='${SPLIT_DOMAIN}' IP='${ROUTER_TS_IP}' python3 -c \"
+import yaml, os
+domain = os.environ['DOMAIN']
+ip = os.environ['IP']
+with open('/etc/headscale/config.yaml') as f:
+    config = yaml.safe_load(f)
+split = config.setdefault('dns', {}).setdefault('nameservers', {}).setdefault('split', {})
+split[domain] = [ip]
+config['dns']['override_local_dns'] = False
+with open('/etc/headscale/config.yaml', 'w') as f:
+    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+print(f'Split DNS: {domain} -> {ip}')
+\" && systemctl restart headscale" 2>&1 | sed 's/^/  /' || \
+      print_warning "  Split DNS configuration failed (configure manually)"
+  fi
+fi
+
 print_success "Tailscale router deployed to $NS_INGRESS_INTERNAL"
-echo ""
-echo "Next steps:"
-echo "  1. Configure Headscale split DNS for internal domains"
-echo "  2. Test: dig @<router-tailscale-ip> grafana.${MT_ENV}.mother-tree.org"

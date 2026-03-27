@@ -596,6 +596,15 @@ else
   print_status "files_linkeditor submodule not found, skipping (optional component)"
 fi
 
+# Deploy Tailscale subnet router for operator access to internal services.
+# Provides split DNS + subnet routing so operators can reach Grafana, Prometheus, etc.
+# Non-blocking — router failure shouldn't fail the deploy.
+if [ -x "$REPO_ROOT/apps/deploy-tailscale-router.sh" ]; then
+  print_status "Deploying Tailscale subnet router..."
+  "$REPO_ROOT/apps/deploy-tailscale-router.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /' || \
+    print_warning "Tailscale router deploy failed (non-fatal)"
+fi
+
 # Clean up stale Headscale node registrations from previous pod rollouts.
 # PgBouncer/Postfix Tailscale sidecars register new nodes on every pod restart;
 # this prunes offline ones. Non-blocking — cleanup failure shouldn't fail the deploy.
