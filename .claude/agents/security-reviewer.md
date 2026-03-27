@@ -84,9 +84,9 @@ In addition to general security, specifically check for:
 5. **Terraform state/secrets**: No `.tfstate` files or `secrets.tfvars` in commits
 6. **Kubeconfig exposure**: No kubeconfig files with cluster tokens in commits
 7. **S3 bucket permissions**: Buckets should not be public unless explicitly required
-8. **Ingress rules**: Internal services (Grafana, Prometheus, Synapse admin) should use internal ingress with VPN whitelist
+8. **Ingress rules**: Internal services (Grafana, Prometheus, Synapse admin) should use internal ingress with Tailscale CGNAT whitelist
 9. **Database credentials**: Must come from secrets, not hardcoded in Helm values or manifests
-10. **VPN/network boundaries**: Services that should only be VPN-accessible are not exposed publicly
+10. **Mesh/network boundaries**: Services that should only be mesh-accessible (Tailscale-restricted) are not exposed publicly
 11. **Submodule boundary integrity**: The `config/` directory is a private submodule boundary. Ensure scripts don't `cat` or inline private config file contents into manifests, ConfigMaps, or logs. Config values should flow through `envsubst` or Helm `requiredEnv`, never be read and embedded directly. Also verify that private config paths aren't accidentally referenced in ways that would log or expose their content (e.g., `echo "Using config: $(cat config/platform/project.conf)"`).
 
 ## Output Format

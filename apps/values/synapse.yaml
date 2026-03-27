@@ -20,7 +20,7 @@ synapse:
     - 'pip install --no-cache-dir synapse-s3-storage-provider==1.6.0'
   resources:
     requests:
-      cpu: 250m
+      cpu: 100m
       memory: 512Mi
     limits:
       memory: 2Gi

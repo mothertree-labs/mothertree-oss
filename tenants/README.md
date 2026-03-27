@@ -186,7 +186,7 @@ jitsi:
 
 ### Infrastructure Management
 
-Infrastructure (cluster, VPN, TURN) is managed separately and shared across tenants:
+Infrastructure (cluster, Headscale, PostgreSQL VM, Postfix relay VM, TURN) is managed separately and shared across tenants:
 
 ```bash
 # Create/update shared infrastructure
@@ -210,7 +210,7 @@ Shared components that serve all tenants:
 | `infra-auth` | Keycloak (shared SSO/authentication) |
 | `infra-monitoring` | Prometheus, Grafana, Vector |
 | `infra-ingress` | Public ingress controller |
-| `infra-ingress-internal` | VPN-only internal ingress |
+| `infra-ingress-internal` | Internal ingress (Tailscale-restricted) |
 | `infra-cert-manager` | Certificate management |
 | `infra-mail` | Postfix SMTP server |
 

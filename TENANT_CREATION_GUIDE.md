@@ -570,7 +570,7 @@ kubectl logs -n tn-newtenant-docs -l app=docs-backend
 | `infra-auth` | Keycloak (shared SSO) |
 | `infra-monitoring` | Prometheus, Grafana, Vector |
 | `infra-ingress` | Public nginx ingress controller |
-| `infra-ingress-internal` | VPN-only internal ingress |
+| `infra-ingress-internal` | Internal ingress (Tailscale-restricted) |
 | `infra-cert-manager` | Certificate management |
 | `infra-mail` | Postfix SMTP server |
 
@@ -620,5 +620,5 @@ rm -rf tenants/newtenant
 
 - [tenants/README.md](tenants/README.md) - Tenant directory structure
 - [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) - Full deployment guide
-- [VPN_ACCESS_GUIDE.md](VPN_ACCESS_GUIDE.md) - VPN setup for internal access
+- [TAILSCALE_ACCESS_GUIDE.md](TAILSCALE_ACCESS_GUIDE.md) - Tailscale mesh setup for internal access
 - [MONITORING_GUIDE.md](MONITORING_GUIDE.md) - Monitoring and alerting

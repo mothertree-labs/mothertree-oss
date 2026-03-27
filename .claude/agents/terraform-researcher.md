@@ -20,7 +20,9 @@ Research Terraform infrastructure code to answer the user's question. Understand
 
 **Resources provisioned**:
 - LKE Kubernetes cluster (via `modules/lke-cluster/`)
-- OpenVPN server (via `modules/openvpn-server/`)
+- Headscale VM (via `modules/headscale/`) — self-hosted Tailscale control plane
+- PostgreSQL VM (via `modules/postgres-server/`) — dedicated external DB per env
+- Postfix relay VM (via `modules/postfix-relay/`) — inbound MX + outbound relay
 - TURN server (for Matrix/Jitsi video calls)
 - Jitsi tester VM (optional, `--jitsi_tester=yes`)
 - Base DNS records (via `modules/dns/`)
@@ -37,7 +39,7 @@ Research Terraform infrastructure code to answer the user's question. Understand
 - `domain`, `env`, `cluster_label`
 - `ssh_public_key`
 
-**Key outputs**: `kubeconfig`, `turn_server_ip`, `openvpn_server_ip`, `openvpn_server_private_ip`
+**Key outputs**: `kubeconfig`, `turn_server_ip`, `headscale_ip`, `postgres_server_ip`, `postfix_relay_ip`
 
 ### Phase 2: Kubernetes Infrastructure (`infra/`)
 
@@ -55,8 +57,7 @@ data "terraform_remote_state" "phase1" {
 - cert-manager ClusterIssuers (HTTP-01 and DNS-01)
 - Postfix Deployment + Service (with OpenDKIM sidecar)
 - ConfigMaps: postfix-config, opendkim-config, postfix-init-scripts
-- DNS records via `modules/dns/` (lb1, mail, turn, VPN A records; tenant CNAMEs)
-- Reverse DNS (PTR) for VPN server via Linode API
+- DNS records via `modules/dns/` (lb1, mail, turn A records; tenant CNAMEs)
 
 **Templates** (in `infra/templates/`):
 - `postfix-main.cf.tpl` — Postfix configuration
@@ -70,7 +71,9 @@ data "terraform_remote_state" "phase1" {
 |--------|------|---------|
 | lke-cluster | `modules/lke-cluster/` | LKE cluster provisioning (node pools, HA control plane) |
 | dns | `modules/dns/` | Cloudflare DNS records (A, CNAME, SRV, MX) |
-| openvpn-server | `modules/openvpn-server/` | OpenVPN server instance on Linode |
+| headscale | `modules/headscale/` | Headscale VM (self-hosted Tailscale control plane) |
+| postgres-server | `modules/postgres-server/` | Dedicated PostgreSQL VM per environment |
+| postfix-relay | `modules/postfix-relay/` | Postfix relay VM (inbound MX, outbound relay) |
 | helm-bootstrap | `modules/helm-bootstrap/` | Helm provider initialization |
 
 ## Variable Flow
