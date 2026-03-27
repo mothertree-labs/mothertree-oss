@@ -3,11 +3,10 @@
 # Runs daily via cron, configured by Ansible
 set -euo pipefail
 
-BACKUP_DIR="/tmp/headscale-backup"
+BACKUP_DIR=$(mktemp -d /tmp/headscale-backup.XXXXXX)
+chmod 700 "$BACKUP_DIR"
 S3_DEST="s3:{{ headscale_s3_bucket }}/headscale"
 DATE=$(date +%Y%m%d-%H%M%S)
-
-mkdir -p "$BACKUP_DIR"
 
 # SQLite online backup (safe with WAL mode — consistent snapshot)
 sqlite3 /var/lib/headscale/db.sqlite ".backup '$BACKUP_DIR/db-${DATE}.sqlite'"
