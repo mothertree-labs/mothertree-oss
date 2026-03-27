@@ -527,7 +527,7 @@ EOF
         echo "loki_push_url: \"http://${_loki_host}\"" >> "$TEMP_EXTRA_VARS"
         # Internal ingress ClusterIP — resolved via subnet router route
         _internal_ingress_ip=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress-internal \
-          get svc ingress-nginx-controller \
+          get svc ingress-nginx-internal-controller \
           -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
         if [ -n "$_internal_ingress_ip" ]; then
           echo "loki_internal_ip: \"${_internal_ingress_ip}\"" >> "$TEMP_EXTRA_VARS"
