@@ -826,19 +826,23 @@ fi
 # Step 7d: Set overwrite.cli.url for pretty URLs (.htaccess rewrites)
 # Without this, Apache can't rewrite /apps/calendar (and similar paths) to index.php,
 # causing 404 errors on the calendar subdomain and any pretty URL route.
+# Run on ALL pods — with HPA the service load-balances across replicas, so every
+# pod needs .htaccess. The before-starting hook handles future restarts.
 print_status "Configuring overwrite.cli.url for pretty URLs..."
-NEXTCLOUD_POD=$(_get_nc_pod)
-if [ -n "$NEXTCLOUD_POD" ]; then
-    if timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-            su -s /bin/sh www-data -c "php occ config:system:set overwrite.cli.url --value='https://$FILES_HOST'" 2>/dev/null && \
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-            su -s /bin/sh www-data -c "php occ maintenance:update:htaccess" 2>/dev/null && \
-        print_success "overwrite.cli.url set and .htaccess updated" || \
-        print_warning "Failed to set overwrite.cli.url (non-critical on first install)"
-    fi
+NC_PODS=$(kubectl get pods -n "$NS_FILES" -l app.kubernetes.io/name=nextcloud --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+if [ -n "$NC_PODS" ]; then
+    for NC_POD in $NC_PODS; do
+        if timeout 30 kubectl exec -n "$NS_FILES" "$NC_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
+            kubectl exec -n "$NS_FILES" "$NC_POD" -c nextcloud -- \
+                su -s /bin/sh www-data -c "php occ config:system:set overwrite.cli.url --value='https://$FILES_HOST'" 2>/dev/null && \
+            kubectl exec -n "$NS_FILES" "$NC_POD" -c nextcloud -- \
+                su -s /bin/sh www-data -c "php occ maintenance:update:htaccess" 2>/dev/null && \
+            print_success "overwrite.cli.url set and .htaccess updated on $NC_POD" || \
+            print_warning "Failed to set overwrite.cli.url on $NC_POD (non-critical on first install)"
+        fi
+    done
 else
-    print_warning "Nextcloud pod not found, skipping overwrite.cli.url"
+    print_warning "No Nextcloud pods found, skipping overwrite.cli.url"
 fi
 
 # Step 8: Generate and apply OIDC configuration job from template
