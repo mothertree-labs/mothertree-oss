@@ -344,13 +344,23 @@ _mt_infra_load_shared_secrets() {
     echo "[INFO] AWS SES SMTP relay credentials loaded from infra tenant secrets"
   fi
 
-  # Tailscale pre-auth key (used by PG VM and PgBouncer sidecars to join mesh)
+  # Tailscale pre-auth keys (generic + per-component tagged keys for ACL enforcement)
   local _ts_authkey
   _ts_authkey=$(yq '.tailscale.authkey // ""' "$_infra_secrets")
   if [ -n "$_ts_authkey" ] && [ "$_ts_authkey" != "null" ]; then
     export TAILSCALE_AUTHKEY="$_ts_authkey"
     echo "[INFO] Tailscale auth key loaded from infra tenant secrets"
   fi
+  # Per-component keys: when ACLs are enabled, each component needs a key
+  # with the correct tag so new pods register with the right permissions.
+  # Falls back to generic TAILSCALE_AUTHKEY if not set.
+  local _ts_pgb_key _ts_postfix_key _ts_router_key
+  _ts_pgb_key=$(yq '.tailscale.pgbouncer_authkey // ""' "$_infra_secrets")
+  _ts_postfix_key=$(yq '.tailscale.postfix_authkey // ""' "$_infra_secrets")
+  _ts_router_key=$(yq '.tailscale.router_authkey // ""' "$_infra_secrets")
+  [ -n "$_ts_pgb_key" ] && [ "$_ts_pgb_key" != "null" ] && export TAILSCALE_AUTHKEY_PGBOUNCER="$_ts_pgb_key"
+  [ -n "$_ts_postfix_key" ] && [ "$_ts_postfix_key" != "null" ] && export TAILSCALE_AUTHKEY_POSTFIX="$_ts_postfix_key"
+  [ -n "$_ts_router_key" ] && [ "$_ts_router_key" != "null" ] && export TAILSCALE_AUTHKEY_ROUTER="$_ts_router_key"
 
   # PgBouncer auth password (optional — only when PGBOUNCER_ENABLED=true)
   if [ "${PGBOUNCER_ENABLED:-false}" = "true" ]; then

@@ -45,12 +45,8 @@ dns:
       - 1.1.1.1
       - 1.0.0.1
 
-# ACL policy — disabled until Headscale v0.28 tag ownership format is resolved.
-# Without ACL, all nodes on the mesh can communicate freely (traffic is still
-# encrypted via WireGuard). Re-enable once we determine the correct tagOwners
-# format for Headscale v0.28 (which requires email-style usernames with @).
-# policy:
-#   path: /etc/headscale/acl-policy.json
+policy:
+  path: /etc/headscale/acl-policy.json
 
 log:
   level: info

@@ -60,8 +60,8 @@ export POSTFIX_RELAY_IP
 : "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
 export HEADSCALE_URL
 
-# Required: Tailscale pre-auth key (from infra secrets)
-: "${TAILSCALE_AUTHKEY:?TAILSCALE_AUTHKEY not set. Add tailscale.authkey to infra secrets.}"
+# Required: Tailscale pre-auth key — prefer tagged key for ACL enforcement
+TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY_POSTFIX:-${TAILSCALE_AUTHKEY:?TAILSCALE_AUTHKEY not set. Add tailscale.authkey to infra secrets.}}"
 
 # =============================================================================
 # Compute derived variables
