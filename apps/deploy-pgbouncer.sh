@@ -73,7 +73,9 @@ export PG_SUPERUSER_PASSWORD="$TF_VAR_postgres_password"
 
 # Pool sizing (defaults can be overridden in infra config)
 export PGBOUNCER_MAX_CLIENT_CONN="${PGBOUNCER_MAX_CLIENT_CONN:-400}"
-export PGBOUNCER_DEFAULT_POOL_SIZE="${PGBOUNCER_DEFAULT_POOL_SIZE:-50}"
+export PGBOUNCER_DEFAULT_POOL_SIZE="${PGBOUNCER_DEFAULT_POOL_SIZE:-15}"
+export PGBOUNCER_MIN_POOL_SIZE="${PGBOUNCER_MIN_POOL_SIZE:-2}"
+export PGBOUNCER_RESERVE_POOL_SIZE="${PGBOUNCER_RESERVE_POOL_SIZE:-2}"
 
 print_status "Deploying PgBouncer to $NS_DB (env: $MT_ENV)"
 print_status "  PG VM Tailscale IP: $PG_VM_TAILSCALE_IP"
