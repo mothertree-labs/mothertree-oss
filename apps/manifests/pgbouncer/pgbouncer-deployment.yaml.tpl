@@ -55,12 +55,20 @@ spec:
               mountPath: /etc/pgbouncer/userlist.txt
               subPath: userlist.txt
               readOnly: true
-          # Graceful shutdown: sleep lets K8s endpoint removal propagate (no new
-          # connections routed here) before SIGTERM triggers PgBouncer smart shutdown.
+          # Graceful shutdown:
+          # 1. sleep 3 — let K8s endpoint removal propagate (no new connections routed)
+          # 2. kill -INT 1 — SIGINT triggers SHUTDOWN_WAIT_FOR_SERVERS: actively
+          #    disconnects clients, sends PostgreSQL Terminate ('X') on each server
+          #    connection, waits only for in-flight queries. This is critical because
+          #    SIGTERM (what K8s sends) triggers SHUTDOWN_WAIT_FOR_CLIENTS which waits
+          #    for session-mode clients to disconnect — they never do within the grace
+          #    period, leading to SIGKILL and zombie connections on PostgreSQL.
+          # 3. sleep 10 — keep container alive while PgBouncer drains
+          # 4. K8s SIGTERM arrives → PgBouncer already shutting down → escalates to exit
           lifecycle:
             preStop:
               exec:
-                command: ["sh", "-c", "sleep 5"]
+                command: ["sh", "-c", "sleep 3 && kill -INT 1 && sleep 10"]
           livenessProbe:
             tcpSocket:
               port: 5432
