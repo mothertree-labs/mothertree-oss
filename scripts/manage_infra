@@ -423,14 +423,19 @@ EOF
         print_status "TURN server ${TURN_SERVER_IP} added to inventory"
       fi
 
-      # Headscale server
+      # Headscale server — prefer Tailscale IP (public SSH is blocked at cloud firewall)
       if [ -n "${HEADSCALE_SERVER_IP:-}" ] && [ "$HEADSCALE_SERVER_IP" != "null" ]; then
+        _hs_ansible_host="${HEADSCALE_SERVER_IP}"
+        if [ -n "${HEADSCALE_TAILSCALE_IP:-}" ] && [ "$HEADSCALE_TAILSCALE_IP" != "null" ]; then
+          _hs_ansible_host="${HEADSCALE_TAILSCALE_IP}"
+          print_status "Headscale server using Tailscale IP ${HEADSCALE_TAILSCALE_IP} for Ansible (public SSH blocked)"
+        fi
         cat >> "$TEMP_INVENTORY" <<EOF
 
 [headscale_servers]
-headscale-server ansible_host=${HEADSCALE_SERVER_IP} ansible_user=root
+headscale-server ansible_host=${_hs_ansible_host} ansible_user=root
 EOF
-        print_status "Headscale server ${HEADSCALE_SERVER_IP} added to inventory"
+        print_status "Headscale server ${_hs_ansible_host} added to inventory"
       fi
 
       # PostgreSQL server

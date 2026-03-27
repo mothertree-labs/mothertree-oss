@@ -120,7 +120,8 @@ _mt_infra_load_env_config() {
     HEADSCALE_URL=$(yq '.headscale.url // ""' "$infra_config")
     HEADSCALE_DOMAIN=$(yq '.headscale.domain // ""' "$infra_config")
     HEADSCALE_BASE_DOMAIN=$(yq '.headscale.base_domain // ""' "$infra_config")
-    export HEADSCALE_URL HEADSCALE_DOMAIN HEADSCALE_BASE_DOMAIN
+    HEADSCALE_TAILSCALE_IP=$(yq '.headscale.tailscale_ip // ""' "$infra_config")
+    export HEADSCALE_URL HEADSCALE_DOMAIN HEADSCALE_BASE_DOMAIN HEADSCALE_TAILSCALE_IP
 
     # Postfix relay VM on Tailscale mesh (replaces VPN server mail relay)
     POSTFIX_RELAY_IP=$(yq '.postfix_relay.tailscale_ip // ""' "$infra_config")

@@ -717,6 +717,55 @@
         - operators
       when: item not in hs_user_names
 
+    # -------------------------------------------------------------------
+    # Tailscale client — join the server's own mesh for operator SSH access.
+    # Public SSH is blocked at the cloud firewall; operators use Tailscale SSH.
+    # -------------------------------------------------------------------
+    - name: Check if Tailscale client is installed
+      command: tailscale version
+      register: hs_ts_version
+      changed_when: false
+      failed_when: false
+
+    - name: Install Tailscale client if not present
+      shell: curl -fsSL https://tailscale.com/install.sh | sh
+      when: hs_ts_version.rc != 0
+
+    - name: Ensure Tailscale client is enabled and running
+      systemd:
+        name: tailscaled
+        enabled: yes
+        state: started
+
+    - name: Check Tailscale client status
+      command: tailscale status --json
+      register: hs_ts_status
+      changed_when: false
+      failed_when: false
+
+    - name: Join own tailnet if not connected
+      command: >
+        tailscale up
+        --reset
+        --login-server=https://{{ headscale_domain }}:8080
+        --authkey={{ tailscale_auth_key }}
+        --accept-routes=false
+      when: >
+        tailscale_auth_key is defined and tailscale_auth_key | length > 0 and
+        (hs_ts_status.rc != 0 or
+        (hs_ts_status.stdout | from_json).BackendState != "Running")
+
+    - name: Get Headscale server Tailscale IP
+      command: tailscale ip -4
+      register: hs_tailscale_ip
+      changed_when: false
+      when: tailscale_auth_key is defined and tailscale_auth_key | length > 0
+
+    - name: Display Tailscale IP
+      debug:
+        msg: "Headscale server Tailscale IP: {{ hs_tailscale_ip.stdout }}"
+      when: hs_tailscale_ip is defined and hs_tailscale_ip.stdout is defined
+
     - name: Display post-setup instructions
       debug:
         msg: |
@@ -724,7 +773,7 @@
 
           To generate a pre-auth key for infrastructure nodes:
             ssh root@{{ headscale_domain }} \
-              headscale preauthkeys create --user infra --reusable --expiration 87600h --tags tag:k8s-node
+              headscale preauthkeys create --user infra --reusable --expiration 8760h --tags tag:k8s-node
 
           To register an operator (OIDC or CLI):
             headscale users create <username>
