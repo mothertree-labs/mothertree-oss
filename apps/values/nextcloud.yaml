@@ -94,7 +94,7 @@ nextcloud:
       password: ""
   # NOTE: NEXTCLOUD_INIT_HTACCESS disabled — the entrypoint's maintenance:update:htaccess
   # fails on fresh emptyDir pods when the app bootstrap hasn't completed yet.
-  # The .htaccess is configured via ConfigMap mount instead (pretty-urls.config.php).
+  # The before-starting hook handles this instead (runs after bootstrap completes).
   extraEnv:
     # guest_bridge config — injected from secret so every pod has it on startup.
     # The before-starting hook reads these and writes to per-pod config.php.
