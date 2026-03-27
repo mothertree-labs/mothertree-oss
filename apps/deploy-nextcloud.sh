@@ -713,6 +713,23 @@ else
     fi
 fi
 
+# Step 6c: Reset OIDC-only login before waiting for readiness.
+# The calendar-automation deploy temporarily sets allow_multiple_user_backends=1
+# (needed for app password creation). If a previous pipeline was killed mid-deploy,
+# this value stays at 1, which poisons the readiness probe (oidc-health.php) on ALL
+# pods — causing rollout timeouts. Reset it here as a self-healing mechanism.
+_NC_RESET_POD=$(kubectl get pods -n "$NS_FILES" -l app.kubernetes.io/name=nextcloud \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$_NC_RESET_POD" ]; then
+    _CURRENT_VAL=$(kubectl exec -n "$NS_FILES" "$_NC_RESET_POD" -c nextcloud -- \
+        php occ config:app:get user_oidc allow_multiple_user_backends 2>/dev/null || echo "unknown")
+    if [ "$_CURRENT_VAL" = "1" ]; then
+        print_warning "allow_multiple_user_backends=1 (stale from killed pipeline) — resetting to 0"
+        kubectl exec -n "$NS_FILES" "$_NC_RESET_POD" -c nextcloud -- \
+            php occ config:app:set --type=string --value=0 user_oidc allow_multiple_user_backends 2>/dev/null || true
+    fi
+fi
+
 # Step 7: Wait for Nextcloud to be ready
 print_status "Waiting for Nextcloud pod to be ready (this may take a few minutes)..."
 if ! poll_pod_ready "$NS_FILES" "app.kubernetes.io/instance=nextcloud" 600 5; then
