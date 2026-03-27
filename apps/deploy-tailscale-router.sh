@@ -54,13 +54,14 @@ INTERNAL_INGRESS_IP=$(kubectl get svc -n "$NS_INGRESS_INTERNAL" \
 
 print_status "  Internal ingress ClusterIP: $INTERNAL_INGRESS_IP"
 
-# Discover K8s service CIDR from CoreDNS ClusterIP (first IP in the range)
-COREDNS_IP=$(kubectl get svc -n kube-system kube-dns -o jsonpath='{.spec.clusterIP}')
-# Derive /16 CIDR from CoreDNS IP (e.g., 10.128.0.10 → 10.128.0.0/16)
-SERVICE_CIDR=$(echo "$COREDNS_IP" | awk -F. '{print $1"."$2".0.0/16"}')
+# Advertise only the internal ingress ClusterIP as a /32 route.
+# Using the full service CIDR (/16) would conflict when multiple clusters
+# share the same CIDR (e.g., prod and prod-eu both use 10.128.0.0/16).
+# A /32 for each cluster's ingress ClusterIP is unique and non-overlapping.
+SERVICE_CIDR="${INTERNAL_INGRESS_IP}/32"
 export SERVICE_CIDR
 
-print_status "  Service CIDR: $SERVICE_CIDR"
+print_status "  Advertised route: $SERVICE_CIDR"
 
 # Discover all hostnames served by the internal ingress
 INTERNAL_HOSTS=$(kubectl get ingress -A -o json 2>/dev/null | python3 -c "
@@ -150,40 +151,44 @@ kubectl rollout status deployment/tailscale-router -n "$NS_INGRESS_INTERNAL" --t
 # Approve routes in Headscale (if not auto-approved by ACL policy)
 # =============================================================================
 
-if [[ -n "${HEADSCALE_SERVER_IP:-}" ]]; then
-  print_status "Checking Headscale route approval..."
-  # Find the router node and enable its routes
+# Approve the /32 route in Headscale so the subnet router can forward traffic.
+# Prod and prod-eu share a Headscale server (provisioned in prod-eu). If the
+# local env doesn't have HEADSCALE_SERVER_IP, try loading it from prod-eu outputs.
+HS_IP="${HEADSCALE_SERVER_IP:-}"
+if [[ -z "$HS_IP" ]]; then
+  # Shared Headscale: check prod-eu terraform outputs
+  PRODEU_OUTPUTS="${REPO_ROOT}/config/platform/infra/terraform-outputs.prod-eu.env"
+  if [[ -f "$PRODEU_OUTPUTS" ]]; then
+    HS_IP=$(grep "^HEADSCALE_SERVER_IP=" "$PRODEU_OUTPUTS" 2>/dev/null | cut -d'"' -f2)
+  fi
+fi
+
+if [[ -n "$HS_IP" ]]; then
+  print_status "Approving route in Headscale ($HS_IP)..."
+  export ROUTER_NAME="router-${MT_ENV}"
   ROUTER_NODE_ID=$(ssh -n -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
-    "root@${HEADSCALE_SERVER_IP}" \
+    "root@${HS_IP}" \
     "headscale nodes list --output json" 2>/dev/null \
     | python3 -c "
-import json, sys
+import json, sys, os
+target = os.environ.get('ROUTER_NAME', 'router-')
 for n in json.load(sys.stdin):
     name = n.get('given_name') or n.get('name', '')
-    if name.startswith('router-'):
+    if name == target:
         print(n['id'])
         break
 " 2>/dev/null || true)
 
   if [[ -n "$ROUTER_NODE_ID" ]]; then
-    # List and enable unapproved routes
-    ROUTES=$(ssh -n -o ConnectTimeout=10 "root@${HEADSCALE_SERVER_IP}" \
-      "headscale routes list --output json" 2>/dev/null || true)
-
-    if [[ -n "$ROUTES" ]]; then
-      echo "$ROUTES" | python3 -c "
-import json, sys
-routes = json.load(sys.stdin)
-for r in routes:
-    if r.get('node', {}).get('id') == ${ROUTER_NODE_ID} and not r.get('enabled', False):
-        print(r['id'])
-" 2>/dev/null | while IFS= read -r route_id; do
-        ssh -n -o ConnectTimeout=10 "root@${HEADSCALE_SERVER_IP}" \
-          "headscale routes enable -r $route_id" > /dev/null 2>&1 && \
-          print_status "  Enabled route $route_id" || true
-      done
-    fi
+    ssh -n -o ConnectTimeout=10 "root@${HS_IP}" \
+      "headscale nodes approve-routes -i $ROUTER_NODE_ID -r $SERVICE_CIDR" > /dev/null 2>&1 && \
+      print_status "  Route $SERVICE_CIDR approved for node $ROUTER_NODE_ID" || \
+      print_warning "  Route approval failed (may need manual approval)"
+  else
+    print_warning "  Router node '$ROUTER_NAME' not found in Headscale — approve route manually"
   fi
+else
+  print_warning "  Headscale server IP not available — approve route manually"
 fi
 
 print_success "Tailscale router deployed to $NS_INGRESS_INTERNAL"
