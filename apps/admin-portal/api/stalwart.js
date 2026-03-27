@@ -7,6 +7,16 @@
 const STALWART_API_URL = process.env.STALWART_API_URL;
 const STALWART_ADMIN_PASSWORD = process.env.STALWART_ADMIN_PASSWORD;
 
+// Timeout for Stalwart API requests. Under concurrent CI load, Stalwart can
+// take 100+ seconds per request, so the default is generous. The invite
+// endpoint runs provisioning in the background (non-blocking), so this
+// timeout only guards against indefinitely hung connections.
+const FETCH_TIMEOUT_MS = parseInt(process.env.STALWART_FETCH_TIMEOUT_MS, 10) || 120_000;
+
+function fetchWithTimeout(url, options = {}) {
+  return fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+}
+
 function getAdminAuth() {
   if (!STALWART_API_URL || !STALWART_ADMIN_PASSWORD) {
     throw new Error('Stalwart API not configured (STALWART_API_URL or STALWART_ADMIN_PASSWORD missing)');
@@ -20,7 +30,7 @@ function getAdminAuth() {
  */
 async function reloadConfig() {
   const adminAuth = getAdminAuth();
-  const response = await fetch(`${STALWART_API_URL}/api/reload`, {
+  const response = await fetchWithTimeout(`${STALWART_API_URL}/api/reload`, {
     headers: { 'Authorization': adminAuth },
   });
   if (!response.ok) {
@@ -36,7 +46,7 @@ async function reloadConfig() {
 async function ensureUserExists(email, name, quotaBytes) {
   const adminAuth = getAdminAuth();
 
-  const checkResponse = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+  const checkResponse = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
     headers: { 'Authorization': adminAuth },
   });
 
@@ -61,7 +71,7 @@ async function ensureUserExists(email, name, quotaBytes) {
   if (quotaBytes) {
     body.quota = quotaBytes;
   }
-  const createResponse = await fetch(`${STALWART_API_URL}/api/principal/deploy`, {
+  const createResponse = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/deploy`, {
     method: 'POST',
     headers: {
       'Authorization': adminAuth,
@@ -109,7 +119,7 @@ async function ensureUserExists(email, name, quotaBytes) {
 async function ensureRoles(email) {
   const adminAuth = getAdminAuth();
 
-  const response = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+  const response = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
     headers: { 'Authorization': adminAuth },
   });
 
@@ -122,7 +132,7 @@ async function ensureRoles(email) {
   if (roles.includes('user')) return;
 
   console.log(`Stalwart: principal ${email} missing 'user' role, patching...`);
-  const patchResponse = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+  const patchResponse = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
     method: 'PATCH',
     headers: {
       'Authorization': adminAuth,
@@ -147,7 +157,7 @@ async function ensureRoles(email) {
 async function getUserQuota(email) {
   const adminAuth = getAdminAuth();
 
-  const response = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+  const response = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
     headers: { 'Authorization': adminAuth },
   });
 
@@ -168,7 +178,7 @@ async function getUserQuota(email) {
 async function setUserQuota(email, quotaBytes) {
   const adminAuth = getAdminAuth();
 
-  const response = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+  const response = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
     method: 'PATCH',
     headers: {
       'Authorization': adminAuth,
@@ -196,7 +206,7 @@ async function setUserQuota(email, quotaBytes) {
 async function backfillQuotas(defaultQuotaBytes) {
   const adminAuth = getAdminAuth();
 
-  const listResponse = await fetch(`${STALWART_API_URL}/api/principal?types=individual&limit=0`, {
+  const listResponse = await fetchWithTimeout(`${STALWART_API_URL}/api/principal?types=individual&limit=0`, {
     headers: { 'Authorization': adminAuth },
   });
 
@@ -225,7 +235,7 @@ async function backfillQuotas(defaultQuotaBytes) {
 
     // Otherwise fetch the full principal to check
     if (typeof item === 'string') {
-      const principal = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(principalName)}`, {
+      const principal = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(principalName)}`, {
         headers: { 'Authorization': adminAuth },
       });
 
@@ -241,7 +251,7 @@ async function backfillQuotas(defaultQuotaBytes) {
       }
     }
 
-    const patchResponse = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(principalName)}`, {
+    const patchResponse = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(principalName)}`, {
       method: 'PATCH',
       headers: {
         'Authorization': adminAuth,
@@ -272,7 +282,7 @@ async function backfillQuotas(defaultQuotaBytes) {
 async function listAppPasswords(email) {
   const adminAuth = getAdminAuth();
 
-  const response = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+  const response = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
     headers: { 'Authorization': adminAuth },
   });
 
@@ -302,7 +312,7 @@ async function listAppPasswords(email) {
 async function createAppPassword(email, deviceName, password) {
   const adminAuth = getAdminAuth();
 
-  const response = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+  const response = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
     method: 'PATCH',
     headers: {
       'Authorization': adminAuth,
@@ -331,7 +341,7 @@ async function revokeAppPassword(email, passwordName) {
   const adminAuth = getAdminAuth();
 
   // Get current secrets to find the full value
-  const getResponse = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+  const getResponse = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
     headers: { 'Authorization': adminAuth },
   });
 
@@ -348,7 +358,7 @@ async function revokeAppPassword(email, passwordName) {
     throw new Error(`App password "${passwordName}" not found`);
   }
 
-  const response = await fetch(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+  const response = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
     method: 'PATCH',
     headers: {
       'Authorization': adminAuth,

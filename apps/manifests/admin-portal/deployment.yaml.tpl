@@ -109,7 +109,7 @@ spec:
                   key: beginsetup-secret
             # Synapse Matrix server (for user provisioning during invite)
             - name: SYNAPSE_ADMIN_URL
-              value: "http://synapse.${NS_MATRIX}.svc.cluster.local:8008"
+              value: "http://matrix-synapse.${NS_MATRIX}.svc.cluster.local:8008"
             - name: SYNAPSE_SHARED_SECRET
               valueFrom:
                 secretKeyRef:

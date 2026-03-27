@@ -392,23 +392,19 @@ app.post('/api/invite', verifyOrigin, requireAuth, requireTenantAdmin, async (re
     // so the user gets their invite even if downstream services fail)
     await keycloakApi.sendInvitationEmail(result.userId);
 
-    // Step 3: Provision Stalwart email account (non-fatal)
-    try {
-      const defaultQuotaMb = parseInt(process.env.DEFAULT_EMAIL_QUOTA_MB || '5120', 10);
-      const defaultQuotaBytes = defaultQuotaMb * 1024 * 1024;
-      await stalwartApi.ensureUserExists(email, `${firstName} ${lastName}`, defaultQuotaBytes);
-    } catch (err) {
-      console.error('Stalwart provisioning failed (non-fatal):', err.message);
-    }
-
-    // Step 4: Provision Matrix/Synapse account (non-fatal)
-    try {
-      await synapseApi.ensureMatrixUser(email, `${firstName} ${lastName}`);
-    } catch (err) {
-      console.error('Synapse provisioning failed (non-fatal):', err.message);
-    }
-
+    // Respond immediately — the critical path (Keycloak + email) is done.
+    // Downstream provisioning runs in the background so it doesn't block the
+    // HTTP response (Stalwart and Synapse can take 10+ seconds under load).
     res.json({ success: true, userId: result.userId });
+
+    // Step 3: Provision Stalwart email account (non-fatal, background)
+    const displayName = `${firstName} ${lastName}`;
+    stalwartApi.ensureUserExists(email, displayName, parseInt(process.env.DEFAULT_EMAIL_QUOTA_MB || '5120', 10) * 1024 * 1024)
+      .catch(err => console.error('Stalwart provisioning failed (non-fatal):', err.message));
+
+    // Step 4: Provision Matrix/Synapse account (non-fatal, background)
+    synapseApi.ensureMatrixUser(email, displayName)
+      .catch(err => console.error('Synapse provisioning failed (non-fatal):', err.message));
   } catch (error) {
     console.error('Invite error:', error.message);
     res.status(500).json({ error: error.message });
