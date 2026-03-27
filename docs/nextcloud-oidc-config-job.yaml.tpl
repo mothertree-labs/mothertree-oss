@@ -103,19 +103,28 @@ spec:
                 kubectl exec -n "$POD_NAMESPACE" "$pod" -- "$@"
               }
 
-              # Wait for Nextcloud pod to be ready
+              # Wait for Nextcloud pod to be ready.
+              # Uses a polling loop instead of `kubectl wait` because kubectl wait
+              # watches pods at invocation time — pods created during a rolling update
+              # (after old pods are deleted) are not picked up, causing a permanent hang.
               echo "Waiting for Nextcloud pod to be ready in namespace $POD_NAMESPACE..."
-              if ! kubectl wait --for=condition=ready pod -l app.kubernetes.io/instance=nextcloud -n "$POD_NAMESPACE" --timeout=600s; then
+              _ready=false
+              for _attempt in $(seq 1 120); do
+                _pod=$(get_nc_pod)
+                if [ -n "$_pod" ]; then
+                  _ready=true
+                  break
+                fi
+                if [ $((_attempt % 12)) -eq 0 ]; then
+                  echo "  Still waiting for a Ready Nextcloud pod... (${_attempt}0s)"
+                fi
+                sleep 5
+              done
+              if [ "$_ready" != "true" ]; then
                 echo "ERROR: Nextcloud pod did not become ready within 600s"
                 echo ""
                 echo "Nextcloud pods:"
                 kubectl get pods -n "$POD_NAMESPACE" -l app.kubernetes.io/instance=nextcloud -o wide || true
-                NC_POD="$(get_nc_pod || true)"
-                if [ -n "$NC_POD" ]; then
-                  echo ""
-                  echo "Describe Nextcloud pod $NC_POD:"
-                  kubectl describe pod -n "$POD_NAMESPACE" "$NC_POD" || true
-                fi
                 echo ""
                 echo "Recent events in $POD_NAMESPACE:"
                 kubectl get events -n "$POD_NAMESPACE" --sort-by=.lastTimestamp | tail -n 80 || true

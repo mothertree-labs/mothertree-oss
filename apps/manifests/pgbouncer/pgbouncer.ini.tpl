@@ -31,6 +31,9 @@ auth_query = SELECT usename, passwd FROM pg_shadow WHERE usename=$1
 admin_users = pgbouncer
 stats_users = pgbouncer
 
+; Allow extra startup parameters that some clients send (e.g. Rust's tokio-postgres)
+ignore_startup_parameters = extra_float_digits
+
 ; Logging
 log_connections = 0
 log_disconnections = 0

@@ -125,10 +125,10 @@ else
     print_status "Files namespace $NS_FILES already exists"
 fi
 
-# Step 2: Wait for PostgreSQL to be ready (shared database in db namespace)
-print_status "Waiting for PostgreSQL to be ready in namespace $NS_DB..."
-if ! poll_pod_ready "$NS_DB" "app.kubernetes.io/name=postgresql" 300 5; then
-    print_error "PostgreSQL is not ready"
+# Step 2: Wait for PgBouncer to be ready (sole entrypoint to external PG VM)
+print_status "Waiting for PgBouncer to be ready in namespace $NS_DB..."
+if ! poll_pod_ready "$NS_DB" "app=pgbouncer" 300 5; then
+    print_error "PgBouncer is not ready"
     exit 1
 fi
 
