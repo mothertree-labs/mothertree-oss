@@ -696,7 +696,7 @@ else
         -p '{"spec":{"template":{"spec":{"hostAliases":[{"ip":"'"$INTERNAL_INGRESS_IP"'","hostnames":['"$INTERNAL_HOSTNAMES"']}]}}}}'
 
     # Wait for rollout to complete (immediate if patch was a no-op)
-    kubectl rollout status deployment/nextcloud -n "$NS_FILES" --timeout=600s
+    kubectl rollout status deployment/nextcloud -n "$NS_FILES" --timeout=900s
     print_success "Nextcloud configured to route traffic internally"
 
     # Patch the Collabora deployment so it resolves FILES_HOST via internal ingress.
