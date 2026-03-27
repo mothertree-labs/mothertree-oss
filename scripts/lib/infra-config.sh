@@ -112,7 +112,7 @@ _mt_infra_load_env_config() {
     PGBOUNCER_ENABLED=$(yq '.pgbouncer.enabled // false' "$infra_config")
     PG_VM_TAILSCALE_IP=$(yq '.pgbouncer.pg_vm_tailscale_ip // ""' "$infra_config")
     PGBOUNCER_MAX_CLIENT_CONN=$(yq '.pgbouncer.max_client_conn // 400' "$infra_config")
-    PGBOUNCER_DEFAULT_POOL_SIZE=$(yq '.pgbouncer.default_pool_size // 50' "$infra_config")
+    PGBOUNCER_DEFAULT_POOL_SIZE=$(yq '.pgbouncer.default_pool_size // 15' "$infra_config")
     PGBOUNCER_MIN_POOL_SIZE=$(yq '.pgbouncer.min_pool_size // 2' "$infra_config")
     PGBOUNCER_RESERVE_POOL_SIZE=$(yq '.pgbouncer.reserve_pool_size // 2' "$infra_config")
     export PGBOUNCER_ENABLED PG_VM_TAILSCALE_IP
