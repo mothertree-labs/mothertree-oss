@@ -521,6 +521,13 @@ EOF
       if [ -n "${HEADSCALE_BASE_DOMAIN:-}" ]; then
         echo "headscale_base_domain: \"${HEADSCALE_BASE_DOMAIN}\"" >> "$TEMP_EXTRA_VARS"
       fi
+      # Headscale backup to S3 — reuse pgBackRest S3 credentials (same Linode Object Storage account)
+      if [ -n "${PGBACKREST_S3_ENDPOINT:-}" ] && [ -n "${PGBACKREST_S3_KEY:-}" ]; then
+        echo "headscale_s3_endpoint: \"${PGBACKREST_S3_ENDPOINT}\"" >> "$TEMP_EXTRA_VARS"
+        echo "headscale_s3_bucket: \"${PGBACKREST_S3_BUCKET}\"" >> "$TEMP_EXTRA_VARS"
+        echo "headscale_s3_key: \"${PGBACKREST_S3_KEY}\"" >> "$TEMP_EXTRA_VARS"
+        echo "headscale_s3_secret: \"${PGBACKREST_S3_SECRET}\"" >> "$TEMP_EXTRA_VARS"
+      fi
 
       # PostgreSQL server configuration
       if [ -n "${POSTGRES_VERSION:-}" ]; then

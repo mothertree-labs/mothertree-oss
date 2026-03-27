@@ -691,6 +691,42 @@
         - { port: '8080', proto: 'tcp', comment: 'Headscale API' }
 
     # -------------------------------------------------------------------
+    # Automated backup — SQLite DB + keys to S3 via rclone
+    # -------------------------------------------------------------------
+    - name: Install rclone for S3 backups
+      shell: curl -fsSL https://rclone.org/install.sh | bash
+      args:
+        creates: /usr/bin/rclone
+
+    - name: Create rclone config directory
+      file:
+        path: /root/.config/rclone
+        state: directory
+        mode: '0700'
+
+    - name: Configure rclone for Linode Object Storage
+      template:
+        src: headscale-rclone.conf.j2
+        dest: /root/.config/rclone/rclone.conf
+        mode: '0600'
+      when: headscale_s3_key is defined and headscale_s3_key | length > 0
+
+    - name: Deploy Headscale backup script
+      template:
+        src: headscale-backup.sh.j2
+        dest: /usr/local/bin/headscale-backup.sh
+        mode: '0755'
+      when: headscale_s3_key is defined and headscale_s3_key | length > 0
+
+    - name: Schedule daily Headscale backup via cron
+      cron:
+        name: "headscale-backup"
+        minute: "30"
+        hour: "3"
+        job: "/usr/local/bin/headscale-backup.sh >> /var/log/headscale-backup.log 2>&1"
+      when: headscale_s3_key is defined and headscale_s3_key | length > 0
+
+    # -------------------------------------------------------------------
     # Create users and generate pre-auth keys
     # -------------------------------------------------------------------
     - name: Wait for Headscale to be ready

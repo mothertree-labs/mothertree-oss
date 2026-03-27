@@ -1,0 +1,28 @@
+#!/bin/bash
+# Headscale automated backup — SQLite DB + keys to S3
+# Runs daily via cron, configured by Ansible
+set -euo pipefail
+
+BACKUP_DIR="/tmp/headscale-backup"
+S3_DEST="s3:{{ headscale_s3_bucket }}/headscale"
+DATE=$(date +%Y%m%d-%H%M%S)
+
+mkdir -p "$BACKUP_DIR"
+
+# SQLite online backup (safe with WAL mode — consistent snapshot)
+sqlite3 /var/lib/headscale/db.sqlite ".backup '$BACKUP_DIR/db-${DATE}.sqlite'"
+
+# Copy private keys (small files, critical for mesh identity)
+cp /var/lib/headscale/noise_private.key "$BACKUP_DIR/noise_private-${DATE}.key"
+cp /var/lib/headscale/derp_server_private.key "$BACKUP_DIR/derp_server_private-${DATE}.key"
+
+# Upload to S3
+rclone copy "$BACKUP_DIR/" "$S3_DEST/" --s3-no-check-bucket
+
+# Clean up local temp
+rm -rf "$BACKUP_DIR"
+
+# Prune remote backups older than 30 days
+rclone delete "$S3_DEST/" --min-age 30d --s3-no-check-bucket 2>/dev/null || true
+
+echo "[$(date)] Backup completed: db-${DATE}.sqlite + keys"
