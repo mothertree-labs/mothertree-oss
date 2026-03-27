@@ -31,6 +31,22 @@ else
     echo "[before-starting] No DB upgrade needed, skipping occ upgrade"
 fi
 
+# Set overwrite.cli.url and regenerate .htaccess for pretty URLs.
+# Without this, Apache returns 404 for /apps/calendar and any rewrite-dependent path.
+# Must run on every pod start because /var/www/html is an emptyDir.
+# NEXTCLOUD_INIT_HTACCESS is disabled in the entrypoint (fails before bootstrap completes),
+# so we do it here where the app is already installed.
+FILES_HOST=$(echo "${NEXTCLOUD_TRUSTED_DOMAINS:-}" | awk '{print $1}')
+if [ -n "$FILES_HOST" ]; then
+    echo "[before-starting] Configuring pretty URLs (overwrite.cli.url=https://$FILES_HOST)..."
+    php /var/www/html/occ config:system:set overwrite.cli.url --value="https://$FILES_HOST" 2>/dev/null && \
+    php /var/www/html/occ maintenance:update:htaccess 2>/dev/null && \
+    echo "[before-starting] .htaccess updated for pretty URLs" || \
+    echo "[before-starting] Warning: failed to update .htaccess (non-critical)"
+else
+    echo "[before-starting] Warning: NEXTCLOUD_TRUSTED_DOMAINS not set, skipping .htaccess update"
+fi
+
 echo "[before-starting] Enforcing OIDC-only login (allow_multiple_user_backends=0)..."
 php /var/www/html/occ config:app:set --type=string --value=0 user_oidc allow_multiple_user_backends 2>/dev/null || {
     echo "[before-starting] Warning: could not set allow_multiple_user_backends (user_oidc may not be installed yet)"
