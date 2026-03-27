@@ -514,6 +514,22 @@
         mode: '0644'
 
     # -------------------------------------------------------------------
+    # SSH hardening
+    # -------------------------------------------------------------------
+    - name: Harden sshd configuration
+      copy:
+        dest: /etc/ssh/sshd_config.d/99-hardening.conf
+        content: |
+          PasswordAuthentication no
+          PermitRootLogin prohibit-password
+          MaxAuthTries 3
+          X11Forwarding no
+          AllowAgentForwarding no
+          AllowTcpForwarding no
+        mode: '0644'
+      notify: restart sshd
+
+    # -------------------------------------------------------------------
     # Install Headscale
     # -------------------------------------------------------------------
     - name: Check if Headscale is already installed at target version
@@ -855,6 +871,11 @@
     - name: restart headscale
       systemd:
         name: headscale
+        state: restarted
+
+    - name: restart sshd
+      systemd:
+        name: ssh
         state: restarted
 
 # =============================================================================
