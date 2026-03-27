@@ -26,6 +26,7 @@ runcmd:
       --login-server="${headscale_url}" \
       --authkey="${tailscale_auth_key}" \
       --advertise-tags=tag:postfix-relay \
+      --hostname="postfix-relay-${env}" \
       --accept-routes=false \
       --ssh
 
