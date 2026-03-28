@@ -55,6 +55,12 @@ case "$COMPONENT" in
   *) print_error "Invalid component: $COMPONENT (must be pgbouncer, postfix, or all)"; exit 1 ;;
 esac
 
+# Validate expiration format (prevent command injection via SSH)
+if ! [[ "$KEY_EXPIRATION" =~ ^[0-9]+[hHdDmM]$ ]]; then
+  print_error "Invalid expiration format: $KEY_EXPIRATION (expected e.g. 8760h, 365d)"
+  exit 1
+fi
+
 # Load infra config (sets HEADSCALE_TAILSCALE_IP, HEADSCALE_SERVER_IP, etc.)
 source "${REPO_ROOT}/scripts/lib/infra-config.sh"
 mt_load_infra_config
@@ -128,7 +134,7 @@ fi
 print_status "Headscale connectivity OK"
 
 # Resolve Headscale user ID for 'infra' (v0.28+ requires numeric ID)
-HEADSCALE_USER_ID=$(ssh -o ConnectTimeout=10 "root@${HEADSCALE_SSH_HOST}" \
+HEADSCALE_USER_ID=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "root@${HEADSCALE_SSH_HOST}" \
   "headscale users list -o json" 2>/dev/null \
   | python3 -c "
 import json, sys
@@ -138,6 +144,10 @@ for u in json.loads(sys.stdin.read()):
         break
 " 2>/dev/null) || true
 : "${HEADSCALE_USER_ID:?Could not resolve Headscale user ID for 'infra'}"
+if ! [[ "$HEADSCALE_USER_ID" =~ ^[0-9]+$ ]]; then
+  print_error "Invalid Headscale user ID: $HEADSCALE_USER_ID (expected numeric)"
+  exit 1
+fi
 
 # Rotate keys
 for comp in "${COMPONENTS[@]}"; do
@@ -145,18 +155,18 @@ for comp in "${COMPONENTS[@]}"; do
   secrets_key=$(_component_secrets_key "$comp")
 
   print_status "[$comp] Creating new pre-auth key (tag: $tag, expiration: $KEY_EXPIRATION)..."
-  NEW_KEY=$(ssh -o ConnectTimeout=10 "root@${HEADSCALE_SSH_HOST}" \
+  NEW_KEY=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "root@${HEADSCALE_SSH_HOST}" \
     "headscale preauthkeys create --user $HEADSCALE_USER_ID --reusable --expiration $KEY_EXPIRATION --tags $tag" 2>/dev/null)
 
   if [ -z "$NEW_KEY" ]; then
     print_error "[$comp] Failed to create pre-auth key on Headscale"
     exit 1
   fi
-  print_status "[$comp] New key created: ${NEW_KEY:0:25}..."
+  print_status "[$comp] New key created (length: ${#NEW_KEY})"
 
-  # Update secrets YAML
+  # Update secrets YAML (use strenv to avoid shell injection via key value)
   print_status "[$comp] Updating secrets file..."
-  yq -i ".tailscale.${secrets_key} = \"${NEW_KEY}\"" "$SECRETS_FILE"
+  NEW_KEY="$NEW_KEY" yq -i ".tailscale.${secrets_key} = strenv(NEW_KEY)" "$SECRETS_FILE"
   print_success "[$comp] Secrets file updated: $SECRETS_FILE"
 
   # Apply to K8s if requested

@@ -111,12 +111,8 @@ for key in data:
     print_warning "  $comp: expires in ${days_left} days"
   done <<< "$expiring_components"
 
-  # Auto-rotate
+  # Auto-rotate each expiring component
   print_status "Auto-rotating expiring keys..."
-  local components_to_rotate
-  components_to_rotate=$(echo "$expiring_components" | cut -d: -f1 | sort -u | tr '\n' ',' | sed 's/,$//')
-
-  # Rotate each expiring component
   while IFS=: read -r comp _; do
     "$REPO_ROOT/scripts/rotate-tailscale-keys.sh" -e "$MT_ENV" "--component=$comp" --apply-now
   done <<< "$(echo "$expiring_components" | sort -u -t: -k1,1)"
