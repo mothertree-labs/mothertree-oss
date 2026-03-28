@@ -72,6 +72,15 @@ prometheus:
             interval: 30s
         namespaceSelector:
           any: true
+      - name: pg-metrics-bridge
+        selector:
+          matchLabels:
+            app: pg-metrics-bridge
+        endpoints:
+          - port: metrics
+            interval: 30s
+        namespaceSelector:
+          matchNames: [infra-db]
     # Additional PrometheusRule configurations
     additionalPrometheusRules:
       - name: matrix-alerts
@@ -340,24 +349,37 @@ additionalPrometheusRulesMap:
             for: 5m
             labels:
               severity: warning
-          - alert: PostgreSQLDown
+          - alert: PgBouncerDown
             annotations:
-              summary: Shared PostgreSQL is down
-              description: 'PostgreSQL primary has 0 ready replicas in infra-db. All tenant databases are unavailable.'
+              summary: PgBouncer has no ready replicas
+              description: 'PgBouncer deployment has 0 ready replicas in infra-db. All tenant database connections will fail.'
             expr: |-
-              kube_statefulset_status_replicas_ready{statefulset="docs-postgresql-primary", namespace="infra-db"} == 0
+              kube_deployment_status_replicas_ready{deployment="pgbouncer", namespace="infra-db"} == 0
             for: 1m
             labels:
               severity: critical
-          - alert: PostgreSQLReadReplicaDown
+          - alert: PgBouncerDegraded
             annotations:
-              summary: PostgreSQL read replica is down
-              description: 'PostgreSQL read replica has 0 ready replicas in infra-db. Read queries may fail.'
+              summary: PgBouncer is degraded
+              description: 'PgBouncer has fewer ready replicas than desired in infra-db. Reduced database connection capacity.'
             expr: |-
-              kube_statefulset_status_replicas_ready{statefulset="docs-postgresql-read", namespace="infra-db"} == 0
-            for: 2m
+              kube_deployment_status_replicas_ready{deployment="pgbouncer", namespace="infra-db"}
+                < kube_deployment_spec_replicas{deployment="pgbouncer", namespace="infra-db"}
+            for: 5m
             labels:
               severity: warning
+          - alert: PostgreSQLVMDown
+            annotations:
+              summary: PostgreSQL VM is unreachable
+              description: 'postgres_exporter on the external PG VM reports pg_up=0. All tenant databases may be unavailable.'
+            # Only fires when the metrics bridge is deployed and reporting pg_up=0.
+            # Does NOT use absent() to avoid false critical alerts in environments
+            # where the pg-metrics-bridge pod is not yet deployed (e.g., prod-eu).
+            expr: |-
+              pg_up{job="pg-metrics-bridge"} == 0
+            for: 2m
+            labels:
+              severity: critical
           - alert: CertificateExpiringSoon
             annotations:
               summary: 'Certificate {{ $labels.namespace }}/{{ $labels.name }} expiring soon'

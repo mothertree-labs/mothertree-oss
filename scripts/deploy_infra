@@ -425,6 +425,17 @@ else
   exit 1
 fi
 
+# =============================================================================
+# Deploy PG Metrics Bridge (forwards postgres_exporter from PG VM into cluster)
+# =============================================================================
+print_status "Deploying PG metrics bridge to $NS_DB namespace..."
+if [ -x "$REPO_ROOT/apps/deploy-pg-metrics-bridge.sh" ]; then
+  "$REPO_ROOT/apps/deploy-pg-metrics-bridge.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+else
+  print_error "deploy-pg-metrics-bridge.sh not found or not executable"
+  exit 1
+fi
+
 # Create Keycloak theme ConfigMap BEFORE deploying Keycloak.
 # Track whether the ConfigMap actually changed so we can conditionally restart
 # Keycloak below — unnecessary restarts destroy all user sessions (Infinispan).
