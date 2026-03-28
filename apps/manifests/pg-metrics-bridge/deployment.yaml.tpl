@@ -31,10 +31,13 @@ spec:
               port: 9187
             initialDelaySeconds: 10
             periodSeconds: 30
+          # End-to-end readiness: verifies socat -> Tailscale tunnel -> PG VM ->
+          # postgres_exporter chain is functional, not just that socat is listening.
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /metrics
               port: 9187
-            initialDelaySeconds: 5
+            initialDelaySeconds: 15
             periodSeconds: 10
           resources:
             requests:
@@ -43,9 +46,15 @@ spec:
             limits:
               memory: 32Mi
 
-        # Tailscale sidecar — WireGuard mesh connectivity to PG VM
+      # Native sidecar (K8s 1.28+): starts before main containers, terminated AFTER
+      # them. This guarantees the WireGuard tunnel stays alive while socat drains
+      # any in-flight requests on shutdown.
+      initContainers:
         - name: tailscale
+          # tailscale/tailscale:v1.94.2 — stable release, multi-arch
+          # https://hub.docker.com/r/tailscale/tailscale
           image: tailscale/tailscale:v1.94.2
+          restartPolicy: Always
           env:
             - name: POD_NAME
               valueFrom:
@@ -76,4 +85,4 @@ spec:
             limits:
               memory: 128Mi
 
-      terminationGracePeriodSeconds: 10
+      terminationGracePeriodSeconds: 15

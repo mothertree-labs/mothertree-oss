@@ -371,9 +371,12 @@ additionalPrometheusRulesMap:
           - alert: PostgreSQLVMDown
             annotations:
               summary: PostgreSQL VM is unreachable
-              description: 'postgres_exporter on the external PG VM reports pg_up=0 (or metrics bridge is down). All tenant databases may be unavailable.'
+              description: 'postgres_exporter on the external PG VM reports pg_up=0. All tenant databases may be unavailable.'
+            # Only fires when the metrics bridge is deployed and reporting pg_up=0.
+            # Does NOT use absent() to avoid false critical alerts in environments
+            # where the pg-metrics-bridge pod is not yet deployed (e.g., prod-eu).
             expr: |-
-              pg_up{job="pg-metrics-bridge"} == 0 or absent(pg_up{job="pg-metrics-bridge"})
+              pg_up{job="pg-metrics-bridge"} == 0
             for: 2m
             labels:
               severity: critical
