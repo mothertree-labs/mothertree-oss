@@ -146,6 +146,51 @@ export async function appendCalendarEmail(opts: {
 }
 
 /**
+ * Delete messages from a user's INBOX whose subject contains the given string.
+ * Used for test cleanup to prevent inbox accumulation across CI runs.
+ * Returns the number of messages deleted.
+ */
+export async function deleteEmailsBySubject(opts: {
+  userEmail: string;
+  subjectContains: string;
+}): Promise<number> {
+  const config = getImapConfig();
+  if (!config) return 0;
+
+  let client: typeof ImapFlow | null = null;
+  try {
+    client = await connectAsMaster(opts.userEmail, config);
+    await client.mailboxOpen('INBOX');
+
+    const uids = await client.search({ all: true });
+    if (!uids || uids.length === 0) return 0;
+
+    const needle = opts.subjectContains.toLowerCase();
+    const toDelete: number[] = [];
+
+    for await (const msg of client.fetch(uids, { uid: true, envelope: true })) {
+      const subject = (msg.envelope?.subject || '').toLowerCase();
+      if (subject.includes(needle)) {
+        toDelete.push(msg.uid);
+      }
+    }
+
+    if (toDelete.length > 0) {
+      await client.messageDelete(toDelete, { uid: true });
+    }
+
+    return toDelete.length;
+  } catch (err) {
+    console.warn(`Cleanup: failed to delete emails for ${opts.userEmail}: ${(err as Error).message}`);
+    return 0;
+  } finally {
+    if (client) {
+      await client.logout().catch(() => {});
+    }
+  }
+}
+
+/**
  * Count messages in the user's INBOX whose subject contains the given string.
  * Useful for asserting that no outbound scheduling emails were generated.
  */
