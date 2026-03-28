@@ -7,6 +7,10 @@ metadata:
     app: pg-metrics-bridge
 spec:
   replicas: 1
+  # Recreate: single-replica pod with Tailscale sidecar — two pods cannot share
+  # the same mesh identity during a rolling update, causing readiness failures.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: pg-metrics-bridge
@@ -31,13 +35,10 @@ spec:
               port: 9187
             initialDelaySeconds: 10
             periodSeconds: 30
-          # End-to-end readiness: verifies socat -> Tailscale tunnel -> PG VM ->
-          # postgres_exporter chain is functional, not just that socat is listening.
           readinessProbe:
-            httpGet:
-              path: /metrics
+            tcpSocket:
               port: 9187
-            initialDelaySeconds: 15
+            initialDelaySeconds: 5
             periodSeconds: 10
           resources:
             requests:
