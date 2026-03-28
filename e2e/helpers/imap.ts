@@ -176,6 +176,8 @@ export async function deleteEmailsBySubject(opts: {
     }
 
     if (toDelete.length > 0) {
+      // Stalwart requires explicit \Deleted flag before expunge
+      await client.messageFlagsAdd(toDelete, ['\\Deleted'], { uid: true });
       await client.messageDelete(toDelete, { uid: true });
     }
 
