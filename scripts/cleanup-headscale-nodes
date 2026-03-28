@@ -60,8 +60,12 @@ if [[ -z "$HEADSCALE_IP" ]]; then
 fi
 
 # K8s pod name patterns that create ephemeral Tailscale registrations.
-# VMs (localhost, postgres, postfix-relay) use stable names and are excluded.
+# Pod names follow K8s convention: <deployment>-<replicaset-hash>-<pod-hash>,
+# e.g., pgbouncer-7b4f9c6d8-x2k9l, postfix-5d6f7a8b9-abc12.
+# VM hostnames (postgres-{env}, postfix-relay-{env}) are explicitly excluded
+# to prevent deleting VM registrations during VM reboots or maintenance.
 POD_PATTERNS="pgbouncer-|postfix-"
+VM_NAMES="postgres-|postfix-relay-|router-"
 
 print_status "Cleaning up stale Headscale nodes (env: $MT_ENV)"
 print_status "  Headscale server: $HEADSCALE_IP"
@@ -84,13 +88,15 @@ fi
 STALE_FILE=$(mktemp)
 trap "rm -f $STALE_FILE" EXIT
 
-echo "$NODES_JSON" | POD_PATTERNS="$POD_PATTERNS" STALE_FILE="$STALE_FILE" python3 -c "
+echo "$NODES_JSON" | POD_PATTERNS="$POD_PATTERNS" VM_NAMES="$VM_NAMES" STALE_FILE="$STALE_FILE" python3 -c "
 import json, sys, os, re
 
 nodes = json.load(sys.stdin)
 patterns = os.environ['POD_PATTERNS']
+vm_patterns = os.environ['VM_NAMES']
 stale_file = os.environ['STALE_FILE']
 pattern_re = re.compile(patterns)
+vm_re = re.compile(vm_patterns)
 
 stale = []
 online_count = 0
@@ -100,6 +106,11 @@ for n in nodes:
     name = n.get('given_name') or n.get('name', '')
     online = n.get('online', False)
     nid = n.get('id')
+
+    # Skip VM hostnames — these are stable registrations, not ephemeral pods
+    if vm_re.search(name):
+        vm_count += 1
+        continue
 
     if not pattern_re.search(name):
         vm_count += 1
@@ -119,10 +130,12 @@ print(f'Online pod nodes kept: {online_count}')
 print(f'Stale to delete: {len(stale)}')
 
 with open(stale_file, 'w') as f:
-    f.write('\n'.join(stale))
+    if stale:
+        f.write('\n'.join(stale) + '\n')
 "
 
-STALE_COUNT=$(wc -l < "$STALE_FILE" | tr -d ' ')
+# Count non-empty lines (grep -c is robust regardless of trailing newline)
+STALE_COUNT=$(grep -c . "$STALE_FILE" 2>/dev/null || echo 0)
 
 if [[ "$STALE_COUNT" -eq 0 ]] || [[ ! -s "$STALE_FILE" ]]; then
   print_status "No stale nodes to clean up"

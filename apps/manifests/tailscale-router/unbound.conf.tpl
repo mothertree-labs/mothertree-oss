@@ -8,7 +8,11 @@
 server:
   interface: 0.0.0.0
   port: 53
-  access-control: 0.0.0.0/0 allow
+  # Only allow queries from the Tailscale CGNAT range and localhost.
+  # This DNS server is only meant to serve split DNS queries from the mesh.
+  access-control: 0.0.0.0/0 refuse
+  access-control: 127.0.0.0/8 allow
+  access-control: 100.64.0.0/10 allow
   do-daemonize: no
 
   # Logging
