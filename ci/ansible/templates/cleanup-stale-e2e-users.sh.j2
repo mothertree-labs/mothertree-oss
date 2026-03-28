@@ -16,12 +16,9 @@ WP_API_URL="http://localhost:8000/api"
 WP_API_TOKEN="{{ woodpecker_api_token }}"
 WP_REPO_ID=1
 
-# Pool configs: base_domain, kc_realm, kc_admin_password
-POOLS=(
-{% for pool in e2e_cleanup_pools %}
-  "{{ pool.base_domain }}|{{ pool.kc_realm }}|{{ pool.kc_admin_password }}"
-{% endfor %}
-)
+# Pool configs sourced from a separate env file to avoid shell metacharacter
+# issues with passwords containing ", $, `, etc.
+source /etc/mothertree/e2e-cleanup-pools.env
 
 # --- Get running pipeline numbers from Woodpecker ---
 get_running_pipelines() {
@@ -70,10 +67,11 @@ for pool_config in "${POOLS[@]}"; do
     "$kc_url/admin/realms/$kc_realm/users?search=e2e-&max=500" 2>/dev/null || echo "[]")
 
   # Extract pipeline numbers and user IDs, check against running pipelines
-  stale_users=$(echo "$users_json" | python3 -c "
-import json, sys, re
+  # Pass $running via env var to avoid shell/Python injection
+  stale_users=$(echo "$users_json" | RUNNING_PIPELINES="$running" python3 -c "
+import json, sys, re, os
 
-running = set(line.strip() for line in '''$running'''.strip().split('\n') if line.strip())
+running = set(line.strip() for line in os.environ['RUNNING_PIPELINES'].strip().split('\n') if line.strip())
 users = json.loads(sys.stdin.read())
 
 for u in users:

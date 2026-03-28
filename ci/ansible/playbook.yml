@@ -480,6 +480,24 @@
         user: root
         job: 'docker image prune -af --filter "until=168h" > /dev/null 2>&1; docker buildx prune -f --keep-storage=2GB > /dev/null 2>&1'
 
+    - name: Create mothertree config directory
+      ansible.builtin.file:
+        path: /etc/mothertree
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when: e2e_cleanup_pools is defined
+
+    - name: Deploy e2e cleanup pool credentials
+      ansible.builtin.template:
+        src: e2e-cleanup-pools.env.j2
+        dest: /etc/mothertree/e2e-cleanup-pools.env
+        owner: root
+        group: root
+        mode: "0600"
+      when: e2e_cleanup_pools is defined
+
     - name: Deploy stale e2e user cleanup script
       ansible.builtin.template:
         src: cleanup-stale-e2e-users.sh.j2
