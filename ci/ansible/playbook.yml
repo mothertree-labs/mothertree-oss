@@ -19,6 +19,47 @@
   vars:
     woodpecker_version: "{{ woodpecker_version_override | default('3.13.0') }}"
     plugin_git_version: "{{ plugin_git_version_override | default('2.8.1') }}"
+    # Path to tenant config submodule (relative to playbook)
+    _tenants_dir: "{{ playbook_dir }}/../../config/tenants"
+
+  pre_tasks:
+    # Auto-discover dev tenant Keycloak credentials for e2e user cleanup.
+    # Reads from config/tenants/*/dev.{config,secrets}.yaml at provision time
+    # so that KC admin passwords never need to be checked into ansible-vars.yml.
+    - name: Discover dev tenants for e2e cleanup
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          echo "["
+          first=true
+          for dir in "{{ _tenants_dir }}"/*/; do
+            config="$dir/dev.config.yaml"
+            secrets="$dir/dev.secrets.yaml"
+            [[ -f "$config" && -f "$secrets" ]] || continue
+            domain=$(yq '.dns.domain' "$config")
+            env_label=$(yq '.dns.env_dns_label // ""' "$config")
+            realm=$(yq '.keycloak.realm' "$config")
+            password=$(yq '.keycloak.admin_password // ""' "$secrets")
+            [[ -n "$password" && "$password" != "null" ]] || continue
+            base_domain="${env_label:+${env_label}.}${domain}"
+            $first || echo ","
+            first=false
+            printf '{"base_domain":"%s","kc_realm":"%s","kc_admin_password":"%s"}' \
+              "$base_domain" "$realm" "$password"
+          done
+          echo "]"
+        executable: /bin/bash
+      delegate_to: localhost
+      become: false
+      register: _tenant_discovery
+      changed_when: false
+      no_log: true
+
+    - name: Set e2e_cleanup_pools from discovered tenants
+      ansible.builtin.set_fact:
+        e2e_cleanup_pools: "{{ _tenant_discovery.stdout | from_json }}"
+      when: _tenant_discovery.stdout | default('[]') | from_json | length > 0
+      no_log: true
 
   tasks:
     # ── Remove Buildkite (cleanup from previous installation) ──────
