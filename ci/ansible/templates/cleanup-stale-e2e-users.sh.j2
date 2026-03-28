@@ -21,29 +21,29 @@ WP_REPO_ID=1
 source /etc/mothertree/e2e-cleanup-pools.env
 
 # --- Get running pipeline numbers from Woodpecker ---
-# Returns pipeline numbers on stdout (one per line), or empty if none are running.
-# Sets _WP_API_OK=true/false so callers can distinguish "zero running" from "API down".
-_WP_API_OK=false
-get_running_pipelines() {
-  local response
-  response=$(curl -sf --connect-timeout 10 --max-time 30 \
-    -H "Authorization: Bearer $WP_API_TOKEN" \
-    "$WP_API_URL/repos/$WP_REPO_ID/pipelines?perPage=50" 2>/dev/null) || return 0
-  _WP_API_OK=true
-  echo "$response" | python3 -c "
+# Writes running pipeline numbers to a temp file (one per line).
+# Uses a marker file to distinguish "API reachable, zero running" from "API down".
+_RUNNING_FILE=$(mktemp)
+_API_OK_FILE=$(mktemp)
+trap 'rm -f "$_RUNNING_FILE" "$_API_OK_FILE"' EXIT
+
+response=$(curl -sf --connect-timeout 10 --max-time 30 \
+  -H "Authorization: Bearer $WP_API_TOKEN" \
+  "$WP_API_URL/repos/$WP_REPO_ID/pipelines?perPage=50" 2>/dev/null) && touch "$_API_OK_FILE"
+
+if [ ! -f "$_API_OK_FILE" ]; then
+  echo "$LOG_PREFIX WARNING: Could not reach Woodpecker API — skipping cleanup"
+  exit 0
+fi
+
+echo "$response" | python3 -c "
 import json, sys
 for p in json.loads(sys.stdin.read()):
     if p.get('status') in ('running', 'pending'):
         print(p['number'])
-" 2>/dev/null || true
-}
+" 2>/dev/null > "$_RUNNING_FILE" || true
 
-# --- Main ---
-running=$(get_running_pipelines)
-if [ "$_WP_API_OK" != "true" ]; then
-  echo "$LOG_PREFIX WARNING: Could not reach Woodpecker API — skipping cleanup"
-  exit 0
-fi
+running=$(cat "$_RUNNING_FILE")
 
 total_deleted=0
 
