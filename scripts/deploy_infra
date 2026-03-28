@@ -39,8 +39,9 @@ mt_usage() {
   echo "Deploy shared infrastructure components for an environment."
   echo ""
   echo "Options:"
-  echo "  -e <env>       Environment (e.g., dev, prod)"
-  echo "  -h, --help     Show this help"
+  echo "  -e <env>              Environment (e.g., dev, prod)"
+  echo "  --rotate-all-keys     Force rotation of all Tailscale pre-auth keys"
+  echo "  -h, --help            Show this help"
   echo ""
   echo "Examples:"
   echo "  $0 -e prod    # Deploy infrastructure for production"
@@ -58,6 +59,17 @@ source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy_infra"
 
 mt_require_commands kubectl helm helmfile yq jq curl openssl
+
+# =============================================================================
+# Tailscale pre-auth key expiry check (auto-rotate if within 45 days)
+# =============================================================================
+source "${REPO_ROOT}/scripts/lib/tailscale-keys.sh"
+if mt_has_flag "--rotate-all-keys"; then
+  print_status "Force-rotating all Tailscale pre-auth keys..."
+  "$REPO_ROOT/scripts/rotate-tailscale-keys.sh" -e "$MT_ENV" --component=all --apply-now
+else
+  mt_check_and_rotate_expiring_keys 45
+fi
 
 # Validate Cloudflare IP ranges before deploying (firewall rules depend on these)
 print_status "Validating Cloudflare IP ranges..."
