@@ -278,7 +278,7 @@ else
   print_status "Created lb1 A record: $LB1_RECORD -> $INGRESS_IP (proxied=$CF_PROXIED)"
 
   # Create CNAME records for all tenant subdomains pointing to lb1
-  # Note: 'mail' is excluded - its A record is managed by Terraform
+  # Note: 'mail' is excluded — its A record is created above alongside the MX record
   PROXIED_SUBDOMAINS="matrix synapse docs files auth home admin account webmail calendar jitsi office"
   DNS_ONLY_SUBDOMAINS="imap smtp"
 
@@ -300,10 +300,31 @@ else
     create_dns_record "$record_name" "CNAME" "$LB1_RECORD" "false"
   done
 
-  # Create MX record for email domain
+  # Create mail DNS records (A record for MX target + MX record)
   if [ "$MAIL_ENABLED" = "true" ]; then
-    print_status "Creating MX record for $EMAIL_DOMAIN..."
+    # Load Postfix relay VM IP from terraform outputs (for the mail A record)
+    if [ -z "${POSTFIX_RELAY_SERVER_IP:-}" ]; then
+      _tf_out="${MT_TERRAFORM_OUTPUTS_FILE:-}"
+      if [ -z "$_tf_out" ] && [ -n "${MT_INFRA_CONFIG:-}" ]; then
+        _tf_out="${MT_INFRA_CONFIG%/*}/terraform-outputs.${MT_ENV}.env"
+      fi
+      if [ -n "$_tf_out" ] && [ -f "$_tf_out" ]; then
+        # shellcheck disable=SC1090
+        source "$_tf_out"
+      fi
+    fi
+
     MX_HOST="${MAIL_HOST}"
+
+    # Create/update the mail A record pointing to the Postfix relay VM
+    if [ -n "${POSTFIX_RELAY_SERVER_IP:-}" ] && [ "${POSTFIX_RELAY_SERVER_IP}" != "null" ]; then
+      create_dns_record "$MX_HOST" "A" "$POSTFIX_RELAY_SERVER_IP"
+      print_status "Updated DNS: $MX_HOST -> $POSTFIX_RELAY_SERVER_IP"
+    else
+      print_warning "POSTFIX_RELAY_SERVER_IP not available — skipping mail A record for $MX_HOST"
+    fi
+
+    print_status "Creating MX record for $EMAIL_DOMAIN..."
     create_mx_record "$EMAIL_DOMAIN" "$MX_HOST" 10
 
     # ==========================================================================
