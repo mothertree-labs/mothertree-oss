@@ -482,6 +482,54 @@
         cache_valid_time: 3600
 
     # -------------------------------------------------------------------
+    # Unattended security upgrades
+    # -------------------------------------------------------------------
+    - name: Install unattended-upgrades
+      apt:
+        name: unattended-upgrades
+        state: present
+
+    - name: Enable automatic security updates
+      copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+          APT::Periodic::AutocleanInterval "7";
+        mode: '0644'
+
+    - name: Configure unattended-upgrades (security only)
+      copy:
+        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        content: |
+          Unattended-Upgrade::Allowed-Origins {
+              "${distro_id}:${distro_codename}-security";
+              "${distro_id}ESMApps:${distro_codename}-apps-security";
+              "${distro_id}ESM:${distro_codename}-infra-security";
+          };
+          Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+          Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+          Unattended-Upgrade::Remove-Unused-Dependencies "true";
+          Unattended-Upgrade::Automatic-Reboot "false";
+        mode: '0644'
+
+    # -------------------------------------------------------------------
+    # SSH hardening
+    # -------------------------------------------------------------------
+    - name: Harden sshd configuration
+      copy:
+        dest: /etc/ssh/sshd_config.d/99-hardening.conf
+        content: |
+          PasswordAuthentication no
+          PermitRootLogin prohibit-password
+          MaxAuthTries 3
+          X11Forwarding no
+          AllowAgentForwarding no
+          AllowTcpForwarding no
+        mode: '0644'
+      notify: restart sshd
+
+    # -------------------------------------------------------------------
     # Install Headscale
     # -------------------------------------------------------------------
     - name: Check if Headscale is already installed at target version
@@ -691,6 +739,113 @@
         - { port: '8080', proto: 'tcp', comment: 'Headscale API' }
 
     # -------------------------------------------------------------------
+    # Automated backup — SQLite DB + keys to S3 via rclone
+    # -------------------------------------------------------------------
+    - name: Install rclone for S3 backups
+      shell: curl -fsSL https://rclone.org/install.sh | bash
+      args:
+        creates: /usr/bin/rclone
+
+    - name: Create rclone config directory
+      file:
+        path: /root/.config/rclone
+        state: directory
+        mode: '0700'
+
+    - name: Configure rclone for Linode Object Storage
+      template:
+        src: headscale-rclone.conf.j2
+        dest: /root/.config/rclone/rclone.conf
+        mode: '0600'
+      when: headscale_s3_key is defined and headscale_s3_key | length > 0
+
+    - name: Deploy Headscale backup script
+      template:
+        src: headscale-backup.sh.j2
+        dest: /usr/local/bin/headscale-backup.sh
+        mode: '0755'
+      when: headscale_s3_key is defined and headscale_s3_key | length > 0
+
+    - name: Schedule daily Headscale backup via cron
+      cron:
+        name: "headscale-backup"
+        minute: "30"
+        hour: "3"
+        job: "/usr/local/bin/headscale-backup.sh >> /var/log/headscale-backup.log 2>&1"
+      when: headscale_s3_key is defined and headscale_s3_key | length > 0
+
+    # -------------------------------------------------------------------
+    # Log shipping — Vector to Loki via internal ingress
+    # -------------------------------------------------------------------
+    - name: Check if Vector is installed
+      command: vector --version
+      register: vector_version
+      changed_when: false
+      failed_when: false
+
+    - name: Install Vector
+      shell: curl -fsSL https://sh.vector.dev | bash -s -- -y --prefix /usr/local
+      when: vector_version.rc != 0
+
+    - name: Create Vector config directory
+      file:
+        path: /etc/vector
+        state: directory
+        mode: '0755'
+
+    - name: Create Vector data directory
+      file:
+        path: /var/lib/vector
+        state: directory
+        mode: '0755'
+
+    - name: Add Loki internal hostname to /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        regexp: 'loki\.'
+        line: "{{ loki_internal_ip }} {{ loki_push_url | regex_replace('https?://', '') }}"
+        state: present
+      when: loki_push_url is defined and loki_internal_ip is defined
+
+    - name: Deploy Vector configuration
+      template:
+        src: headscale-vector.yaml.j2
+        dest: /etc/vector/vector.yaml
+        mode: '0644'
+      when: loki_push_url is defined and loki_push_url | length > 0
+      notify: restart vector
+
+    - name: Deploy Vector systemd unit
+      copy:
+        dest: /etc/systemd/system/vector.service
+        content: |
+          [Unit]
+          Description=Vector log agent
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          ExecStart=/usr/local/bin/vector --config /etc/vector/vector.yaml
+          Restart=always
+          RestartSec=5
+          User=root
+          Group=root
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart vector
+
+    - name: Enable and start Vector
+      systemd:
+        name: vector
+        enabled: yes
+        state: started
+      when: loki_push_url is defined and loki_push_url | length > 0
+
+    # -------------------------------------------------------------------
     # Create users and generate pre-auth keys
     # -------------------------------------------------------------------
     - name: Wait for Headscale to be ready
@@ -717,6 +872,55 @@
         - operators
       when: item not in hs_user_names
 
+    # -------------------------------------------------------------------
+    # Tailscale client — join the server's own mesh for operator SSH access.
+    # Public SSH is blocked at the cloud firewall; operators use Tailscale SSH.
+    # -------------------------------------------------------------------
+    - name: Check if Tailscale client is installed
+      command: tailscale version
+      register: hs_ts_version
+      changed_when: false
+      failed_when: false
+
+    - name: Install Tailscale client if not present
+      shell: curl -fsSL https://tailscale.com/install.sh | sh
+      when: hs_ts_version.rc != 0
+
+    - name: Ensure Tailscale client is enabled and running
+      systemd:
+        name: tailscaled
+        enabled: yes
+        state: started
+
+    - name: Check Tailscale client status
+      command: tailscale status --json
+      register: hs_ts_status
+      changed_when: false
+      failed_when: false
+
+    - name: Join own tailnet if not connected
+      command: >
+        tailscale up
+        --reset
+        --login-server=https://{{ headscale_domain }}:8080
+        --authkey={{ tailscale_auth_key }}
+        --accept-routes=true
+      when: >
+        tailscale_auth_key is defined and tailscale_auth_key | length > 0 and
+        (hs_ts_status.rc != 0 or
+        (hs_ts_status.stdout | from_json).BackendState != "Running")
+
+    - name: Get Headscale server Tailscale IP
+      command: tailscale ip -4
+      register: hs_tailscale_ip
+      changed_when: false
+      when: tailscale_auth_key is defined and tailscale_auth_key | length > 0
+
+    - name: Display Tailscale IP
+      debug:
+        msg: "Headscale server Tailscale IP: {{ hs_tailscale_ip.stdout }}"
+      when: hs_tailscale_ip is defined and hs_tailscale_ip.stdout is defined
+
     - name: Display post-setup instructions
       debug:
         msg: |
@@ -724,7 +928,7 @@
 
           To generate a pre-auth key for infrastructure nodes:
             ssh root@{{ headscale_domain }} \
-              headscale preauthkeys create --user infra --reusable --expiration 87600h --tags tag:k8s-node
+              headscale preauthkeys create --user infra --reusable --expiration 8760h --tags tag:k8s-node
 
           To register an operator (OIDC or CLI):
             headscale users create <username>
@@ -738,6 +942,16 @@
     - name: restart headscale
       systemd:
         name: headscale
+        state: restarted
+
+    - name: restart sshd
+      systemd:
+        name: ssh
+        state: restarted
+
+    - name: restart vector
+      systemd:
+        name: vector
         state: restarted
 
 # =============================================================================

@@ -112,15 +112,18 @@ _mt_infra_load_env_config() {
     PGBOUNCER_ENABLED=$(yq '.pgbouncer.enabled // false' "$infra_config")
     PG_VM_TAILSCALE_IP=$(yq '.pgbouncer.pg_vm_tailscale_ip // ""' "$infra_config")
     PGBOUNCER_MAX_CLIENT_CONN=$(yq '.pgbouncer.max_client_conn // 400' "$infra_config")
-    PGBOUNCER_DEFAULT_POOL_SIZE=$(yq '.pgbouncer.default_pool_size // 50' "$infra_config")
+    PGBOUNCER_DEFAULT_POOL_SIZE=$(yq '.pgbouncer.default_pool_size // 15' "$infra_config")
+    PGBOUNCER_MIN_POOL_SIZE=$(yq '.pgbouncer.min_pool_size // 2' "$infra_config")
+    PGBOUNCER_RESERVE_POOL_SIZE=$(yq '.pgbouncer.reserve_pool_size // 2' "$infra_config")
     export PGBOUNCER_ENABLED PG_VM_TAILSCALE_IP
-    export PGBOUNCER_MAX_CLIENT_CONN PGBOUNCER_DEFAULT_POOL_SIZE
+    export PGBOUNCER_MAX_CLIENT_CONN PGBOUNCER_DEFAULT_POOL_SIZE PGBOUNCER_MIN_POOL_SIZE PGBOUNCER_RESERVE_POOL_SIZE
 
     # Headscale coordination server
     HEADSCALE_URL=$(yq '.headscale.url // ""' "$infra_config")
     HEADSCALE_DOMAIN=$(yq '.headscale.domain // ""' "$infra_config")
     HEADSCALE_BASE_DOMAIN=$(yq '.headscale.base_domain // ""' "$infra_config")
-    export HEADSCALE_URL HEADSCALE_DOMAIN HEADSCALE_BASE_DOMAIN
+    HEADSCALE_TAILSCALE_IP=$(yq '.headscale.tailscale_ip // ""' "$infra_config")
+    export HEADSCALE_URL HEADSCALE_DOMAIN HEADSCALE_BASE_DOMAIN HEADSCALE_TAILSCALE_IP
 
     # Postfix relay VM on Tailscale mesh (replaces VPN server mail relay)
     POSTFIX_RELAY_IP=$(yq '.postfix_relay.tailscale_ip // ""' "$infra_config")
@@ -343,13 +346,23 @@ _mt_infra_load_shared_secrets() {
     echo "[INFO] AWS SES SMTP relay credentials loaded from infra tenant secrets"
   fi
 
-  # Tailscale pre-auth key (used by PG VM and PgBouncer sidecars to join mesh)
+  # Tailscale pre-auth keys (generic + per-component tagged keys for ACL enforcement)
   local _ts_authkey
   _ts_authkey=$(yq '.tailscale.authkey // ""' "$_infra_secrets")
   if [ -n "$_ts_authkey" ] && [ "$_ts_authkey" != "null" ]; then
     export TAILSCALE_AUTHKEY="$_ts_authkey"
     echo "[INFO] Tailscale auth key loaded from infra tenant secrets"
   fi
+  # Per-component keys: when ACLs are enabled, each component needs a key
+  # with the correct tag so new pods register with the right permissions.
+  # Falls back to generic TAILSCALE_AUTHKEY if not set.
+  local _ts_pgb_key _ts_postfix_key _ts_router_key
+  _ts_pgb_key=$(yq '.tailscale.pgbouncer_authkey // ""' "$_infra_secrets")
+  _ts_postfix_key=$(yq '.tailscale.postfix_authkey // ""' "$_infra_secrets")
+  _ts_router_key=$(yq '.tailscale.router_authkey // ""' "$_infra_secrets")
+  [ -n "$_ts_pgb_key" ] && [ "$_ts_pgb_key" != "null" ] && export TAILSCALE_AUTHKEY_PGBOUNCER="$_ts_pgb_key"
+  [ -n "$_ts_postfix_key" ] && [ "$_ts_postfix_key" != "null" ] && export TAILSCALE_AUTHKEY_POSTFIX="$_ts_postfix_key"
+  [ -n "$_ts_router_key" ] && [ "$_ts_router_key" != "null" ] && export TAILSCALE_AUTHKEY_ROUTER="$_ts_router_key"
 
   # PgBouncer auth password (optional — only when PGBOUNCER_ENABLED=true)
   if [ "${PGBOUNCER_ENABLED:-false}" = "true" ]; then

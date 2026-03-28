@@ -9,8 +9,10 @@
     "tag:postfix-relay": ["group:admins"],
     "tag:monitoring": ["group:admins"],
     "tag:operator": ["group:admins"],
+    "tag:headscale": ["group:admins"],
     "tag:k8s-node": ["group:admins"],
-    "tag:ci": ["group:admins"]
+    "tag:ci": ["group:admins"],
+    "tag:router": ["group:admins"]
   },
   "acls": [
     {"action": "accept", "src": ["tag:pgbouncer"], "dst": ["tag:postgres:5432"]},
@@ -18,6 +20,17 @@
     {"action": "accept", "src": ["tag:postfix-k8s"], "dst": ["tag:postfix-relay:25"]},
     {"action": "accept", "src": ["tag:postfix-relay"], "dst": ["tag:postfix-k8s:25"]},
     {"action": "accept", "src": ["tag:ci"], "dst": ["tag:k8s-node:6443", "tag:postgres:5432"]},
-    {"action": "accept", "src": ["tag:operator"], "dst": ["*:*"]}
+    {"action": "accept", "src": ["tag:router"], "dst": ["*:*"]},
+    {"action": "accept", "src": ["tag:headscale"], "dst": ["*:*"]},
+    {"action": "accept", "src": ["tag:operator"], "dst": ["*:*"]},
+    {"action": "accept", "src": ["operators@"], "dst": ["*:*"]}
+  ],
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["tag:operator", "operators@"],
+      "dst": ["tag:postgres", "tag:postfix-relay", "tag:ci", "tag:headscale"],
+      "users": ["root"]
+    }
   ]
 }

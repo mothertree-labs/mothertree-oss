@@ -13,6 +13,14 @@ const SYNAPSE_ADMIN_URL = process.env.SYNAPSE_ADMIN_URL;
 const SYNAPSE_SHARED_SECRET = process.env.SYNAPSE_SHARED_SECRET;
 const MATRIX_DOMAIN = process.env.MATRIX_DOMAIN;
 
+// Timeout for Synapse API requests. Guards against indefinitely hung
+// connections when the service is unreachable or slow.
+const FETCH_TIMEOUT_MS = parseInt(process.env.SYNAPSE_FETCH_TIMEOUT_MS, 10) || 30_000;
+
+function fetchWithTimeout(url, options = {}) {
+  return fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+}
+
 /**
  * Ensure a Matrix user exists on Synapse for the given email address.
  *
@@ -37,7 +45,7 @@ async function ensureMatrixUser(email, displayName) {
   const randomPassword = crypto.randomBytes(32).toString('base64url');
 
   // Step 1: Get a registration nonce from Synapse
-  const nonceResponse = await fetch(`${SYNAPSE_ADMIN_URL}/_synapse/admin/v1/register`, {
+  const nonceResponse = await fetchWithTimeout(`${SYNAPSE_ADMIN_URL}/_synapse/admin/v1/register`, {
     method: 'GET',
   });
 
@@ -55,7 +63,7 @@ async function ensureMatrixUser(email, displayName) {
     .digest('hex');
 
   // Step 3: Register the user
-  const registerResponse = await fetch(`${SYNAPSE_ADMIN_URL}/_synapse/admin/v1/register`, {
+  const registerResponse = await fetchWithTimeout(`${SYNAPSE_ADMIN_URL}/_synapse/admin/v1/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

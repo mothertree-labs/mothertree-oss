@@ -61,8 +61,8 @@ export PG_VM_TAILSCALE_IP
 : "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
 export HEADSCALE_URL
 
-# Required: Tailscale pre-auth key (from infra secrets)
-: "${TAILSCALE_AUTHKEY:?TAILSCALE_AUTHKEY not set. Add tailscale.authkey to infra secrets.}"
+# Required: Tailscale pre-auth key — prefer tagged key for ACL enforcement
+TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY_PGBOUNCER:-${TAILSCALE_AUTHKEY:?TAILSCALE_AUTHKEY not set. Add tailscale.authkey to infra secrets.}}"
 
 # Required: PgBouncer auth password (for auth_query bootstrap)
 : "${PGBOUNCER_AUTH_PASSWORD:?PGBOUNCER_AUTH_PASSWORD not set. Add pgbouncer.auth_password to infra secrets.}"
@@ -73,7 +73,9 @@ export PG_SUPERUSER_PASSWORD="$TF_VAR_postgres_password"
 
 # Pool sizing (defaults can be overridden in infra config)
 export PGBOUNCER_MAX_CLIENT_CONN="${PGBOUNCER_MAX_CLIENT_CONN:-400}"
-export PGBOUNCER_DEFAULT_POOL_SIZE="${PGBOUNCER_DEFAULT_POOL_SIZE:-50}"
+export PGBOUNCER_DEFAULT_POOL_SIZE="${PGBOUNCER_DEFAULT_POOL_SIZE:-15}"
+export PGBOUNCER_MIN_POOL_SIZE="${PGBOUNCER_MIN_POOL_SIZE:-2}"
+export PGBOUNCER_RESERVE_POOL_SIZE="${PGBOUNCER_RESERVE_POOL_SIZE:-2}"
 
 print_status "Deploying PgBouncer to $NS_DB (env: $MT_ENV)"
 print_status "  PG VM Tailscale IP: $PG_VM_TAILSCALE_IP"
@@ -88,7 +90,7 @@ print_status "  Default pool size: $PGBOUNCER_DEFAULT_POOL_SIZE"
 WORK_DIR=$(mktemp -d)
 trap "rm -rf $WORK_DIR" EXIT
 
-envsubst '${PG_VM_TAILSCALE_IP} ${PGBOUNCER_MAX_CLIENT_CONN} ${PGBOUNCER_DEFAULT_POOL_SIZE}' \
+envsubst '${PG_VM_TAILSCALE_IP} ${PGBOUNCER_MAX_CLIENT_CONN} ${PGBOUNCER_DEFAULT_POOL_SIZE} ${PGBOUNCER_MIN_POOL_SIZE} ${PGBOUNCER_RESERVE_POOL_SIZE}' \
   < "$MANIFESTS_DIR/pgbouncer.ini.tpl" > "$WORK_DIR/pgbouncer.ini"
 
 # =============================================================================

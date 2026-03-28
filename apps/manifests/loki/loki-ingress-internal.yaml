@@ -1,0 +1,24 @@
+---
+# Loki internal ingress — allows VM-based Vector agents (Headscale, PG, etc.)
+# to push logs to Loki via the Tailscale mesh and internal ingress.
+# Only reachable from inside the cluster or via the mesh subnet router.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: loki
+  namespace: infra-monitoring
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+spec:
+  ingressClassName: nginx-internal
+  rules:
+  - host: loki.${ENV_DNS_LABEL}.${INFRA_DOMAIN}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: loki
+            port:
+              number: 3100

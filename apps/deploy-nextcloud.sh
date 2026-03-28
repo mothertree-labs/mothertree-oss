@@ -713,6 +713,23 @@ else
     fi
 fi
 
+# Step 6c: Reset OIDC-only login before waiting for readiness.
+# The calendar-automation deploy temporarily sets allow_multiple_user_backends=1
+# (needed for app password creation). If a previous pipeline was killed mid-deploy,
+# this value stays at 1, which poisons the readiness probe (oidc-health.php) on ALL
+# pods — causing rollout timeouts. Reset it here as a self-healing mechanism.
+_NC_RESET_POD=$(kubectl get pods -n "$NS_FILES" -l app.kubernetes.io/name=nextcloud \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$_NC_RESET_POD" ]; then
+    _CURRENT_VAL=$(kubectl exec -n "$NS_FILES" "$_NC_RESET_POD" -c nextcloud -- \
+        php occ config:app:get user_oidc allow_multiple_user_backends 2>/dev/null || echo "unknown")
+    if [ "$_CURRENT_VAL" = "1" ]; then
+        print_warning "allow_multiple_user_backends=1 (stale from killed pipeline) — resetting to 0"
+        kubectl exec -n "$NS_FILES" "$_NC_RESET_POD" -c nextcloud -- \
+            php occ config:app:set --type=string --value=0 user_oidc allow_multiple_user_backends 2>/dev/null || true
+    fi
+fi
+
 # Step 7: Wait for Nextcloud to be ready
 print_status "Waiting for Nextcloud pod to be ready (this may take a few minutes)..."
 if ! poll_pod_ready "$NS_FILES" "app.kubernetes.io/instance=nextcloud" 600 5; then
@@ -826,19 +843,23 @@ fi
 # Step 7d: Set overwrite.cli.url for pretty URLs (.htaccess rewrites)
 # Without this, Apache can't rewrite /apps/calendar (and similar paths) to index.php,
 # causing 404 errors on the calendar subdomain and any pretty URL route.
+# Run on ALL pods — with HPA the service load-balances across replicas, so every
+# pod needs .htaccess. The before-starting hook handles future restarts.
 print_status "Configuring overwrite.cli.url for pretty URLs..."
-NEXTCLOUD_POD=$(_get_nc_pod)
-if [ -n "$NEXTCLOUD_POD" ]; then
-    if timeout 30 kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-            su -s /bin/sh www-data -c "php occ config:system:set overwrite.cli.url --value='https://$FILES_HOST'" 2>/dev/null && \
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-            su -s /bin/sh www-data -c "php occ maintenance:update:htaccess" 2>/dev/null && \
-        print_success "overwrite.cli.url set and .htaccess updated" || \
-        print_warning "Failed to set overwrite.cli.url (non-critical on first install)"
-    fi
+NC_PODS=$(kubectl get pods -n "$NS_FILES" -l app.kubernetes.io/name=nextcloud --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+if [ -n "$NC_PODS" ]; then
+    for NC_POD in $NC_PODS; do
+        if timeout 30 kubectl exec -n "$NS_FILES" "$NC_POD" -- test -f /var/www/html/config/config.php 2>/dev/null; then
+            kubectl exec -n "$NS_FILES" "$NC_POD" -c nextcloud -- \
+                su -s /bin/sh www-data -c "php occ config:system:set overwrite.cli.url --value='https://$FILES_HOST'" 2>/dev/null && \
+            kubectl exec -n "$NS_FILES" "$NC_POD" -c nextcloud -- \
+                su -s /bin/sh www-data -c "php occ maintenance:update:htaccess" 2>/dev/null && \
+            print_success "overwrite.cli.url set and .htaccess updated on $NC_POD" || \
+            print_warning "Failed to set overwrite.cli.url on $NC_POD (non-critical on first install)"
+        fi
+    done
 else
-    print_warning "Nextcloud pod not found, skipping overwrite.cli.url"
+    print_warning "No Nextcloud pods found, skipping overwrite.cli.url"
 fi
 
 # Step 8: Generate and apply OIDC configuration job from template
