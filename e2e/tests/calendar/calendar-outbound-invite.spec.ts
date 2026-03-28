@@ -8,7 +8,7 @@ import {
   getNextcloudUserId,
 } from '../../helpers/caldav';
 import { buildEvent, futureDateIcal } from '../../helpers/ical-builder';
-import { isImapConfigured, countInboxBySubject } from '../../helpers/imap';
+import { isImapConfigured, countInboxBySubject, deleteEmailsBySubject } from '../../helpers/imap';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -143,6 +143,11 @@ test.describe('Calendar — Outbound Invitation Email', () => {
         await caldavDelete(emailTestPage, organizerNcId, uid).catch((e) =>
           console.warn('Cleanup: failed to delete event:', e.message),
         );
+      }
+      // ── Cleanup: Delete invitation email from attendee's inbox ─────────
+      if (isImapConfigured()) {
+        const deleted = await deleteEmailsBySubject({ userEmail: attendee.email, subjectContains: eventTitle });
+        if (deleted > 0) console.log(`  [cleanup] Deleted ${deleted} invitation email(s) from ${attendee.email}`);
       }
     }
   });

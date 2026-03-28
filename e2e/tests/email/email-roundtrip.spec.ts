@@ -2,7 +2,7 @@ import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
-import { isImapConfigured, waitForEmailBody } from '../../helpers/imap';
+import { isImapConfigured, waitForEmailBody, deleteEmailsBySubject } from '../../helpers/imap';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -51,93 +51,103 @@ test.describe('Email — Round-Trip via Echo Group', () => {
 
     const sender = TEST_USERS.emailTest;
     const receiver = TEST_USERS.emailRecv;
-
-    // ── Step 1: Sender logs into Roundcube and sends email to the echo group ──
-    await roundcubeLogin(senderPage, sender.username, sender.password);
-
-    // Wait for Roundcube JS app to finish initializing (rcmail.busy clears
-    // after IMAP inbox load completes — large inboxes delay this)
-    await senderPage.waitForFunction(
-      () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
-      { timeout: 30_000 },
-    );
-    await senderPage.getByRole('button', { name: 'Compose' }).click();
-    const subjectInput = senderPage.getByRole('textbox', { name: 'Subject' });
-    await subjectInput.waitFor({ timeout: 15_000 });
-
-    const toInput = senderPage.locator('.recipient-input input').first();
-    await toInput.waitFor({ state: 'visible', timeout: 10_000 });
-    await toInput.click();
-    await toInput.pressSequentially(echoGroupAddress);
-    await toInput.press('Enter');
-
     const subject = `E2E Round-Trip Test ${Date.now()}`;
-    await subjectInput.fill(subject);
 
-    const bodyFrame = senderPage.frameLocator('iframe').first();
-    await bodyFrame.locator('body').fill('E2E round-trip test message');
+    try {
+      // ── Step 1: Sender logs into Roundcube and sends email to the echo group ──
+      await roundcubeLogin(senderPage, sender.username, sender.password);
 
-    await senderPage.getByRole('button', { name: 'Send' }).click();
+      // Wait for Roundcube JS app to finish initializing (rcmail.busy clears
+      // after IMAP inbox load completes — large inboxes delay this)
+      await senderPage.waitForFunction(
+        () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
+        { timeout: 30_000 },
+      );
+      await senderPage.getByRole('button', { name: 'Compose' }).click();
+      const subjectInput = senderPage.getByRole('textbox', { name: 'Subject' });
+      await subjectInput.waitFor({ timeout: 15_000 });
 
-    // Wait for send to complete (returns to inbox)
-    await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
+      const toInput = senderPage.locator('.recipient-input input').first();
+      await toInput.waitFor({ state: 'visible', timeout: 10_000 });
+      await toInput.click();
+      await toInput.pressSequentially(echoGroupAddress);
+      await toInput.press('Enter');
 
-    // ── Step 2: Receiver logs into Roundcube and polls for the forwarded email ──
-    await roundcubeLogin(receiverPage, receiver.username, receiver.password);
+      await subjectInput.fill(subject);
 
-    const maxWait = 120_000;
-    const pollInterval = 5_000;
-    let found = false;
-    const start = Date.now();
+      const bodyFrame = senderPage.frameLocator('iframe').first();
+      await bodyFrame.locator('body').fill('E2E round-trip test message');
 
-    while (Date.now() - start < maxWait) {
-      // Refresh inbox
-      const refreshed = await receiverPage.getByRole('button', { name: /refresh|check/i }).first()
-        .click({ timeout: 3000 }).then(() => true).catch(() => false);
-      if (!refreshed) {
-        await receiverPage.reload();
-        await receiverPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 15_000 });
+      await senderPage.getByRole('button', { name: 'Send' }).click();
+
+      // Wait for send to complete (returns to inbox)
+      await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
+
+      // ── Step 2: Receiver logs into Roundcube and polls for the forwarded email ──
+      await roundcubeLogin(receiverPage, receiver.username, receiver.password);
+
+      const maxWait = 120_000;
+      const pollInterval = 5_000;
+      let found = false;
+      const start = Date.now();
+
+      while (Date.now() - start < maxWait) {
+        // Refresh inbox
+        const refreshed = await receiverPage.getByRole('button', { name: /refresh|check/i }).first()
+          .click({ timeout: 3000 }).then(() => true).catch(() => false);
+        if (!refreshed) {
+          await receiverPage.reload();
+          await receiverPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 15_000 });
+        }
+        await receiverPage.waitForTimeout(2000);
+
+        // Check if the email appears in the message list
+        const hasSubject = await receiverPage.locator(`td:has-text("${subject}")`).first()
+          .isVisible().catch(() => false);
+
+        if (hasSubject) {
+          found = true;
+          break;
+        }
+
+        await receiverPage.waitForTimeout(pollInterval);
       }
-      await receiverPage.waitForTimeout(2000);
 
-      // Check if the email appears in the message list
-      const hasSubject = await receiverPage.locator(`td:has-text("${subject}")`).first()
-        .isVisible().catch(() => false);
+      expect(found, `Expected email with subject "${subject}" to appear in receiver's inbox within ${maxWait / 1000}s`).toBe(true);
 
-      if (hasSubject) {
-        found = true;
-        break;
+      // ── Step 3: Verify the received email's From header includes a display name ──
+      // Download the email via IMAP and check that the original sender's From header
+      // has "Display Name <email>" rather than just a bare email address.
+      if (isImapConfigured()) {
+        const rawMime = await waitForEmailBody({
+          userEmail: receiver.email,
+          subjectContains: subject,
+          timeoutMs: 15_000,
+        });
+
+        const fromMatch = rawMime.match(/^From:\s*(.+)$/mi);
+        expect(fromMatch, 'Expected From header in received email').toBeTruthy();
+        const fromHeader = fromMatch![1];
+
+        // From should be: "Display Name" <email@domain> or Display Name <email@domain>
+        // Not just: email@domain or <email@domain>
+        const hasAngleBracket = fromHeader.includes('<');
+        const displayName = hasAngleBracket
+          ? fromHeader.split('<')[0].trim().replace(/"/g, '')
+          : '';
+        expect(
+          displayName.length,
+          `From header of received email should include a display name, got: "${fromHeader}"`,
+        ).toBeGreaterThan(0);
       }
-
-      await receiverPage.waitForTimeout(pollInterval);
-    }
-
-    expect(found, `Expected email with subject "${subject}" to appear in receiver's inbox within ${maxWait / 1000}s`).toBe(true);
-
-    // ── Step 3: Verify the received email's From header includes a display name ──
-    // Download the email via IMAP and check that the original sender's From header
-    // has "Display Name <email>" rather than just a bare email address.
-    if (isImapConfigured()) {
-      const rawMime = await waitForEmailBody({
-        userEmail: receiver.email,
-        subjectContains: subject,
-        timeoutMs: 15_000,
-      });
-
-      const fromMatch = rawMime.match(/^From:\s*(.+)$/mi);
-      expect(fromMatch, 'Expected From header in received email').toBeTruthy();
-      const fromHeader = fromMatch![1];
-
-      // From should be: "Display Name" <email@domain> or Display Name <email@domain>
-      // Not just: email@domain or <email@domain>
-      const hasAngleBracket = fromHeader.includes('<');
-      const displayName = hasAngleBracket
-        ? fromHeader.split('<')[0].trim().replace(/"/g, '')
-        : '';
-      expect(
-        displayName.length,
-        `From header of received email should include a display name, got: "${fromHeader}"`,
-      ).toBeGreaterThan(0);
+    } finally {
+      // ── Cleanup: delete test emails from both sender and receiver inboxes ──
+      if (isImapConfigured()) {
+        const deleted = await deleteEmailsBySubject({ userEmail: receiver.email, subjectContains: subject });
+        if (deleted > 0) console.log(`  [cleanup] Deleted ${deleted} email(s) from ${receiver.email}`);
+        const deletedSender = await deleteEmailsBySubject({ userEmail: sender.email, subjectContains: subject });
+        if (deletedSender > 0) console.log(`  [cleanup] Deleted ${deletedSender} email(s) from ${sender.email}`);
+      }
     }
   });
 });
