@@ -1,7 +1,7 @@
-The `/ci-logs` command lives in the **private config submodule** at:
+# CI Log Retrieval
 
-```
-config/platform/.claude/commands/ci-logs.md
-```
+Retrieve and analyze Woodpecker CI build logs. The full instructions live in the private config submodule.
 
-If the private config submodule is available, run that command instead. If it's not available, let the user know they need the private config submodule checked out to use CI log retrieval.
+**Read `config/platform/.claude/commands/ci-logs.md` and follow those instructions exactly.**
+
+Pass through all user arguments (build number, pipeline, step, failure analysis) to the instructions in that file.
