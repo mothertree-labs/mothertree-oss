@@ -19,6 +19,11 @@ export default defineConfig({
   globalSetup: './global-setup.ts',
   globalTeardown: './global-teardown.ts',
 
+  // Per-shard cap: fail the shard if total execution exceeds 15 minutes.
+  // Prevents a cascade of slow calendar/email tests from holding the
+  // e2e protection lock indefinitely, blocking other pipelines' deploy_infra.
+  globalTimeout: process.env.CI ? 15 * 60_000 : undefined,
+
   timeout: 60_000,
 
   use: {

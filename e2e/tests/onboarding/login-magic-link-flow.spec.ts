@@ -28,7 +28,7 @@ const baseDomain = urls.baseDomain;
  * - IMAP access configured (E2E_STALWART_ADMIN_PASSWORD)
  */
 test.describe('Login — Magic Link Flow (Returning User)', () => {
-  test.setTimeout(300_000); // 5 minutes
+  test.setTimeout(180_000); // 5 minutes
 
   test('returning magic-link user can log in via email link', async ({ adminPage }) => {
     test.skip(!isImapConfigured(), 'IMAP not configured (E2E_STALWART_ADMIN_PASSWORD not set)');
@@ -72,7 +72,7 @@ test.describe('Login — Magic Link Flow (Returning User)', () => {
       const rawEmail = await waitForEmailBody({
         userEmail: TEST_USERS.emailTest.email,
         bodyContains: uniqueId,
-        timeoutMs: 180_000,
+        timeoutMs: 90_000,
         pollIntervalMs: 3_000,
       });
 

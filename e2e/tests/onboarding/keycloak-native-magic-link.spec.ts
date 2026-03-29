@@ -25,7 +25,7 @@ const baseDomain = urls.baseDomain;
  * 6. Navigate to magic-link URL -> authenticated -> account portal home
  */
 test.describe('Keycloak Native Magic-Link (credential-less user)', () => {
-  test.setTimeout(300_000); // 5 minutes
+  test.setTimeout(180_000); // 5 minutes
 
   test('credential-less user authenticates via Keycloak-native magic link', async ({ adminPage }) => {
     test.skip(!isImapConfigured(), 'IMAP not configured (E2E_STALWART_ADMIN_PASSWORD not set)');
