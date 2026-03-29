@@ -40,12 +40,13 @@
             env_label=$(yq '.dns.env_dns_label // ""' "$config")
             realm=$(yq '.keycloak.realm' "$config")
             password=$(yq '.keycloak.admin_password // ""' "$secrets")
+            stalwart_pw=$(yq '.stalwart.admin_password // ""' "$secrets")
             [[ -n "$password" && "$password" != "null" ]] || continue
             base_domain="${env_label:+${env_label}.}${domain}"
             $first || echo ","
             first=false
-            printf '{"base_domain":"%s","kc_realm":"%s","kc_admin_password":"%s"}' \
-              "$base_domain" "$realm" "$password"
+            printf '{"base_domain":"%s","kc_realm":"%s","kc_admin_password":"%s","stalwart_admin_password":"%s"}' \
+              "$base_domain" "$realm" "$password" "${stalwart_pw:-}"
           done
           echo "]"
         executable: /bin/bash
