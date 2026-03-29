@@ -17,22 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 source "${REPO_ROOT}/scripts/lib/common.sh"
-
-KEYCLOAK_VERSION=$(grep -E "^  tag:" "$REPO_ROOT/apps/values/keycloak-codecentric.yaml" | awk '{print $2}' | tr -d '"')
-if [ -z "$KEYCLOAK_VERSION" ]; then
-    print_error "Could not determine Keycloak version from apps/values/keycloak-codecentric.yaml"
-    exit 1
-fi
-print_status "Using Keycloak version: $KEYCLOAK_VERSION"
-
-CONTAINER_NAME="keycloak-dev"
-KEYCLOAK_URL="http://localhost:8080"
-ADMIN_USER="admin"
-ADMIN_PASSWORD="admin"
-REALM="dev"
-CLIENT_ID="account-portal"
-TEST_USER="testuser"
-TEST_PASSWORD="testpassword"
+source "${REPO_ROOT}/scripts/localhost/lib-keycloak.sh"
 
 RESTART_KEYCLOAK=false
 
@@ -64,7 +49,12 @@ for arg in "$@"; do
     esac
 done
 
+mt_keycloak_init "account-portal" "account-portal" '["http://localhost:3000/", "http://localhost:3000/*", "http://localhost:3000/auth/callback", "http://localhost:3000/registration-callback"]'
+mt_keycloak_set_port "3000"
+
 ENV_FILE="$REPO_ROOT/apps/account-portal/.env"
+mt_keycloak_set_env_file "$ENV_FILE"
+
 if [ ! -f "$ENV_FILE" ]; then
     print_status "No .env file found, creating from .env.example..."
     cp "$REPO_ROOT/apps/account-portal/.env.example" "$ENV_FILE"
@@ -87,173 +77,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-start_keycloak_container() {
-    KEYCLOAK_STARTED=true
-    docker run -d --name "$CONTAINER_NAME" -p 8080:8080 -p 9000:9000 \
-        -e KEYCLOAK_ADMIN="$ADMIN_USER" \
-        -e KEYCLOAK_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-        -e KC_HEALTH_ENABLED=true \
-        -e KC_BOOTSTRAP_ADMIN_USERNAME="$ADMIN_USER" \
-        -e KC_BOOTSTRAP_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-        "quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}" start-dev
-}
-
-wait_for_keycloak() {
-    print_status "Waiting for Keycloak to be ready..."
-    MAX_WAIT=150
-    COUNT=0
-    until curl -sf "http://localhost:9000/health/ready" 2>/dev/null; do
-        if [ $COUNT -ge $MAX_WAIT ]; then
-            print_error "Timed out waiting for Keycloak after 5 minutes"
-            exit 1
-        fi
-        print_status "Waiting for Keycloak... ($((COUNT * 2))s)"
-        sleep 2
-        COUNT=$((COUNT + 1))
-    done
-    print_success "Keycloak is ready at $KEYCLOAK_URL"
-}
-
-get_admin_token() {
-    curl -s -X POST "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
-        -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "username=$ADMIN_USER" \
-        -d "password=$ADMIN_PASSWORD" \
-        -d "grant_type=password" \
-        -d "client_id=admin-cli" | jq -r '.access_token'
-}
-
-setup_keycloak_realm() {
-    local admin_token="$1"
-
-    print_status "Creating realm '$REALM'..."
-    curl -s -X POST "$KEYCLOAK_URL/admin/realms" \
-        -H "Authorization: Bearer $admin_token" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"realm\": \"$REALM\",
-            \"enabled\": true,
-            \"displayName\": \"Development\"
-        }"
-
-    print_status "Creating test user '$TEST_USER'..."
-    curl -s -X POST "$KEYCLOAK_URL/admin/realms/$REALM/users" \
-        -H "Authorization: Bearer $admin_token" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"username\": \"$TEST_USER\",
-            \"enabled\": true,
-            \"emailVerified\": true,
-            \"email\": \"$TEST_USER@localhost\",
-            \"firstName\": \"Test\",
-            \"lastName\": \"User\",
-            \"credentials\": [{\"type\": \"password\", \"value\": \"$TEST_PASSWORD\", \"temporary\": false}]
-        }"
-
-    print_status "Creating client '$CLIENT_ID'..."
-    curl -s -X POST "$KEYCLOAK_URL/admin/realms/$REALM/clients" \
-        -H "Authorization: Bearer $admin_token" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"clientId\": \"$CLIENT_ID\",
-            \"enabled\": true,
-            \"protocol\": \"openid-connect\",
-            \"publicClient\": false,
-            \"bearerOnly\": false,
-            \"standardFlowEnabled\": true,
-            \"implicitFlowEnabled\": false,
-            \"directAccessGrantsEnabled\": true,
-            \"serviceAccountsEnabled\": false,
-            \"authorizationServicesEnabled\": false,
-            \"redirectUris\": [\"http://localhost:3000/\", \"http://localhost:3000/*\", \"http://localhost:3000/auth/callback\", \"http://localhost:3000/registration-callback\"],
-            \"webOrigins\": [\"http://localhost:3000\", \"*\"]
-        }"
-
-    print_status "Getting client UUID..."
-    CLIENT_UUID=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients?clientId=$CLIENT_ID" \
-        -H "Authorization: Bearer $admin_token" | jq -r '.[0].id')
-
-    print_status "Resetting client secret..."
-    NEW_SECRET=$(curl -s -X POST "$KEYCLOAK_URL/admin/realms/$REALM/clients/$CLIENT_UUID/client-secret" \
-        -H "Authorization: Bearer $admin_token" \
-        -H "Content-Type: application/json" \
-        -d '{}' | jq -r '.value')
-
-    print_success "Keycloak setup complete: realm=$REALM, client=$CLIENT_ID"
-
-    print_status "Updating account-portal .env with new secret..."
-    mt_set_env KEYCLOAK_CLIENT_SECRET "$NEW_SECRET" "$REPO_ROOT/apps/account-portal/.env"
-}
-
-ensure_client_exists() {
-    local admin_token="$1"
-
-    CLIENT_UUID=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients?clientId=$CLIENT_ID" \
-        -H "Authorization: Bearer $admin_token" | jq -r '.[0].id')
-
-    if [ "$CLIENT_UUID" = "null" ] || [ -z "$CLIENT_UUID" ]; then
-        print_status "Client '$CLIENT_ID' not found, creating..."
-        setup_keycloak_realm "$admin_token"
-    else
-        CURRENT_SECRET=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients/$CLIENT_UUID/client-secret" \
-            -H "Authorization: Bearer $admin_token" | jq -r '.value')
-        mt_set_env KEYCLOAK_CLIENT_SECRET "$CURRENT_SECRET" "$ENV_FILE"
-        print_success "Updated KEYCLOAK_CLIENT_SECRET in .env"
-    fi
-}
-
 if [[ "$RESTART_KEYCLOAK" == "true" ]]; then
-    print_status "================================================"
-    print_status "=== RESTARTING KEYCLOAK (--restart-keycloak) ==="
-    print_status "================================================"
-
-    print_status "Stopping and removing Keycloak container..."
-    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-
-    print_status "Removing any associated volumes..."
-    docker volume rm "$(docker volume ls -q -f name=keycloak 2>/dev/null | tr '\n' ' ')" 2>/dev/null || true
-
-    print_status "Starting fresh Keycloak container..."
-    start_keycloak_container
-
-    wait_for_keycloak
-
-    ADMIN_TOKEN=$(get_admin_token)
-    setup_keycloak_realm "$ADMIN_TOKEN"
+    mt_keycloak_restart
 else
-    if docker ps -q -f name="$CONTAINER_NAME" | grep -q .; then
-        print_status "Keycloak is already running"
-        ADMIN_TOKEN=$(get_admin_token)
-        ensure_client_exists "$ADMIN_TOKEN"
-    else
-        if docker ps -aq -f name="$CONTAINER_NAME" | grep -q .; then
-            print_status "Starting existing Keycloak container..."
-            KEYCLOAK_STARTED=true
-            docker start "$CONTAINER_NAME"
-            wait_for_keycloak
-            print_status "Keycloak started"
-            ADMIN_TOKEN=$(get_admin_token)
-            ensure_client_exists "$ADMIN_TOKEN"
-        else
-            print_status "================================================"
-            print_status "=== STARTING KEYCLOAK (not running) ==="
-            print_status "================================================"
-
-            print_status "Starting Keycloak container..."
-            start_keycloak_container
-
-            wait_for_keycloak
-
-            ADMIN_TOKEN=$(get_admin_token)
-
-            if ! curl -sf "$KEYCLOAK_URL/admin/realms/$REALM" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null 2>&1; then
-                setup_keycloak_realm "$ADMIN_TOKEN"
-            else
-                print_status "Realm '$REALM' already exists, ensuring client..."
-                ensure_client_exists "$ADMIN_TOKEN"
-            fi
-        fi
-    fi
+    mt_keycloak_start_if_needed
 fi
 
 print_status "Building Tailwind CSS..."
