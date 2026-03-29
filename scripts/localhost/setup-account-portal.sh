@@ -182,7 +182,7 @@ setup_keycloak_realm() {
     print_success "Keycloak setup complete: realm=$REALM, client=$CLIENT_ID"
 
     print_status "Updating account-portal .env with new secret..."
-    sed -i "s/KEYCLOAK_CLIENT_SECRET=.*/KEYCLOAK_CLIENT_SECRET=$NEW_SECRET/" "$REPO_ROOT/apps/account-portal/.env"
+    mt_set_env KEYCLOAK_CLIENT_SECRET "$NEW_SECRET" "$REPO_ROOT/apps/account-portal/.env"
 }
 
 ensure_client_exists() {
@@ -197,7 +197,7 @@ ensure_client_exists() {
     else
         CURRENT_SECRET=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients/$CLIENT_UUID/client-secret" \
             -H "Authorization: Bearer $admin_token" | jq -r '.value')
-        sed -i "s/KEYCLOAK_CLIENT_SECRET=.*/KEYCLOAK_CLIENT_SECRET=$CURRENT_SECRET/" "$ENV_FILE"
+        mt_set_env KEYCLOAK_CLIENT_SECRET "$CURRENT_SECRET" "$ENV_FILE"
         print_success "Updated KEYCLOAK_CLIENT_SECRET in .env"
     fi
 }

@@ -246,14 +246,14 @@ setup_keycloak_realm() {
     print_success "Keycloak setup complete: realm=$REALM, client=$CLIENT_ID"
 
     print_status "Updating admin-portal .env with new secret..."
-    sed -i "s/KEYCLOAK_CLIENT_SECRET=.*/KEYCLOAK_CLIENT_SECRET=$NEW_SECRET/" "$REPO_ROOT/apps/admin-portal/.env"
-    sed -i "s|KEYCLOAK_ISSUER=.*|KEYCLOAK_ISSUER=$KEYCLOAK_URL/realms/$REALM|" "$REPO_ROOT/apps/admin-portal/.env"
-    sed -i "s|KEYCLOAK_URL=.*|KEYCLOAK_URL=$KEYCLOAK_URL|" "$REPO_ROOT/apps/admin-portal/.env"
-    sed -i "s/KEYCLOAK_REALM=.*/KEYCLOAK_REALM=$REALM/" "$REPO_ROOT/apps/admin-portal/.env"
-    sed -i "s/NEXTAUTH_URL=.*/NEXTAUTH_URL=http:\/\/localhost:3001/" "$REPO_ROOT/apps/admin-portal/.env"
-    sed -i "s/TENANT_DOMAIN=.*/TENANT_DOMAIN=localhost/" "$REPO_ROOT/apps/admin-portal/.env"
-    sed -i "s/EMAIL_DOMAIN=.*/EMAIL_DOMAIN=localhost/" "$REPO_ROOT/apps/admin-portal/.env"
-    sed -i "s/SMTP_FROM=.*/SMTP_FROM=noreply@localhost/" "$REPO_ROOT/apps/admin-portal/.env"
+    mt_set_env KEYCLOAK_CLIENT_SECRET "$NEW_SECRET" "$REPO_ROOT/apps/admin-portal/.env"
+    mt_set_env KEYCLOAK_ISSUER "$KEYCLOAK_URL/realms/$REALM" "$REPO_ROOT/apps/admin-portal/.env"
+    mt_set_env KEYCLOAK_URL "$KEYCLOAK_URL" "$REPO_ROOT/apps/admin-portal/.env"
+    mt_set_env KEYCLOAK_REALM "$REALM" "$REPO_ROOT/apps/admin-portal/.env"
+    mt_set_env NEXTAUTH_URL "http://localhost:3001" "$REPO_ROOT/apps/admin-portal/.env"
+    mt_set_env TENANT_DOMAIN "localhost" "$REPO_ROOT/apps/admin-portal/.env"
+    mt_set_env EMAIL_DOMAIN "localhost" "$REPO_ROOT/apps/admin-portal/.env"
+    mt_set_env SMTP_FROM "noreply@localhost" "$REPO_ROOT/apps/admin-portal/.env"
 }
 
 ensure_client_exists() {
@@ -268,14 +268,14 @@ ensure_client_exists() {
     else
         CURRENT_SECRET=$(curl -s "$KEYCLOAK_URL/admin/realms/$REALM/clients/$CLIENT_UUID/client-secret" \
             -H "Authorization: Bearer $admin_token" | jq -r '.value')
-        sed -i "s/KEYCLOAK_CLIENT_SECRET=.*/KEYCLOAK_CLIENT_SECRET=$CURRENT_SECRET/" "$ENV_FILE"
-        sed -i "s|KEYCLOAK_ISSUER=.*|KEYCLOAK_ISSUER=$KEYCLOAK_URL/realms/$REALM|" "$ENV_FILE"
-        sed -i "s|KEYCLOAK_URL=.*|KEYCLOAK_URL=$KEYCLOAK_URL|" "$ENV_FILE"
-        sed -i "s/KEYCLOAK_REALM=.*/KEYCLOAK_REALM=$REALM/" "$ENV_FILE"
-        sed -i "s/NEXTAUTH_URL=.*/NEXTAUTH_URL=http:\/\/localhost:3001/" "$ENV_FILE"
-        sed -i "s/TENANT_DOMAIN=.*/TENANT_DOMAIN=localhost/" "$ENV_FILE"
-        sed -i "s/EMAIL_DOMAIN=.*/EMAIL_DOMAIN=localhost/" "$ENV_FILE"
-        sed -i "s/SMTP_FROM=.*/SMTP_FROM=noreply@localhost/" "$ENV_FILE"
+        mt_set_env KEYCLOAK_CLIENT_SECRET "$CURRENT_SECRET" "$ENV_FILE"
+        mt_set_env KEYCLOAK_ISSUER "$KEYCLOAK_URL/realms/$REALM" "$ENV_FILE"
+        mt_set_env KEYCLOAK_URL "$KEYCLOAK_URL" "$ENV_FILE"
+        mt_set_env KEYCLOAK_REALM "$REALM" "$ENV_FILE"
+        mt_set_env NEXTAUTH_URL "http://localhost:3001" "$ENV_FILE"
+        mt_set_env TENANT_DOMAIN "localhost" "$ENV_FILE"
+        mt_set_env EMAIL_DOMAIN "localhost" "$ENV_FILE"
+        mt_set_env SMTP_FROM "noreply@localhost" "$ENV_FILE"
         print_success "Updated .env with local Keycloak settings"
     fi
 }
