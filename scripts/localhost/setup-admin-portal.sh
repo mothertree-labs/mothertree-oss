@@ -347,7 +347,8 @@ pkill -f "node server.js" 2>/dev/null || true
 sleep 1
 
 cd "$REPO_ROOT/apps/admin-portal"
-setsid env $(grep -v '^#' .env | xargs) NODE_ENV=development PORT=3001 node server.js > /tmp/admin-portal.log 2>&1 &
+nohup env $(grep -v '^#' .env | xargs) NODE_ENV=development PORT=3001 node server.js > /tmp/admin-portal.log 2>&1 &
+ADMIN_PID=$!
 
 sleep 2
 

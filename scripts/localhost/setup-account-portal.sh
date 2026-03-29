@@ -266,7 +266,8 @@ pkill -f "node server.js" 2>/dev/null || true
 sleep 1
 
 cd "$REPO_ROOT/apps/account-portal"
-setsid env $(grep -v '^#' .env | xargs) NODE_ENV=development node server.js > /tmp/account-portal.log 2>&1 &
+nohup env $(grep -v '^#' .env | xargs) NODE_ENV=development node server.js > /tmp/account-portal.log 2>&1 &
+ACCOUNT_PID=$!
 
 sleep 2
 
