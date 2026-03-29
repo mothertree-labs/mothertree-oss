@@ -48,7 +48,7 @@ running=$(cat "$_RUNNING_FILE")
 total_deleted=0
 
 for pool_config in "${POOLS[@]}"; do
-  IFS='|' read -r base_domain kc_realm kc_admin_password <<< "$pool_config"
+  IFS='|' read -r base_domain kc_realm kc_admin_password stalwart_admin_password <<< "$pool_config"
   kc_url="https://auth.${base_domain}"
 
   # Get KC admin token via password grant on master realm
@@ -107,9 +107,50 @@ for u in users:
   done <<< "$stale_users"
 
   if [ "$pool_deleted" -gt 0 ]; then
-    echo "$LOG_PREFIX Deleted $pool_deleted stale user(s) from $kc_realm ($base_domain)"
+    echo "$LOG_PREFIX Deleted $pool_deleted stale KC user(s) from $kc_realm ($base_domain)"
   fi
   total_deleted=$((total_deleted + pool_deleted))
+
+  # Clean matching Stalwart principals (OIDC auto-provisioned, persist after KC deletion)
+  if [ -n "$stalwart_admin_password" ]; then
+    stalwart_url="https://mail.${base_domain}"
+    stalwart_auth=$(echo -n "admin:${stalwart_admin_password}" | base64)
+
+    stalwart_principals=$(curl -sf --connect-timeout 10 --max-time 30 \
+      -H "Authorization: Basic $stalwart_auth" \
+      "$stalwart_url/api/principal?types=individual&limit=0" 2>/dev/null \
+      | RUNNING_PIPELINES="$running" python3 -c "
+import json, sys, re, os
+
+running = set(line.strip() for line in os.environ['RUNNING_PIPELINES'].strip().split('\n') if line.strip())
+body = json.load(sys.stdin)
+items = body.get('data', {}).get('items', body.get('data', []))
+
+for u in items:
+    name = u.get('name', '')
+    if name.startswith('e2e-mail') or name.startswith('e2e-local-') or name.startswith('e2e-member') or name.startswith('e2e-admin'):
+        continue
+    m = re.match(r'^e2e-(\d+)-', name)
+    if m and m.group(1) not in running:
+        print(name)
+" 2>/dev/null || true)
+
+    if [ -n "$stalwart_principals" ]; then
+      sw_deleted=0
+      while IFS= read -r principal; do
+        encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$principal', safe=''))" 2>/dev/null)
+        if curl -sf --connect-timeout 10 --max-time 10 -X DELETE \
+          -H "Authorization: Basic $stalwart_auth" \
+          "$stalwart_url/api/principal/${encoded}" > /dev/null 2>&1; then
+          sw_deleted=$((sw_deleted + 1))
+        fi
+      done <<< "$stalwart_principals"
+      if [ "$sw_deleted" -gt 0 ]; then
+        echo "$LOG_PREFIX Deleted $sw_deleted stale Stalwart principal(s) from $base_domain"
+      fi
+      total_deleted=$((total_deleted + sw_deleted))
+    fi
+  fi
 done
 
 if [ "$total_deleted" -gt 0 ]; then

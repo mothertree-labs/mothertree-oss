@@ -46,5 +46,9 @@ steps:
         from_secret: e2e_pool2_kc_realm
       E2E_POOL2_KC_CLIENT_SECRET:
         from_secret: e2e_pool2_kc_client_secret
+      E2E_POOL1_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool1_stalwart_admin_password
+      E2E_POOL2_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool2_stalwart_admin_password
     commands:
       - ci/scripts/ci-release-tenant.sh
