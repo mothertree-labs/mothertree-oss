@@ -372,3 +372,4 @@ echo "Press Ctrl+C to stop."
 while pgrep -f "node server.js" > /dev/null 2>&1; do
     sleep 1
 done
+
