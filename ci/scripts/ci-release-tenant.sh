@@ -74,6 +74,7 @@ resolve_var() {
 E2E_BASE_DOMAIN=$(resolve_var E2E_BASE_DOMAIN)
 E2E_KC_REALM=$(resolve_var E2E_KC_REALM)
 E2E_KC_CLIENT_SECRET=$(resolve_var E2E_KC_CLIENT_SECRET)
+E2E_STALWART_ADMIN_PASSWORD=$(resolve_var E2E_STALWART_ADMIN_PASSWORD)
 
 # ── Clean up Keycloak test users ─────────────────────────────────
 # This section is best-effort — user cleanup failure must NOT prevent
@@ -153,6 +154,54 @@ else
   done <<< "$USERS_TO_DELETE"
 
   echo "Cleanup: ${DELETED} deleted, ${FAILED} failed."
+fi
+
+# ── Clean up Stalwart principals ─────────────────────────────────
+# Stalwart auto-provisions OIDC principals on first login. These persist
+# even after the Keycloak user is deleted, bloating calendar-automation
+# scan cycles (each principal = one IMAP connection per poll).
+if [[ -n "$E2E_STALWART_ADMIN_PASSWORD" && -n "$E2E_BASE_DOMAIN" ]]; then
+  STALWART_URL="https://mail.${E2E_BASE_DOMAIN}"
+  STALWART_AUTH=$(echo -n "admin:${E2E_STALWART_ADMIN_PASSWORD}" | base64)
+
+  echo ""
+  echo "Cleaning up Stalwart principals with prefix: ${PREFIX}"
+
+  STALWART_USERS=$(curl -sf --connect-timeout 10 --max-time 30 \
+    -H "Authorization: Basic $STALWART_AUTH" \
+    "${STALWART_URL}/api/principal?types=individual&limit=0" 2>/dev/null \
+    | PREFIX="$PREFIX" python3 -c "
+import json, sys, os
+body = json.load(sys.stdin)
+items = body.get('data', {}).get('items', body.get('data', []))
+prefix = os.environ['PREFIX']
+for u in items:
+    name = u.get('name', '')
+    if name.startswith(prefix):
+        print(name)
+" 2>/dev/null || true)
+
+  if [[ -z "$STALWART_USERS" ]]; then
+    echo "No Stalwart principals to clean up."
+  else
+    SW_DELETED=0
+    SW_FAILED=0
+    while IFS= read -r principal; do
+      encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$principal', safe=''))" 2>/dev/null)
+      if curl -sf --connect-timeout 10 --max-time 10 -X DELETE \
+        -H "Authorization: Basic $STALWART_AUTH" \
+        "${STALWART_URL}/api/principal/${encoded}" > /dev/null 2>&1; then
+        SW_DELETED=$(( SW_DELETED + 1 ))
+      else
+        echo "  Failed: $principal"
+        SW_FAILED=$(( SW_FAILED + 1 ))
+      fi
+    done <<< "$STALWART_USERS"
+    echo "Stalwart cleanup: ${SW_DELETED} deleted, ${SW_FAILED} failed."
+  fi
+else
+  echo ""
+  echo "Skipping Stalwart cleanup (no admin password available)."
 fi
 
 # Lease release happens in EXIT trap — no need for explicit release here
