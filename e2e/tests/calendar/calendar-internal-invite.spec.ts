@@ -52,7 +52,7 @@ async function loginToCalendar(
 }
 
 test.describe('Calendar — Internal Invite Round-Trip', () => {
-  test.setTimeout(300_000); // 5 minutes
+  test.setTimeout(180_000); // 3 minutes
 
   test('prerequisites: calendar must be enabled', () => {
     expect(
@@ -117,7 +117,7 @@ test.describe('Calendar — Internal Invite Round-Trip', () => {
         emailTestPage,
         recipientNcId,
         eventTitle,
-        180_000,
+        90_000,
       );
 
       expect(recipientIcal).toBeTruthy();
@@ -189,7 +189,7 @@ test.describe('Calendar — Internal Invite Round-Trip', () => {
         eventTitle,
         recipient.email,
         'ACCEPTED',
-        180_000,
+        90_000,
       );
 
       expect(updatedIcal).toBeTruthy();
