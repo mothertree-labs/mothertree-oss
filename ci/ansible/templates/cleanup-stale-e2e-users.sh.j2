@@ -1,0 +1,117 @@
+#!/bin/bash
+# Clean up stale e2e test users from Keycloak realms.
+#
+# Deployed by Ansible to the CI server and run as a cron job.
+# Lists all e2e-NNN-* users, checks if pipeline NNN is still running
+# on Woodpecker, and deletes users from pipelines that are no longer active.
+#
+# Managed by Ansible — do not edit manually on the CI server.
+
+set -euo pipefail
+
+LOG_PREFIX="[e2e-cleanup]"
+
+# --- Configuration (templated by Ansible) ---
+WP_API_URL="http://localhost:8000/api"
+WP_API_TOKEN="{{ woodpecker_api_token }}"
+WP_REPO_ID=1
+
+# Pool configs sourced from a separate env file to avoid shell metacharacter
+# issues with passwords containing ", $, `, etc.
+source /etc/mothertree/e2e-cleanup-pools.env
+
+# --- Get running pipeline numbers from Woodpecker ---
+# Writes running pipeline numbers to a temp file (one per line).
+# Uses a marker file to distinguish "API reachable, zero running" from "API down".
+_RUNNING_FILE=$(mktemp)
+_API_OK_FILE=$(mktemp)
+trap 'rm -f "$_RUNNING_FILE" "$_API_OK_FILE"' EXIT
+
+response=$(curl -sf --connect-timeout 10 --max-time 30 \
+  -H "Authorization: Bearer $WP_API_TOKEN" \
+  "$WP_API_URL/repos/$WP_REPO_ID/pipelines?perPage=50" 2>/dev/null) && touch "$_API_OK_FILE"
+
+if [ ! -f "$_API_OK_FILE" ]; then
+  echo "$LOG_PREFIX WARNING: Could not reach Woodpecker API — skipping cleanup"
+  exit 0
+fi
+
+echo "$response" | python3 -c "
+import json, sys
+for p in json.loads(sys.stdin.read()):
+    if p.get('status') in ('running', 'pending'):
+        print(p['number'])
+" 2>/dev/null > "$_RUNNING_FILE" || true
+
+running=$(cat "$_RUNNING_FILE")
+
+total_deleted=0
+
+for pool_config in "${POOLS[@]}"; do
+  IFS='|' read -r base_domain kc_realm kc_admin_password <<< "$pool_config"
+  kc_url="https://auth.${base_domain}"
+
+  # Get KC admin token via password grant on master realm
+  token=$(curl -sf --connect-timeout 10 --max-time 30 \
+    -X POST "$kc_url/realms/master/protocol/openid-connect/token" \
+    -d "client_id=admin-cli" \
+    -d "username=admin" \
+    --data-urlencode "password=$kc_admin_password" \
+    -d "grant_type=password" \
+    | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('access_token',''))" 2>/dev/null)
+
+  if [ -z "$token" ]; then
+    echo "$LOG_PREFIX WARNING: Could not get KC token for $base_domain realm=$kc_realm — skipping"
+    continue
+  fi
+
+  # List all users with e2e- prefix (excluding fixed e2e-mail* users)
+  users_json=$(curl -sf --connect-timeout 10 --max-time 30 \
+    -H "Authorization: Bearer $token" \
+    "$kc_url/admin/realms/$kc_realm/users?search=e2e-&max=500" 2>/dev/null || echo "[]")
+
+  # Extract pipeline numbers and user IDs, check against running pipelines
+  # Pass $running via env var to avoid shell/Python injection
+  stale_users=$(echo "$users_json" | RUNNING_PIPELINES="$running" python3 -c "
+import json, sys, re, os
+
+running = set(line.strip() for line in os.environ['RUNNING_PIPELINES'].strip().split('\n') if line.strip())
+users = json.loads(sys.stdin.read())
+
+for u in users:
+    name = u.get('username', '')
+    # Skip fixed users (e2e-mailrt, e2e-mailrcv)
+    if name.startswith('e2e-mail'):
+        continue
+    # Extract pipeline number: e2e-NNN-suffix
+    m = re.match(r'^e2e-(\d+)-', name)
+    if m and m.group(1) not in running:
+        print(f'{u[\"id\"]}|{name}')
+" 2>/dev/null)
+
+  if [ -z "$stale_users" ]; then
+    continue
+  fi
+
+  pool_deleted=0
+  while IFS='|' read -r uid username; do
+    http_code=$(curl -sf -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 10 \
+      -X DELETE \
+      -H "Authorization: Bearer $token" \
+      "$kc_url/admin/realms/$kc_realm/users/$uid" 2>/dev/null || echo "000")
+    if [ "$http_code" = "204" ]; then
+      pool_deleted=$((pool_deleted + 1))
+    else
+      echo "$LOG_PREFIX WARNING: Failed to delete $username (HTTP $http_code)"
+    fi
+  done <<< "$stale_users"
+
+  if [ "$pool_deleted" -gt 0 ]; then
+    echo "$LOG_PREFIX Deleted $pool_deleted stale user(s) from $kc_realm ($base_domain)"
+  fi
+  total_deleted=$((total_deleted + pool_deleted))
+done
+
+if [ "$total_deleted" -gt 0 ]; then
+  echo "$LOG_PREFIX Total: deleted $total_deleted stale e2e user(s)"
+fi

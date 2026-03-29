@@ -27,6 +27,7 @@ runcmd:
       --login-server="${headscale_url}" \
       --authkey="${tailscale_auth_key}" \
       --advertise-tags=tag:postgres \
+      --hostname="postgres-${env}" \
       --accept-routes=false \
       --ssh
 

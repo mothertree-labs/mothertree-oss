@@ -1,36 +1,30 @@
 prometheus:
   ingress:
     hosts:
-      - 'prometheus.internal.{{ env "INFRA_DOMAIN" }}'
-      - 'prometheus.prod.{{ env "INFRA_DOMAIN" }}'
+      - 'prometheus.prod-eu.{{ env "INFRA_DOMAIN" }}'
     tls:
       - secretName: prometheus-tls
         hosts:
-          - 'prometheus.internal.{{ env "INFRA_DOMAIN" }}'
-          - 'prometheus.prod.{{ env "INFRA_DOMAIN" }}'
+          - 'prometheus.prod-eu.{{ env "INFRA_DOMAIN" }}'
 
 grafana:
   adminPassword: '{{ env "TF_VAR_grafana_admin_password" | default "changeme" }}'
   ingress:
     hosts:
-      - 'grafana.internal.{{ env "INFRA_DOMAIN" }}'
-      - 'grafana.prod.{{ env "INFRA_DOMAIN" }}'
+      - 'grafana.prod-eu.{{ env "INFRA_DOMAIN" }}'
     tls:
       - secretName: grafana-tls
         hosts:
-          - 'grafana.internal.{{ env "INFRA_DOMAIN" }}'
-          - 'grafana.prod.{{ env "INFRA_DOMAIN" }}'
+          - 'grafana.prod-eu.{{ env "INFRA_DOMAIN" }}'
 
 alertmanager:
   ingress:
     hosts:
-      - 'alertmanager.internal.{{ env "INFRA_DOMAIN" }}'
-      - 'alertmanager.prod.{{ env "INFRA_DOMAIN" }}'
+      - 'alertmanager.prod-eu.{{ env "INFRA_DOMAIN" }}'
     tls:
       - secretName: alertmanager-tls
         hosts:
-          - 'alertmanager.internal.{{ env "INFRA_DOMAIN" }}'
-          - 'alertmanager.prod.{{ env "INFRA_DOMAIN" }}'
+          - 'alertmanager.prod-eu.{{ env "INFRA_DOMAIN" }}'
   # AlertManager configuration for production alerting
   config:
     global:

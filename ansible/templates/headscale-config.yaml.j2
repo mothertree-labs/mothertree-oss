@@ -40,10 +40,21 @@ derp:
 dns:
   magic_dns: true
   base_domain: "{{ headscale_base_domain }}"
+  # Don't override the client's local DNS resolver — only intercept split DNS domains.
+  # Without this, Tailscale replaces the OS resolver (e.g., home router DNS) with
+  # the global nameservers below, breaking local network name resolution.
+  override_local_dns: false
   nameservers:
     global:
       - 1.1.1.1
       - 1.0.0.1
+{% if tailscale_router_dns is defined %}
+    split:
+{% for domain, ip in tailscale_router_dns.items() %}
+      {{ domain }}:
+        - {{ ip }}
+{% endfor %}
+{% endif %}
 
 policy:
   path: /etc/headscale/acl-policy.json
