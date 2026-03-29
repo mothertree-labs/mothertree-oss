@@ -43,8 +43,20 @@ echo "Pool slot: ${POOL}"
 # the pool slot stays locked until TTL expires, blocking other pipelines.
 release_lease() {
   echo ""
-  echo "--- Releasing Valkey lease"
-  # Only release if we still own it (avoid releasing a re-leased key)
+  echo "--- Releasing e2e lock and Valkey lease"
+
+  # Release e2e protection lock first (unblocks other pipelines' deploy_infra)
+  local e2e_key="ci-e2e-active-${POOL}"
+  local e2e_holder
+  e2e_holder=$(vcli GET "$e2e_key" 2>/dev/null || true)
+  if [[ -n "$e2e_holder" && "$e2e_holder" == "${CI_PIPELINE_NUMBER}#"* ]]; then
+    vcli DEL "$e2e_key" > /dev/null
+    echo "Released e2e lock: ${e2e_key}"
+  elif [[ -n "$e2e_holder" ]]; then
+    echo "e2e lock ${e2e_key} held by ${e2e_holder} — not releasing"
+  fi
+
+  # Release tenant lease
   local holder
   holder=$(vcli GET "$LEASE_KEY" 2>/dev/null || true)
   if [[ "$holder" == "$CI_PIPELINE_NUMBER" ]]; then
