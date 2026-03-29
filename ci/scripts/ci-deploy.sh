@@ -305,4 +305,14 @@ if [[ ${#FAILED_TENANTS[@]} -gt 0 ]]; then
   exit 1
 fi
 
+# ── Clean up stale Headscale nodes (prod only) ────────────────────
+# Prod and prod-eu share the same Headscale server (provisioned in prod-eu).
+# Run cleanup with -e prod-eu to reach that server. Non-blocking.
+if [[ "$ALL_TENANTS" == "true" ]] && [[ -x "$REPO_ROOT/scripts/cleanup-headscale-nodes" ]]; then
+  echo ""
+  echo "=== Cleaning up stale Headscale nodes ==="
+  "$REPO_ROOT/scripts/cleanup-headscale-nodes" -e prod-eu || \
+    echo "WARNING: Headscale node cleanup failed (non-fatal)"
+fi
+
 echo "=== CI Deploy complete: env=$MT_ENV tenants=${TENANTS[*]} ==="

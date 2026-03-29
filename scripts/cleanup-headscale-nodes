@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Clean up stale Headscale node registrations from K8s pod churn.
+#
+# Every PgBouncer/Postfix pod restart registers a new Tailscale node in
+# Headscale. Old registrations accumulate (81 nodes seen after a few weeks
+# of deploys). This script deletes offline nodes matching K8s pod name
+# patterns, keeping VMs and currently-online nodes intact.
+#
+# Usage:
+#   ./scripts/cleanup-headscale-nodes -e <env>
+#   ./scripts/cleanup-headscale-nodes -e dev --dry-run
+#
+# Called by:
+#   - deploy_infra (after PgBouncer + Postfix rollout)
+#   - Cron (daily, via CI server or K8s CronJob)
+
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
+
+mt_usage() {
+  echo "Usage: $0 -e <env> [--dry-run]"
+  echo ""
+  echo "Remove stale Headscale node registrations from K8s pod churn."
+  echo ""
+  echo "Options:"
+  echo "  -e <env>       Environment (e.g., dev, prod)"
+  echo "  --dry-run      Show what would be deleted without deleting"
+  echo "  -h, --help     Show this help"
+}
+
+DRY_RUN=false
+for arg in "$@"; do
+  if [[ "$arg" == "--dry-run" ]]; then
+    DRY_RUN=true
+  fi
+done
+
+# Filter --dry-run from args before parsing (mt_parse_args doesn't know it)
+FILTERED_ARGS=()
+for arg in "$@"; do
+  [[ "$arg" != "--dry-run" ]] && FILTERED_ARGS+=("$arg")
+done
+mt_parse_args "${FILTERED_ARGS[@]}"
+mt_require_env
+
+# Load infrastructure config for Headscale server IP
+source "${REPO_ROOT}/scripts/lib/infra-config.sh"
+mt_load_infra_config
+
+mt_require_commands ssh python3
+
+# Resolve Headscale server IP from terraform outputs
+HEADSCALE_IP="${HEADSCALE_SERVER_IP:-}"
+if [[ -z "$HEADSCALE_IP" ]]; then
+  print_error "HEADSCALE_SERVER_IP not set — load terraform outputs first"
+  exit 1
+fi
+
+# K8s pod name patterns that create ephemeral Tailscale registrations.
+# Pod names follow K8s convention: <deployment>-<replicaset-hash>-<pod-hash>,
+# e.g., pgbouncer-7b4f9c6d8-x2k9l, postfix-5d6f7a8b9-abc12.
+# VM hostnames (postgres-{env}, postfix-relay-{env}) are explicitly excluded
+# to prevent deleting VM registrations during VM reboots or maintenance.
+POD_PATTERNS="pgbouncer-|postfix-"
+VM_NAMES="postgres-|postfix-relay-|router-"
+
+print_status "Cleaning up stale Headscale nodes (env: $MT_ENV)"
+print_status "  Headscale server: $HEADSCALE_IP"
+print_status "  Pod patterns: $POD_PATTERNS"
+if [[ "$DRY_RUN" == "true" ]]; then
+  print_status "  Mode: DRY RUN (no deletions)"
+fi
+
+# Get all nodes from Headscale as JSON
+NODES_JSON=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+  "root@${HEADSCALE_IP}" "headscale nodes list --output json" 2>/dev/null)
+
+if [[ -z "$NODES_JSON" ]]; then
+  print_error "Failed to get node list from Headscale"
+  exit 1
+fi
+
+# Find stale nodes: offline + matching pod name patterns.
+# Write stale node IDs to a temp file (one per line) to avoid stdout/stderr mixing.
+STALE_FILE=$(mktemp)
+trap "rm -f $STALE_FILE" EXIT
+
+echo "$NODES_JSON" | POD_PATTERNS="$POD_PATTERNS" VM_NAMES="$VM_NAMES" STALE_FILE="$STALE_FILE" python3 -c "
+import json, sys, os, re
+
+nodes = json.load(sys.stdin)
+patterns = os.environ['POD_PATTERNS']
+vm_patterns = os.environ['VM_NAMES']
+stale_file = os.environ['STALE_FILE']
+pattern_re = re.compile(patterns)
+vm_re = re.compile(vm_patterns)
+
+stale = []
+online_count = 0
+vm_count = 0
+
+for n in nodes:
+    name = n.get('given_name') or n.get('name', '')
+    online = n.get('online', False)
+    nid = n.get('id')
+
+    # Skip VM hostnames — these are stable registrations, not ephemeral pods
+    if vm_re.search(name):
+        vm_count += 1
+        continue
+
+    if not pattern_re.search(name):
+        vm_count += 1
+        continue
+
+    if online:
+        online_count += 1
+        print(f'  KEEP (online): id={nid} {name}')
+        continue
+
+    stale.append(str(nid))
+    print(f'  STALE:         id={nid} {name}')
+
+print(f'')
+print(f'VMs/non-pod nodes kept: {vm_count}')
+print(f'Online pod nodes kept: {online_count}')
+print(f'Stale to delete: {len(stale)}')
+
+with open(stale_file, 'w') as f:
+    if stale:
+        f.write('\n'.join(stale) + '\n')
+"
+
+# Count non-empty lines (grep -c is robust regardless of trailing newline)
+STALE_COUNT=$(grep -c . "$STALE_FILE" 2>/dev/null || echo 0)
+
+if [[ "$STALE_COUNT" -eq 0 ]] || [[ ! -s "$STALE_FILE" ]]; then
+  print_status "No stale nodes to clean up"
+  exit 0
+fi
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  print_status "Would delete $STALE_COUNT stale nodes (dry run)"
+  exit 0
+fi
+
+print_status "Deleting $STALE_COUNT stale nodes..."
+
+DELETED=0
+FAILED=0
+while IFS= read -r nid; do
+  [[ -z "$nid" ]] && continue
+  if ssh -n -o ConnectTimeout=10 "root@${HEADSCALE_IP}" \
+    "headscale nodes delete --identifier $nid --force" > /dev/null 2>&1; then
+    DELETED=$(( DELETED + 1 ))
+  else
+    FAILED=$(( FAILED + 1 ))
+    print_error "Failed to delete node $nid"
+  fi
+done < "$STALE_FILE"
+
+print_success "Cleaned up $DELETED stale nodes ($FAILED failed)"

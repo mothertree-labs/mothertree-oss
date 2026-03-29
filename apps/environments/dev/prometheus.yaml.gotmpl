@@ -68,9 +68,9 @@ alertmanager:
         - match:
             alertname: InfoInhibitor
           receiver: 'null'
-        # Dev has no read replica — silence this known condition
+        # Dev runs single PgBouncer pool — degraded state is expected
         - match:
-            alertname: PostgreSQLReadReplicaDown
+            alertname: PgBouncerDegraded
           receiver: 'null'
         # Critical alerts: email + Matrix, notify immediately and more frequently
         - match:
