@@ -187,14 +187,17 @@ resource "linode_firewall" "jitsi_tester_firewall" {
   inbound_policy  = "DROP"
   outbound_policy = "ACCEPT"
 
-  # SSH access only - VNC accessed via SSH port forwarding
-  inbound {
-    label    = "SSH"
-    action   = "ACCEPT"
-    protocol = "TCP"
-    ports    = "22"
-    ipv4     = ["0.0.0.0/0"]
-    ipv6     = ["::/0"]
+  # SSH access - restricted to admin IPs (access via Tailscale mesh).
+  # VNC is accessed via SSH port forwarding, so only SSH is needed.
+  dynamic "inbound" {
+    for_each = length(var.admin_ssh_cidrs) > 0 ? [1] : []
+    content {
+      label    = "SSH"
+      action   = "ACCEPT"
+      protocol = "TCP"
+      ports    = "22"
+      ipv4     = var.admin_ssh_cidrs
+    }
   }
 }
 

@@ -42,3 +42,12 @@ fi
 # Always renew the reverse-lookup key — ci-release needs it for cleanup
 vcli EXPIRE "ci-build-${CI_PIPELINE_NUMBER}" "$LEASE_TTL" > /dev/null
 echo "Renewed reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → ${POOL} (TTL: ${LEASE_TTL}s)"
+
+# Renew e2e protection lock if we own it (prevents TTL expiry during long test suites)
+E2E_KEY="ci-e2e-active-${POOL}"
+E2E_TTL=2400
+E2E_HOLDER=$(vcli GET "$E2E_KEY" 2>/dev/null || true)
+if [[ -n "$E2E_HOLDER" && "$E2E_HOLDER" == "${CI_PIPELINE_NUMBER}#"* ]]; then
+  vcli EXPIRE "$E2E_KEY" "$E2E_TTL" > /dev/null
+  echo "Renewed e2e lock: ${E2E_KEY} (TTL: ${E2E_TTL}s)"
+fi

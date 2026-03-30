@@ -19,6 +19,48 @@
   vars:
     woodpecker_version: "{{ woodpecker_version_override | default('3.13.0') }}"
     plugin_git_version: "{{ plugin_git_version_override | default('2.8.1') }}"
+    # Path to tenant config submodule (relative to playbook)
+    _tenants_dir: "{{ playbook_dir }}/../../config/tenants"
+
+  pre_tasks:
+    # Auto-discover dev tenant Keycloak credentials for e2e user cleanup.
+    # Reads from config/tenants/*/dev.{config,secrets}.yaml at provision time
+    # so that KC admin passwords never need to be checked into ansible-vars.yml.
+    - name: Discover dev tenants for e2e cleanup
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          echo "["
+          first=true
+          for dir in "{{ _tenants_dir }}"/*/; do
+            config="$dir/dev.config.yaml"
+            secrets="$dir/dev.secrets.yaml"
+            [[ -f "$config" && -f "$secrets" ]] || continue
+            domain=$(yq '.dns.domain' "$config")
+            env_label=$(yq '.dns.env_dns_label // ""' "$config")
+            realm=$(yq '.keycloak.realm' "$config")
+            password=$(yq '.keycloak.admin_password // ""' "$secrets")
+            stalwart_pw=$(yq '.stalwart.admin_password // ""' "$secrets")
+            [[ -n "$password" && "$password" != "null" ]] || continue
+            base_domain="${env_label:+${env_label}.}${domain}"
+            $first || echo ","
+            first=false
+            printf '{"base_domain":"%s","kc_realm":"%s","kc_admin_password":"%s","stalwart_admin_password":"%s"}' \
+              "$base_domain" "$realm" "$password" "${stalwart_pw:-}"
+          done
+          echo "]"
+        executable: /bin/bash
+      delegate_to: localhost
+      become: false
+      register: _tenant_discovery
+      changed_when: false
+      no_log: true
+
+    - name: Set e2e_cleanup_pools from discovered tenants
+      ansible.builtin.set_fact:
+        e2e_cleanup_pools: "{{ _tenant_discovery.stdout | from_json }}"
+      when: _tenant_discovery.stdout | default('[]') | from_json | length > 0
+      no_log: true
 
   tasks:
     # ── Remove Buildkite (cleanup from previous installation) ──────
@@ -479,6 +521,41 @@
         hour: "10"
         user: root
         job: 'docker image prune -af --filter "until=168h" > /dev/null 2>&1; docker buildx prune -f --keep-storage=2GB > /dev/null 2>&1'
+
+    - name: Create mothertree config directory
+      ansible.builtin.file:
+        path: /etc/mothertree
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when: e2e_cleanup_pools is defined
+
+    - name: Deploy e2e cleanup pool credentials
+      ansible.builtin.template:
+        src: e2e-cleanup-pools.env.j2
+        dest: /etc/mothertree/e2e-cleanup-pools.env
+        owner: root
+        group: root
+        mode: "0600"
+      when: e2e_cleanup_pools is defined
+
+    - name: Deploy stale e2e user cleanup script
+      ansible.builtin.template:
+        src: cleanup-stale-e2e-users.sh.j2
+        dest: /usr/local/bin/cleanup-stale-e2e-users.sh
+        owner: root
+        group: root
+        mode: "0700"
+      when: e2e_cleanup_pools is defined
+
+    - name: Clean stale e2e test users from Keycloak (cron)
+      ansible.builtin.cron:
+        name: "Clean stale e2e users"
+        minute: "*/15"
+        user: root
+        job: '/usr/local/bin/cleanup-stale-e2e-users.sh >> /var/log/e2e-cleanup.log 2>&1'
+      when: e2e_cleanup_pools is defined
 
   handlers:
     - name: Restart Docker

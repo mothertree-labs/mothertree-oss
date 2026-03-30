@@ -542,6 +542,29 @@ EOF
         echo "headscale_s3_secret: \"${PGBACKREST_S3_SECRET}\"" >> "$TEMP_EXTRA_VARS"
       fi
 
+      # Tailscale router split DNS — read state files written by deploy-tailscale-router.sh.
+      # Collects all per-env split DNS mappings so Ansible preserves them in headscale config.
+      _ROUTER_DNS_ENTRIES=""
+      _INFRA_DIR="${REPO_ROOT}/config/platform/infra"
+      [ -d "$_INFRA_DIR" ] || _INFRA_DIR="${REPO_ROOT}/infra"
+      for _dns_file in "$_INFRA_DIR"/tailscale-router-dns.*.env; do
+        [ -f "$_dns_file" ] || continue
+        _dns_domain="" _dns_ip=""
+        # shellcheck disable=SC1090
+        source "$_dns_file"
+        _dns_domain="${TAILSCALE_ROUTER_DNS_DOMAIN:-}"
+        _dns_ip="${TAILSCALE_ROUTER_DNS_IP:-}"
+        if [ -n "$_dns_domain" ] && [ -n "$_dns_ip" ]; then
+          _ROUTER_DNS_ENTRIES="${_ROUTER_DNS_ENTRIES}  ${_dns_domain}: \"${_dns_ip}\"\n"
+        fi
+        # Reset sourced vars so next iteration is clean
+        unset TAILSCALE_ROUTER_DNS_DOMAIN TAILSCALE_ROUTER_DNS_IP
+      done
+      if [ -n "$_ROUTER_DNS_ENTRIES" ]; then
+        echo "tailscale_router_dns:" >> "$TEMP_EXTRA_VARS"
+        echo -e "$_ROUTER_DNS_ENTRIES" >> "$TEMP_EXTRA_VARS"
+      fi
+
       # PostgreSQL server configuration
       if [ -n "${POSTGRES_VERSION:-}" ]; then
         echo "postgres_version: \"${POSTGRES_VERSION}\"" >> "$TEMP_EXTRA_VARS"

@@ -24,7 +24,7 @@ const baseDomain = urls.baseDomain;
  * 5. Click subtle magic-link link → /switch-to-magic-link → "Check your email" page
  */
 test.describe('WebAuthn Register — Always-Visible Magic Link Option', () => {
-  test.setTimeout(300_000);
+  test.setTimeout(180_000);
 
   test('subtle magic-link link is visible when device supports passkeys', async ({ adminPage }) => {
     test.skip(!isImapConfigured(), 'IMAP not configured (E2E_STALWART_ADMIN_PASSWORD not set)');
@@ -70,7 +70,7 @@ test.describe('WebAuthn Register — Always-Visible Magic Link Option', () => {
       const rawEmail = await waitForEmailBody({
         userEmail: TEST_USERS.emailTest.email,
         bodyContains: uniqueId,
-        timeoutMs: 180_000,
+        timeoutMs: 90_000,
         pollIntervalMs: 3_000,
       });
 
