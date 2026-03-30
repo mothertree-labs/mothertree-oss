@@ -258,10 +258,13 @@ else
         print_warning "Could not get Keycloak admin token — skipping user provisioning into Nextcloud"
     fi
 
-    # List Nextcloud users via occ (reliable, no cross-namespace API call needed)
+    # Build combined user list: occ user:list (local users) + Keycloak emails (OIDC users).
+    # occ user:list doesn't enumerate OIDC-backend users, so we merge both sources
+    # to ensure CalDAV tokens are created for all users regardless of backend.
     NC_USER_JSON=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
         php occ user:list --output=json 2>/dev/null || echo "{}")
-    USER_EMAILS=$(echo "$NC_USER_JSON" | jq -r 'keys[] | select(. != "admin")' 2>/dev/null || echo "")
+    NC_EMAILS=$(echo "$NC_USER_JSON" | jq -r 'keys[] | select(. != "admin")' 2>/dev/null || echo "")
+    USER_EMAILS=$(printf '%s\n%s' "$NC_EMAILS" "${KC_EMAILS:-}" | sort -u | grep -v '^$' || echo "")
 
     # Create app passwords for each user and build JSON token map
     CALDAV_TOKENS="{}"
