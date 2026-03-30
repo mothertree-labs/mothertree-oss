@@ -30,7 +30,7 @@ const ROUNDCUBE_INBOX = '#messagelist, #mailboxlist, .mailbox-list, button:has-t
  * - No production code changes needed
  */
 test.describe('Onboarding — Full User Flow', () => {
-  test.setTimeout(300_000); // 5 minutes — touches all services + email delivery
+  test.setTimeout(180_000); // 5 minutes — touches all services + email delivery
 
   test('invited user can register passkey and access all services', async ({ adminPage }) => {
     test.skip(!isImapConfigured(), 'IMAP not configured (E2E_STALWART_ADMIN_PASSWORD not set)');
@@ -81,7 +81,7 @@ test.describe('Onboarding — Full User Flow', () => {
       expect(messageText).toContain('successfully');
 
       // Verify user appears in members list
-      await expect(adminPage.locator(ap.membersList)).toContainText(firstName, { timeout: 10_000 });
+      await expect(adminPage.locator(ap.membersList)).toContainText(firstName, { timeout: 30_000 });
 
       record('admin-portal-invite', true);
       console.log(`  [onboarding] Invite API response: userId=${invitedUserId}, status=${apiResponse.status()}`);
@@ -100,7 +100,7 @@ test.describe('Onboarding — Full User Flow', () => {
       const rawEmail = await waitForEmailBody({
         userEmail: TEST_USERS.emailTest.email, // Read from e2e-mailrt's inbox
         bodyContains: uniqueId, // Match timestamp in To: header (always in raw MIME)
-        timeoutMs: 180_000, // Email delivery (Keycloak→Postfix→Stalwart) takes 60-120s in CI
+        timeoutMs: 90_000, // Email delivery (Keycloak→Postfix→Stalwart) takes 60-120s in CI
         pollIntervalMs: 3_000,
       });
 

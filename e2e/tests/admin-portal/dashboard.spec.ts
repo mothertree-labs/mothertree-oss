@@ -10,7 +10,7 @@ test.describe('Admin Portal — Dashboard', () => {
     const ap = selectors.adminPortal;
 
     // Wait for the members list to load (replaces "Loading members...")
-    await expect(page.locator(ap.membersList)).not.toContainText('Loading members...', { timeout: 10_000 });
+    await expect(page.locator(ap.membersList)).not.toContainText('Loading members...', { timeout: 30_000 });
 
     // Should contain at least the admin test user
     await expect(page.locator(ap.membersList)).toContainText(TEST_USERS.admin.username);

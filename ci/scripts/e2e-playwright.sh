@@ -6,6 +6,9 @@ echo "--- :playwright: E2E Browser Tests"
 # Resolve tenant from Valkey lease (sets E2E_BASE_DOMAIN, E2E_TENANT, etc.)
 if [[ "${CI:-}" == "true" ]]; then
   source ci/scripts/ci-resolve-tenant.sh
+  # Acquire e2e protection lock — blocks deploy_infra on other pipelines
+  # from running while our tests are active.
+  ci/scripts/ci-e2e-lock.sh acquire
 fi
 
 # Requires E2E_BASE_DOMAIN and E2E_TENANT to be set in the CI environment.

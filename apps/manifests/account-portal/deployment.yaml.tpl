@@ -31,6 +31,8 @@ spec:
               value: "${RATE_LIMIT_MAX}"
             - name: RATE_LIMIT_WINDOW_MS
               value: "${RATE_LIMIT_WINDOW_MS}"
+            - name: RATE_LIMIT_BEGINSETUP_MAX
+              value: "${RATE_LIMIT_BEGINSETUP_MAX}"
             - name: BASE_URL
               value: "https://${ACCOUNT_HOST}"
             - name: SESSION_SECRET

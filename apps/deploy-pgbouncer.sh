@@ -61,8 +61,12 @@ export PG_VM_TAILSCALE_IP
 : "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
 export HEADSCALE_URL
 
-# Required: Tailscale pre-auth key — prefer tagged key for ACL enforcement
-TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY_PGBOUNCER:-${TAILSCALE_AUTHKEY:?TAILSCALE_AUTHKEY not set. Add tailscale.authkey to infra secrets.}}"
+# Required: Tailscale pre-auth key with tag:pgbouncer for ACL enforcement.
+# The generic TAILSCALE_AUTHKEY must NOT be used — nodes registered without
+# the tag:pgbouncer ACL tag cannot reach the PostgreSQL VM, silently breaking
+# all database connectivity cluster-wide.
+: "${TAILSCALE_AUTHKEY_PGBOUNCER:?TAILSCALE_AUTHKEY_PGBOUNCER not set. Create a tagged pre-auth key (tag:pgbouncer) on Headscale and add tailscale.pgbouncer_authkey to infra secrets.}"
+TAILSCALE_AUTHKEY="$TAILSCALE_AUTHKEY_PGBOUNCER"
 
 # Required: PgBouncer auth password (for auth_query bootstrap)
 : "${PGBOUNCER_AUTH_PASSWORD:?PGBOUNCER_AUTH_PASSWORD not set. Add pgbouncer.auth_password to infra secrets.}"

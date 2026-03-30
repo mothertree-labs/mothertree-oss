@@ -61,7 +61,7 @@ async function loginToCalendar(
 }
 
 test.describe('Calendar — External Invite via Calendar Automation', () => {
-  test.setTimeout(300_000); // 5 minutes
+  test.setTimeout(180_000); // 3 minutes
 
   test('prerequisites: calendar and IMAP must be configured', () => {
     expect(
@@ -125,7 +125,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
         emailTestPage,
         recipientNcId,
         summary,
-        180_000,
+        90_000,
       );
 
       expect(ical).toBeTruthy();
@@ -225,7 +225,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
         summary,
         externalAttendee,
         'ACCEPTED',
-        180_000,
+        90_000,
       );
 
       expect(updatedIcal).toBeTruthy();
@@ -398,7 +398,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
         summary,
         externalAttendee,
         'ACCEPTED',
-        180_000,
+        90_000,
       );
 
       expect(updatedIcal).toBeTruthy();
