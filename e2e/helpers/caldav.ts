@@ -184,7 +184,7 @@ export async function pollForEvent(
   page: Page,
   username: string,
   summary: string,
-  timeoutMs = 180_000,
+  timeoutMs = 90_000,
   intervalMs = 10_000,
 ): Promise<string> {
   const start = Date.now();
@@ -213,7 +213,7 @@ export async function pollForPartstat(
   summary: string,
   attendeeEmail: string,
   expectedPartstat: string,
-  timeoutMs = 180_000,
+  timeoutMs = 90_000,
   intervalMs = 10_000,
 ): Promise<string> {
   const start = Date.now();
@@ -243,7 +243,7 @@ export async function pollForEventGone(
   page: Page,
   username: string,
   summary: string,
-  timeoutMs = 180_000,
+  timeoutMs = 90_000,
   intervalMs = 10_000,
 ): Promise<void> {
   const start = Date.now();

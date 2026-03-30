@@ -270,10 +270,21 @@ if [[ "$ALL_TENANTS" == "true" ]]; then
     done
   fi
 else
-  echo "Dev deploy — skipping deploy lock (pool lease provides isolation)"
+  # Dev: acquire infra lock to prevent concurrent shared infra deploys
+  # and to wait for any running e2e tests to finish.
+  : "${CI_VALKEY_PASSWORD:?CI_VALKEY_PASSWORD is required for infra locking}"
+  "$REPO_ROOT/ci/scripts/ci-infra-lock.sh" acquire
+  _INFRA_LOCK_ACQUIRED=1
 fi
 
-trap '_release_deploy_lock; _cleanup' EXIT
+_release_infra_lock() {
+  if [[ -n "${_INFRA_LOCK_ACQUIRED:-}" ]]; then
+    "$REPO_ROOT/ci/scripts/ci-infra-lock.sh" release || true
+    _INFRA_LOCK_ACQUIRED=""
+  fi
+}
+
+trap '_release_deploy_lock; _release_infra_lock; _cleanup' EXIT
 
 echo ""
 echo "=== Running deploy_infra -e $MT_ENV ==="
@@ -281,6 +292,10 @@ echo "=== Running deploy_infra -e $MT_ENV ==="
 
 echo ""
 echo "=== deploy_infra complete ==="
+
+# Release infra lock early — create_env is tenant-scoped, doesn't need it.
+# This lets the other pipeline's deploy_infra proceed while we run create_env.
+_release_infra_lock
 
 # ── Deploy tenant(s) ─────────────────────────────────────────────
 FAILED_TENANTS=()
