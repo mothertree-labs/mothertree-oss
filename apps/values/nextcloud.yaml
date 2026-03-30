@@ -144,6 +144,17 @@ nextcloud:
           ),
         ),
       );
+    # Disable the Nextcloud App Store to prevent occ upgrade from pulling
+    # newer app versions at pod startup. We pin app versions explicitly in
+    # app-versions.json and install them via the identity-init container.
+    # Without this, occ upgrade fetches latest compatible versions from
+    # apps.nextcloud.com, causing split-brain version mismatches when pods
+    # restart at different times (disk=old, db=new → readiness probe failure).
+    appstore.config.php: |-
+      <?php
+      $CONFIG = array (
+        'appstoreenabled' => false,
+      );
 
   # PHP ini overrides (mounted into /usr/local/etc/php/conf.d/)
   # Session cookie security — critical for OIDC login.

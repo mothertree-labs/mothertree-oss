@@ -209,7 +209,7 @@ const beginSetupAttempts = new Map();
 function checkBeginSetupRateLimit(ip) {
   const now = Date.now();
   const windowMs = 5 * 60 * 1000; // 5 minutes
-  const maxAttempts = 20;
+  const maxAttempts = parseInt(process.env.RATE_LIMIT_BEGINSETUP_MAX, 10) || 20;
   const attempts = (beginSetupAttempts.get(ip) || []).filter(t => t > now - windowMs);
   beginSetupAttempts.set(ip, attempts);
   if (attempts.length >= maxAttempts) return false;

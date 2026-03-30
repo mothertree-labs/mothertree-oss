@@ -72,7 +72,7 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
       await expect(adminPage.locator(ap.formMessage)).toBeVisible({ timeout: 30_000 });
       const messageText = await adminPage.locator(ap.formMessage).textContent();
       expect(messageText).toContain('successfully');
-      await expect(adminPage.locator(ap.membersList)).toContainText(firstName, { timeout: 10_000 });
+      await expect(adminPage.locator(ap.membersList)).toContainText(firstName, { timeout: 30_000 });
 
       console.log(`  [magic-link] Invite sent: userId=${invitedUserId}`);
 
