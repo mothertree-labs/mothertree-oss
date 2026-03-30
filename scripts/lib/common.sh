@@ -311,6 +311,19 @@ mt_restart_if_changed() {
 }
 
 # ---------------------------------------------------------------------------
+# mt_set_env — set KEY=VALUE in a dotenv file (update if exists, append if not)
+# Usage: mt_set_env <key> <value> <file>
+# ---------------------------------------------------------------------------
+mt_set_env() {
+    local key="$1" value="$2" file="$3"
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        sed -i'' "s|^${key}=.*|${key}=${value}|" "$file"
+    else
+        echo "${key}=${value}" >> "$file"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # PostgreSQL helpers (connects via PgBouncer to external PG VM)
 # ---------------------------------------------------------------------------
 

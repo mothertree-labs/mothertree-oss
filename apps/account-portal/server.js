@@ -130,7 +130,7 @@ app.use(session({
   saveUninitialized: false, // Don't create session until something is stored
   cookie: {
     domain: cookieDomain,   // Shared parent domain so logout clears both portals
-    secure: process.env.NODE_ENV === 'development' ? false : true,
+    secure: process.env.NODE_ENV !== 'development',
     httpOnly: true,
     sameSite: process.env.NODE_ENV === 'development' ? false : 'lax',
     maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days (matches Remember Me / offline token lifespan)
