@@ -576,8 +576,10 @@ _mt_export_all() {
   # Rate limiting: 1-minute sliding window for both envs, higher limit for dev
   if [ "$MT_ENV" = "dev" ]; then
     export RATE_LIMIT_MAX="${RATE_LIMIT_MAX:-2000}"       # ~33 QPS
+    export RATE_LIMIT_BEGINSETUP_MAX="${RATE_LIMIT_BEGINSETUP_MAX:-20000}"
   else
     export RATE_LIMIT_MAX="${RATE_LIMIT_MAX:-300}"        # ~5 QPS
+    export RATE_LIMIT_BEGINSETUP_MAX="${RATE_LIMIT_BEGINSETUP_MAX:-20}"
   fi
   export RATE_LIMIT_WINDOW_MS="${RATE_LIMIT_WINDOW_MS:-60000}"  # 1 minute
   export DOCS_HOST FILES_HOST JITSI_HOST HOME_HOST AUTH_HOST
