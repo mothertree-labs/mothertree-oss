@@ -233,6 +233,11 @@ else
         PROVISIONED=0
         while IFS= read -r kc_email; do
             [ -z "$kc_email" ] && continue
+            # Validate email format (defense-in-depth against injection via crafted Keycloak data)
+            if ! [[ "$kc_email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+$ ]]; then
+                print_warning "Skipping invalid email from Keycloak: $kc_email"
+                continue
+            fi
             # Skip if already in Nextcloud
             if echo "$NC_EXISTING" | grep -qxF "$kc_email"; then
                 continue
@@ -241,7 +246,7 @@ else
             RAND_PASS=$(openssl rand -base64 32)
             kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
                 env "OC_PASS=$RAND_PASS" \
-                php occ user:add --password-from-env --display-name "$kc_email" "$kc_email" 2>/dev/null && \
+                php occ user:add --password-from-env --display-name "$kc_email" -- "$kc_email" 2>/dev/null && \
                 PROVISIONED=$((PROVISIONED + 1)) || \
                 print_warning "Failed to provision Nextcloud user: $kc_email"
         done <<< "$KC_EMAILS"
