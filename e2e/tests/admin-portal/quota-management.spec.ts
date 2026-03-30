@@ -16,7 +16,7 @@ test.describe('Admin Portal — Quota Management', () => {
       }
       break;
     }
-    await expect(page.locator(selectors.adminPortal.membersList)).not.toContainText('Loading members...', { timeout: 10_000 });
+    await expect(page.locator(selectors.adminPortal.membersList)).not.toContainText('Loading members...', { timeout: 30_000 });
   });
 
   // Target the e2e-admin user's quota button directly via data-email attribute

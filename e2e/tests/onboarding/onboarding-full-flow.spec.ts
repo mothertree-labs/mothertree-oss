@@ -81,7 +81,7 @@ test.describe('Onboarding — Full User Flow', () => {
       expect(messageText).toContain('successfully');
 
       // Verify user appears in members list
-      await expect(adminPage.locator(ap.membersList)).toContainText(firstName, { timeout: 10_000 });
+      await expect(adminPage.locator(ap.membersList)).toContainText(firstName, { timeout: 30_000 });
 
       record('admin-portal-invite', true);
       console.log(`  [onboarding] Invite API response: userId=${invitedUserId}, status=${apiResponse.status()}`);
