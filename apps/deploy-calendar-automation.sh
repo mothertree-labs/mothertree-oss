@@ -202,10 +202,69 @@ else
     kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
         env "OC_PASS=${NEXTCLOUD_ADMIN_PASSWORD}" php occ user:resetpassword --password-from-env admin 2>/dev/null || true
 
-    # List Nextcloud users via occ (reliable, no cross-namespace API call needed)
+    # -------------------------------------------------------------------------
+    # Provision Keycloak users into Nextcloud
+    # -------------------------------------------------------------------------
+    # Nextcloud only creates user principals on first OIDC web login. Users that
+    # exist in Keycloak but have never logged into Nextcloud (e.g. CI mail users)
+    # won't have CalDAV principals, so calendar-automation can't create calendars
+    # for them. Pre-provision them here so CalDAV tokens can be created below.
+    KC_TOKEN=""
+    if [ -n "${KEYCLOAK_ADMIN_PASSWORD:-}" ] && [ -n "${AUTH_HOST:-}" ] && [ -n "${TENANT_KEYCLOAK_REALM:-}" ]; then
+        KEYCLOAK_URL="https://${AUTH_HOST}"
+        KC_TOKEN=$(curl -sf --connect-timeout 10 --max-time 15 -X POST \
+          "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
+          --data-urlencode "username=admin" \
+          --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
+          --data-urlencode "grant_type=password" \
+          --data-urlencode "client_id=admin-cli" | \
+          jq -r '.access_token // empty' 2>/dev/null) || true
+    fi
+
+    if [ -n "$KC_TOKEN" ]; then
+        KC_EMAILS=$(curl -sf --connect-timeout 10 --max-time 15 \
+          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/users?max=500" \
+          -H "Authorization: Bearer $KC_TOKEN" | \
+          jq -r '.[] | select(.email != null) | .email' 2>/dev/null || echo "")
+
+        NC_EXISTING=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+            php occ user:list --output=json 2>/dev/null | jq -r 'keys[]' 2>/dev/null || echo "")
+
+        PROVISIONED=0
+        while IFS= read -r kc_email; do
+            [ -z "$kc_email" ] && continue
+            # Validate email format (defense-in-depth against injection via crafted Keycloak data)
+            if ! [[ "$kc_email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+$ ]]; then
+                print_warning "Skipping invalid email from Keycloak: $kc_email"
+                continue
+            fi
+            # Skip if already in Nextcloud
+            if echo "$NC_EXISTING" | grep -qxF "$kc_email"; then
+                continue
+            fi
+            # Provision with a random password (OIDC handles real auth)
+            RAND_PASS=$(openssl rand -base64 32)
+            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+                env "OC_PASS=$RAND_PASS" \
+                php occ user:add --password-from-env --display-name "$kc_email" -- "$kc_email" 2>/dev/null && \
+                PROVISIONED=$((PROVISIONED + 1)) || \
+                print_warning "Failed to provision Nextcloud user: $kc_email"
+        done <<< "$KC_EMAILS"
+
+        if [ "$PROVISIONED" -gt 0 ]; then
+            print_success "Provisioned $PROVISIONED Keycloak user(s) into Nextcloud"
+        fi
+    else
+        print_warning "Could not get Keycloak admin token — skipping user provisioning into Nextcloud"
+    fi
+
+    # Build combined user list: occ user:list (local users) + Keycloak emails (OIDC users).
+    # occ user:list doesn't enumerate OIDC-backend users, so we merge both sources
+    # to ensure CalDAV tokens are created for all users regardless of backend.
     NC_USER_JSON=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
         php occ user:list --output=json 2>/dev/null || echo "{}")
-    USER_EMAILS=$(echo "$NC_USER_JSON" | jq -r 'keys[] | select(. != "admin")' 2>/dev/null || echo "")
+    NC_EMAILS=$(echo "$NC_USER_JSON" | jq -r 'keys[] | select(. != "admin")' 2>/dev/null || echo "")
+    USER_EMAILS=$(printf '%s\n%s' "$NC_EMAILS" "${KC_EMAILS:-}" | sort -u | grep -v '^$' || echo "")
 
     # Create app passwords for each user and build JSON token map
     CALDAV_TOKENS="{}"

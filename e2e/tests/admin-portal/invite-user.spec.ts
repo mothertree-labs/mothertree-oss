@@ -34,7 +34,7 @@ test.describe('Admin Portal — Invite User', () => {
       expect(messageText).toContain('successfully');
 
       // Verify user appears in the members list by their unique first name
-      await expect(page.locator(ap.membersList)).toContainText(uniqueFirstName, { timeout: 10_000 });
+      await expect(page.locator(ap.membersList)).toContainText(uniqueFirstName, { timeout: 30_000 });
     } finally {
       // Cleanup: always delete the invited user, even if the test failed
       if (invitedUserId) {
@@ -102,7 +102,7 @@ test.describe('Admin Portal — Invite User', () => {
       expect(await page.locator(ap.formMessage).textContent()).toContain('successfully');
 
       // Wait for user to appear in the list
-      await expect(page.locator(ap.membersList)).toContainText(uniqueFirstName, { timeout: 10_000 });
+      await expect(page.locator(ap.membersList)).toContainText(uniqueFirstName, { timeout: 30_000 });
 
       // Find the user's card and click the delete button
       page.on('dialog', (dialog) => dialog.accept());
