@@ -40,7 +40,7 @@ async function loginToCalendar(
 }
 
 test.describe('Calendar — Outbound Invitation Email', () => {
-  test.setTimeout(300_000); // 5 minutes
+  test.setTimeout(180_000); // 3 minutes
 
   test('prerequisites: calendar and IMAP must be configured', () => {
     expect(

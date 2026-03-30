@@ -39,8 +39,9 @@ mt_usage() {
   echo "Deploy shared infrastructure components for an environment."
   echo ""
   echo "Options:"
-  echo "  -e <env>       Environment (e.g., dev, prod)"
-  echo "  -h, --help     Show this help"
+  echo "  -e <env>              Environment (e.g., dev, prod)"
+  echo "  --rotate-all-keys     Force rotation of all Tailscale pre-auth keys"
+  echo "  -h, --help            Show this help"
   echo ""
   echo "Examples:"
   echo "  $0 -e prod    # Deploy infrastructure for production"
@@ -58,6 +59,17 @@ source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy_infra"
 
 mt_require_commands kubectl helm helmfile yq jq curl openssl
+
+# =============================================================================
+# Tailscale pre-auth key expiry check (auto-rotate if within 45 days)
+# =============================================================================
+source "${REPO_ROOT}/scripts/lib/tailscale-keys.sh"
+if mt_has_flag "--rotate-all-keys"; then
+  print_status "Force-rotating all Tailscale pre-auth keys..."
+  "$REPO_ROOT/scripts/rotate-tailscale-keys.sh" -e "$MT_ENV" --component=all --apply-now
+else
+  mt_check_and_rotate_expiring_keys 45
+fi
 
 # Validate Cloudflare IP ranges before deploying (firewall rules depend on these)
 print_status "Validating Cloudflare IP ranges..."
@@ -425,6 +437,17 @@ else
   exit 1
 fi
 
+# =============================================================================
+# Deploy PG Metrics Bridge (forwards postgres_exporter from PG VM into cluster)
+# =============================================================================
+print_status "Deploying PG metrics bridge to $NS_DB namespace..."
+if [ -x "$REPO_ROOT/apps/deploy-pg-metrics-bridge.sh" ]; then
+  "$REPO_ROOT/apps/deploy-pg-metrics-bridge.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+else
+  print_error "deploy-pg-metrics-bridge.sh not found or not executable"
+  exit 1
+fi
+
 # Create Keycloak theme ConfigMap BEFORE deploying Keycloak.
 # Track whether the ConfigMap actually changed so we can conditionally restart
 # Keycloak below — unnecessary restarts destroy all user sessions (Infinispan).
@@ -594,6 +617,24 @@ elif [ -d "$REPO_ROOT/submodules/files_linkeditor" ]; then
   fi
 else
   print_status "files_linkeditor submodule not found, skipping (optional component)"
+fi
+
+# Deploy Tailscale subnet router for operator access to internal services.
+# Provides split DNS + subnet routing so operators can reach Grafana, Prometheus, etc.
+# Non-blocking — router failure shouldn't fail the deploy.
+if [ -x "$REPO_ROOT/apps/deploy-tailscale-router.sh" ]; then
+  print_status "Deploying Tailscale subnet router..."
+  "$REPO_ROOT/apps/deploy-tailscale-router.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /' || \
+    print_warning "Tailscale router deploy failed (non-fatal)"
+fi
+
+# Clean up stale Headscale node registrations from previous pod rollouts.
+# PgBouncer/Postfix Tailscale sidecars register new nodes on every pod restart;
+# this prunes offline ones. Non-blocking — cleanup failure shouldn't fail the deploy.
+if [ -x "$REPO_ROOT/scripts/cleanup-headscale-nodes" ]; then
+  print_status "Cleaning up stale Headscale nodes..."
+  "$REPO_ROOT/scripts/cleanup-headscale-nodes" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /' || \
+    print_warning "Headscale node cleanup failed (non-fatal)"
 fi
 
 # Run post-deploy health check (non-blocking)

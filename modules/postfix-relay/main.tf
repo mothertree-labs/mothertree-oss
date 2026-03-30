@@ -94,6 +94,7 @@ resource "linode_instance" "postfix_relay" {
     user_data = base64encode(templatefile("${path.module}/user-data.yaml", {
       headscale_url      = var.headscale_url
       tailscale_auth_key = var.tailscale_auth_key
+      env                = var.env
     }))
   }
 
