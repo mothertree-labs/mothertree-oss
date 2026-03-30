@@ -27,7 +27,7 @@ resources:
 # Custom rules below are APPENDED to the defaults.
 firewall:
   inbound:
-    # SSH + internal ingress restricted to Tailscale mesh + legacy VPN CIDRs
+    # SSH restricted to Tailscale mesh (CGNAT range)
     - label: "ssh-tailscale"
       action: "ACCEPT"
       protocol: "TCP"
@@ -35,8 +35,6 @@ firewall:
       addresses:
         ipv4:
           - "100.64.0.0/10"
-          - "10.8.0.0/24"
-          - "10.9.0.0/24"
     # Internal ingress NodePort (Grafana, Prometheus, AlertManager) from mesh
     - label: "monitoring-mesh"
       action: "ACCEPT"
@@ -45,8 +43,6 @@ firewall:
       addresses:
         ipv4:
           - "100.64.0.0/10"
-          - "10.8.0.0/24"
-          - "10.9.0.0/24"
     # Node exporter metrics (port 9100) - allow Prometheus to scrape across nodes
     # Uses the same private subnet as the chart's default rules (kubelet, Calico, etc.)
     - label: "node-exporter"
