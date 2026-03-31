@@ -102,7 +102,9 @@ mt_restart_if_changed deployment/pg-metrics-bridge -n "$NS_DB"
 # Wait for rollout
 # =============================================================================
 
-print_status "Waiting for PG metrics bridge rollout..."
-kubectl rollout status deployment/pg-metrics-bridge -n "$NS_DB" --timeout=120s
+if mt_has_changes; then
+  print_status "Waiting for PG metrics bridge rollout..."
+  kubectl rollout status deployment/pg-metrics-bridge -n "$NS_DB" --timeout=120s
+fi
 
 print_success "PG metrics bridge deployed to $NS_DB"
