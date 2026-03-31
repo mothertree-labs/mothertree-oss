@@ -443,24 +443,34 @@ EOF
         print_status "Headscale server ${_hs_ansible_host} added to inventory"
       fi
 
-      # PostgreSQL server
+      # PostgreSQL server — prefer Tailscale IP (public SSH may be blocked at cloud firewall)
       if [ -n "${POSTGRES_SERVER_IP:-}" ] && [ "$POSTGRES_SERVER_IP" != "null" ]; then
+        _pg_ansible_host="${POSTGRES_SERVER_IP}"
+        if [ -n "${PG_VM_TAILSCALE_IP:-}" ] && [ "$PG_VM_TAILSCALE_IP" != "null" ]; then
+          _pg_ansible_host="${PG_VM_TAILSCALE_IP}"
+          print_status "PostgreSQL server using Tailscale IP ${PG_VM_TAILSCALE_IP} for Ansible (public SSH may be blocked)"
+        fi
         cat >> "$TEMP_INVENTORY" <<EOF
 
 [postgres_servers]
-postgres-server ansible_host=${POSTGRES_SERVER_IP} ansible_user=root
+postgres-server ansible_host=${_pg_ansible_host} ansible_user=root
 EOF
-        print_status "PostgreSQL server ${POSTGRES_SERVER_IP} added to inventory"
+        print_status "PostgreSQL server ${_pg_ansible_host} added to inventory"
       fi
 
-      # Postfix relay server (SMTP relay on Tailscale mesh)
+      # Postfix relay server — prefer Tailscale IP (public SSH may be blocked at cloud firewall)
       if [ -n "${POSTFIX_RELAY_SERVER_IP:-}" ] && [ "$POSTFIX_RELAY_SERVER_IP" != "null" ]; then
+        _postfix_ansible_host="${POSTFIX_RELAY_SERVER_IP}"
+        if [ -n "${POSTFIX_RELAY_IP:-}" ] && [ "$POSTFIX_RELAY_IP" != "null" ]; then
+          _postfix_ansible_host="${POSTFIX_RELAY_IP}"
+          print_status "Postfix relay using Tailscale IP ${POSTFIX_RELAY_IP} for Ansible (public SSH may be blocked)"
+        fi
         cat >> "$TEMP_INVENTORY" <<EOF
 
 [postfix_relay_servers]
-postfix-relay ansible_host=${POSTFIX_RELAY_SERVER_IP} ansible_user=root
+postfix-relay ansible_host=${_postfix_ansible_host} ansible_user=root
 EOF
-        print_status "Postfix relay server ${POSTFIX_RELAY_SERVER_IP} added to inventory"
+        print_status "Postfix relay server ${_postfix_ansible_host} added to inventory"
       fi
 
       # Source env-specific secrets if available (for tls_email, etc.)
