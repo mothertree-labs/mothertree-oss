@@ -125,6 +125,10 @@ _mt_infra_load_env_config() {
     HEADSCALE_TAILSCALE_IP=$(yq '.headscale.tailscale_ip // ""' "$infra_config")
     export HEADSCALE_URL HEADSCALE_DOMAIN HEADSCALE_BASE_DOMAIN HEADSCALE_TAILSCALE_IP
 
+    # TURN server Tailscale IP (for Ansible inventory mesh fallback)
+    TURN_TAILSCALE_IP=$(yq '.turn.tailscale_ip // ""' "$infra_config")
+    export TURN_TAILSCALE_IP
+
     # Postfix relay VM on Tailscale mesh (replaces VPN server mail relay)
     POSTFIX_RELAY_IP=$(yq '.postfix_relay.tailscale_ip // ""' "$infra_config")
     export POSTFIX_RELAY_IP
@@ -356,15 +360,17 @@ _mt_infra_load_shared_secrets() {
   # Per-component keys: when ACLs are enabled, each component needs a key
   # with the correct tag so new pods register with the right permissions.
   # Falls back to generic TAILSCALE_AUTHKEY if not set.
-  local _ts_pgb_key _ts_postfix_key _ts_router_key _ts_metrics_key
+  local _ts_pgb_key _ts_postfix_key _ts_router_key _ts_metrics_key _ts_turn_key
   _ts_pgb_key=$(yq '.tailscale.pgbouncer_authkey // ""' "$_infra_secrets")
   _ts_postfix_key=$(yq '.tailscale.postfix_authkey // ""' "$_infra_secrets")
   _ts_router_key=$(yq '.tailscale.router_authkey // ""' "$_infra_secrets")
   _ts_metrics_key=$(yq '.tailscale.metrics_authkey // ""' "$_infra_secrets")
+  _ts_turn_key=$(yq '.tailscale.turn_authkey // ""' "$_infra_secrets")
   [ -n "$_ts_pgb_key" ] && [ "$_ts_pgb_key" != "null" ] && export TAILSCALE_AUTHKEY_PGBOUNCER="$_ts_pgb_key"
   [ -n "$_ts_postfix_key" ] && [ "$_ts_postfix_key" != "null" ] && export TAILSCALE_AUTHKEY_POSTFIX="$_ts_postfix_key"
   [ -n "$_ts_router_key" ] && [ "$_ts_router_key" != "null" ] && export TAILSCALE_AUTHKEY_ROUTER="$_ts_router_key"
   [ -n "$_ts_metrics_key" ] && [ "$_ts_metrics_key" != "null" ] && export TAILSCALE_AUTHKEY_METRICS="$_ts_metrics_key"
+  [ -n "$_ts_turn_key" ] && [ "$_ts_turn_key" != "null" ] && export TAILSCALE_AUTHKEY_TURN="$_ts_turn_key"
 
   # PgBouncer auth password (optional — only when PGBOUNCER_ENABLED=true)
   if [ "${PGBOUNCER_ENABLED:-false}" = "true" ]; then

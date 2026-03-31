@@ -140,6 +140,15 @@ resource "linode_firewall" "turn_server_firewall" {
     ipv6     = ["::/0"]
   }
 
+  # Tailscale/WireGuard mesh connectivity
+  inbound {
+    label    = "Tailscale-WireGuard"
+    action   = "ACCEPT"
+    protocol = "UDP"
+    ports    = "41641"
+    ipv4     = ["0.0.0.0/0"]
+    ipv6     = ["::/0"]
+  }
 
 }
 

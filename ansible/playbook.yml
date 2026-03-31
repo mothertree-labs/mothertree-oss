@@ -397,6 +397,73 @@
         update_cache: yes
         cache_valid_time: 3600
 
+    # --- Tailscale mesh connectivity (optional — skipped if headscale_url not provided) ---
+    - name: Set effective Tailscale auth key for TURN
+      set_fact:
+        _turn_ts_authkey: "{{ turn_tailscale_auth_key | default(tailscale_auth_key, true) | default('', true) }}"
+      when: headscale_url is defined and headscale_url | length > 0
+
+    - name: Check if Tailscale is installed
+      command: tailscale version
+      register: turn_ts_version
+      changed_when: false
+      failed_when: false
+      when: headscale_url is defined and headscale_url | length > 0 and _turn_ts_authkey | length > 0
+
+    - name: Install Tailscale if not present
+      shell: curl -fsSL https://tailscale.com/install.sh | sh
+      when: >
+        headscale_url is defined and headscale_url | length > 0 and
+        _turn_ts_authkey | length > 0 and
+        turn_ts_version.rc is defined and turn_ts_version.rc != 0
+
+    - name: Ensure Tailscale is enabled and running
+      systemd:
+        name: tailscaled
+        enabled: yes
+        state: started
+      when: >
+        headscale_url is defined and headscale_url | length > 0 and
+        _turn_ts_authkey | length > 0
+
+    - name: Check Tailscale status
+      command: tailscale status --json
+      register: turn_ts_status
+      changed_when: false
+      failed_when: false
+      when: >
+        headscale_url is defined and headscale_url | length > 0 and
+        _turn_ts_authkey | length > 0
+
+    - name: Join tailnet if not connected
+      command: >
+        tailscale up
+        --reset
+        --login-server={{ headscale_url }}
+        --authkey={{ _turn_ts_authkey }}
+        --accept-routes=false
+        --ssh
+      no_log: true
+      when: >
+        headscale_url is defined and headscale_url | length > 0 and
+        _turn_ts_authkey | length > 0 and
+        (turn_ts_status.rc is defined and turn_ts_status.rc != 0 or
+        (turn_ts_status.stdout is defined and
+         (turn_ts_status.stdout | from_json).BackendState != "Running"))
+
+    - name: Get Tailscale IP
+      command: tailscale ip -4
+      register: turn_tailscale_ip
+      changed_when: false
+      when: >
+        headscale_url is defined and headscale_url | length > 0 and
+        _turn_ts_authkey | length > 0
+
+    - name: Display Tailscale IP
+      debug:
+        msg: "TURN server Tailscale IP: {{ turn_tailscale_ip.stdout }}"
+      when: turn_tailscale_ip.stdout is defined
+
     - name: Install Coturn
       apt:
         name: coturn
