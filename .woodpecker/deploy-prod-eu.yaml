@@ -1,0 +1,26 @@
+when:
+  - event: push
+    branch: main
+
+depends_on:
+  - mothertree-build
+
+clone:
+  - name: clone
+    image: woodpeckerci/plugin-git
+    settings:
+      recursive: false
+
+steps:
+  - name: deploy-prod-eu
+    image: bash
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      DEPLOY_VAULT_PASSWORD:
+        from_secret: deploy_vault_password
+      GITHUB_PAT:
+        from_secret: github_pat
+    commands:
+      - ci/scripts/ci-deploy.sh prod-eu --all-tenants

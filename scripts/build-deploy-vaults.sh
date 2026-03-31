@@ -55,7 +55,7 @@ if [[ -z "$VAULT_PASSWORD" ]]; then
 fi
 
 # ── Determine which envs to build ─────────────────────────────────
-ENVS=("${1:-dev}" "${1:-prod}")
+ENVS=("${1:-dev}" "${1:-prod}" "${1:-prod-eu}")
 if [[ -n "${1:-}" ]]; then
   ENVS=("$1")
 fi
