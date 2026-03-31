@@ -24,11 +24,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # shellcheck source=ci-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"
-MT_ENV="${1:?Usage: ci-deploy.sh <env> [--all-tenants]}"
+MT_ENV="${1:?Usage: ci-deploy.sh <env> [--all-tenants] [--prep-only]}"
 ALL_TENANTS=false
-if [[ "${2:-}" == "--all-tenants" ]]; then
-  ALL_TENANTS=true
-fi
+PREP_ONLY=false
+for arg in "${@:2}"; do
+  case "$arg" in
+    --all-tenants) ALL_TENANTS=true ;;
+    --prep-only)   PREP_ONLY=true ;;
+  esac
+done
 
 : "${DEPLOY_VAULT_PASSWORD:?DEPLOY_VAULT_PASSWORD is required}"
 
@@ -316,11 +320,16 @@ echo "=== deploy_infra complete ==="
 _release_infra_lock
 
 # ── Deploy tenant(s) ─────────────────────────────────────────────
+CREATE_ENV_EXTRA_ARGS=""
+if [[ "$PREP_ONLY" == "true" ]]; then
+  CREATE_ENV_EXTRA_ARGS="--prep-only"
+fi
+
 FAILED_TENANTS=()
 for tenant in "${TENANTS[@]}"; do
   echo ""
-  echo "=== Running create_env -e $MT_ENV -t $tenant ==="
-  if "$REPO_ROOT/scripts/create_env" -e "$MT_ENV" -t "$tenant"; then
+  echo "=== Running create_env -e $MT_ENV -t $tenant ${CREATE_ENV_EXTRA_ARGS} ==="
+  if "$REPO_ROOT/scripts/create_env" -e "$MT_ENV" -t "$tenant" $CREATE_ENV_EXTRA_ARGS; then
     echo "=== Tenant $tenant deployed successfully ==="
   else
     echo "=== FAILED: Tenant $tenant deploy failed ==="

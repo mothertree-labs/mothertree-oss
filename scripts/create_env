@@ -32,11 +32,15 @@ mt_usage() {
   echo "  -e <env>              Environment (e.g., dev, prod)"
   echo "  -t <tenant>           Tenant name (e.g., example)"
   echo "  --create-alert-user   Create the alertbot Matrix user for alerting"
+  echo "  --prep-only           Run only Phase 1 (namespaces, TLS, DNS, Keycloak realm)"
+  echo "  --finalize-only       Run only the finalize phase (cleanup, probes, health checks)"
   echo "  -h, --help            Show this help"
   echo ""
   echo "Examples:"
   echo "  $0 -e prod -t example"
   echo "  $0 -e dev -t example --create-alert-user"
+  echo "  $0 -e dev -t example --prep-only     # CI: run before parallel app deploys"
+  echo "  $0 -e dev -t example --finalize-only  # CI: run after parallel app deploys"
 }
 
 mt_parse_args "$@"
@@ -52,10 +56,25 @@ _mt_resolve_project_conf
 source "${REPO_ROOT}/scripts/lib/config.sh"
 mt_load_tenant_config
 
-# Check --create-alert-user flag
+# Check flags
 CREATE_ALERT_USER="false"
 if mt_has_flag "--create-alert-user"; then
   CREATE_ALERT_USER="true"
+fi
+
+PREP_ONLY="false"
+if mt_has_flag "--prep-only"; then
+  PREP_ONLY="true"
+fi
+
+FINALIZE_ONLY="false"
+if mt_has_flag "--finalize-only"; then
+  FINALIZE_ONLY="true"
+fi
+
+if [ "$PREP_ONLY" = "true" ] && [ "$FINALIZE_ONLY" = "true" ]; then
+  print_error "Cannot use both --prep-only and --finalize-only"
+  exit 1
 fi
 
 source "${REPO_ROOT}/scripts/lib/notify.sh"
@@ -78,6 +97,13 @@ print_status "Hosts: matrix=$MATRIX_HOST, docs=$DOCS_HOST, files=$FILES_HOST, ji
 print_status "Hosts: mail=$MAIL_HOST, webmail=$WEBMAIL_HOST, admin=$ADMIN_HOST, calendar=$CALENDAR_HOST, office=$OFFICE_HOST"
 print_status "S3 bucket (files): $S3_FILES_BUCKET"
 print_status "Scaling: docs_backend=$DOCS_BACKEND_MIN_REPLICAS-$DOCS_BACKEND_MAX_REPLICAS, jvb=$JVB_MIN_REPLICAS-$JVB_MAX_REPLICAS, redis=$REDIS_REPLICAS"
+
+# When --finalize-only, skip infra verification and helm setup (already done in prep)
+if [ "$FINALIZE_ONLY" = "true" ]; then
+  print_status "Running finalize-only mode — skipping to cleanup and health checks"
+  # Jump past all prep and app deploy sections to the finalize block
+  # (the FINALIZE_ONLY != true guard below will skip app deploys)
+else
 
 # Verify infrastructure is deployed
 print_status "Verifying shared infrastructure is deployed..."
@@ -514,6 +540,25 @@ if ! MT_ENV="$MT_ENV" "$REPO_ROOT/docs/import-keycloak-realm.sh"; then
   exit 1
 fi
 
+# ── Prep-only exit point ────────────────────────────────────────────
+# When --prep-only is set, exit here. All prerequisites for parallel
+# app deploys are now in place: namespaces, TLS cert, DNS records,
+# DKIM/mail routing, Docs, and Keycloak realm.
+if [ "$PREP_ONLY" = "true" ]; then
+  print_success "Prep phase complete for tenant $TENANT_NAME (--prep-only)"
+  print_status "Namespaces, TLS cert, DNS, DKIM, Docs, and Keycloak realm are ready."
+  print_status "Individual app deploys can now run in parallel."
+  exit 0
+fi
+
+fi  # end of FINALIZE_ONLY else block (skips infra verification + prep)
+
+# ── Finalize-only: skip to finalize phase ────────────────────────────
+# When --finalize-only is set, skip all app deploys and go straight to
+# cleanup, endpoint probes, and health checks.
+if [ "$FINALIZE_ONLY" != "true" ]; then
+# ── BEGIN app deploys (skipped when --finalize-only) ─────────────────
+
 # Deploy Collabora CODE (per-tenant office suite for in-browser document editing)
 # Must come BEFORE Nextcloud so the richdocuments activate-config step can reach Collabora
 if [ "$OFFICE_ENABLED" = "true" ]; then
@@ -698,6 +743,13 @@ if [ "$ACCOUNT_PORTAL_ENABLED" = "true" ]; then
 else
   print_status "Account Portal: skipping (features.account_portal_enabled is not true)"
 fi
+
+# ── END app deploys ──────────────────────────────────────────────────
+fi  # end of FINALIZE_ONLY != true
+
+# =============================================================================
+# Finalize: Cleanup, endpoint probes, and health checks
+# =============================================================================
 
 # =============================================================================
 # Cleanup old per-service Certificate resources (replaced by wildcard cert)

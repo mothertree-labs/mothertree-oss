@@ -1,7 +1,7 @@
 depends_on:
   - validate
   - build-images
-  - deploy-dev
+  - deploy-dev-finalize
   - e2e-shard-1
   - e2e-shard-2
   - e2e-shard-3
