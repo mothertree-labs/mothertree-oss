@@ -23,7 +23,7 @@ vcli() {
 # Token is deployed to the CI host by Ansible (ci/ansible/playbook.yml).
 _WP_API_TOKEN_FILE="/home/woodpecker/.woodpecker-api-token"
 _WP_API_URL="http://localhost:8000/api"
-_WP_REPO_ID=1
+_WP_REPO_ID="${CI_REPO_ID:-1}"
 
 # Extract pipeline number from lock values like "123" or "123#pull_request".
 _extract_pipeline_number() {
@@ -48,6 +48,8 @@ _extract_pipeline_number() {
 _pipeline_is_alive() {
   local pipeline_number="$1"
   [[ -z "$pipeline_number" ]] && return 0
+  # Validate numeric to prevent URL path injection from corrupted Valkey values
+  [[ "$pipeline_number" =~ ^[0-9]+$ ]] || return 0
 
   # Read API token — skip check if not available
   local token
