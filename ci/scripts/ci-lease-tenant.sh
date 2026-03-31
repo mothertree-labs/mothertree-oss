@@ -16,10 +16,8 @@ set -euo pipefail
 : "${CI_PIPELINE_NUMBER:?CI_PIPELINE_NUMBER is required}"
 : "${CI_VALKEY_PASSWORD:?CI_VALKEY_PASSWORD is required}"
 
-# Redis-compatible CLI (redis-tools installed on the CI host via Ansible)
-_CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
-# shellcheck disable=SC2086
-vcli() { $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
+# shellcheck source=ci-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"
 
 # ── Soft lease for main merges ─────────────────────────────────
 # On main merges, e2e shards still run against the default pool without
@@ -61,6 +59,18 @@ else
         break
       else
         HOLDER=$(vcli GET "$KEY" 2>/dev/null || echo "unknown")
+        HOLDER_PIPELINE=$(_extract_pipeline_number "$HOLDER")
+        if ! _pipeline_is_alive "$HOLDER_PIPELINE"; then
+          echo "  ${pool}: held by pipeline #${HOLDER_PIPELINE} which is no longer running — force-acquiring"
+          vcli DEL "$KEY" > /dev/null 2>&1 || true
+          vcli DEL "ci-build-${HOLDER_PIPELINE}" > /dev/null 2>&1 || true
+          RESULT=$(vcli SET "$KEY" "$CI_PIPELINE_NUMBER" NX EX "$LEASE_TTL" 2>/dev/null || true)
+          if [[ "$RESULT" == "OK" ]]; then
+            LEASED_POOL="$pool"
+            echo "  Force-acquired pool slot: ${pool}"
+            break
+          fi
+        fi
         echo "  ${pool}: occupied by pipeline #${HOLDER}"
       fi
     done

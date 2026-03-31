@@ -21,6 +21,9 @@ set -euo pipefail
 #   E2E_POOL1_TENANT, E2E_POOL2_TENANT
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# shellcheck source=ci-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"
 MT_ENV="${1:?Usage: ci-deploy.sh <env> [--all-tenants]}"
 ALL_TENANTS=false
 if [[ "${2:-}" == "--all-tenants" ]]; then
@@ -266,6 +269,16 @@ if [[ "$ALL_TENANTS" == "true" ]]; then
 
       HOLDER=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
         GET "$LOCK_KEY" 2>/dev/null || echo "unknown")
+
+      # Check if the lock holder pipeline is still alive
+      HOLDER_PIPELINE=$(_extract_pipeline_number "$HOLDER")
+      if ! _pipeline_is_alive "$HOLDER_PIPELINE"; then
+        echo "Deploy lock held by pipeline #${HOLDER_PIPELINE} which is no longer running — force-acquiring"
+        $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+          DEL "$LOCK_KEY" >/dev/null 2>&1 || true
+        continue  # retry acquire immediately
+      fi
+
       echo "Deploy lock held by #$HOLDER, waiting... ($ELAPSED/${MAX_WAIT}s)"
     done
   fi
