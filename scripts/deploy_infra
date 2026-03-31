@@ -549,50 +549,54 @@ fi
 # =============================================================================
 # Deploy K8s Postfix (ConfigMaps, Deployment, Services, NetworkPolicy)
 # =============================================================================
-print_status "Deploying K8s Postfix..."
-if [ -x "$REPO_ROOT/apps/deploy-postfix.sh" ]; then
-  "$REPO_ROOT/apps/deploy-postfix.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+if [ -n "${POSTFIX_RELAY_IP:-}" ]; then
+  print_status "Deploying K8s Postfix..."
+  if [ -x "$REPO_ROOT/apps/deploy-postfix.sh" ]; then
+    "$REPO_ROOT/apps/deploy-postfix.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+  else
+    print_error "deploy-postfix.sh not found"
+    exit 1
+  fi
+
+  # =============================================================================
+  # Configure K8s Postfix mail routing using shared script
+  # =============================================================================
+  print_status "Configuring K8s Postfix mail routing..."
+  if [ -x "$REPO_ROOT/scripts/configure-mail-routing" ]; then
+    "$REPO_ROOT/scripts/configure-mail-routing" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+  else
+    print_warning "configure-mail-routing script not found"
+  fi
+
+  # =============================================================================
+  # Configure nginx TCP proxy for inbound SMTP (port 30025 -> Postfix:25)
+  # =============================================================================
+  # Routes inbound mail through the ingress-nginx NodeBalancer TCP proxy.
+  # The NodeBalancer has a stable IP (lb1.<env>.<domain>) and its subnet is permanently
+  # allowed through the LKE firewall. This avoids reliance on hardcoded K8s node VPC IPs.
+  # Two things are needed:
+  #   1. tcp-services ConfigMap entries (tells nginx where to proxy)
+  #   2. LB service ports (tells the cloud LB to forward to nginx's NodePort)
+  print_status "Configuring nginx TCP proxy for Postfix inbound SMTP..."
+
+  if ! kubectl get configmap tcp-services -n "$NS_INGRESS" >/dev/null 2>&1; then
+    print_status "Creating tcp-services ConfigMap..."
+    kubectl create configmap tcp-services -n "$NS_INGRESS"
+  fi
+
+  kubectl patch configmap tcp-services -n "$NS_INGRESS" --type merge -p '{"data": {"30025": "infra-mail/postfix:25:PROXY:"}}'
+  print_status "tcp-services ConfigMap updated with 30025 -> infra-mail/postfix:25:PROXY:"
+
+  EXISTING_PORTS=$(kubectl get svc ingress-nginx-controller -n "$NS_INGRESS" -o jsonpath='{.spec.ports[*].port}' 2>/dev/null || echo "")
+  if ! echo "$EXISTING_PORTS" | grep -qw "30025"; then
+    print_status "Adding port 30025 (smtp-inbound) to ingress-nginx LB service..."
+    kubectl patch svc ingress-nginx-controller -n "$NS_INGRESS" --type='json' \
+      -p='[{"op": "add", "path": "/spec/ports/-", "value": {"name": "smtp-inbound", "port": 30025, "targetPort": 30025, "protocol": "TCP"}}]'
+  else
+    print_status "Port 30025 already present on ingress-nginx LB service"
+  fi
 else
-  print_error "deploy-postfix.sh not found"
-  exit 1
-fi
-
-# =============================================================================
-# Configure K8s Postfix mail routing using shared script
-# =============================================================================
-print_status "Configuring K8s Postfix mail routing..."
-if [ -x "$REPO_ROOT/scripts/configure-mail-routing" ]; then
-  "$REPO_ROOT/scripts/configure-mail-routing" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
-else
-  print_warning "configure-mail-routing script not found"
-fi
-
-# =============================================================================
-# Configure nginx TCP proxy for inbound SMTP (port 30025 -> Postfix:25)
-# =============================================================================
-# Routes inbound mail through the ingress-nginx NodeBalancer TCP proxy.
-# The NodeBalancer has a stable IP (lb1.<env>.<domain>) and its subnet is permanently
-# allowed through the LKE firewall. This avoids reliance on hardcoded K8s node VPC IPs.
-# Two things are needed:
-#   1. tcp-services ConfigMap entries (tells nginx where to proxy)
-#   2. LB service ports (tells the cloud LB to forward to nginx's NodePort)
-print_status "Configuring nginx TCP proxy for Postfix inbound SMTP..."
-
-if ! kubectl get configmap tcp-services -n "$NS_INGRESS" >/dev/null 2>&1; then
-  print_status "Creating tcp-services ConfigMap..."
-  kubectl create configmap tcp-services -n "$NS_INGRESS"
-fi
-
-kubectl patch configmap tcp-services -n "$NS_INGRESS" --type merge -p '{"data": {"30025": "infra-mail/postfix:25:PROXY:"}}'
-print_status "tcp-services ConfigMap updated with 30025 -> infra-mail/postfix:25:PROXY:"
-
-EXISTING_PORTS=$(kubectl get svc ingress-nginx-controller -n "$NS_INGRESS" -o jsonpath='{.spec.ports[*].port}' 2>/dev/null || echo "")
-if ! echo "$EXISTING_PORTS" | grep -qw "30025"; then
-  print_status "Adding port 30025 (smtp-inbound) to ingress-nginx LB service..."
-  kubectl patch svc ingress-nginx-controller -n "$NS_INGRESS" --type='json' \
-    -p='[{"op": "add", "path": "/spec/ports/-", "value": {"name": "smtp-inbound", "port": 30025, "targetPort": 30025, "protocol": "TCP"}}]'
-else
-  print_status "Port 30025 already present on ingress-nginx LB service"
+  print_status "Skipping K8s Postfix (no postfix_relay.tailscale_ip in infra config)"
 fi
 
 # NOTE: VPN route DaemonSet removed — replaced by Tailscale mesh (Headscale).
