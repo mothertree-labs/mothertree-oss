@@ -12,7 +12,8 @@
     "tag:headscale": ["group:admins"],
     "tag:k8s-node": ["group:admins"],
     "tag:ci": ["group:admins"],
-    "tag:router": ["group:admins"]
+    "tag:router": ["group:admins"],
+    "tag:turn": ["group:admins"]
   },
   "acls": [
     {"action": "accept", "src": ["tag:pgbouncer"], "dst": ["tag:postgres:5432"]},
@@ -29,7 +30,7 @@
     {
       "action": "accept",
       "src": ["tag:operator", "operators@"],
-      "dst": ["tag:postgres", "tag:postfix-relay", "tag:ci", "tag:headscale"],
+      "dst": ["tag:postgres", "tag:postfix-relay", "tag:ci", "tag:headscale", "tag:turn"],
       "users": ["root"]
     }
   ]
