@@ -522,6 +522,16 @@
         user: root
         job: 'docker image prune -af --filter "until=168h" > /dev/null 2>&1; docker buildx prune -f --keep-storage=2GB > /dev/null 2>&1'
 
+    - name: Deploy Woodpecker API token for CI lock liveness checks
+      ansible.builtin.copy:
+        content: "{{ woodpecker_api_token }}"
+        dest: /home/woodpecker/.woodpecker-api-token
+        owner: woodpecker
+        group: woodpecker
+        mode: "0600"
+      no_log: true
+      when: woodpecker_api_token is defined
+
     - name: Create mothertree config directory
       ansible.builtin.file:
         path: /etc/mothertree

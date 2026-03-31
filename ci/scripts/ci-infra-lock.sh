@@ -17,8 +17,8 @@ set -euo pipefail
 
 ACTION="${1:?Usage: ci-infra-lock.sh acquire|release}"
 
-_CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
-vcli() { $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
+# shellcheck source=ci-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"
 
 LOCK_KEY="ci-infra-lock-dev"
 LOCK_VALUE="${CI_PIPELINE_NUMBER}#${CI_PIPELINE_EVENT:-unknown}"
@@ -34,6 +34,14 @@ _e2e_tests_running() {
     local holder
     holder=$(vcli GET "ci-e2e-active-${pool}" 2>/dev/null || true)
     if [[ -n "$holder" ]]; then
+      # Check if the e2e holder pipeline is still alive
+      local holder_pipeline
+      holder_pipeline=$(_extract_pipeline_number "$holder")
+      if ! _pipeline_is_alive "$holder_pipeline"; then
+        echo "  e2e lock on ${pool} held by pipeline #${holder_pipeline} which is no longer running — clearing" >&2
+        vcli DEL "ci-e2e-active-${pool}" > /dev/null 2>&1 || true
+        continue
+      fi
       echo "$holder"
       return 0
     fi
@@ -67,6 +75,16 @@ do_acquire() {
     if [[ "$result" != "OK" ]]; then
       local holder
       holder=$(vcli GET "$LOCK_KEY" 2>/dev/null || echo "unknown")
+
+      # Check if the lock holder pipeline is still alive
+      local holder_pipeline
+      holder_pipeline=$(_extract_pipeline_number "$holder")
+      if ! _pipeline_is_alive "$holder_pipeline"; then
+        echo "  Infra lock held by pipeline #${holder_pipeline} which is no longer running — force-acquiring"
+        vcli DEL "$LOCK_KEY" > /dev/null 2>&1 || true
+        continue  # retry acquire immediately
+      fi
+
       echo "  Waiting: infra lock held by $holder [$elapsed/${MAX_WAIT}s]"
       sleep "$POLL_INTERVAL"
       elapsed=$((elapsed + POLL_INTERVAL))
