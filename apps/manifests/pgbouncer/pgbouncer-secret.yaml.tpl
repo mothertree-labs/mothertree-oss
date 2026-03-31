@@ -13,15 +13,3 @@ stringData:
   userlist.txt: |
     "pgbouncer" "${PGBOUNCER_AUTH_PASSWORD}"
     "postgres" "${PG_SUPERUSER_PASSWORD}"
----
-# Tailscale pre-authenticated key for mesh connectivity
-apiVersion: v1
-kind: Secret
-metadata:
-  name: pgbouncer-tailscale-auth
-  namespace: ${NS_DB}
-  labels:
-    app: pgbouncer
-type: Opaque
-stringData:
-  TS_AUTHKEY: "${TAILSCALE_AUTHKEY}"

@@ -61,12 +61,11 @@ export PG_VM_TAILSCALE_IP
 : "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
 export HEADSCALE_URL
 
-# Required: Tailscale pre-auth key with tag:pgbouncer for ACL enforcement.
-# The generic TAILSCALE_AUTHKEY must NOT be used — nodes registered without
-# the tag:pgbouncer ACL tag cannot reach the PostgreSQL VM, silently breaking
-# all database connectivity cluster-wide.
-: "${TAILSCALE_AUTHKEY_PGBOUNCER:?TAILSCALE_AUTHKEY_PGBOUNCER not set. Create a tagged pre-auth key (tag:pgbouncer) on Headscale and add tailscale.pgbouncer_authkey to infra secrets.}"
-TAILSCALE_AUTHKEY="$TAILSCALE_AUTHKEY_PGBOUNCER"
+# Tailscale pre-auth key with tag:pgbouncer — only needed for first-time bootstrap.
+# After initial creation, the key-rotator CronJob manages this secret.
+if [ -n "${TAILSCALE_AUTHKEY_PGBOUNCER:-}" ]; then
+  TAILSCALE_AUTHKEY="$TAILSCALE_AUTHKEY_PGBOUNCER"
+fi
 
 # Required: PgBouncer auth password (for auth_query bootstrap)
 : "${PGBOUNCER_AUTH_PASSWORD:?PGBOUNCER_AUTH_PASSWORD not set. Add pgbouncer.auth_password to infra secrets.}"
@@ -128,8 +127,23 @@ kubectl create configmap pgbouncer-config -n "$NS_DB" \
 # =============================================================================
 
 print_status "Applying PgBouncer Secrets..."
-envsubst '${NS_DB} ${PGBOUNCER_AUTH_PASSWORD} ${PG_SUPERUSER_PASSWORD} ${TAILSCALE_AUTHKEY}' \
+envsubst '${NS_DB} ${PGBOUNCER_AUTH_PASSWORD} ${PG_SUPERUSER_PASSWORD}' \
   < "$MANIFESTS_DIR/pgbouncer-secret.yaml.tpl" | mt_apply kubectl apply -f -
+
+# Tailscale auth secret: create only if missing (managed by key-rotator CronJob)
+if ! kubectl get secret pgbouncer-tailscale-auth -n "$NS_DB" >/dev/null 2>&1; then
+  if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
+    print_error "pgbouncer-tailscale-auth secret does not exist and TAILSCALE_AUTHKEY_PGBOUNCER is not set"
+    print_error "Bootstrap: create a tagged pre-auth key (tag:pgbouncer) and set tailscale.pgbouncer_authkey in infra secrets"
+    exit 1
+  fi
+  print_status "Creating Tailscale auth secret (first-time bootstrap)..."
+  kubectl create secret generic pgbouncer-tailscale-auth -n "$NS_DB" \
+    --from-literal=TS_AUTHKEY="$TAILSCALE_AUTHKEY" \
+    --dry-run=client -o yaml | mt_apply kubectl apply -f -
+else
+  print_status "Tailscale auth secret exists (managed by key-rotator CronJob)"
+fi
 
 # Create postgres-credentials Secret for deploy scripts (mt_psql / mt_pg_password helpers).
 # This replaces the Bitnami-generated docs-postgresql secret that scripts previously read.

@@ -60,16 +60,8 @@ mt_deploy_start "deploy_infra"
 
 mt_require_commands kubectl helm helmfile yq jq curl openssl
 
-# =============================================================================
-# Tailscale pre-auth key expiry check (auto-rotate if within 45 days)
-# =============================================================================
-source "${REPO_ROOT}/scripts/lib/tailscale-keys.sh"
-if mt_has_flag "--rotate-all-keys"; then
-  print_status "Force-rotating all Tailscale pre-auth keys..."
-  "$REPO_ROOT/scripts/rotate-tailscale-keys.sh" -e "$MT_ENV" --component=all --apply-now
-else
-  mt_check_and_rotate_expiring_keys 45
-fi
+# NOTE: Tailscale key rotation is handled by the in-cluster key-rotator CronJob.
+# For manual rotation, use: ./scripts/rotate-tailscale-keys.sh -e <env> --apply-now
 
 # Validate Cloudflare IP ranges before deploying (firewall rules depend on these)
 print_status "Validating Cloudflare IP ranges..."
@@ -446,6 +438,16 @@ if [ -x "$REPO_ROOT/apps/deploy-pg-metrics-bridge.sh" ]; then
 else
   print_error "deploy-pg-metrics-bridge.sh not found or not executable"
   exit 1
+fi
+
+# =============================================================================
+# Deploy Tailscale Key Rotator CronJob
+# =============================================================================
+print_status "Deploying Tailscale key rotator CronJob..."
+if [ -x "$REPO_ROOT/apps/deploy-tailscale-key-rotator.sh" ]; then
+  "$REPO_ROOT/apps/deploy-tailscale-key-rotator.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+else
+  print_warning "deploy-tailscale-key-rotator.sh not found"
 fi
 
 # Create Keycloak theme ConfigMap BEFORE deploying Keycloak.

@@ -54,8 +54,9 @@ export PG_VM_TAILSCALE_IP
 : "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
 export HEADSCALE_URL
 
-# Required: Tailscale pre-auth key — prefer tagged key for ACL enforcement
-TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY_METRICS:-${TAILSCALE_AUTHKEY:?TAILSCALE_AUTHKEY not set. Add tailscale.authkey to infra secrets.}}"
+# Tailscale pre-auth key — only needed for first-time bootstrap.
+# After initial creation, the key-rotator CronJob manages this secret.
+TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY_METRICS:-${TAILSCALE_AUTHKEY:-}}"
 
 print_status "Deploying PG metrics bridge to $NS_DB (env: $MT_ENV)"
 print_status "  PG VM Tailscale IP: $PG_VM_TAILSCALE_IP"
@@ -73,9 +74,19 @@ envsubst '${NS_DB}' < "$MANIFESTS_DIR/rbac.yaml.tpl" | mt_apply kubectl apply -f
 # Apply Secret
 # =============================================================================
 
-print_status "Applying PG metrics bridge Tailscale auth Secret..."
-envsubst '${NS_DB} ${TAILSCALE_AUTHKEY}' \
-  < "$MANIFESTS_DIR/secret.yaml.tpl" | mt_apply kubectl apply -f -
+# Tailscale auth secret: create only if missing (managed by key-rotator CronJob)
+if ! kubectl get secret pg-metrics-bridge-tailscale-auth -n "$NS_DB" >/dev/null 2>&1; then
+  if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
+    print_error "pg-metrics-bridge-tailscale-auth secret does not exist and no Tailscale auth key is set"
+    print_error "Bootstrap: create a tagged pre-auth key (tag:monitoring) and set tailscale.metrics_authkey in infra secrets"
+    exit 1
+  fi
+  print_status "Creating PG metrics bridge Tailscale auth secret (first-time bootstrap)..."
+  envsubst '${NS_DB} ${TAILSCALE_AUTHKEY}' \
+    < "$MANIFESTS_DIR/secret.yaml.tpl" | mt_apply kubectl apply -f -
+else
+  print_status "Tailscale auth secret exists (managed by key-rotator CronJob)"
+fi
 
 # =============================================================================
 # Apply Deployment

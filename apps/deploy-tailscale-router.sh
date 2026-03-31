@@ -40,7 +40,7 @@ mt_require_commands kubectl envsubst shasum
 MANIFESTS_DIR="$REPO_ROOT/apps/manifests/tailscale-router"
 
 : "${HEADSCALE_URL:?HEADSCALE_URL not set}"
-: "${TAILSCALE_AUTHKEY:?TAILSCALE_AUTHKEY not set}"
+# TAILSCALE_AUTHKEY only required for first-time bootstrap (key-rotator CronJob manages after)
 
 print_status "Deploying Tailscale router to $NS_INGRESS_INTERNAL (env: $MT_ENV)"
 
@@ -116,10 +116,20 @@ envsubst '${NS_INGRESS_INTERNAL}' \
 # Apply Tailscale auth secret
 # =============================================================================
 
-print_status "Applying Tailscale router auth secret..."
-kubectl create secret generic tailscale-router-auth -n "$NS_INGRESS_INTERNAL" \
-  --from-literal=TS_AUTHKEY="$TAILSCALE_AUTHKEY" \
-  --dry-run=client -o yaml | mt_apply kubectl apply -f -
+# Tailscale auth secret: create only if missing (managed by key-rotator CronJob)
+if ! kubectl get secret tailscale-router-auth -n "$NS_INGRESS_INTERNAL" >/dev/null 2>&1; then
+  if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
+    print_error "tailscale-router-auth secret does not exist and TAILSCALE_AUTHKEY is not set"
+    print_error "Bootstrap: create a tagged pre-auth key and set tailscale.authkey in infra secrets"
+    exit 1
+  fi
+  print_status "Creating Tailscale router auth secret (first-time bootstrap)..."
+  kubectl create secret generic tailscale-router-auth -n "$NS_INGRESS_INTERNAL" \
+    --from-literal=TS_AUTHKEY="$TAILSCALE_AUTHKEY" \
+    --dry-run=client -o yaml | mt_apply kubectl apply -f -
+else
+  print_status "Tailscale auth secret exists (managed by key-rotator CronJob)"
+fi
 
 # =============================================================================
 # Apply Unbound ConfigMap

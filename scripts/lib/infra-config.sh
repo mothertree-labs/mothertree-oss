@@ -371,6 +371,13 @@ _mt_infra_load_shared_secrets() {
   [ -n "$_ts_router_key" ] && [ "$_ts_router_key" != "null" ] && export TAILSCALE_AUTHKEY_ROUTER="$_ts_router_key"
   [ -n "$_ts_metrics_key" ] && [ "$_ts_metrics_key" != "null" ] && export TAILSCALE_AUTHKEY_METRICS="$_ts_metrics_key"
   [ -n "$_ts_turn_key" ] && [ "$_ts_turn_key" != "null" ] && export TAILSCALE_AUTHKEY_TURN="$_ts_turn_key"
+  # Headscale API key for in-cluster key rotator CronJob
+  local _ts_rotator_api_key
+  _ts_rotator_api_key=$(yq '.tailscale.rotator_api_key // ""' "$_infra_secrets")
+  if [ -n "$_ts_rotator_api_key" ] && [ "$_ts_rotator_api_key" != "null" ]; then
+    export TAILSCALE_ROTATOR_API_KEY="$_ts_rotator_api_key"
+    echo "[INFO] Tailscale rotator API key loaded from infra tenant secrets"
+  fi
 
   # PgBouncer auth password (optional — only when PGBOUNCER_ENABLED=true)
   if [ "${PGBOUNCER_ENABLED:-false}" = "true" ]; then
