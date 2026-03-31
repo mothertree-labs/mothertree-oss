@@ -125,6 +125,11 @@ if [[ "$ALL_TENANTS" == "true" ]]; then
     [[ -f "$config_file" ]] || continue
     tenant=$(basename "$(dirname "$config_file")")
     [[ "$tenant" == ".example" ]] && continue
+    # Skip infra-only configs (no deployable tenant apps)
+    if [[ "$(yq '.tenant.infra_only // false' "$config_file")" == "true" ]]; then
+      echo "Skipping infra-only tenant: $tenant"
+      continue
+    fi
     TENANTS+=("$tenant")
   done
   echo "Discovered ${#TENANTS[@]} tenant(s) for $MT_ENV: ${TENANTS[*]}"
