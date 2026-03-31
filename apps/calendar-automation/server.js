@@ -1126,11 +1126,37 @@ async function processUser(user) {
     // IMAP connection failures are non-fatal for individual users.
     // Auth-related issues (common for misconfigured accounts) are debug-level.
     const isAuthIssue = err.authenticationFailed || err.message === 'Unexpected close';
-    log(isAuthIssue ? 'debug' : 'warn', 'Failed to scan inbox', { user, error: err.message });
+    log(isAuthIssue ? 'debug' : 'warn', 'Failed to scan inbox', {
+      user: stalwartName,
+      error: err.message,
+    });
+    // Apply exponential backoff for transient IMAP failures (connection refused,
+    // socket timeout, PG errors in Stalwart). Without this, every user is retried
+    // every poll cycle against a broken Stalwart, producing log spam.
+    // Auth failures are permanent per-user misconfig — no backoff helps.
+    if (!isAuthIssue) {
+      const existing = userBackoff.get(stalwartName) || { consecutiveFullFailures: 0, nextRetryAfter: 0 };
+      existing.consecutiveFullFailures++;
+      const delay = Math.min(
+        RETRY_BASE_DELAY_MS * Math.pow(2, existing.consecutiveFullFailures - 1),
+        RETRY_MAX_DELAY_MS,
+      );
+      existing.nextRetryAfter = Date.now() + delay;
+      userBackoff.set(stalwartName, existing);
+      log('warn', 'IMAP connection failed, backing off user', {
+        user: stalwartName,
+        consecutiveFailures: existing.consecutiveFullFailures,
+        nextRetryMs: delay,
+      });
+    }
     return;
   }
 
-  if (messages.length === 0) return;
+  if (messages.length === 0) {
+    // Successful scan (even if empty) clears any connection-failure backoff
+    userBackoff.delete(stalwartName);
+    return;
+  }
 
   log('info', `Found ${messages.length} iTIP message(s)`, { user: userEmail });
 
