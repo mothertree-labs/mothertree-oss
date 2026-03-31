@@ -78,6 +78,7 @@ components = set()
 tag_to_component = {
     'tag:pgbouncer': 'pgbouncer',
     'tag:postfix-k8s': 'postfix',
+    'tag:monitoring': 'metrics',
 }
 
 for key in data:
