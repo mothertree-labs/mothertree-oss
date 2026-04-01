@@ -130,9 +130,9 @@ source "$REPO_ROOT/scripts/lib/args.sh"
 # Set MT_NESTING_LEVEL for sub-scripts
 export MT_NESTING_LEVEL=1
 
-# Skip helm repo update in sub-scripts — prep step already did it,
-# and parallel steps would race on the repo lock.
-export SKIP_HELM_REPO_UPDATE=true
+# Do NOT set SKIP_HELM_REPO_UPDATE — each parallel step needs to add
+# its own helm repos since the prep step only adds repos needed for
+# the prep phase (cert-manager, etc.), not app-specific repos like ananace.
 
 # ── Dispatch ─────────────────────────────────────────────────────
 case "$MODE" in
