@@ -60,11 +60,11 @@ export POSTFIX_RELAY_IP
 : "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
 export HEADSCALE_URL
 
-# Required: Tailscale pre-auth key with tag:postfix-k8s for ACL enforcement.
-# The generic TAILSCALE_AUTHKEY must NOT be used — nodes registered without
-# the tag:postfix-k8s ACL tag cannot reach the Postfix relay VM.
-: "${TAILSCALE_AUTHKEY_POSTFIX:?TAILSCALE_AUTHKEY_POSTFIX not set. Create a tagged pre-auth key (tag:postfix-k8s) on Headscale and add tailscale.postfix_authkey to infra secrets.}"
-TAILSCALE_AUTHKEY="$TAILSCALE_AUTHKEY_POSTFIX"
+# Tailscale pre-auth key with tag:postfix-k8s — only needed for first-time bootstrap.
+# After initial creation, the key-rotator CronJob manages this secret.
+if [ -n "${TAILSCALE_AUTHKEY_POSTFIX:-}" ]; then
+  TAILSCALE_AUTHKEY="$TAILSCALE_AUTHKEY_POSTFIX"
+fi
 
 # =============================================================================
 # Compute derived variables
@@ -168,10 +168,20 @@ envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/postfix-rbac.yaml.tpl" | mt_apply kubect
 # Apply Tailscale auth Secret
 # =============================================================================
 
-print_status "Applying Postfix Tailscale auth Secret..."
-kubectl create secret generic postfix-tailscale-auth -n "$NS_MAIL" \
-  --from-literal=TS_AUTHKEY="$TAILSCALE_AUTHKEY" \
-  --dry-run=client -o yaml | mt_apply kubectl apply -f -
+# Tailscale auth secret: create only if missing (managed by key-rotator CronJob)
+if ! kubectl get secret postfix-tailscale-auth -n "$NS_MAIL" >/dev/null 2>&1; then
+  if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
+    print_error "postfix-tailscale-auth secret does not exist and TAILSCALE_AUTHKEY_POSTFIX is not set"
+    print_error "Bootstrap: create a tagged pre-auth key (tag:postfix-k8s) and set tailscale.postfix_authkey in infra secrets"
+    exit 1
+  fi
+  print_status "Creating Postfix Tailscale auth secret (first-time bootstrap)..."
+  kubectl create secret generic postfix-tailscale-auth -n "$NS_MAIL" \
+    --from-literal=TS_AUTHKEY="$TAILSCALE_AUTHKEY" \
+    --dry-run=client -o yaml | mt_apply kubectl apply -f -
+else
+  print_status "Tailscale auth secret exists (managed by key-rotator CronJob)"
+fi
 
 # =============================================================================
 # Create/update ConfigMaps
