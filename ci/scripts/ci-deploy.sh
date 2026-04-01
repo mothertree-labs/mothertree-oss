@@ -220,10 +220,20 @@ if [[ "$ALL_TENANTS" == "true" ]]; then
     _DEPLOY_LOCK_ACQUIRED=1
     echo "Acquired deploy lock (pipeline #$CI_PIPELINE_NUMBER)"
   else
-    # Lock is held — register as pending (overwrites any previous pending)
+    # Lock is held — check who holds it
     HOLDER=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
       GET "$LOCK_KEY" 2>/dev/null || echo "unknown")
     echo "Deploy lock held by pipeline #$HOLDER"
+
+    # Self-deadlock: if we already hold the lock (e.g. a parallel workflow in
+    # the same pipeline set it, or a restarted step left it), just re-acquire.
+    if [[ "$HOLDER" == "$CI_PIPELINE_NUMBER" ]]; then
+      echo "Lock holder is this pipeline (#$CI_PIPELINE_NUMBER) — re-acquiring"
+      $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+        SET "$LOCK_KEY" "$CI_PIPELINE_NUMBER" XX EX "$LOCK_TTL" >/dev/null 2>&1
+      _DEPLOY_LOCK_ACQUIRED=1
+      echo "Acquired deploy lock (pipeline #$CI_PIPELINE_NUMBER)"
+    else
 
     $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
       SET "$PENDING_KEY" "$CI_PIPELINE_NUMBER" EX "$MAX_WAIT" >/dev/null 2>&1
@@ -286,6 +296,8 @@ if [[ "$ALL_TENANTS" == "true" ]]; then
 
       echo "Deploy lock held by #$HOLDER, waiting... ($ELAPSED/${MAX_WAIT}s)"
     done
+
+    fi  # end self-deadlock check
   fi
 else
   # Dev: acquire infra lock to prevent concurrent shared infra deploys
