@@ -162,9 +162,11 @@ case "$MODE" in
     # Deploy Collabora first if enabled (must be ready before Nextcloud)
     if [ "${OFFICE_ENABLED:-false}" = "true" ]; then
       echo "  Deploying Collabora CODE..."
+      helm repo add collabora https://collaboraonline.github.io/online/ 2>/dev/null || true
+      helm repo update >/dev/null 2>&1
       kubectl create namespace "$NS_OFFICE" --dry-run=client -o yaml | kubectl apply -f -
       pushd "$REPO_ROOT/apps" >/dev/null
-        helmfile -e "$MT_ENV" -l name=collabora-online --skip-deps sync
+        helmfile -e "$MT_ENV" -l name=collabora-online sync
       popd >/dev/null
       kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=collabora-online \
         -n "$NS_OFFICE" --timeout=300s
