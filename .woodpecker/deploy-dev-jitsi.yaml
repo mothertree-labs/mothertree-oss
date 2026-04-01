@@ -4,9 +4,7 @@ when:
     branch: main
 
 depends_on:
-  - validate
-  - build-images
-  - ci-lease
+  - deploy-dev-prep
 
 clone:
   - name: clone
@@ -15,7 +13,7 @@ clone:
       recursive: false
 
 steps:
-  - name: deploy-dev
+  - name: deploy-dev-jitsi
     image: bash
     when:
       - event: pull_request
@@ -36,4 +34,4 @@ steps:
       E2E_POOL2_BASE_DOMAIN:
         from_secret: e2e_pool2_base_domain
     commands:
-      - ci/scripts/ci-deploy.sh dev
+      - ci/scripts/ci-deploy-app.sh dev jitsi
