@@ -103,23 +103,10 @@ if [[ -z "${E2E_TENANT:-}" ]]; then
 fi
 echo "Resolved tenant: $E2E_TENANT"
 
-# ── Renew lease (deploy steps can take several minutes) ──────────
-_LEASE_RENEWAL_PID=""
-_VCLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
-_POOL=$($_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-  GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || echo "")
-(
-  while true; do
-    sleep 120
-    $_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-      EXPIRE "ci-lease-${_POOL}" 600 >/dev/null 2>&1 || true
-    $_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-      EXPIRE "ci-build-${CI_PIPELINE_NUMBER}" 600 >/dev/null 2>&1 || true
-    echo "Renewed tenant lease (pool=${_POOL}, pipeline=#${CI_PIPELINE_NUMBER})"
-  done
-) &
-_LEASE_RENEWAL_PID=$!
-trap 'kill "$_LEASE_RENEWAL_PID" 2>/dev/null || true; _cleanup' EXIT
+# No lease renewal needed — individual app deploy steps complete in under
+# a minute of actual work, well within the 10-minute Valkey lease TTL.
+# The prep step (ci-deploy.sh) handles lease renewal for the long-running
+# deploy_infra + create_env phase.
 
 # ── Pre-load tenant config for app deploy modes ─────────────────
 # Source config loading so env vars are available for inline deploy logic
