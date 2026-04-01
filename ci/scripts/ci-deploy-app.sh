@@ -127,8 +127,10 @@ trap 'kill "$_LEASE_RENEWAL_PID" 2>/dev/null || true; _cleanup' EXIT
 export MT_ENV MT_TENANT="$E2E_TENANT"
 source "$REPO_ROOT/scripts/lib/common.sh"
 source "$REPO_ROOT/scripts/lib/args.sh"
-# Set MT_NESTING_LEVEL for sub-scripts
-export MT_NESTING_LEVEL=1
+# Set MT_NESTING_LEVEL=0 so deploy scripts run their own helm repo setup.
+# Unlike create_env (which sets nesting=1 to skip repo adds in sub-scripts),
+# each parallel CI step runs independently and needs its own repos.
+export MT_NESTING_LEVEL=0
 
 # Do NOT set SKIP_HELM_REPO_UPDATE — each parallel step needs to add
 # its own helm repos since the prep step only adds repos needed for
@@ -148,7 +150,7 @@ case "$MODE" in
 
   matrix)
     echo "=== Deploying Matrix ==="
-    "$REPO_ROOT/apps/deploy-matrix.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=2
+    "$REPO_ROOT/apps/deploy-matrix.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0
     ;;
 
   nextcloud)
@@ -169,7 +171,7 @@ case "$MODE" in
       echo "  Collabora deployed"
     fi
 
-    "$REPO_ROOT/apps/deploy-nextcloud.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=2
+    "$REPO_ROOT/apps/deploy-nextcloud.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0
     ;;
 
   jitsi)
@@ -177,7 +179,7 @@ case "$MODE" in
     source "$REPO_ROOT/scripts/lib/config.sh"
     mt_load_tenant_config
 
-    "$REPO_ROOT/apps/deploy-jitsi.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=2
+    "$REPO_ROOT/apps/deploy-jitsi.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0
 
     # Deploy Jitsi metrics exporter and ServiceMonitors
     envsubst '${TURN_SERVER_IP}' < "$REPO_ROOT/apps/manifests/jitsi/jitsi-metrics-exporter.yaml" | \
@@ -203,7 +205,7 @@ case "$MODE" in
     mt_load_tenant_config
 
     if [ "${MAIL_ENABLED:-false}" = "true" ]; then
-      "$REPO_ROOT/apps/deploy-stalwart.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=2
+      "$REPO_ROOT/apps/deploy-stalwart.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0
     else
       echo "Stalwart: skipping (mail_enabled is not true)"
     fi
@@ -215,7 +217,7 @@ case "$MODE" in
     mt_load_tenant_config
 
     if [ "${WEBMAIL_ENABLED:-false}" = "true" ]; then
-      "$REPO_ROOT/apps/deploy-roundcube.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=2
+      "$REPO_ROOT/apps/deploy-roundcube.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0
     else
       echo "Roundcube: skipping (webmail_enabled is not true)"
     fi
@@ -228,7 +230,7 @@ case "$MODE" in
 
     if [ "${CALENDAR_ENABLED:-false}" = "true" ] && [ "${MAIL_ENABLED:-false}" = "true" ] && [ "${FILES_ENABLED:-false}" = "true" ]; then
       if [ -f "$REPO_ROOT/apps/deploy-calendar-automation.sh" ]; then
-        "$REPO_ROOT/apps/deploy-calendar-automation.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=2 || \
+        "$REPO_ROOT/apps/deploy-calendar-automation.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0 || \
           echo "WARNING: calendar automation deploy failed (non-fatal)"
       fi
     else
@@ -243,7 +245,7 @@ case "$MODE" in
 
     if [ "${EMAIL_PROBE_ENABLED:-false}" = "true" ] && [ "${MAIL_ENABLED:-false}" = "true" ]; then
       if [ -f "$REPO_ROOT/apps/deploy-email-probe.sh" ]; then
-        "$REPO_ROOT/apps/deploy-email-probe.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=2 || \
+        "$REPO_ROOT/apps/deploy-email-probe.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0 || \
           echo "WARNING: email probe deploy failed (non-fatal)"
       fi
     else
@@ -261,10 +263,10 @@ case "$MODE" in
     _mt_load_release_version
 
     if [ "${ADMIN_PORTAL_ENABLED:-false}" = "true" ]; then
-      "$REPO_ROOT/apps/deploy-admin-portal.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=2
+      "$REPO_ROOT/apps/deploy-admin-portal.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0
     fi
     if [ "${ACCOUNT_PORTAL_ENABLED:-false}" = "true" ]; then
-      "$REPO_ROOT/apps/deploy-account-portal.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=2
+      "$REPO_ROOT/apps/deploy-account-portal.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0
     fi
     ;;
 
