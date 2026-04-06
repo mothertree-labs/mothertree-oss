@@ -11,14 +11,14 @@
   "devDependencies": {
     "@tailwindcss/cli": "^4.2.2",
     "jest": "^30.3.0",
-    "nock": "^14.0.11",
+    "nock": "^14.0.12",
     "supertest": "^7.2.2"
   },
   "dependencies": {
     "connect-redis": "9.0.0",
     "ejs": "5.0.1",
     "express": "5.2.1",
-    "express-rate-limit": "8.3.1",
+    "express-rate-limit": "8.3.2",
     "express-session": "1.19.0",
     "helmet": "8.1.0",
     "nodemailer": "8.0.4",
