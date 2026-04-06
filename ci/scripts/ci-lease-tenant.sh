@@ -32,7 +32,7 @@ if [[ "${CI_PIPELINE_EVENT:-}" != "pull_request" ]]; then
   vcli SET "ci-build-${CI_PIPELINE_NUMBER}" "$LEASED_POOL" EX 7200 > /dev/null
   echo "Reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → ${LEASED_POOL} (TTL: 7200s)"
 else
-  LEASE_TTL=600  # 10 minutes (renewed by ci-deploy.sh and e2e shards)
+  LEASE_TTL=1000  # ~17 minutes (renewed by ci-deploy.sh, ci-deploy-app.sh, and e2e shards)
   RETRY_INTERVAL=60
   MAX_WAIT=3600  # 1 hour — prod deploys on other slots can take 20-30 min
 

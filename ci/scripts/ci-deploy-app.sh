@@ -103,10 +103,16 @@ if [[ -z "${E2E_TENANT:-}" ]]; then
 fi
 echo "Resolved tenant: $E2E_TENANT"
 
-# No lease renewal needed — individual app deploy steps complete in under
-# a minute of actual work, well within the 10-minute Valkey lease TTL.
-# The prep step (ci-deploy.sh) handles lease renewal for the long-running
-# deploy_infra + create_env phase.
+# Renew the lease and reverse-lookup keys now that we've resolved the tenant.
+# The prep step's renewal loop dies when prep exits, so the TTL has been counting
+# down through all the parallel app deploy steps. Without this renewal, the keys
+# can expire before the finalize step runs (the aggregate time of parallel steps
+# can exceed the TTL even though each individual step is short).
+_POOL=$(vcli GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || true)
+if [[ -n "$_POOL" ]]; then
+  vcli EXPIRE "ci-lease-${_POOL}" 1000 >/dev/null 2>&1 || true
+  vcli EXPIRE "ci-build-${CI_PIPELINE_NUMBER}" 1000 >/dev/null 2>&1 || true
+fi
 
 # ── Pre-load tenant config for app deploy modes ─────────────────
 # Source config loading so env vars are available for inline deploy logic

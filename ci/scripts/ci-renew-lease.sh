@@ -12,7 +12,7 @@ _CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
 # shellcheck disable=SC2086
 vcli() { $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
 
-LEASE_TTL=600  # 10 minutes
+LEASE_TTL=1000  # ~17 minutes
 
 POOL=$(vcli GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || true)
 
