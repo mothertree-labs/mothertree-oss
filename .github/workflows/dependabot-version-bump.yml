@@ -1,0 +1,90 @@
+name: "Dependabot Version Bump"
+
+# Auto-bump VERSION files and image-versions.env when Dependabot updates
+# a package's dependencies. Uses pull_request_target so the workflow has
+# write permissions to push back to the Dependabot PR branch.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+    paths:
+      - "apps/admin-portal/**"
+      - "apps/account-portal/**"
+      - "apps/docker/roundcube/**"
+
+permissions:
+  contents: write
+
+jobs:
+  version-bump:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          # Use SHA (not ref) to prevent ref-name injection attacks.
+          # This is the GitHub-recommended hardening for pull_request_target.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Detect changes and bump versions
+        id: bump
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # Get files changed in this PR vs the base branch
+          CHANGED=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+
+          # Map: directory prefix → VERSION file : image-versions.env key
+          declare -A VERSION_MAP
+          VERSION_MAP["apps/admin-portal"]="apps/admin-portal/VERSION:ADMIN_PORTAL_IMAGE_TAG"
+          VERSION_MAP["apps/account-portal"]="apps/account-portal/VERSION:ACCOUNT_PORTAL_IMAGE_TAG"
+          VERSION_MAP["apps/docker/roundcube"]="apps/docker/roundcube/VERSION:ROUNDCUBE_IMAGE_TAG"
+
+          BUMPED=""
+          for dir in "${!VERSION_MAP[@]}"; do
+            if echo "$CHANGED" | grep -q "^${dir}/"; then
+              IFS=: read -r version_file tag_key <<< "${VERSION_MAP[$dir]}"
+
+              # Read the base branch version (not HEAD — makes this idempotent
+              # across workflow re-runs since Dependabot rebases reset HEAD)
+              base_version=$(git show "origin/${BASE_REF}:${version_file}" 2>/dev/null | tr -d '[:space:]')
+              if [[ -z "$base_version" ]]; then
+                echo "WARNING: Could not read ${version_file} from base branch — skipping"
+                continue
+              fi
+
+              IFS=. read -r major minor patch <<< "$base_version"
+              if [[ -z "$major" || -z "$minor" || -z "$patch" ]]; then
+                echo "WARNING: Could not parse version '${base_version}' — skipping"
+                continue
+              fi
+
+              new_version="${major}.${minor}.$((patch + 1))"
+
+              echo "${new_version}" > "${version_file}"
+              sed -i "s/^${tag_key}=.*/${tag_key}=${new_version}/" apps/image-versions.env
+
+              BUMPED="${BUMPED}- ${dir}: ${base_version} → ${new_version}\n"
+              echo "Bumped ${version_file}: ${base_version} → ${new_version}"
+            fi
+          done
+
+          if [[ -n "$BUMPED" ]]; then
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push version bump
+        if: steps.bump.outputs.bumped == 'true'
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/*/VERSION apps/docker/*/VERSION apps/image-versions.env
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "chore: bump image version for dependency update"
+          # Checked out by SHA (detached HEAD) — push explicitly to the PR branch
+          git push origin "HEAD:refs/heads/${HEAD_REF}"
