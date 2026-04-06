@@ -18,6 +18,11 @@
 // the readiness probe (oidc-health.php) on ALL Nextcloud pods, causing NextcloudDown
 // alerts during every CI deploy.
 
+if (php_sapi_name() !== 'cli') {
+    http_response_code(403);
+    exit(1);
+}
+
 define("OC_CONSOLE", 1);
 require_once "/var/www/html/lib/base.php";
 

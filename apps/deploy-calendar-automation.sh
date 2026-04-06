@@ -257,8 +257,8 @@ else
     # Single PHP process, single kubectl exec, ~30s for 550 users instead of ~6min.
     # Critically: allow_multiple_user_backends is never toggled, so the readiness
     # probe (oidc-health.php) is never poisoned and no NextcloudDown alert fires.
-    CALDAV_TOKENS=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-        su -s /bin/sh www-data -c "echo '${USER_EMAILS_JSON}' | php /var/www/html/create-caldav-tokens.php calendar-automation" 2>/dev/null || echo "{}")
+    CALDAV_TOKENS=$(echo "$USER_EMAILS_JSON" | kubectl exec -i -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+        su -s /bin/sh www-data -c 'php /var/www/html/create-caldav-tokens.php calendar-automation' 2>/dev/null || echo "{}")
     TOKEN_COUNT=$(echo "$CALDAV_TOKENS" | jq 'length' 2>/dev/null || echo "0")
 
     if [ "$TOKEN_COUNT" -eq 0 ]; then
