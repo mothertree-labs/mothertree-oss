@@ -63,7 +63,7 @@ print_status "PostgreSQL service: ${PG_HOST}"
 
 # Verify PgBouncer is ready (sole entrypoint to external PG VM)
 print_status "Verifying PgBouncer is ready..."
-if ! kubectl get pod -n "$NS_DB" -l app=pgbouncer -o name 2>/dev/null | head -1 | xargs -I{} kubectl wait --for=condition=ready {} -n "$NS_DB" --timeout=60s 2>/dev/null; then
+if ! kubectl wait --for=condition=ready pod -l app=pgbouncer -n "$NS_DB" --timeout=60s 2>/dev/null; then
   print_error "PgBouncer is not ready. Check deploy_infra logs."
   exit 1
 fi
