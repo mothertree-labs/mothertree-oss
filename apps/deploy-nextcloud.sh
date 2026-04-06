@@ -431,11 +431,13 @@ fi
 # The hook sets it back to 0, preventing the native login form from appearing.
 HOOK_SCRIPT="$REPO_ROOT/apps/manifests/nextcloud/before-starting-hook.sh"
 OIDC_HEALTH_SCRIPT="$REPO_ROOT/apps/manifests/nextcloud/oidc-health.php"
+CALDAV_TOKENS_SCRIPT="$REPO_ROOT/apps/manifests/nextcloud/create-caldav-tokens.php"
 if [ -f "$HOOK_SCRIPT" ]; then
     kubectl create configmap nextcloud-before-starting \
         --namespace "$NS_FILES" \
         --from-file=enforce-oidc-login.sh="$HOOK_SCRIPT" \
         --from-file=oidc-health.php="$OIDC_HEALTH_SCRIPT" \
+        --from-file=create-caldav-tokens.php="$CALDAV_TOKENS_SCRIPT" \
         --dry-run=client -o yaml | kubectl apply -f -
     print_status "before-starting hook ConfigMap created/updated"
 fi
@@ -710,23 +712,6 @@ else
 
         kubectl rollout status deployment/collabora-online -n "$NS_OFFICE" --timeout=300s
         print_success "Collabora configured to route WOPI traffic internally"
-    fi
-fi
-
-# Step 6c: Reset OIDC-only login before waiting for readiness.
-# The calendar-automation deploy temporarily sets allow_multiple_user_backends=1
-# (needed for app password creation). If a previous pipeline was killed mid-deploy,
-# this value stays at 1, which poisons the readiness probe (oidc-health.php) on ALL
-# pods — causing rollout timeouts. Reset it here as a self-healing mechanism.
-_NC_RESET_POD=$(kubectl get pods -n "$NS_FILES" -l app.kubernetes.io/name=nextcloud \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-if [ -n "$_NC_RESET_POD" ]; then
-    _CURRENT_VAL=$(kubectl exec -n "$NS_FILES" "$_NC_RESET_POD" -c nextcloud -- \
-        php occ config:app:get user_oidc allow_multiple_user_backends 2>/dev/null || echo "unknown")
-    if [ "$_CURRENT_VAL" = "1" ]; then
-        print_warning "allow_multiple_user_backends=1 (stale from killed pipeline) — resetting to 0"
-        kubectl exec -n "$NS_FILES" "$_NC_RESET_POD" -c nextcloud -- \
-            php occ config:app:set --type=string --value=0 user_oidc allow_multiple_user_backends 2>/dev/null || true
     fi
 fi
 

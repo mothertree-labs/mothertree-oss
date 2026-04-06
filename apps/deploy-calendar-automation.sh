@@ -183,21 +183,6 @@ NEXTCLOUD_POD=$(kubectl get pods -n "$NS_FILES" -l app.kubernetes.io/name=nextcl
 if [ -z "$NEXTCLOUD_POD" ]; then
     print_warning "Nextcloud pod not found in $NS_FILES, skipping CalDAV token creation"
 else
-    # Temporarily enable app password auth alongside OIDC (required for occ user:auth-tokens:add).
-    # CRITICAL: The restore to 0 MUST run no matter what — if allow_multiple_user_backends stays
-    # at 1, the readiness probe fails on ALL pods (oidc-health.php check), causing cluster-wide
-    # 503s. Use a trap to guarantee restore even if the script exits early (set -e / pipefail).
-    _restore_oidc_only() {
-        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-            php occ config:app:set --type=string --value=0 user_oidc allow_multiple_user_backends
-        print_status "Restored OIDC-only login (allow_multiple_user_backends=0)"
-    }
-    trap _restore_oidc_only EXIT
-
-    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-        php occ config:app:set --type=string --value=1 user_oidc allow_multiple_user_backends
-    print_status "Temporarily enabled app password auth (allow_multiple_user_backends=1)"
-
     # Ensure admin password matches K8s secret (may drift after Helm upgrades)
     kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
         env "OC_PASS=${NEXTCLOUD_ADMIN_PASSWORD}" php occ user:resetpassword --password-from-env admin 2>/dev/null || true
@@ -264,27 +249,21 @@ else
     NC_USER_JSON=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
         php occ user:list --output=json 2>/dev/null || echo "{}")
     NC_EMAILS=$(echo "$NC_USER_JSON" | jq -r 'keys[] | select(. != "admin")' 2>/dev/null || echo "")
-    USER_EMAILS=$(printf '%s\n%s' "$NC_EMAILS" "${KC_EMAILS:-}" | sort -u | grep -v '^$' || echo "")
+    USER_EMAILS_JSON=$(printf '%s\n%s' "$NC_EMAILS" "${KC_EMAILS:-}" | sort -u | grep -v '^$' | jq -R . | jq -s . || echo "[]")
 
-    # Create app passwords for each user and build JSON token map
-    CALDAV_TOKENS="{}"
-    TOKEN_COUNT=0
-    while IFS= read -r user_email; do
-        [ -z "$user_email" ] && continue
-        # Create new app password (pipe empty string to skip interactive password prompt).
-        # Output format: "app password:\n<token>" — password is on the line after the label.
-        # The || true prevents set -e from killing the script if a user doesn't exist or
-        # the command produces unexpected output (grep exit 1 + pipefail would be fatal).
-        APP_PASS=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-            sh -c "echo '' | php occ user:auth-tokens:add '$user_email'" 2>/dev/null \
-            | grep -A1 "app password:" | tail -1 | tr -d '[:space:]' || true)
-        if [ -n "$APP_PASS" ]; then
-            CALDAV_TOKENS=$(echo "$CALDAV_TOKENS" | jq --arg k "$user_email" --arg v "$APP_PASS" '. + {($k): $v}')
-            TOKEN_COUNT=$((TOKEN_COUNT + 1))
-        else
-            print_warning "Failed to create CalDAV token for $user_email"
-        fi
-    done <<< "$USER_EMAILS"
+    # Create app passwords in bulk via create-caldav-tokens.php.
+    # This uses Nextcloud's ITokenProvider::generateToken() directly, bypassing
+    # occ user:auth-tokens:add which requires allow_multiple_user_backends=1.
+    # Single PHP process, single kubectl exec, ~30s for 550 users instead of ~6min.
+    # Critically: allow_multiple_user_backends is never toggled, so the readiness
+    # probe (oidc-health.php) is never poisoned and no NextcloudDown alert fires.
+    CALDAV_TOKENS=$(echo "$USER_EMAILS_JSON" | kubectl exec -i -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+        su -s /bin/sh www-data -c 'php /var/www/html/create-caldav-tokens.php calendar-automation' 2>/dev/null || echo "{}")
+    TOKEN_COUNT=$(echo "$CALDAV_TOKENS" | jq 'length' 2>/dev/null || echo "0")
+
+    if [ "$TOKEN_COUNT" -eq 0 ]; then
+        print_warning "No CalDAV tokens were created — calendar-automation will not be able to access user calendars"
+    fi
 
     # Store tokens as a Secret (mounted read-only in the calendar-automation pod)
     kubectl create secret generic calendar-automation-caldav-tokens \
@@ -292,10 +271,6 @@ else
         --from-literal=caldav-tokens.json="$CALDAV_TOKENS" \
         --dry-run=client -o yaml | kubectl apply -f -
     print_success "CalDAV app passwords created for $TOKEN_COUNT user(s)"
-
-    # Restore now (trap is belt-and-suspenders for abnormal exit)
-    _restore_oidc_only
-    trap - EXIT
 fi
 
 # =============================================================================

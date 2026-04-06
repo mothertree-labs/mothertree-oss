@@ -127,4 +127,7 @@ fi
 # Install OIDC health check script (exec readiness probe uses this via CLI)
 cp /docker-entrypoint-hooks.d/before-starting/oidc-health.php /var/www/html/oidc-health.php 2>/dev/null || true
 
+# Install CalDAV token creation script (deploy-calendar-automation.sh calls this via kubectl exec)
+cp /docker-entrypoint-hooks.d/before-starting/create-caldav-tokens.php /var/www/html/create-caldav-tokens.php 2>/dev/null || true
+
 echo "[before-starting] Done"
