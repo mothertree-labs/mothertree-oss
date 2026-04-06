@@ -9,8 +9,8 @@
     "test": "node --test server.test.js"
   },
   "dependencies": {
-    "imapflow": "1.0.171",
-    "ical.js": "2.1.0",
+    "imapflow": "1.2.18",
+    "ical.js": "2.2.1",
     "node-fetch": "3.3.2"
   },
   "engines": {
