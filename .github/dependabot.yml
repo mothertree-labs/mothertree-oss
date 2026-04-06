@@ -10,6 +10,9 @@ updates:
     labels:
       - "dependencies"
       - "npm"
+    groups:
+      all-deps:
+        patterns: ["*"]
     ignore:
       - dependency-name: "openid-client"
         versions: [">=6"]
@@ -24,9 +27,26 @@ updates:
     labels:
       - "dependencies"
       - "npm"
+    groups:
+      all-deps:
+        patterns: ["*"]
     ignore:
       - dependency-name: "openid-client"
         versions: [">=6"]
+
+  # npm: Calendar Automation
+  - package-ecosystem: "npm"
+    directory: "/apps/calendar-automation"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+    groups:
+      all-deps:
+        patterns: ["*"]
 
   # Terraform: Phase 1 (cluster, VPN, TURN)
   - package-ecosystem: "terraform"
@@ -37,6 +57,9 @@ updates:
     labels:
       - "dependencies"
       - "terraform"
+    groups:
+      all-providers:
+        patterns: ["*"]
 
   # Terraform: Infra (K8s infra layer)
   - package-ecosystem: "terraform"
@@ -47,6 +70,9 @@ updates:
     labels:
       - "dependencies"
       - "terraform"
+    groups:
+      all-providers:
+        patterns: ["*"]
 
   # Terraform: CI server
   - package-ecosystem: "terraform"
@@ -57,6 +83,9 @@ updates:
     labels:
       - "dependencies"
       - "terraform"
+    groups:
+      all-providers:
+        patterns: ["*"]
 
   # Docker: Admin Portal
   - package-ecosystem: "docker"
@@ -67,6 +96,9 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    groups:
+      base-images:
+        patterns: ["*"]
     ignore:
       - dependency-name: "node"
         versions: [">=23, <24", ">=24, <25", ">=25, <26"]
@@ -80,6 +112,9 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    groups:
+      base-images:
+        patterns: ["*"]
     ignore:
       - dependency-name: "node"
         versions: [">=23, <24", ">=24, <25", ">=25, <26"]
@@ -93,3 +128,6 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    groups:
+      base-images:
+        patterns: ["*"]
