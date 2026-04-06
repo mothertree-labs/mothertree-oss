@@ -173,9 +173,9 @@ if [[ "$ALL_TENANTS" != "true" ]] && [[ -n "${CI_VALKEY_PASSWORD:-}" ]] && [[ -n
       # causing Woodpecker to hang for up to 120s waiting for it to exit.
       read -t 120 < /dev/null || true
       $_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-        EXPIRE "ci-lease-${_POOL}" 600 >/dev/null 2>&1 || true
+        EXPIRE "ci-lease-${_POOL}" 1000 >/dev/null 2>&1 || true
       $_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-        EXPIRE "ci-build-${CI_PIPELINE_NUMBER}" 600 >/dev/null 2>&1 || true
+        EXPIRE "ci-build-${CI_PIPELINE_NUMBER}" 1000 >/dev/null 2>&1 || true
       echo "Renewed tenant lease (pool=${_POOL}, pipeline=#${CI_PIPELINE_NUMBER})"
     done
   ) &
