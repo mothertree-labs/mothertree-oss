@@ -21,16 +21,8 @@ echo "--- CI Tenant Release (pipeline #${CI_PIPELINE_NUMBER})"
 POOL=$(vcli GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || true)
 
 if [[ -z "$POOL" ]]; then
-  # Reverse-lookup key expired — fall back to pool1 for main merges so
-  # user cleanup still runs.  This is a safety net; the primary fix is
-  # the longer TTL set by ci-lease-tenant.sh and renewal by ci-renew-lease.sh.
-  if [[ "${CI_PIPELINE_EVENT:-}" != "pull_request" ]]; then
-    POOL="pool1"
-    echo "WARNING: Reverse-lookup key expired — falling back to ${POOL} for user cleanup"
-  else
-    echo "No pool lease found for pipeline #${CI_PIPELINE_NUMBER} — nothing to release"
-    exit 0
-  fi
+  echo "No pool lease found for pipeline #${CI_PIPELINE_NUMBER} — nothing to release"
+  exit 0
 fi
 
 LEASE_KEY="ci-lease-${POOL}"

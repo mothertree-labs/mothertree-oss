@@ -12,7 +12,10 @@ _CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
 # shellcheck disable=SC2086
 vcli() { $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
 
-LEASE_TTL=1000  # ~17 minutes
+# Use the existing TTL as the renewal value so we don't accidentally
+# downgrade a main-merge lease (7200s) to a PR lease TTL (1000s).
+# Falls back to 1000s if TTL can't be read (shouldn't happen).
+FALLBACK_TTL=1000
 
 POOL=$(vcli GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || true)
 
@@ -23,14 +26,19 @@ fi
 
 KEY="ci-lease-${POOL}"
 
-# Verify we still own the lease (if one exists).
-# On main merges, only a reverse-lookup key is set (soft lease) — there is
-# no ci-lease-{pool} key, so HOLDER will be empty.  That's fine; we still
-# need to renew the reverse-lookup key so ci-release can find it later.
+# Verify we still own the lease.
 HOLDER=$(vcli GET "$KEY" 2>/dev/null || true)
 if [[ -n "$HOLDER" && "$HOLDER" != "$CI_PIPELINE_NUMBER" ]]; then
   echo "WARNING: Lease for ${POOL} is held by pipeline #${HOLDER}, not #${CI_PIPELINE_NUMBER}"
   exit 0
+fi
+
+# Read the current TTL to preserve it (main merges use 7200s, PRs use 1000s)
+CURRENT_TTL=$(vcli TTL "$KEY" 2>/dev/null || echo "-1")
+if (( CURRENT_TTL > 0 )); then
+  LEASE_TTL=$CURRENT_TTL
+else
+  LEASE_TTL=$FALLBACK_TTL
 fi
 
 # Renew the actual lease if we own it
@@ -39,7 +47,7 @@ if [[ -n "$HOLDER" ]]; then
   echo "Renewed lease: ${KEY} (TTL: ${LEASE_TTL}s)"
 fi
 
-# Always renew the reverse-lookup key — ci-release needs it for cleanup
+# Renew the reverse-lookup key — ci-release needs it for cleanup
 vcli EXPIRE "ci-build-${CI_PIPELINE_NUMBER}" "$LEASE_TTL" > /dev/null
 echo "Renewed reverse lookup: ci-build-${CI_PIPELINE_NUMBER} → ${POOL} (TTL: ${LEASE_TTL}s)"
 
