@@ -450,6 +450,16 @@ else
   print_warning "deploy-tailscale-key-rotator.sh not found"
 fi
 
+# =============================================================================
+# Deploy Headscale Cleanup CronJob
+# =============================================================================
+print_status "Deploying Headscale cleanup CronJob..."
+if [ -x "$REPO_ROOT/apps/deploy-headscale-cleanup.sh" ]; then
+  "$REPO_ROOT/apps/deploy-headscale-cleanup.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+else
+  print_warning "deploy-headscale-cleanup.sh not found"
+fi
+
 # Create Keycloak theme ConfigMap BEFORE deploying Keycloak.
 # Track whether the ConfigMap actually changed so we can conditionally restart
 # Keycloak below — unnecessary restarts destroy all user sessions (Infinispan).
@@ -632,15 +642,6 @@ if [ -x "$REPO_ROOT/apps/deploy-tailscale-router.sh" ]; then
   print_status "Deploying Tailscale subnet router..."
   "$REPO_ROOT/apps/deploy-tailscale-router.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /' || \
     print_warning "Tailscale router deploy failed (non-fatal)"
-fi
-
-# Clean up stale Headscale node registrations from previous pod rollouts.
-# PgBouncer/Postfix Tailscale sidecars register new nodes on every pod restart;
-# this prunes offline ones. Non-blocking — cleanup failure shouldn't fail the deploy.
-if [ -x "$REPO_ROOT/scripts/cleanup-headscale-nodes" ]; then
-  print_status "Cleaning up stale Headscale nodes..."
-  "$REPO_ROOT/scripts/cleanup-headscale-nodes" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /' || \
-    print_warning "Headscale node cleanup failed (non-fatal)"
 fi
 
 # Run post-deploy health check (non-blocking)
