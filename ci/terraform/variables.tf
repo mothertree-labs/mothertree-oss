@@ -39,19 +39,9 @@ variable "vpc_subnet_id" {
   type        = number
 }
 
-variable "vpn_server_public_ip" {
-  description = "VPN server's public IP (for firewall SSH rule — Cloud Firewalls filter VPC traffic by public IP)"
-  type        = string
-}
-
 variable "ci_vpc_ip" {
   description = "CI server's static VPC IP on the support subnet"
   type        = string
   default     = "192.168.1.3"
 }
 
-variable "admin_ssh_cidrs" {
-  description = "Admin IP CIDRs allowed to SSH directly (normally empty, for debugging only)"
-  type        = list(string)
-  default     = []
-}

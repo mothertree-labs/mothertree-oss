@@ -19,7 +19,7 @@ resource "linode_sshkey" "ci_key" {
 }
 
 # Firewall for CI server
-# Woodpecker uses Cloudflare Tunnel (outbound only) - no inbound ports needed except SSH from VPN server
+# SSH via Tailscale mesh only (no public SSH). Woodpecker UI via Cloudflare Tunnel (outbound only).
 resource "linode_firewall" "ci_firewall" {
   label = "${var.ci_label}-firewall"
   tags  = var.tags
@@ -27,14 +27,14 @@ resource "linode_firewall" "ci_firewall" {
   inbound_policy  = "DROP"
   outbound_policy = "ACCEPT"
 
-  # SSH access from VPN server (public IP, since Linode Cloud Firewalls filter VPC traffic
-  # and don't reliably match VPC source IPs) and optional admin CIDRs (for debugging)
+  # Allow inbound WireGuard for direct Tailscale peer connections (avoids DERP relay)
   inbound {
-    label    = "SSH"
+    label    = "Tailscale-WireGuard"
     action   = "ACCEPT"
-    protocol = "TCP"
-    ports    = "22"
-    ipv4     = distinct(concat(["${var.vpn_server_public_ip}/32"], var.admin_ssh_cidrs))
+    protocol = "UDP"
+    ports    = "41641"
+    ipv4     = ["0.0.0.0/0"]
+    ipv6     = ["::/0"]
   }
 }
 
