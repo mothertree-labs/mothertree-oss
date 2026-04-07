@@ -258,7 +258,7 @@ else
     # Critically: allow_multiple_user_backends is never toggled, so the readiness
     # probe (oidc-health.php) is never poisoned and no NextcloudDown alert fires.
     CALDAV_TOKENS=$(echo "$USER_EMAILS_JSON" | kubectl exec -i -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-        su -s /bin/sh www-data -c 'php /var/www/html/create-caldav-tokens.php calendar-automation' 2>/dev/null || echo "{}")
+        su -s /bin/sh www-data -c 'php /docker-entrypoint-hooks.d/before-starting/create-caldav-tokens.php calendar-automation' 2>/dev/null || echo "{}")
     TOKEN_COUNT=$(echo "$CALDAV_TOKENS" | jq 'length' 2>/dev/null || echo "0")
 
     if [ "$TOKEN_COUNT" -eq 0 ]; then
