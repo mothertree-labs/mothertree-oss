@@ -73,7 +73,7 @@ data:
       # Find the best (longest-lived) valid key for this tag
       BEST_EXPIRY=$(echo "$KEYS" | jq -r --arg tag "$tag" '
         [.preAuthKeys[]
-         | select(.reusable == true and (.aclTags // []) | index($tag))
+         | select(.reusable == true and ((.aclTags // []) | index($tag)))
          | .expiration
         ] | map(sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) | max // 0
       ')
