@@ -164,6 +164,24 @@
         state: directory
         mode: "0755"
 
+    - name: Deploy Mothertree custom CSS for Woodpecker UI
+      ansible.builtin.copy:
+        src: files/woodpecker-custom.css
+        dest: /etc/woodpecker/woodpecker-custom.css
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart Woodpecker server
+
+    - name: Deploy Mothertree custom JS for Woodpecker UI
+      ansible.builtin.copy:
+        src: files/woodpecker-custom.js
+        dest: /etc/woodpecker/woodpecker-custom.js
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart Woodpecker server
+
     - name: Configure Woodpecker server environment
       ansible.builtin.template:
         src: templates/woodpecker-server.env.j2
