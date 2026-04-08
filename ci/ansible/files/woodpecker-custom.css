@@ -1,0 +1,129 @@
+/*
+ * Mothertree CI — Custom Woodpecker theme
+ * Overrides default green palette with Mothertree brand colors:
+ *   Ash (#F3E8D6)        — warm cream background
+ *   Coal (#141511)       — near-black text/dark theme base
+ *   Ghost Fern (#A7AE8D) — sage green primary accent
+ *   Cinder (#A64330)     — warm red secondary accent
+ */
+
+/* ── Light theme ──────────────────────────────────────────────── */
+
+:root,
+:root[data-theme='light'] {
+  /* Backgrounds: warm cream tones instead of cold gray */
+  --wp-background-100: #FEFCF8;
+  --wp-background-200: #F9F3EA;
+  --wp-background-300: #EDE4D5;
+  --wp-background-400: #DDD3C2;
+  --wp-background-500: #C9BEAE;
+
+  /* Text: coal-based */
+  --wp-text-100: #4A4A42;
+  --wp-text-200: #2A2A24;
+  --wp-text-alt-100: #6B6B5E;
+
+  /* Primary: ghost fern sage green */
+  --wp-primary-100: #A7AE8D;
+  --wp-primary-200: #8A9475;
+  --wp-primary-300: #6E7A5A;
+  --wp-primary-text-100: #FEFCF8;
+
+  /* Links */
+  --wp-link-100: #8A9475;
+  --wp-link-200: #6E7A5A;
+
+  /* OK/success states: keep sage green tones */
+  --wp-control-ok-100: #8A9475;
+  --wp-control-ok-200: #6E7A5A;
+  --wp-control-ok-300: #566243;
+  --wp-state-ok-100: #8A9475;
+
+  /* Error states: use cinder red */
+  --wp-error-100: #A64330;
+  --wp-error-200: #8C3828;
+  --wp-error-300: #722D20;
+
+  /* Neutral controls: warm gray tones */
+  --wp-control-neutral-100: #F3E8D6;
+  --wp-control-neutral-200: #E4D8C5;
+  --wp-control-neutral-300: #C9BEAE;
+
+  /* Code blocks: warm tinted */
+  --wp-code-inline-100: #EDE4D5;
+  --wp-code-inline-200: #E4D8C5;
+  --wp-code-inline-text-100: #4A4A42;
+}
+
+/* ── Dark theme ───────────────────────────────────────────────── */
+/* Warm ash-derived palette — like parchment under lamplight.     */
+/* Backgrounds use desaturated warm browns (no green tint),       */
+/* with wide contrast steps so rows are clearly distinct.         */
+
+:root[data-theme='dark'] {
+  /* Backgrounds: Coal page (300 — dark: override), lighter rows (200) */
+  --wp-background-100: #141511;
+  --wp-background-200: #2C2824;
+  --wp-background-300: #141511;
+  --wp-background-400: #52483E;
+  --wp-background-500: #6B6B5E;
+
+  /* Text: Ash cream */
+  --wp-text-100: #D4C8B5;
+  --wp-text-200: #F3E8D6;
+  --wp-text-alt-100: #A89A8A;
+
+  /* Primary: navbar/header — Ghost Fern Dark */
+  --wp-primary-100: #8A9475;
+  --wp-primary-200: #6E7A5A;
+  --wp-primary-300: #566243;
+  --wp-primary-text-100: #F3E8D6;
+
+  /* Links: sage green stands out on brown backgrounds */
+  --wp-link-100: #B5BC9E;
+  --wp-link-200: #A7AE8D;
+
+  /* OK/success: sage green accents (unchanged — run pipeline button) */
+  --wp-control-ok-100: #6E7A5A;
+  --wp-control-ok-200: #566243;
+  --wp-control-ok-300: #3F4C30;
+  --wp-state-ok-100: #8A9475;
+
+  /* Error: cinder red */
+  --wp-error-100: #A64330;
+  --wp-error-200: #8C3828;
+  --wp-error-300: #722D20;
+
+  /* Neutral controls: warm brown steps */
+  --wp-control-neutral-100: #4A3F35;
+  --wp-control-neutral-200: #382F28;
+  --wp-control-neutral-300: #2C2520;
+
+  /* Code blocks: match dark page tone */
+  --wp-code-100: #1A1510;
+  --wp-code-200: #231D18;
+  --wp-code-300: #141210;
+  --wp-code-text-100: #D4C8B5;
+  --wp-code-text-alt-100: #A89A8A;
+  --wp-code-inline-100: #332B24;
+  --wp-code-inline-200: #2C2520;
+  --wp-code-inline-text-100: #D4C8B5;
+}
+
+/* ── Sidebar / navigation accent stripe ───────────────────────── */
+/* The left sidebar "active" indicator uses primary colors;
+   the variables above handle it. This adds a subtle brand touch
+   to the top bar / header area. */
+header nav {
+  border-bottom-color: #A7AE8D !important;
+}
+
+/* Pipeline status badges — use sage for running, cinder for failed */
+.bg-wp-state-ok-100 {
+  background-color: #8A9475 !important;
+}
+
+/* Button hover refinement */
+button:hover {
+  transition: background-color 0.15s ease;
+}
