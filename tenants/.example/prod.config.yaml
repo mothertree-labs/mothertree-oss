@@ -200,3 +200,9 @@ features:
   calendar_enabled: true
   office_enabled: true
   google_import_enabled: false
+  # Login methods enabled for this tenant. At least one must be true.
+  # Defaults if omitted: passkey + magic_link enabled, google_sso disabled.
+  login_methods:
+    passkey: true
+    magic_link: true
+    google_sso: false
