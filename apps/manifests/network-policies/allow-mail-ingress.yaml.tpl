@@ -63,6 +63,8 @@ spec:
           port: 993
         - protocol: TCP
           port: 994
+        - protocol: TCP
+          port: 8080
     # Admin/Account portals (admin namespace) accessing Stalwart HTTP API
     # for user provisioning and quota management
     - from:

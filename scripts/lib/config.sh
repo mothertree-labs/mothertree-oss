@@ -233,6 +233,7 @@ _mt_derive_hostnames() {
     export IMAP_HOST="imap.${label}.${TENANT_DOMAIN}"
     export SMTP_HOST="smtp.${label}.${TENANT_DOMAIN}"
     export WEBMAIL_HOST="webmail.${label}.${TENANT_DOMAIN}"
+    export ENCRYPTEDMAIL_HOST="encryptedmail.${label}.${TENANT_DOMAIN}"
     export CALENDAR_HOST="calendar.${label}.${TENANT_DOMAIN}"
     export OFFICE_HOST="office.${label}.${TENANT_DOMAIN}"
     export MATRIX_SERVER_NAME="${label}.${TENANT_DOMAIN}"
@@ -252,6 +253,7 @@ _mt_derive_hostnames() {
     export IMAP_HOST="imap.${TENANT_DOMAIN}"
     export SMTP_HOST="smtp.${TENANT_DOMAIN}"
     export WEBMAIL_HOST="webmail.${TENANT_DOMAIN}"
+    export ENCRYPTEDMAIL_HOST="encryptedmail.${TENANT_DOMAIN}"
     export CALENDAR_HOST="calendar.${TENANT_DOMAIN}"
     export OFFICE_HOST="office.${TENANT_DOMAIN}"
     export MATRIX_SERVER_NAME="${TENANT_DOMAIN}"
@@ -607,7 +609,7 @@ _mt_export_all() {
   fi
   export RATE_LIMIT_WINDOW_MS="${RATE_LIMIT_WINDOW_MS:-60000}"  # 1 minute
   export DOCS_HOST FILES_HOST JITSI_HOST HOME_HOST AUTH_HOST
-  export MAIL_HOST IMAP_HOST SMTP_HOST WEBMAIL_HOST CALENDAR_HOST OFFICE_HOST
+  export MAIL_HOST IMAP_HOST SMTP_HOST WEBMAIL_HOST ENCRYPTEDMAIL_HOST CALENDAR_HOST OFFICE_HOST
   export MATRIX_SERVER_NAME WEBADMIN_HOST
   export TENANT_NS_PREFIX NS_MATRIX NS_DOCS NS_FILES NS_JITSI
   export NS_STALWART NS_WEBMAIL NS_ADMIN NS_OFFICE NS_HOME

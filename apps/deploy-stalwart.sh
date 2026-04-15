@@ -240,6 +240,12 @@ print_success "Public ingress applied for $MAIL_HOST"
 envsubst < "$REPO_ROOT/apps/manifests/stalwart/ingress-internal.yaml.tpl" | kubectl apply -f -
 print_success "Internal ingress applied for $WEBADMIN_HOST"
 
+# Apply encryptedmail ingress for JMAP/encryption at rest
+if [ -n "${ENCRYPTEDMAIL_HOST:-}" ]; then
+  envsubst < "$REPO_ROOT/apps/manifests/stalwart/ingress-encryptedmail.yaml.tpl" | kubectl apply -f -
+  print_status "Encryptedmail ingress applied for $ENCRYPTEDMAIL_HOST"
+fi
+
 # =============================================================================
 # Register tenant with Postfix for inbound mail routing
 # =============================================================================
