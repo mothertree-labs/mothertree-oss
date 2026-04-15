@@ -479,14 +479,21 @@ EOF
         source "$REPO_ROOT/secrets.$MT_ENV.tfvars.env"
       fi
 
+      # LB FQDN: lb2.prod for prod, lb1.<env> for dev/prod-eu
+      if [ "$MT_ENV" = "prod" ]; then
+        LB_FQDN="lb2.prod.${INFRA_DOMAIN}"
+      else
+        LB_FQDN="lb1.${MT_ENV}.${INFRA_DOMAIN}"
+      fi
+
       # Resolve NodeBalancer's real hostname for mail routing.
-      # Cloudflare-proxied lb1.* FQDNs block SMTP (port 30025) — must use the
+      # Cloudflare-proxied LB FQDNs block SMTP (port 30025) — must use the
       # NodeBalancer's direct IP/hostname from the LoadBalancer service.
       K8S_LB_DIRECT_HOST=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress \
         get svc ingress-nginx-controller \
         -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
       if [ -z "$K8S_LB_DIRECT_HOST" ]; then
-        K8S_LB_DIRECT_HOST="lb1.${MT_ENV}.${INFRA_DOMAIN}"
+        K8S_LB_DIRECT_HOST="$LB_FQDN"
         print_warning "Could not resolve NodeBalancer IP — using $K8S_LB_DIRECT_HOST (may fail if Cloudflare-proxied)"
       fi
 
@@ -503,7 +510,7 @@ EOF
       cat >> "$TEMP_EXTRA_VARS" <<EOF
 
 # K8s Postfix inbound mail routing via NodeBalancer TCP proxy
-# Use the NodeBalancer's real IP (not Cloudflare-proxied lb1.* FQDN)
+# Use the NodeBalancer's real IP (not Cloudflare-proxied LB FQDN)
 # because Cloudflare only proxies HTTP/HTTPS — SMTP port 30025 is blocked.
 k8s_postfix_nodeport: 30025
 k8s_lb_host: "${K8S_LB_DIRECT_HOST}"
@@ -641,7 +648,7 @@ EOF
       print_status "Environment:        $MT_ENV"
       print_status "TLS email:          ${TF_VAR_tls_email:-<not set, Certbot/TLS skipped>}"
       print_status "Tenant Domains:     ${TENANT_DOMAINS:-<none>}"
-      print_status "K8s LB Host:        lb1.${MT_ENV}.${INFRA_DOMAIN}"
+      print_status "K8s LB Host:        $LB_FQDN"
       print_status "TURN IP:            ${TURN_SERVER_IP:-<not deployed>}"
       print_status "Headscale IP:       ${HEADSCALE_SERVER_IP:-<not deployed>}"
       print_status "PostgreSQL IP:      ${POSTGRES_SERVER_IP:-<not deployed>}"

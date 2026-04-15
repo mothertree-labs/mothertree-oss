@@ -57,7 +57,7 @@ data "terraform_remote_state" "phase1" {
 - cert-manager ClusterIssuers (HTTP-01 and DNS-01)
 - Postfix Deployment + Service (with OpenDKIM sidecar)
 - ConfigMaps: postfix-config, opendkim-config, postfix-init-scripts
-- DNS records via `modules/dns/` (lb1, mail, turn A records; tenant CNAMEs)
+- DNS records via `modules/dns/` (LB A record: `lb2.prod`/`lb1.<label>`, mail, turn A records; tenant CNAMEs)
 
 **Templates** (in `infra/templates/`):
 - `postfix-main.cf.tpl` — Postfix configuration

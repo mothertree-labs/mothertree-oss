@@ -164,6 +164,35 @@ create_mx_record() {
   fi
 }
 
+# Delete a Cloudflare DNS record (idempotent — no-op if record doesn't exist)
+# Args: record_name record_type
+delete_dns_record() {
+  local record_name="$1"
+  local record_type="$2"
+
+  EXISTING=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records?name=${record_name}&type=${record_type}" \
+    -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+    -H "Content-Type: application/json")
+
+  RECORD_ID=$(echo "$EXISTING" | jq -r '.result[0].id // empty')
+
+  if [ -z "$RECORD_ID" ]; then
+    print_status "DNS record absent (already deleted): $record_name ($record_type)"
+    return 0
+  fi
+
+  RESULT=$(curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records/${RECORD_ID}" \
+    -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+    -H "Content-Type: application/json")
+
+  if echo "$RESULT" | jq -e '.success' >/dev/null 2>&1; then
+    print_status "Deleted DNS: $record_name ($record_type)"
+  else
+    print_error "Failed to delete DNS: $record_name — $(echo "$RESULT" | jq -r '.errors[0].message // "unknown error"')"
+    return 1
+  fi
+}
+
 # Set Linode reverse DNS (PTR) for an IP address
 # Args: ip_address rdns_hostname
 # Linode requires forward DNS to resolve first

@@ -110,11 +110,11 @@ deploy-prod → deploy_infra -e prod + create_env -e prod -t <all tenants>
 
 ## DNS Patterns
 
-- **Prod**: `matrix.example.com`, `mail.example.com`, `lb1.prod.example.com`
+- **Prod**: `matrix.example.com`, `mail.example.com`, `lb2.prod.example.com`
 - **Dev**: `matrix.dev.example.com`, `mail.dev.example.com`, `lb1.dev.example.com`
 - **Prod internal**: `grafana.prod.example.com`, `prometheus.prod.example.com` (prefix is `prod`, NOT `internal`)
 - **Dev internal**: `grafana.internal.dev.example.com`, `prometheus.internal.dev.example.com` (prefix is `internal.dev`)
-- Tenant subdomains CNAME to `lb1.{env_label}.example.com`
+- Tenant subdomains CNAME to `lb2.prod.example.com` (prod) or `lb1.{env_label}.example.com` (dev/prod-eu)
 - `env_dns_label`: empty string for prod, `"dev"` for dev
 
 ## Tenant Config Structure
@@ -230,7 +230,7 @@ Never skip this step, even if the changes seem trivial.
 ## DNS Safety Rules
 
 - **NEVER modify the base domain DNS record.** The base domain is a CNAME pointing to an external website. The `create_env` script must not create A/CNAME records for the bare domain.
-- Records managed by `manage_infra --dns` (via `scripts/manage-dns.sh`) should not be duplicated or overridden by `create_env`. Managed records include: base domain CNAME, `lb1` A record, `mail` A record, MX, SPF, DKIM, DMARC, TURN SRV.
+- Records managed by `manage_infra --dns` (via `scripts/manage-dns.sh`) should not be duplicated or overridden by `create_env`. Managed records include: base domain CNAME, LB A record (`lb2.prod` / `lb1.<label>`), `mail` A record, MX, SPF, DKIM, DMARC, TURN SRV.
 - The `create_env` script manages per-tenant CNAME records (subdomains like `matrix`, `element`, `docs`, etc.) and tenant-specific email DNS records only.
 
 ## Troubleshooting
