@@ -61,6 +61,23 @@ if [ ${#missing_vars[@]} -gt 0 ]; then
 fi
 print_status "Using environment: AUTH_HOST=$AUTH_HOST, DOCS_HOST=$DOCS_HOST"
 
+# Validate login method flags (set by config.sh from features.login_methods)
+for v in LOGIN_PASSKEY_ENABLED LOGIN_MAGIC_LINK_ENABLED LOGIN_GOOGLE_SSO_ENABLED; do
+    case "${!v:-}" in
+        true|false) ;;
+        *)
+            print_error "$v must be 'true' or 'false', got: '${!v:-}'"
+            print_error "This is set from features.login_methods in the tenant config."
+            exit 1
+            ;;
+    esac
+done
+if [ "$LOGIN_PASSKEY_ENABLED" = "false" ] && [ "$LOGIN_MAGIC_LINK_ENABLED" = "false" ] && [ "$LOGIN_GOOGLE_SSO_ENABLED" = "false" ]; then
+    print_error "At least one features.login_methods entry must be true"
+    exit 1
+fi
+print_status "Login methods: passkey=$LOGIN_PASSKEY_ENABLED magic_link=$LOGIN_MAGIC_LINK_ENABLED google_sso=$LOGIN_GOOGLE_SSO_ENABLED"
+
 # Set SMTP_DOMAIN from TENANT_DOMAIN if not set
 export SMTP_DOMAIN="${SMTP_DOMAIN:-$TENANT_DOMAIN}"
 
@@ -97,23 +114,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Get Google OAuth credentials from tenant secrets (required - no fallback)
-print_status "Retrieving Google OAuth credentials from tenant secrets..."
-export GOOGLE_CLIENT_ID=$(yq '.google.client_id' "$TENANT_SECRETS" 2>/dev/null)
-export GOOGLE_CLIENT_SECRET=$(yq '.google.client_secret' "$TENANT_SECRETS" 2>/dev/null)
+# Get Google OAuth credentials from tenant secrets (required only if google_sso enabled)
+if [ "$LOGIN_GOOGLE_SSO_ENABLED" = "true" ]; then
+    print_status "Retrieving Google OAuth credentials from tenant secrets..."
+    export GOOGLE_CLIENT_ID=$(yq '.google.client_id' "$TENANT_SECRETS" 2>/dev/null)
+    export GOOGLE_CLIENT_SECRET=$(yq '.google.client_secret' "$TENANT_SECRETS" 2>/dev/null)
 
-if [ -z "$GOOGLE_CLIENT_ID" ] || [ "$GOOGLE_CLIENT_ID" = "null" ]; then
-    print_error "Missing required 'google.client_id' in tenant secrets: $TENANT_SECRETS"
-    print_error "Each tenant must have their own Google OAuth credentials configured"
-    exit 1
+    if [ -z "$GOOGLE_CLIENT_ID" ] || [ "$GOOGLE_CLIENT_ID" = "null" ]; then
+        print_error "google_sso is enabled but 'google.client_id' is missing in: $TENANT_SECRETS"
+        exit 1
+    fi
+    if [ -z "$GOOGLE_CLIENT_SECRET" ] || [ "$GOOGLE_CLIENT_SECRET" = "null" ]; then
+        print_error "google_sso is enabled but 'google.client_secret' is missing in: $TENANT_SECRETS"
+        exit 1
+    fi
+    print_success "Google OAuth credentials retrieved from tenant secrets"
+else
+    # Stub values so envsubst doesn't leave the placeholders unsubstituted (empty is fine for a disabled IdP)
+    export GOOGLE_CLIENT_ID=""
+    export GOOGLE_CLIENT_SECRET=""
+    print_status "Google SSO disabled for this tenant — skipping credential check"
 fi
-
-if [ -z "$GOOGLE_CLIENT_SECRET" ] || [ "$GOOGLE_CLIENT_SECRET" = "null" ]; then
-    print_error "Missing required 'google.client_secret' in tenant secrets: $TENANT_SECRETS"
-    print_error "Each tenant must have their own Google OAuth credentials configured"
-    exit 1
-fi
-print_success "Google OAuth credentials retrieved from tenant secrets"
 
 # Get OIDC client secret for docs-app (required - env var is source of truth)
 print_status "Retrieving OIDC client secret for docs-app..."
@@ -305,21 +326,29 @@ if [ "$MT_ENV" = "dev" ]; then
     fi
 fi
 
-# Update realm frontendUrl to use tenant's auth domain (multi-domain support)
-# This ensures the realm uses the correct domain for redirects and links
-print_status "Setting realm frontendUrl to https://${AUTH_HOST}..."
-FRONTEND_URL_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/frontend_url_update.json -X PUT \
+# Update realm attributes: frontendUrl (multi-domain support) + mt.login.* flags
+# (login flags are read by the platform login theme to render the right UI). All four
+# attributes are sent in a single PUT because Keycloak replaces the entire attributes
+# map with whatever this PUT sends — anything omitted is dropped. If you add a 5th
+# realm attribute elsewhere, also add it here, otherwise this PUT will silently drop it.
+print_status "Setting realm attributes (frontendUrl, login methods)..."
+REALM_ATTR_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/realm_attr_update.json -X PUT \
   "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"attributes\": {\"frontendUrl\": \"https://${AUTH_HOST}\"}}")
+  -d "{\"attributes\": {
+        \"frontendUrl\": \"https://${AUTH_HOST}\",
+        \"mt.login.passkey\": \"${LOGIN_PASSKEY_ENABLED}\",
+        \"mt.login.magic_link\": \"${LOGIN_MAGIC_LINK_ENABLED}\",
+        \"mt.login.google_sso\": \"${LOGIN_GOOGLE_SSO_ENABLED}\"
+      }}")
 
-if [ "$FRONTEND_URL_UPDATE" = "204" ]; then
-    print_success "Realm frontendUrl set to https://${AUTH_HOST}"
+if [ "$REALM_ATTR_UPDATE" = "204" ]; then
+    print_success "Realm attributes updated"
 else
-    print_warning "Failed to update frontendUrl (HTTP $FRONTEND_URL_UPDATE), continuing..."
-    if [ -f /tmp/frontend_url_update.json ]; then
-        print_warning "Details: $(cat /tmp/frontend_url_update.json)"
+    print_warning "Failed to update realm attributes (HTTP $REALM_ATTR_UPDATE), continuing..."
+    if [ -f /tmp/realm_attr_update.json ]; then
+        print_warning "Details: $(cat /tmp/realm_attr_update.json)"
     fi
 fi
 
@@ -351,8 +380,10 @@ else
     fi
 fi
 
-# Update Google identity provider with credentials (realm import doesn't update existing IdPs)
-print_status "Updating Google identity provider with OAuth credentials..."
+# Update Google identity provider state (enabled flag tracks LOGIN_GOOGLE_SSO_ENABLED;
+# realm import doesn't update existing IdPs in place, hence the explicit PUT).
+# When disabled, we still PUT with empty creds + enabled=false so the IdP can't be triggered.
+print_status "Updating Google identity provider (enabled=$LOGIN_GOOGLE_SSO_ENABLED)..."
 GOOGLE_IDP_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/google_idp_update.json -X PUT \
   "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/identity-provider/instances/google" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -361,7 +392,7 @@ GOOGLE_IDP_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tm
     \"alias\": \"google\",
     \"displayName\": \"Google\",
     \"providerId\": \"google\",
-    \"enabled\": true,
+    \"enabled\": $LOGIN_GOOGLE_SSO_ENABLED,
     \"updateProfileFirstLoginMode\": \"on\",
     \"trustEmail\": true,
     \"storeToken\": false,
@@ -382,7 +413,7 @@ GOOGLE_IDP_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tm
   }")
 
 if [ "$GOOGLE_IDP_UPDATE" = "204" ]; then
-    print_success "Google identity provider updated with OAuth credentials"
+    print_success "Google identity provider updated (enabled=$LOGIN_GOOGLE_SSO_ENABLED)"
 else
     print_error "Failed to update Google identity provider (HTTP $GOOGLE_IDP_UPDATE)"
     if [ -f /tmp/google_idp_update.json ]; then
@@ -1801,6 +1832,57 @@ else
     fi
 fi
 
+# Apply login_methods feature flags to the passkey browser flow.
+# Runs unconditionally on every import so flag changes take effect even when
+# the flow already has the new structure. WebAuthn and Magic Link are flipped
+# between ALTERNATIVE and DISABLED based on the flags. Disabled executions are
+# skipped by Keycloak — they neither render nor appear in select-authenticator.
+print_status "Applying login_methods flags to passkey browser flow executions..."
+FLAG_EXECUTIONS=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} \
+  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+  -H "Authorization: Bearer $ACCESS_TOKEN")
+
+WEBAUTHN_REQ="ALTERNATIVE"
+[ "$LOGIN_PASSKEY_ENABLED" = "false" ] && WEBAUTHN_REQ="DISABLED"
+MAGIC_LINK_REQ="ALTERNATIVE"
+[ "$LOGIN_MAGIC_LINK_ENABLED" = "false" ] && MAGIC_LINK_REQ="DISABLED"
+
+WEBAUTHN_EXEC_ID=$(echo "$FLAG_EXECUTIONS" | jq -r '.[] | select(.providerId == "webauthn-authenticator-passwordless") | .id // empty')
+if [ -n "$WEBAUTHN_EXEC_ID" ]; then
+    WEBAUTHN_PUT=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/webauthn_req_update.json -X PUT \
+      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"id\": \"$WEBAUTHN_EXEC_ID\", \"requirement\": \"$WEBAUTHN_REQ\"}")
+    if [ "$WEBAUTHN_PUT" = "204" ]; then
+        print_success "WebAuthn Passwordless requirement = $WEBAUTHN_REQ"
+    else
+        print_error "Failed to set WebAuthn Passwordless requirement to $WEBAUTHN_REQ (HTTP $WEBAUTHN_PUT)"
+        [ -f /tmp/webauthn_req_update.json ] && print_error "Details: $(cat /tmp/webauthn_req_update.json)"
+        exit 1
+    fi
+elif [ "$LOGIN_PASSKEY_ENABLED" = "false" ]; then
+    print_status "WebAuthn Passwordless execution not present (passkey already absent from flow)"
+fi
+
+MAGIC_LINK_EXEC_ID=$(echo "$FLAG_EXECUTIONS" | jq -r '.[] | select(.providerId == "ext-magic-form") | .id // empty')
+if [ -n "$MAGIC_LINK_EXEC_ID" ]; then
+    MAGIC_LINK_PUT=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/magic_link_req_update.json -X PUT \
+      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"id\": \"$MAGIC_LINK_EXEC_ID\", \"requirement\": \"$MAGIC_LINK_REQ\"}")
+    if [ "$MAGIC_LINK_PUT" = "204" ]; then
+        print_success "Magic Link requirement = $MAGIC_LINK_REQ"
+    else
+        print_error "Failed to set Magic Link requirement to $MAGIC_LINK_REQ (HTTP $MAGIC_LINK_PUT)"
+        [ -f /tmp/magic_link_req_update.json ] && print_error "Details: $(cat /tmp/magic_link_req_update.json)"
+        exit 1
+    fi
+elif [ "$LOGIN_MAGIC_LINK_ENABLED" = "false" ]; then
+    print_status "Magic Link execution not present (magic_link already absent from flow)"
+fi
+
 # Set login and email themes to platform
 print_status "Setting login and email themes to platform..."
 THEME_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/theme_update.json -X PUT \
@@ -1935,12 +2017,17 @@ rm -f "$TEMP_CONFIG" "$TEMP_CONFIG.bak"
 
 print_success "Keycloak realm configuration imported successfully!"
 echo ""
+echo "Login methods enabled for this tenant:"
+echo "  passkey:    $LOGIN_PASSKEY_ENABLED"
+echo "  magic_link: $LOGIN_MAGIC_LINK_ENABLED"
+echo "  google_sso: $LOGIN_GOOGLE_SSO_ENABLED"
+echo ""
 echo "Next steps:"
 echo "1. Visit https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/account"
-echo "2. Verify 'Google' login option appears"
-echo "3. Test Google OAuth flow by clicking 'Sign in with Google'"
-echo "4. Verify user can authenticate and is redirected back to Keycloak"
-echo ""
-echo "Google OAuth Configuration:"
-echo "  Client ID: $GOOGLE_CLIENT_ID"
-echo "  Redirect URI: https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/broker/google/endpoint"
+echo "2. Verify the enabled login options appear"
+if [ "$LOGIN_GOOGLE_SSO_ENABLED" = "true" ]; then
+    echo ""
+    echo "Google OAuth Configuration:"
+    echo "  Client ID: $GOOGLE_CLIENT_ID"
+    echo "  Redirect URI: https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/broker/google/endpoint"
+fi

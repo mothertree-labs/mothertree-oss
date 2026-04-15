@@ -217,7 +217,7 @@
       "alias": "google",
       "displayName": "Google",
       "providerId": "google",
-      "enabled": true,
+      "enabled": ${LOGIN_GOOGLE_SSO_ENABLED},
       "updateProfileFirstLoginMode": "on",
       "trustEmail": true,
       "storeToken": false,
@@ -338,7 +338,10 @@
   "clientAuthenticationFlow": "clients",
   "dockerAuthenticationFlow": "docker auth",
   "attributes": {
-    "frontendUrl": "https://${AUTH_HOST}"
+    "frontendUrl": "https://${AUTH_HOST}",
+    "mt.login.passkey": "${LOGIN_PASSKEY_ENABLED}",
+    "mt.login.magic_link": "${LOGIN_MAGIC_LINK_ENABLED}",
+    "mt.login.google_sso": "${LOGIN_GOOGLE_SSO_ENABLED}"
   },
   "browserSecurityHeaders": {
     "contentSecurityPolicy": "frame-ancestors 'self' https://${HOME_HOST} https://${DOCS_HOST}; frame-src 'self'; object-src 'none';",
