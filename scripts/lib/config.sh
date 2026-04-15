@@ -144,6 +144,9 @@ _mt_load_tenant_yaml() {
     "ACCOUNT_PORTAL_ENABLED=" + (.features.account_portal_enabled // false | tostring | @sh) + "\n" +
     "GOOGLE_IMPORT_ENABLED=" + (.features.google_import_enabled // false | tostring | @sh) + "\n" +
     "EMAIL_PROBE_ENABLED=" + (.features.email_probe_enabled // false | tostring | @sh) + "\n" +
+    "LOGIN_PASSKEY_ENABLED=" + (.features.login_methods.passkey | tostring | @sh) + "\n" +
+    "LOGIN_MAGIC_LINK_ENABLED=" + (.features.login_methods.magic_link | tostring | @sh) + "\n" +
+    "LOGIN_GOOGLE_SSO_ENABLED=" + (.features.login_methods.google_sso | tostring | @sh) + "\n" +
     "EMAIL_PROBE_TARGET_EMAIL=" + (.email_probe.target_address // "" | @sh) + "\n" +
     "DEFAULT_EMAIL_QUOTA_MB=" + (.email.default_quota_mb // 5120 | tostring | @sh) + "\n" +
     "PRIVACY_POLICY_URL=" + (.policies.privacy_policy_url // "" | @sh) + "\n" +
@@ -160,6 +163,26 @@ _mt_load_tenant_yaml() {
 
   if [ ${#missing[@]} -gt 0 ]; then
     echo "[ERROR] Required config missing in $TENANT_CONFIG: ${missing[*]}" >&2
+    exit 1
+  fi
+
+  # Login method flags: default if absent (block omitted or key omitted), then validate.
+  # Defaults preserve historical behavior: passkey + magic_link on, google_sso off.
+  [ "$LOGIN_PASSKEY_ENABLED" = "null" ] && LOGIN_PASSKEY_ENABLED=true
+  [ "$LOGIN_MAGIC_LINK_ENABLED" = "null" ] && LOGIN_MAGIC_LINK_ENABLED=true
+  [ "$LOGIN_GOOGLE_SSO_ENABLED" = "null" ] && LOGIN_GOOGLE_SSO_ENABLED=false
+  local lm
+  for lm in LOGIN_PASSKEY_ENABLED LOGIN_MAGIC_LINK_ENABLED LOGIN_GOOGLE_SSO_ENABLED; do
+    case "${!lm}" in
+      true|false) ;;
+      *)
+        echo "[ERROR] features.login_methods value for ${lm} must be true or false, got: '${!lm}' ($TENANT_CONFIG)" >&2
+        exit 1
+        ;;
+    esac
+  done
+  if [ "$LOGIN_PASSKEY_ENABLED" = "false" ] && [ "$LOGIN_MAGIC_LINK_ENABLED" = "false" ] && [ "$LOGIN_GOOGLE_SSO_ENABLED" = "false" ]; then
+    echo "[ERROR] At least one features.login_methods entry must be true in $TENANT_CONFIG" >&2
     exit 1
   fi
 
@@ -569,6 +592,7 @@ _mt_export_all() {
   export CALENDAR_ENABLED OFFICE_ENABLED MAIL_ENABLED JITSI_ENABLED
   export MATRIX_ENABLED DOCS_ENABLED FILES_ENABLED
   export WEBMAIL_ENABLED ADMIN_PORTAL_ENABLED ACCOUNT_PORTAL_ENABLED GOOGLE_IMPORT_ENABLED EMAIL_PROBE_ENABLED
+  export LOGIN_PASSKEY_ENABLED LOGIN_MAGIC_LINK_ENABLED LOGIN_GOOGLE_SSO_ENABLED
   export EMAIL_PROBE_TARGET_EMAIL
   export MATRIX_HOST SYNAPSE_HOST SYNAPSE_ADMIN_HOST ADMIN_HOST ACCOUNT_HOST
   export KEYCLOAK_INTERNAL_URL="http://keycloak-keycloakx-http.infra-auth.svc.cluster.local"
