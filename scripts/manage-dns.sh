@@ -5,7 +5,8 @@
 #          for shared infrastructure (not per-tenant records).
 #
 # Records managed:
-#   - lb1.{prod|dev|prod-eu}.<domain> A  → Ingress LB IP (proxied in prod)
+#   - lb2.prod.<domain> A  → Ingress LB IP (prod, proxied)
+#   - lb1.{dev|prod-eu}.<domain> A  → Ingress LB IP (dev/prod-eu, not proxied)
 #   - turn[.dev].<domain> A              → TURN server IP
 #   - hs-{prod|dev|prod-eu}.<domain> A   → Headscale server IP
 #   - @ CNAME → www.<domain>             (prod only)
@@ -87,9 +88,9 @@ fi
 # Subdomain defaults (match previous Terraform defaults)
 SYNAPSE_CNAME="${SYNAPSE_CNAME:-synapse}"
 
-# LB1 subdomain: lb1.prod for prod, lb1.dev for dev
+# LB subdomain: lb2.prod for prod, lb1.<label> for dev/prod-eu
 if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
-  LB1_SUBDOMAIN="lb1.prod"
+  LB1_SUBDOMAIN="lb2.prod"
   CF_PROXIED="true"
 else
   LB1_SUBDOMAIN="lb1.${INFRA_ENV_DNS_LABEL}"

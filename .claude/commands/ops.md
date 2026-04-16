@@ -121,7 +121,7 @@ without running the full `create_env`.
 | `env_dns_label` | `"dev"` | `""` (empty string) |
 | External hosts | `matrix.dev.example.com` | `matrix.example.com` |
 | Internal hosts | `grafana.internal.dev.example.com` | `grafana.prod.example.com` |
-| LB hostname | `lb1.dev.example.com` | `lb1.prod.example.com` |
+| LB hostname | `lb1.dev.example.com` | `lb2.prod.example.com` |
 | Cloudflare proxy | `false` (DNS-only) | `true` (proxied, DDoS/WAF) |
 | Wildcard cert | `*.dev.example.com` + `*.internal.dev.example.com` | `*.example.com` + `*.prod.example.com` |
 | Cookie domain | `.dev.example.com` | `.example.com` |
@@ -252,7 +252,7 @@ Per-tenant namespace policies (`apps/manifests/network-policies/`):
 
 **Terraform-managed** (modules/dns/ and infra/main.tf) — DO NOT create in scripts:
 - Base domain CNAME (`example.com` → `www.example.com`) — NEVER modify
-- `lb1` A record → cluster ingress IP
+- LB A record (`lb2.prod` for prod, `lb1.<label>` for dev/prod-eu) → cluster ingress IP
 - `mail` A record → Postfix relay VM IP
 - `turn` A record → TURN server IP
 - Matrix federation SRV records
@@ -266,7 +266,7 @@ Per-tenant namespace policies (`apps/manifests/network-policies/`):
 ### CNAME Chain
 
 ```
-matrix.example.com  →  CNAME  →  lb1.prod.example.com  →  A  →  <ingress-IP>
+matrix.example.com  →  CNAME  →  lb2.prod.example.com  →  A  →  <ingress-IP>
 matrix.dev.example.com  →  CNAME  →  lb1.dev.example.com  →  A  →  <ingress-IP>
 ```
 

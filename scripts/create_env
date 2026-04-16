@@ -287,11 +287,11 @@ else
   # Load shared DNS functions (create_dns_record, create_srv_record, create_mx_record)
   source "${REPO_ROOT}/scripts/lib/dns.sh"
 
-  # Create lb1 A record for this tenant's domain
+  # Create LB A record for this tenant's domain (lb2.prod for prod, lb1.<label> for dev/prod-eu)
   if [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
     LB1_RECORD="lb1.${TENANT_ENV_DNS_LABEL}.${TENANT_DOMAIN}"
   else
-    LB1_RECORD="lb1.prod.${TENANT_DOMAIN}"
+    LB1_RECORD="lb2.prod.${TENANT_DOMAIN}"
   fi
   # Cloudflare proxy: prod only (Universal SSL covers *.domain but not *.dev.domain)
   if [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; then
@@ -301,9 +301,9 @@ else
   fi
 
   create_dns_record "$LB1_RECORD" "A" "$INGRESS_IP" "$CF_PROXIED"
-  print_status "Created lb1 A record: $LB1_RECORD -> $INGRESS_IP (proxied=$CF_PROXIED)"
+  print_status "Created LB A record: $LB1_RECORD -> $INGRESS_IP (proxied=$CF_PROXIED)"
 
-  # Create CNAME records for all tenant subdomains pointing to lb1
+  # Create CNAME records for all tenant subdomains pointing to the tenant LB record
   # Note: 'mail' is excluded — its A record is created above alongside the MX record
   PROXIED_SUBDOMAINS="matrix synapse docs files auth home admin account webmail calendar jitsi office"
   DNS_ONLY_SUBDOMAINS="imap smtp"
