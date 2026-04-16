@@ -305,7 +305,7 @@ else
 
   # Create CNAME records for all tenant subdomains pointing to the tenant LB record
   # Note: 'mail' is excluded — its A record is created above alongside the MX record
-  PROXIED_SUBDOMAINS="matrix synapse docs files auth home admin account webmail calendar jitsi office"
+  PROXIED_SUBDOMAINS="matrix synapse element docs files auth home admin account webmail calendar jitsi office"
   DNS_ONLY_SUBDOMAINS="imap smtp"
 
   for subdomain in $PROXIED_SUBDOMAINS; do

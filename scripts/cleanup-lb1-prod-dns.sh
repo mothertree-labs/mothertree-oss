@@ -3,9 +3,13 @@
 # One-shot cleanup: delete orphaned `lb1.prod.<domain>` A records after
 # migrating prod to `lb2.prod`. Idempotent — safe to re-run.
 #
-# Deletes:
-#   - lb1.prod.<INFRA_DOMAIN>            (the shared infra record)
-#   - lb1.prod.<tenant_domain>           (per prod tenant)
+# NOTE: lb1.prod.<domain> is now an intentional CNAME → lb1.prod-eu.<domain>
+# (managed by manage-dns.sh). This script only deletes type=A records, so
+# it will not touch the CNAME. Migration is complete; this script is a no-op.
+#
+# Originally deleted:
+#   - lb1.prod.<INFRA_DOMAIN>            (the old shared infra A record)
+#   - lb1.prod.<tenant_domain>           (per prod tenant A record)
 #
 # Usage:
 #   ./scripts/cleanup-lb1-prod-dns.sh -e prod [--dry-run]
@@ -59,6 +63,8 @@ if [ -z "${TF_VAR_cloudflare_api_token:-}" ]; then
 fi
 
 source "${REPO_ROOT}/scripts/lib/dns.sh"
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_tenants_dir
 
 # Wrapper to honour --dry-run
 _delete_or_log() {
