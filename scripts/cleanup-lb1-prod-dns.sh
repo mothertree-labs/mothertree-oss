@@ -59,6 +59,8 @@ if [ -z "${TF_VAR_cloudflare_api_token:-}" ]; then
 fi
 
 source "${REPO_ROOT}/scripts/lib/dns.sh"
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_tenants_dir
 
 # Wrapper to honour --dry-run
 _delete_or_log() {
