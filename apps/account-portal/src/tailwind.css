@@ -12,6 +12,7 @@
   --color-sage-dark: #8A9475;
   --color-cream: #F3E8D6;
   --color-warm-gray: #6B6B6B;
+  --color-page: #F6F6F3;
 }
 
 /* Self-hosted Figtree font (brand typeface) */
@@ -76,5 +77,8 @@
   }
   .card {
     @apply bg-cream rounded-xl shadow-lg p-8;
+  }
+  .page {
+    @apply bg-page min-h-screen;
   }
 }
