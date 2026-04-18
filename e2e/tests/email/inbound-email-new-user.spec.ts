@@ -104,8 +104,8 @@ test.describe('Email — Inbound Delivery to New User (#189)', () => {
       const rawMime = await waitForEmailBody({
         userEmail: newUserEmail,
         subjectContains: subject,
-        timeoutMs: 90_000,
-        pollIntervalMs: 5_000,
+        timeoutMs: 150_000,
+        pollIntervalMs: 3_000,
       });
 
       expect(rawMime).toContain(subject);
