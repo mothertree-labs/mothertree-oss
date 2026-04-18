@@ -275,6 +275,19 @@ export async function waitForEmailBody(opts: {
   let pollCount = 0;
   let matchedUids: number[] = [];
 
+  // Print a single grep-friendly summary line when delivery succeeds.
+  // Prefix with "SLOW" when above threshold so CI log scans surface recurrences
+  // of the Stalwart queue-stall pattern (see inbound-email-new-user flake 2026-04-18).
+  const SLOW_THRESHOLD_MS = 30_000;
+  const logDelivery = () => {
+    const elapsedMs = Date.now() - start;
+    const tag = elapsedMs >= SLOW_THRESHOLD_MS ? 'SLOW' : 'ok';
+    console.log(
+      `  [imap] Delivery ${tag}: ${Math.round(elapsedMs / 1000)}s after ${pollCount} poll(s) ` +
+      `(user=${opts.userEmail}${opts.subjectContains ? `, subject~="${opts.subjectContains}"` : ''})`,
+    );
+  };
+
   while (Date.now() - start < timeoutMs) {
     pollCount++;
     let client: typeof ImapFlow | null = null;
@@ -350,7 +363,10 @@ export async function waitForEmailBody(opts: {
               chunks.push(chunk as Buffer);
             }
             const raw = Buffer.concat(chunks).toString();
-            if (raw) return raw;
+            if (raw) {
+              logDelivery();
+              return raw;
+            }
             console.log(`  [imap] Source download attempt ${attempt}: empty result for uid=${uid}`);
           } catch (err) {
             console.log(`  [imap] Source download attempt ${attempt} error: ${(err as Error).message}`);
@@ -379,6 +395,7 @@ export async function waitForEmailBody(opts: {
                 console.log(`  [imap] uid=${uid}: skipped (contains skipContaining pattern)`);
                 skippedUids.add(uid);
               } else {
+                logDelivery();
                 return raw;
               }
               break;
