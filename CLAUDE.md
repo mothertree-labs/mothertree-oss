@@ -7,12 +7,12 @@ Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Docs,
 ## Tech Stack
 
 - **Cloud**: Linode (LKE cluster, g6-standard-4, us-lax region, autoscaler min=1 max=5)
-- **IaC**: Terraform (workspaces per env) + Ansible (Headscale, PostgreSQL VM, Postfix relay VM, TURN server)
+- **IaC**: Terraform (workspaces per env) + Ansible (Headscale, PostgreSQL VM, TURN server)
 - **K8s Deployment**: Helmfile + Helm charts + raw manifests (apps/manifests/)
 - **DNS**: Cloudflare API (A, CNAME, MX, TXT, SRV records)
 - **Storage**: PostgreSQL (dedicated external VM per env, connected via Tailscale mesh; PgBouncer in K8s), S3 (Linode Objects, us-lax-1), Redis (per-tenant)
 - **Auth**: Keycloak (OIDC, per-tenant realms)
-- **Email**: Postfix relay VM (inbound MX, on Tailscale mesh) -> K8s Postfix+OpenDKIM -> per-tenant Stalwart; outbound via SES (optional)
+- **Email**: Internet → cluster NodeBalancer:25 → K8s Postfix+OpenDKIM → per-tenant Stalwart (inbound); K8s Postfix → AWS SES (outbound)
 - **Mesh Network**: Headscale (self-hosted Tailscale control plane) — all VMs and K8s PgBouncer pods join the WireGuard mesh (100.64.0.0/10 CGNAT)
 - **Monitoring**: Prometheus + Grafana + AlertManager + Vector (logs)
 - **Tools**: helmfile, yq, kubectl, terraform, ansible, gh (GitHub CLI)
@@ -23,8 +23,8 @@ Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Docs,
 config/          Private config submodules (optional, for operators)
   platform/      Container registry, infra sizing, theme overrides, CLAUDE.private.md
   tenants/       Per-tenant configs (domains, databases, S3 buckets, resources)
-phase1/          Terraform: LKE cluster, Headscale, PostgreSQL VM, Postfix relay VM, TURN server
-modules/         Terraform modules: lke-cluster/, headscale/, postgres-server/, postfix-relay/, helm-bootstrap/
+phase1/          Terraform: LKE cluster, Headscale, PostgreSQL VM, TURN server
+modules/         Terraform modules: lke-cluster/, headscale/, postgres-server/, helm-bootstrap/
 apps/            Application deployment layer
   helmfile.yaml.gotmpl   Main helmfile (Go-templated, env-aware)
   values/                Base Helm values (all environments)
@@ -38,7 +38,7 @@ scripts/         Orchestration scripts (manage_infra, deploy_infra, create_env)
   build-deploy-vaults.sh   Build encrypted CI deploy vault archives
 tenants/         Per-tenant config (or use config/tenants/ submodule)
   .example/      Template for new tenants
-ansible/         VM configuration (Headscale, PostgreSQL, Postfix relay, TURN/CoTURN)
+ansible/         VM configuration (Headscale, PostgreSQL, TURN/CoTURN)
 ci/              CI server (Woodpecker)
   terraform/     CI VM provisioning (Linode)
   ansible/       CI VM configuration (tools, vaults, deploy keys)
@@ -57,7 +57,7 @@ ci/              CI server (Woodpecker)
 
 On initial setup of a new environment, DNS must run after deploy_infra creates the ingress:
 ```bash
-manage_infra -e <env> --phase1          # Create cluster, Headscale, PG VM, relay VM, TURN
+manage_infra -e <env> --phase1          # Create cluster, Headscale, PG VM, TURN
 deploy_infra -e <env>                   # Deploy K8s infra (creates ingress LB, PgBouncer)
 manage_infra -e <env> --dns             # Create DNS records (needs LB IP)
 manage_infra -e <env> --firewall --ansible  # Firewall rules + configure VMs via Ansible

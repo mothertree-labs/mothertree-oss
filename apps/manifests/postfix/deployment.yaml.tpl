@@ -60,6 +60,9 @@ spec:
               readOnly: true
             - name: postfix-tables
               mountPath: /etc/postfix/tables
+            - name: ses-credentials
+              mountPath: /etc/postfix/ses
+              readOnly: true
           env:
             - name: ALLOWED_SENDER_DOMAINS
               value: "${SMTP_ALLOWED_SENDER_DOMAINS}"
@@ -85,10 +88,11 @@ spec:
               value: accept
             - name: POSTFIX_milter_protocol
               value: "6"
-            # SMTP relay — forward outbound mail through relay VM for consistent source IP (SPF)
-            # The relay VM is on the Tailscale mesh; the Tailscale sidecar provides connectivity
+            # SMTP relay — forward outbound mail directly to AWS SES.
+            # SASL credentials and TLS policy are loaded from ConfigMap maps written
+            # by the prepare-routing initContainer into /etc/postfix/tables/.
             - name: RELAYHOST
-              value: "[${POSTFIX_RELAY_IP}]:25"
+              value: "[${SES_SMTP_ENDPOINT}]:587"
             # Inbound mail routing - transport_maps and relay_domains
             # These files are managed by deploy-stalwart.sh for each tenant
             # Init container copies them to /etc/postfix/tables/ and runs postmap
@@ -153,47 +157,10 @@ spec:
             periodSeconds: 10
 
       # Init containers:
-      # - tailscale: native sidecar (restartPolicy: Always) — starts before main
-      #   containers, terminated AFTER them. Keeps the WireGuard tunnel alive while
-      #   Postfix drains queued mail on shutdown.
-      # - prepare-routing: one-shot init that copies routing files and runs postmap
-      # Copies routing files from read-only ConfigMap to writable emptyDir,
-      # then runs postmap to generate .db files
+      # - prepare-routing: one-shot init that copies routing + SES SASL/TLS files
+      #   from read-only ConfigMap/Secret mounts into a writable emptyDir, then runs
+      #   postmap to generate the hash .db files Postfix reads at runtime.
       initContainers:
-        - name: tailscale
-          # tailscale/tailscale:v1.94.2 — stable release, multi-arch
-          # https://hub.docker.com/r/tailscale/tailscale
-          image: tailscale/tailscale:v1.94.2
-          restartPolicy: Always
-          env:
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: TS_AUTHKEY
-              valueFrom:
-                secretKeyRef:
-                  name: postfix-tailscale-auth
-                  key: TS_AUTHKEY
-            - name: TS_EXTRA_ARGS
-              value: "--login-server=${HEADSCALE_URL}"
-            - name: TS_KUBE_SECRET
-              value: "postfix-tailscale-state-$(POD_NAME)"
-            - name: TS_ACCEPT_DNS
-              value: "false"
-            - name: TS_USERSPACE
-              value: "false"
-          securityContext:
-            capabilities:
-              add:
-                - NET_ADMIN
-                - NET_RAW
-          resources:
-            requests:
-              cpu: 10m
-              memory: 64Mi
-            limits:
-              memory: 128Mi
         - name: prepare-routing
           image: boky/postfix:v5.1.0
           command:
@@ -224,6 +191,17 @@ spec:
                 echo "Created empty relay_domains.db"
               fi
 
+              # SES SASL credentials and TLS policy (required — Secret mounted read-only)
+              cp /etc/postfix/ses/sasl_passwd /etc/postfix/tables/sasl_passwd
+              chmod 600 /etc/postfix/tables/sasl_passwd
+              postmap /etc/postfix/tables/sasl_passwd
+              chmod 600 /etc/postfix/tables/sasl_passwd.db
+              echo "Generated sasl_passwd.db"
+
+              cp /etc/postfix/ses/tls_policy /etc/postfix/tables/tls_policy
+              postmap /etc/postfix/tables/tls_policy
+              echo "Generated tls_policy.db"
+
               ls -la /etc/postfix/tables/
           volumeMounts:
             - name: postfix-routing
@@ -231,6 +209,9 @@ spec:
               readOnly: true
             - name: postfix-tables
               mountPath: /etc/postfix/tables
+            - name: ses-credentials
+              mountPath: /etc/postfix/ses
+              readOnly: true
       volumes:
         - name: postfix-config
           configMap:
@@ -255,8 +236,13 @@ spec:
           configMap:
             name: postfix-init-scripts
             defaultMode: 0755
+        # AWS SES SMTP SASL credentials + TLS policy
+        # Secret is created by deploy-postfix.sh from SES_SMTP_* infra secrets
+        - name: ses-credentials
+          secret:
+            secretName: ses-credentials
+            defaultMode: 0400
         # NOTE: DKIM keys are mounted per-tenant by create_env at /etc/dkim-keys/<tenant>/
         # Each tenant's volume is added via kubectl patch when running create_env
       # Budget: Postfix preStop (5s) + graceful shutdown (up to 40s).
-      # Tailscale (native sidecar) is terminated after main containers exit.
       terminationGracePeriodSeconds: 45

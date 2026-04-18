@@ -17,9 +17,9 @@ Investigate the email system to answer the user's question. Trace the full mail 
 ```
 INBOUND MAIL:
 External Sender
-    -> Cloudflare MX (mail.example.com)
-    -> Postfix relay VM (Linode VM, port 25, on Tailscale mesh)
-    -> K8s Postfix (infra-mail, NodePort 25)
+    -> Cloudflare MX (mail.example.com → cluster NodeBalancer IP)
+    -> Ingress-nginx:25 (PROXY protocol from Linode NodeBalancer)
+    -> K8s Postfix (infra-mail, port 25)
     -> OpenDKIM verification (sidecar, port 8891)
     -> Postfix transport map lookup
     -> Stalwart (tn-<tenant>-mail, port 25 internal)
@@ -29,20 +29,20 @@ OUTBOUND MAIL:
 Stalwart (authenticated user sends)
     -> K8s Postfix (infra-mail, port 587 submission)
     -> OpenDKIM signing (sidecar, port 8891, per-tenant key)
-    -> Postfix relay VM (relayhost, port 25) or SES (optional)
+    -> AWS SES SMTP ([email-smtp.<region>.amazonaws.com]:587, SASL AUTH + STARTTLS)
     -> External recipient
 
 APP-GENERATED MAIL (Keycloak, AlertManager, Synapse):
 Application
     -> K8s Postfix (infra-mail, port 587 submission)
     -> OpenDKIM signing
-    -> Postfix relay VM (or SES) -> External
+    -> AWS SES -> External
 ```
 
 ### Port Mappings
 
 #### K8s Postfix (infra-mail)
-- Port 25 (SMTP): Inbound from Postfix relay VM, strict recipient verification
+- Port 25 (SMTP): Inbound from internet (via ingress-nginx TCP proxy), strict recipient verification
 - Port 587 (Submission): Internal apps + Stalwart outbound, permit_mynetworks
 
 #### Stalwart (per-tenant, unique hostPorts)
@@ -54,17 +54,17 @@ Application
 
 Ports are configured per-tenant in `tenants/<name>/<env>.config.yaml` under `resources.stalwart`.
 
-#### Postfix Relay VM (Ansible-managed, on Tailscale mesh)
-- Port 25 (SMTP): Receives from internet, forwards to K8s
-- Relays to K8s Postfix NodePort via Tailscale mesh
-- Configured via `ansible/playbook.yml`
+#### AWS SES (outbound relay)
+- Endpoint: `email-smtp.<region>.amazonaws.com:587` (STARTTLS + SASL PLAIN)
+- Credentials: `SES_SMTP_USERNAME` / `SES_SMTP_PASSWORD` from infra secrets → in-cluster `ses-credentials` Secret
+- SPF authorization: `include:amazonses.com` in per-tenant SPF records
 
 ### DNS Records (per email domain)
 
 | Record | Name | Value |
 |--------|------|-------|
 | MX | `<domain>` | `mail.example.com` (priority 10) |
-| TXT (SPF) | `<domain>` | `v=spf1 a:mail.example.com a:mail.dev.example.com include:_spf.mx.cloudflare.net ~all` |
+| TXT (SPF) | `<domain>` | `v=spf1 include:amazonses.com include:_spf.mx.cloudflare.net ~all` |
 | TXT (DKIM) | `default._domainkey.<domain>` | `v=DKIM1; k=rsa; p=<public_key>` |
 | TXT (DMARC) | `_dmarc.<domain>` | `v=DMARC1; p=quarantine; rua=mailto:postmaster@<domain>; sp=quarantine; adkim=r; aspf=r` |
 | SRV | `_imaps._tcp.<domain>` | `mail.example.com:<imaps_port>` |
@@ -106,8 +106,8 @@ Ports are configured per-tenant in `tenants/<name>/<env>.config.yaml` under `res
 
 1. **Mail not delivered**: Check transport map -> Stalwart pod status -> DNS MX record
 2. **DKIM failure**: Check OpenDKIM logs -> verify DNS TXT record matches key -> check key mount
-3. **SPF failure**: Ensure mail.example.com A record points to Postfix relay VM IP
-4. **Outbound blocked**: Check Postfix relay VM -> check Stalwart outbound config
+3. **SPF failure**: Ensure tenant SPF TXT contains `include:amazonses.com` (outbound leaves via AWS SES)
+4. **Outbound blocked**: Check `ses-credentials` Secret in `infra-mail` -> Postfix SASL logs -> SES sending limits
 5. **Autodiscovery failing**: Verify SRV records match Stalwart hostPorts
 
 ## Investigation Patterns

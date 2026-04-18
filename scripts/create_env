@@ -328,27 +328,20 @@ else
 
   # Create mail DNS records (A record for MX target + MX record)
   if [ "$MAIL_ENABLED" = "true" ]; then
-    # Load Postfix relay VM IP from terraform outputs (for the mail A record)
-    if [ -z "${POSTFIX_RELAY_SERVER_IP:-}" ]; then
-      _tf_out="${MT_TERRAFORM_OUTPUTS_FILE:-}"
-      if [ -z "$_tf_out" ] && [ -n "${MT_INFRA_CONFIG:-}" ]; then
-        _tf_out="${MT_INFRA_CONFIG%/*}/terraform-outputs.${MT_ENV}.env"
-      fi
-      if [ -n "$_tf_out" ] && [ -f "$_tf_out" ]; then
-        # shellcheck disable=SC1090
-        source "$_tf_out"
-      fi
-    fi
-
     MX_HOST="${MAIL_HOST}"
 
-    # Create/update the mail A record pointing to the Postfix relay VM
-    if [ -n "${POSTFIX_RELAY_SERVER_IP:-}" ] && [ "${POSTFIX_RELAY_SERVER_IP}" != "null" ]; then
-      create_dns_record "$MX_HOST" "A" "$POSTFIX_RELAY_SERVER_IP"
-      print_status "Updated DNS: $MX_HOST -> $POSTFIX_RELAY_SERVER_IP"
-    else
-      print_warning "POSTFIX_RELAY_SERVER_IP not available — skipping mail A record for $MX_HOST"
+    # Create/update the mail A record pointing to the cluster ingress LB IP.
+    # Inbound MX traffic: internet → NodeBalancer:25 → infra-mail/postfix:25 → tenant Stalwart.
+    # Fail hard on missing LB IP: a stale/missing A record would silently bounce inbound mail.
+    INGRESS_LB_IP=$(kubectl get service -n "${NS_INGRESS:-infra-ingress}" ingress-nginx-controller \
+      -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+    if [ -z "$INGRESS_LB_IP" ]; then
+      print_error "Cluster ingress LB IP not available — cannot set mail A record for $MX_HOST"
+      print_error "Check: kubectl get svc ingress-nginx-controller -n ${NS_INGRESS:-infra-ingress}"
+      exit 1
     fi
+    create_dns_record "$MX_HOST" "A" "$INGRESS_LB_IP"
+    print_status "Updated DNS: $MX_HOST -> $INGRESS_LB_IP (cluster LB)"
 
     print_status "Creating MX record for $EMAIL_DOMAIN..."
     create_mx_record "$EMAIL_DOMAIN" "$MX_HOST" 10
@@ -400,7 +393,9 @@ else
     fi
 
     # Create/update SPF record
-    SPF_CONTENT="v=spf1 a:mail.${INFRA_DOMAIN} a:mail.dev.${INFRA_DOMAIN} include:_spf.mx.cloudflare.net ~all"
+    # Outbound mail leaves via AWS SES (relayed through in-cluster Postfix) — authorize SES sender IPs.
+    # Inbound MX points at mail.<infra-domain> (cluster ingress), which is not a sender, so no `a:` needed.
+    SPF_CONTENT="v=spf1 include:amazonses.com include:_spf.mx.cloudflare.net ~all"
     create_dns_record "${EMAIL_DOMAIN}" "TXT" "$SPF_CONTENT"
     print_status "SPF record created for ${EMAIL_DOMAIN}"
 

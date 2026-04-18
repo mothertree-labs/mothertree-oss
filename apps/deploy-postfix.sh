@@ -52,19 +52,11 @@ MANIFESTS_DIR="$REPO_ROOT/apps/manifests/postfix"
 # Load Postfix-specific config
 # =============================================================================
 
-# Required: Postfix relay VM Tailscale IP
-: "${POSTFIX_RELAY_IP:?POSTFIX_RELAY_IP not set. Add postfix_relay.tailscale_ip to infra config.}"
-export POSTFIX_RELAY_IP
-
-# Required: Headscale URL (for Tailscale sidecar)
-: "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
-export HEADSCALE_URL
-
-# Tailscale pre-auth key with tag:postfix-k8s — only needed for first-time bootstrap.
-# After initial creation, the key-rotator CronJob manages this secret.
-if [ -n "${TAILSCALE_AUTHKEY_POSTFIX:-}" ]; then
-  TAILSCALE_AUTHKEY="$TAILSCALE_AUTHKEY_POSTFIX"
-fi
+# Required: AWS SES SMTP credentials (outbound relay path)
+: "${SES_SMTP_ENDPOINT:?SES_SMTP_ENDPOINT not set. Add ses.smtp_endpoint to infra secrets.}"
+: "${SES_SMTP_USERNAME:?SES_SMTP_USERNAME not set. Add ses.smtp_username to infra secrets.}"
+: "${SES_SMTP_PASSWORD:?SES_SMTP_PASSWORD not set. Add ses.smtp_password to infra secrets.}"
+export SES_SMTP_ENDPOINT
 
 # =============================================================================
 # Compute derived variables
@@ -81,9 +73,7 @@ export DKIM_SELECTOR="default"
 #   - 127.0.0.0/8: localhost
 #   - 10.0.0.0/8: K8s pod network (Cilium)
 #   - 172.16.0.0/12: K8s service network
-#   - Postfix relay VM's Tailscale IP: allows relay to submit mail back to K8s Postfix
-# Do NOT trust the entire 100.64.0.0/10 — that would let any Tailscale peer relay mail.
-export POSTFIX_MYNETWORKS="127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,${POSTFIX_RELAY_IP}/32"
+export POSTFIX_MYNETWORKS="127.0.0.0/8,10.0.0.0/8,172.16.0.0/12"
 
 # Compute SMTP_ALLOWED_SENDER_DOMAINS from tenant configs if not already set
 if [ -z "${SMTP_ALLOWED_SENDER_DOMAINS:-}" ]; then
@@ -112,8 +102,7 @@ export SMTP_ALLOWED_SENDER_DOMAINS
 print_status "Deploying Postfix to $NS_MAIL (env: $MT_ENV)"
 print_status "  SMTP domain: $SMTP_DOMAIN"
 print_status "  SMTP hostname: $SMTP_HOSTNAME"
-print_status "  Relay VM (Tailscale): $POSTFIX_RELAY_IP"
-print_status "  Headscale URL: $HEADSCALE_URL"
+print_status "  SES endpoint: $SES_SMTP_ENDPOINT"
 print_status "  Trusted networks: $POSTFIX_MYNETWORKS"
 print_status "  Allowed sender domains: ${SMTP_ALLOWED_SENDER_DOMAINS:-<none>}"
 
@@ -126,7 +115,7 @@ trap "rm -rf $WORK_DIR" EXIT
 
 # Process Postfix main.cf template
 # Only substitute our variables — leave Postfix $variables (e.g. $myhostname) intact
-envsubst '${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${POSTFIX_MYNETWORKS} ${POSTFIX_RELAY_IP}' \
+envsubst '${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${POSTFIX_MYNETWORKS} ${SES_SMTP_ENDPOINT}' \
   < "$MANIFESTS_DIR/postfix-main.cf.tpl" > "$WORK_DIR/main.cf"
 
 # Process aliases template
@@ -165,23 +154,38 @@ mt_reset_change_tracker
 envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/postfix-rbac.yaml.tpl" | mt_apply kubectl apply -f -
 
 # =============================================================================
-# Apply Tailscale auth Secret
+# Clean up legacy Tailscale sidecar artifacts (issue #348 migration)
 # =============================================================================
+kubectl delete secret postfix-tailscale-auth -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+for legacy_secret in $(kubectl get secrets -n "$NS_MAIL" -o name 2>/dev/null | grep -E '^secret/postfix-tailscale-state-' || true); do
+  kubectl delete "$legacy_secret" -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+done
+kubectl delete role postfix-tailscale -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+kubectl delete rolebinding postfix-tailscale -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
 
-# Tailscale auth secret: create only if missing (managed by key-rotator CronJob)
-if ! kubectl get secret postfix-tailscale-auth -n "$NS_MAIL" >/dev/null 2>&1; then
-  if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
-    print_error "postfix-tailscale-auth secret does not exist and TAILSCALE_AUTHKEY_POSTFIX is not set"
-    print_error "Bootstrap: create a tagged pre-auth key (tag:postfix-k8s) and set tailscale.postfix_authkey in infra secrets"
-    exit 1
-  fi
-  print_status "Creating Postfix Tailscale auth secret (first-time bootstrap)..."
-  kubectl create secret generic postfix-tailscale-auth -n "$NS_MAIL" \
-    --from-literal=TS_AUTHKEY="$TAILSCALE_AUTHKEY" \
-    --dry-run=client -o yaml | mt_apply kubectl apply -f -
-else
-  print_status "Tailscale auth secret exists (managed by key-rotator CronJob)"
-fi
+# =============================================================================
+# Apply SES credentials Secret
+# =============================================================================
+# Format matches Postfix SASL password map syntax — initContainer runs postmap
+# on the copy placed in /etc/postfix/tables/. TLS policy map enforces CA-verified
+# TLS for the SES endpoint (internal cluster SMTP to tenant Stalwarts stays
+# opportunistic via smtp_tls_security_level = may).
+#
+# Writes via temp files (not --from-literal) so the SES password never appears
+# in kubectl's /proc/<pid>/cmdline.
+
+SES_SECRET_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR" "$SES_SECRET_DIR"' EXIT
+umask 077
+printf '[%s]:587 %s:%s\n' "$SES_SMTP_ENDPOINT" "$SES_SMTP_USERNAME" "$SES_SMTP_PASSWORD" \
+  > "$SES_SECRET_DIR/sasl_passwd"
+printf '[%s]:587 secure\n' "$SES_SMTP_ENDPOINT" > "$SES_SECRET_DIR/tls_policy"
+
+print_status "Applying SES credentials Secret..."
+kubectl create secret generic ses-credentials -n "$NS_MAIL" \
+  --from-file=sasl_passwd="$SES_SECRET_DIR/sasl_passwd" \
+  --from-file=tls_policy="$SES_SECRET_DIR/tls_policy" \
+  --dry-run=client -o yaml | mt_apply kubectl apply -f -
 
 # =============================================================================
 # Create/update ConfigMaps
@@ -223,7 +227,7 @@ kubectl create configmap postfix-init-scripts -n "$NS_MAIL" \
 # create_env patches the Deployment to add per-tenant DKIM key volumes and volume mounts.
 # SSA ensures those fields (owned by kubectl-patch) are not removed when we re-apply.
 print_status "Applying Postfix Deployment..."
-envsubst '${NS_MAIL} ${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${SMTP_ALLOWED_SENDER_DOMAINS} ${POSTFIX_MYNETWORKS} ${POSTFIX_RELAY_IP} ${HEADSCALE_URL} ${CHECKSUM_POSTFIX_CONFIG} ${CHECKSUM_OPENDKIM_CONFIG} ${CHECKSUM_INIT_SCRIPTS}' \
+envsubst '${NS_MAIL} ${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${SMTP_ALLOWED_SENDER_DOMAINS} ${POSTFIX_MYNETWORKS} ${SES_SMTP_ENDPOINT} ${CHECKSUM_POSTFIX_CONFIG} ${CHECKSUM_OPENDKIM_CONFIG} ${CHECKSUM_INIT_SCRIPTS}' \
   < "$MANIFESTS_DIR/deployment.yaml.tpl" \
   | kubectl apply -f - --server-side --field-manager=deploy-postfix --force-conflicts
 

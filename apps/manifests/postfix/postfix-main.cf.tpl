@@ -1,7 +1,7 @@
 # Postfix main configuration for multi-tenant mail routing
 # This Postfix instance serves two roles:
-# 1. Outbound relay: accepts mail from tenant Stalwarts, signs with DKIM, forwards to VPN relay
-# 2. Inbound routing: receives mail from internet, routes to correct tenant Stalwart by domain
+# 1. Outbound relay: accepts mail from tenant Stalwarts, signs with DKIM, forwards to AWS SES
+# 2. Inbound routing: receives mail from internet (via NodeBalancer:25), routes to correct tenant Stalwart by domain
 #
 # See /usr/share/postfix/main.cf.dist for a commented, more complete version
 
@@ -18,10 +18,9 @@ myorigin = ${SMTP_DOMAIN}
 mydestination = $myhostname, localhost, localhost.localdomain
 mynetworks = ${POSTFIX_MYNETWORKS}
 
-# Relay host — forward all outbound mail through the Postfix relay VM
-# This ensures a consistent source IP for SPF compliance
-# The relay VM is on the Tailscale mesh (reached via Tailscale sidecar)
-relayhost = [${POSTFIX_RELAY_IP}]:25
+# Relay host — forward all outbound mail directly to AWS SES SMTP endpoint
+# SPF authorization is via include:amazonses.com in tenant SPF records
+relayhost = [${SES_SMTP_ENDPOINT}]:587
 
 # =============================================================================
 # Inbound Mail Routing (Multi-Tenant)
@@ -72,6 +71,16 @@ smtp_tls_security_level = may
 smtp_tls_note_starttls_offer = yes
 smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
 smtp_tls_session_cache_database = btree:$data_directory/smtp_scache
+
+# AWS SES requires TLS — per https://docs.aws.amazon.com/ses/latest/dg/postfix.html
+smtp_use_tls = yes
+# Enforce strict TLS only for the SES endpoint (not for internal cluster-local SMTP to tenant Stalwarts)
+smtp_tls_policy_maps = hash:/etc/postfix/tables/tls_policy
+
+# SASL authentication for AWS SES SMTP
+smtp_sasl_auth_enable = yes
+smtp_sasl_security_options = noanonymous
+smtp_sasl_password_maps = hash:/etc/postfix/tables/sasl_passwd
 
 # SMTP server settings - allow mynetworks and relay_domains
 # permit_mynetworks: allow internal cluster traffic (tenant Stalwarts sending outbound)
