@@ -18,9 +18,8 @@ myorigin = ${SMTP_DOMAIN}
 mydestination = $myhostname, localhost, localhost.localdomain
 mynetworks = ${POSTFIX_MYNETWORKS}
 
-# Relay host — forward all outbound mail directly to AWS SES SMTP endpoint
-# SPF authorization is via include:amazonses.com in tenant SPF records
-relayhost = [${SES_SMTP_ENDPOINT}]:587
+# Outbound relay: set by deploy-postfix.sh (appended SES block in envs with SES creds).
+# When no relayhost is configured, Postfix direct-delivers to the recipient domain's MX.
 
 # =============================================================================
 # Inbound Mail Routing (Multi-Tenant)
@@ -72,15 +71,8 @@ smtp_tls_note_starttls_offer = yes
 smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
 smtp_tls_session_cache_database = btree:$data_directory/smtp_scache
 
-# AWS SES requires TLS — per https://docs.aws.amazon.com/ses/latest/dg/postfix.html
-smtp_use_tls = yes
-# Enforce strict TLS only for the SES endpoint (not for internal cluster-local SMTP to tenant Stalwarts)
-smtp_tls_policy_maps = hash:/etc/postfix/tables/tls_policy
-
-# SASL authentication for AWS SES SMTP
-smtp_sasl_auth_enable = yes
-smtp_sasl_security_options = noanonymous
-smtp_sasl_password_maps = hash:/etc/postfix/tables/sasl_passwd
+# NOTE: SES SASL + strict TLS policy are appended by deploy-postfix.sh when SES creds are set.
+# Envs without SES direct-send using opportunistic STARTTLS (smtp_tls_security_level = may).
 
 # SMTP server settings - allow mynetworks and relay_domains
 # permit_mynetworks: allow internal cluster traffic (tenant Stalwarts sending outbound)

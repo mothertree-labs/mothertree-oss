@@ -561,7 +561,22 @@ fi
 # =============================================================================
 # Deploy K8s Postfix (ConfigMaps, Deployment, Services, NetworkPolicy)
 # =============================================================================
-if [ -n "${SES_SMTP_USERNAME:-}" ]; then
+# Gate on whether any tenant in this env has mail enabled — prod and dev both
+# have tenants with mail, while prod-eu currently doesn't. SES credentials are
+# orthogonal (prod has them, dev direct-sends without SES).
+_mail_enabled_any=false
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_tenants_dir
+for _tdir in "$MT_TENANTS_DIR"/*/; do
+  _tcfg="${_tdir}/${MT_ENV}.config.yaml"
+  [ -f "$_tcfg" ] || continue
+  if [ "$(yq '.features.mail_enabled // false' "$_tcfg")" = "true" ]; then
+    _mail_enabled_any=true
+    break
+  fi
+done
+
+if [ "$_mail_enabled_any" = "true" ]; then
   print_status "Deploying K8s Postfix..."
   if [ -x "$REPO_ROOT/apps/deploy-postfix.sh" ]; then
     "$REPO_ROOT/apps/deploy-postfix.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
@@ -628,7 +643,7 @@ if [ -n "${SES_SMTP_USERNAME:-}" ]; then
     print_status "Port 25 already present on ingress-nginx LB service"
   fi
 else
-  print_status "Skipping K8s Postfix (no ses.smtp_username in infra secrets)"
+  print_status "Skipping K8s Postfix (no tenant has features.mail_enabled=true in $MT_ENV)"
 fi
 
 # NOTE: VPN route DaemonSet removed — replaced by Tailscale mesh (Headscale).

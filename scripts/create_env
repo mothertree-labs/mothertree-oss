@@ -393,9 +393,15 @@ else
     fi
 
     # Create/update SPF record
-    # Outbound mail leaves via AWS SES (relayed through in-cluster Postfix) — authorize SES sender IPs.
-    # Inbound MX points at mail.<infra-domain> (cluster ingress), which is not a sender, so no `a:` needed.
-    SPF_CONTENT="v=spf1 include:amazonses.com include:_spf.mx.cloudflare.net ~all"
+    # Per-env outbound path:
+    #   - SES is configured → authorize amazonses.com sender IPs
+    #   - Otherwise (dev direct-send) → no IP authorization; rely on soft-fail. K8s node
+    #     egress IPs rotate, so they can't be listed stably. Acceptable for dev only.
+    if [ -n "${SES_SMTP_USERNAME:-}" ]; then
+      SPF_CONTENT="v=spf1 include:amazonses.com include:_spf.mx.cloudflare.net ~all"
+    else
+      SPF_CONTENT="v=spf1 include:_spf.mx.cloudflare.net ~all"
+    fi
     create_dns_record "${EMAIL_DOMAIN}" "TXT" "$SPF_CONTENT"
     print_status "SPF record created for ${EMAIL_DOMAIN}"
 
