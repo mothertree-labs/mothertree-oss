@@ -199,16 +199,18 @@ print_success "Namespace ready: $NS_MAIL"
 # DKIM key Secret (tenant namespace)
 # =============================================================================
 # Stalwart reads the key via %{file:/opt/stalwart/dkim/dkim.private}%.
-# Use stdin for the key contents so the PEM never appears in kubectl's argv.
+# Use --from-file (not --from-literal) so the PEM never appears in kubectl's argv.
+# The tmp file is small and gets `rm -f`'d right after; we deliberately don't
+# register a trap here because mt_deploy_start already owns the EXIT trap for
+# the deploy-end notification, and `trap - EXIT` would clobber it globally.
+# A leak on early failure is acceptable — the next run creates a fresh tmp.
 print_status "Applying DKIM key Secret in $NS_MAIL..."
 DKIM_TMP=$(mktemp)
-trap 'rm -f "$DKIM_TMP"' EXIT
 printf '%s' "$DKIM_PRIVATE_KEY" > "$DKIM_TMP"
 kubectl create secret generic dkim-key -n "$NS_MAIL" \
     --from-file=dkim.private="$DKIM_TMP" \
     --dry-run=client -o yaml | kubectl apply -f -
 rm -f "$DKIM_TMP"
-trap - EXIT
 print_success "DKIM key Secret applied"
 
 # =============================================================================
@@ -216,10 +218,11 @@ print_success "DKIM key Secret applied"
 # =============================================================================
 # Write each value to a temp file and use --from-file so the username/password
 # never appear in kubectl's argv (visible via ps on a shared CI host).
+# No EXIT trap here — mt_deploy_start owns it for the deploy-end notification;
+# `trap - EXIT` would clobber that. A leak on early failure is acceptable.
 if [ "$STALWART_SES_ENABLED" = "true" ]; then
     print_status "Applying SES credentials Secret in $NS_MAIL..."
     SES_TMP_DIR=$(mktemp -d)
-    trap 'rm -rf "$SES_TMP_DIR"' EXIT
     printf '%s' "$SES_SMTP_ENDPOINT" > "$SES_TMP_DIR/endpoint"
     printf '%s' "$SES_SMTP_USERNAME" > "$SES_TMP_DIR/username"
     printf '%s' "$SES_SMTP_PASSWORD" > "$SES_TMP_DIR/password"
@@ -229,7 +232,6 @@ if [ "$STALWART_SES_ENABLED" = "true" ]; then
         --from-file=password="$SES_TMP_DIR/password" \
         --dry-run=client -o yaml | kubectl apply -f -
     rm -rf "$SES_TMP_DIR"
-    trap - EXIT
     print_success "SES credentials Secret applied"
 else
     # Clear any stale Secret from a prior SES-enabled deploy. --ignore-not-found
