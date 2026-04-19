@@ -38,6 +38,11 @@ mt_require_tenant
 source "${REPO_ROOT}/scripts/lib/config.sh"
 mt_load_tenant_config
 
+# Load infrastructure credentials — provides SES_SMTP_* env vars when SES is
+# configured for this env. Absent on dev → Stalwart falls back to direct MX delivery.
+source "${REPO_ROOT}/scripts/lib/infra-config.sh"
+mt_load_infra_config
+
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy-stalwart"
 
@@ -118,16 +123,109 @@ export STALWART_MASTER_SECRET
 STALWART_MASTER_SECRET=$(openssl passwd -6 -salt "$(openssl rand -hex 8)" "$STALWART_ADMIN_PASSWORD")
 print_status "Master-user secret hash generated"
 
-# Generate config checksum for pod annotations
-# Include both secrets AND the rendered config template to trigger restarts on any config change
+# =============================================================================
+# Outbound mail path: SES relay (prod) or direct MX (dev)
+# =============================================================================
+# Stalwart signs outbound mail with the tenant's DKIM key (same key and selector
+# infra-Postfix/OpenDKIM still uses for other callers during the PR-2/PR-3/PR-4
+# transition). Receivers accepting multiple signatures is fine per RFC 6376.
+#
+# Route choice is environment-dependent:
+#   - SES configured (prod): relay via AWS SES on 587 with SASL auth. The
+#     ses-credentials Secret carries endpoint/username/password, mounted as
+#     env vars referenced by %{env:...}% in the relay route block.
+#   - SES unset (dev): direct MX delivery from the cluster's egress IP. No
+#     smart host. Cluster egress IP has no PTR/SPF so receivers may tempfail,
+#     but that matches the existing dev behavior (see project_mail_paths_per_env).
+
+# Load tenant DKIM private key from tenant secrets YAML. Fail fast when mail is
+# enabled but the key is missing — DKIM is load-bearing once Stalwart signs.
+DKIM_PRIVATE_KEY=$(yq '.dkim.private_key' "$TENANT_SECRETS")
+if [ -z "$DKIM_PRIVATE_KEY" ] || [ "$DKIM_PRIVATE_KEY" = "null" ]; then
+    print_error "Missing '.dkim.private_key' in tenant secrets ($TENANT_SECRETS) — required for Stalwart DKIM signing."
+    print_error "Generate with: openssl genrsa 2048"
+    exit 1
+fi
+
+if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
+    # Reject endpoints containing characters that could inject TOML directives
+    # via newlines. Operator-controlled input; defense-in-depth.
+    if ! [[ "$SES_SMTP_ENDPOINT" =~ ^[A-Za-z0-9.-]+$ ]]; then
+        print_error "SES_SMTP_ENDPOINT '$SES_SMTP_ENDPOINT' contains invalid characters (allowed: A-Za-z0-9.-)"
+        exit 1
+    fi
+    STALWART_SES_ENABLED=true
+    export STALWART_OUTBOUND_ROUTE_NAME="relay"
+    export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - AWS SES via SASL-authenticated SMTP submission.
+    [queue.route.\"relay\"]
+    type = \"relay\"
+    address = \"%{env:SES_SMTP_ENDPOINT}%\"
+    port = 587
+    protocol = \"smtp\"
+
+    [queue.route.\"relay\".tls]
+    implicit = false
+    allow-invalid-certs = false
+
+    [queue.route.\"relay\".auth]
+    username = \"%{env:SES_SMTP_USER}%\"
+    secret = \"%{env:SES_SMTP_PASSWORD}%\""
+    print_status "Outbound relay: AWS SES ($SES_SMTP_ENDPOINT)"
+else
+    STALWART_SES_ENABLED=false
+    export STALWART_OUTBOUND_ROUTE_NAME="mx"
+    export STALWART_OUTBOUND_ROUTE_TOML="    # Direct MX delivery - no smart host configured for this env.
+    [queue.route.\"mx\"]
+    type = \"mx\"
+    ip-lookup = \"ipv4_then_ipv6\""
+    print_status "Outbound relay: direct MX (no SES configured for this env)"
+fi
+
+# Generate config checksum for pod annotations. Include every value the pod
+# reads from a Secret/ConfigMap so rotating any of them forces a rollout.
+# STALWART_OUTBOUND_ROUTE_TOML is baked into RENDERED_CONFIG below, but we hash
+# DKIM key and SES creds separately because they are mounted (file or env) and
+# would otherwise roll silently on Secret-only changes.
 RENDERED_CONFIG=$(envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" 2>/dev/null || echo "")
-export CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$S3_MAIL_ACCESS_KEY$RENDERED_CONFIG" | sha256sum | cut -d' ' -f1 | head -c 12)
+export CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$S3_MAIL_ACCESS_KEY$DKIM_PRIVATE_KEY${SES_SMTP_ENDPOINT:-}${SES_SMTP_USERNAME:-}${SES_SMTP_PASSWORD:-}$RENDERED_CONFIG" | sha256sum | cut -d' ' -f1 | head -c 12)
 print_status "Config checksum: $CONFIG_CHECKSUM"
 
 # Ensure namespace exists
 print_status "Ensuring $NS_MAIL namespace exists..."
 kubectl create namespace "$NS_MAIL" --dry-run=client -o yaml | kubectl apply -f -
 print_success "Namespace ready: $NS_MAIL"
+
+# =============================================================================
+# DKIM key Secret (tenant namespace)
+# =============================================================================
+# Stalwart reads the key via %{file:/opt/stalwart/dkim/dkim.private}%.
+# Use stdin for the key contents so the PEM never appears in kubectl's argv.
+print_status "Applying DKIM key Secret in $NS_MAIL..."
+DKIM_TMP=$(mktemp)
+trap 'rm -f "$DKIM_TMP"' EXIT
+printf '%s' "$DKIM_PRIVATE_KEY" > "$DKIM_TMP"
+kubectl create secret generic dkim-key -n "$NS_MAIL" \
+    --from-file=dkim.private="$DKIM_TMP" \
+    --dry-run=client -o yaml | kubectl apply -f -
+rm -f "$DKIM_TMP"
+trap - EXIT
+print_success "DKIM key Secret applied"
+
+# =============================================================================
+# SES credentials Secret (tenant namespace, only when SES is configured)
+# =============================================================================
+if [ "$STALWART_SES_ENABLED" = "true" ]; then
+    print_status "Applying SES credentials Secret in $NS_MAIL..."
+    kubectl create secret generic ses-credentials -n "$NS_MAIL" \
+        --from-literal=endpoint="$SES_SMTP_ENDPOINT" \
+        --from-literal=username="$SES_SMTP_USERNAME" \
+        --from-literal=password="$SES_SMTP_PASSWORD" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    print_success "SES credentials Secret applied"
+else
+    # Clear any stale Secret from a prior SES-enabled deploy.
+    kubectl delete secret ses-credentials -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+fi
 
 # =============================================================================
 # Database Initialization
