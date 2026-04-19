@@ -184,18 +184,3 @@ output "postgres_server_label" {
   value       = var.postgres_enabled ? module.postgres_server[0].postgres_server_label : null
 }
 
-# Postfix Relay Server Outputs
-output "postfix_relay_ip" {
-  description = "Public IP address of the Postfix relay server (for DNS MX records and Ansible provisioning)"
-  value       = var.postfix_relay_enabled ? module.postfix_relay[0].postfix_relay_ip : null
-}
-
-output "postfix_relay_id" {
-  description = "ID of the Postfix relay server"
-  value       = var.postfix_relay_enabled ? module.postfix_relay[0].postfix_relay_id : null
-}
-
-output "postfix_relay_label" {
-  description = "Label of the Postfix relay server"
-  value       = var.postfix_relay_enabled ? module.postfix_relay[0].postfix_relay_label : null
-}

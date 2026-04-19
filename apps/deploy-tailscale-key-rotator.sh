@@ -67,7 +67,7 @@ print_status "  Headscale URL: $HEADSCALE_URL"
 
 print_status "Applying key rotator RBAC..."
 mt_reset_change_tracker
-envsubst '${NS_DB} ${NS_MAIL} ${NS_INGRESS_INTERNAL}' \
+envsubst '${NS_DB} ${NS_INGRESS_INTERNAL}' \
   < "$MANIFESTS_DIR/rbac.yaml.tpl" | mt_apply kubectl apply -f -
 
 # =============================================================================
@@ -83,7 +83,7 @@ envsubst '${NS_DB} ${TAILSCALE_ROTATOR_API_KEY}' \
 # =============================================================================
 
 print_status "Applying key rotator ConfigMap..."
-envsubst '${NS_DB} ${NS_MAIL} ${NS_INGRESS_INTERNAL} ${HEADSCALE_URL}' \
+envsubst '${NS_DB} ${NS_INGRESS_INTERNAL} ${HEADSCALE_URL}' \
   < "$MANIFESTS_DIR/configmap.yaml.tpl" | mt_apply kubectl apply -f -
 
 # =============================================================================
