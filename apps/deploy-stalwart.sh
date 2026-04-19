@@ -214,17 +214,28 @@ print_success "DKIM key Secret applied"
 # =============================================================================
 # SES credentials Secret (tenant namespace, only when SES is configured)
 # =============================================================================
+# Write each value to a temp file and use --from-file so the username/password
+# never appear in kubectl's argv (visible via ps on a shared CI host).
 if [ "$STALWART_SES_ENABLED" = "true" ]; then
     print_status "Applying SES credentials Secret in $NS_MAIL..."
+    SES_TMP_DIR=$(mktemp -d)
+    trap 'rm -rf "$SES_TMP_DIR"' EXIT
+    printf '%s' "$SES_SMTP_ENDPOINT" > "$SES_TMP_DIR/endpoint"
+    printf '%s' "$SES_SMTP_USERNAME" > "$SES_TMP_DIR/username"
+    printf '%s' "$SES_SMTP_PASSWORD" > "$SES_TMP_DIR/password"
     kubectl create secret generic ses-credentials -n "$NS_MAIL" \
-        --from-literal=endpoint="$SES_SMTP_ENDPOINT" \
-        --from-literal=username="$SES_SMTP_USERNAME" \
-        --from-literal=password="$SES_SMTP_PASSWORD" \
+        --from-file=endpoint="$SES_TMP_DIR/endpoint" \
+        --from-file=username="$SES_TMP_DIR/username" \
+        --from-file=password="$SES_TMP_DIR/password" \
         --dry-run=client -o yaml | kubectl apply -f -
+    rm -rf "$SES_TMP_DIR"
+    trap - EXIT
     print_success "SES credentials Secret applied"
 else
-    # Clear any stale Secret from a prior SES-enabled deploy.
-    kubectl delete secret ses-credentials -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+    # Clear any stale Secret from a prior SES-enabled deploy. --ignore-not-found
+    # handles the benign "already gone" case; stderr stays visible so real
+    # failures (auth, connectivity) surface per the project's fail-fast rule.
+    kubectl delete secret ses-credentials -n "$NS_MAIL" --ignore-not-found=true >/dev/null
 fi
 
 # =============================================================================
