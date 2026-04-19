@@ -47,7 +47,27 @@ Content-Type: application/json
 ## Example (dev, mothertree tenant)
 
 ### Step 1: Get an app password for a user
-Users can create app passwords in the account portal, or you can create one via admin API.
+
+Create the app password via the account portal:
+
+1. Log into the account portal with passkey (or magic link)
+2. Navigate to **Settings → Device Passwords** (URL: `/app-passwords`)
+3. Enter a device name (e.g., "API Access") and click **Create Password**
+4. Copy the generated password — it's shown only once
+
+**Under the hood**: The account portal generates a cryptographically random password (`crypto.randomBytes(16)`) and stores it in the user's principal secrets via Stalwart's admin API:
+
+```
+PATCH /api/principal/username@domain
+Authorization: Basic <admin_credentials>
+Content-Type: application/json
+
+[{"action": "addItem", "field": "secrets", "value": "$app$<device_name>$<password>"}]
+```
+
+The password format in Stalwart's secrets is `$app$<name>$<password>`. When authenticating, Stalwart matches against these secrets.
+
+App passwords are stored in Stalwart's PostgreSQL database (the same database that stores all mail data), not in Keycloak. This is separate from OIDC/passkey authentication which authenticates via Keycloak.
 
 ### Step 2: Get crypto settings
 ```bash
