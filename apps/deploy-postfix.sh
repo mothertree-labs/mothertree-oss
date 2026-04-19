@@ -132,23 +132,11 @@ trap "rm -rf $WORK_DIR" EXIT
 envsubst '${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${POSTFIX_MYNETWORKS}' \
   < "$MANIFESTS_DIR/postfix-main.cf.tpl" > "$WORK_DIR/main.cf"
 
-# When SES is configured, append the SES-specific block (relayhost + SASL + strict TLS policy).
-# Dev-style direct-send leaves main.cf without a relayhost so Postfix delivers per-recipient
-# via MX lookup from the cluster node's egress IP.
-if [ "$SES_ENABLED" = "true" ]; then
-  cat >> "$WORK_DIR/main.cf" <<EOF
-
-# --- AWS SES outbound relay (appended by deploy-postfix.sh) ------------------
-relayhost = [${SES_SMTP_ENDPOINT}]:587
-smtp_use_tls = yes
-# Enforce CA-verified TLS only for the SES endpoint (internal tenant Stalwart
-# hops use opportunistic STARTTLS via smtp_tls_security_level = may above).
-smtp_tls_policy_maps = hash:/etc/postfix/tables/tls_policy
-smtp_sasl_auth_enable = yes
-smtp_sasl_security_options = noanonymous
-smtp_sasl_password_maps = hash:/etc/postfix/tables/sasl_passwd
-EOF
-fi
+# SES outbound config is delivered to Postfix via POSTFIX_* env vars in the
+# postfix-ses-env ConfigMap (applied below, loaded via envFrom in the Deployment).
+# The boky/postfix image builds main.cf from POSTFIX_* env vars at container
+# startup, so relayhost and SASL/TLS settings must be env vars — appending them
+# to main.cf in a ConfigMap has no effect because main.cf is not mounted.
 
 # Process aliases template
 envsubst '${SMTP_DOMAIN}' \
@@ -171,7 +159,14 @@ EOF
 # Compute config checksums for deployment annotations
 # =============================================================================
 
-CHECKSUM_POSTFIX_CONFIG=$(cat "$WORK_DIR/main.cf" "$MANIFESTS_DIR/postfix-master.cf" "$WORK_DIR/aliases" | shasum -a 256 | cut -d' ' -f1)
+# Include SES env var contents so a change to relayhost (or toggling SES on/off)
+# bumps the checksum and forces a pod restart even if main.cf hasn't changed.
+if [ "$SES_ENABLED" = "true" ]; then
+  SES_ENV_FINGERPRINT="[${SES_SMTP_ENDPOINT}]:587"
+else
+  SES_ENV_FINGERPRINT="direct-send"
+fi
+CHECKSUM_POSTFIX_CONFIG=$(cat "$WORK_DIR/main.cf" "$MANIFESTS_DIR/postfix-master.cf" "$WORK_DIR/aliases" <(printf '%s\n' "$SES_ENV_FINGERPRINT") | shasum -a 256 | cut -d' ' -f1)
 CHECKSUM_OPENDKIM_CONFIG=$(cat "$WORK_DIR/opendkim.conf" "$WORK_DIR/TrustedHosts" | shasum -a 256 | cut -d' ' -f1)
 CHECKSUM_INIT_SCRIPTS=$(shasum -a 256 "$MANIFESTS_DIR/10-master-cf-overrides.sh" | cut -d' ' -f1)
 
@@ -216,9 +211,25 @@ if [ "$SES_ENABLED" = "true" ]; then
     --from-file=sasl_passwd="$SES_SECRET_DIR/sasl_passwd" \
     --from-file=tls_policy="$SES_SECRET_DIR/tls_policy" \
     --dry-run=client -o yaml | mt_apply kubectl apply -f -
+
+  # SES outbound config delivered as POSTFIX_* env vars via envFrom in the Deployment.
+  # boky/postfix builds main.cf from POSTFIX_* env vars at startup; ConfigMap appends
+  # to main.cf have no effect because /etc/postfix/main.cf isn't mounted.
+  # smtp_sasl_mechanism_filter restricts to PLAIN/LOGIN because SES doesn't support SCRAM.
+  print_status "Applying postfix-ses-env ConfigMap..."
+  kubectl create configmap postfix-ses-env -n "$NS_MAIL" \
+    --from-literal=POSTFIX_relayhost="[${SES_SMTP_ENDPOINT}]:587" \
+    --from-literal=POSTFIX_smtp_use_tls="yes" \
+    --from-literal=POSTFIX_smtp_sasl_auth_enable="yes" \
+    --from-literal=POSTFIX_smtp_sasl_security_options="noanonymous" \
+    --from-literal=POSTFIX_smtp_sasl_mechanism_filter="plain, login" \
+    --from-literal=POSTFIX_smtp_sasl_password_maps="hash:/etc/postfix/tables/sasl_passwd" \
+    --from-literal=POSTFIX_smtp_tls_policy_maps="hash:/etc/postfix/tables/tls_policy" \
+    --dry-run=client -o yaml | mt_apply kubectl apply -f -
 else
-  # Direct-send mode — ensure no stale Secret lingers from a prior SES-enabled deploy.
+  # Direct-send mode — ensure no stale SES artefacts linger from a prior SES-enabled deploy.
   kubectl delete secret ses-credentials -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+  kubectl delete configmap postfix-ses-env -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
 fi
 
 # =============================================================================

@@ -63,6 +63,13 @@ spec:
             - name: ses-credentials
               mountPath: /etc/postfix/ses
               readOnly: true
+          # SES outbound relay env vars (POSTFIX_relayhost + SASL/TLS settings) come from
+          # the postfix-ses-env ConfigMap when present. Absent in envs without SES (dev
+          # direct-send); optional: true lets the pod start cleanly in that case.
+          envFrom:
+            - configMapRef:
+                name: postfix-ses-env
+                optional: true
           env:
             - name: ALLOWED_SENDER_DOMAINS
               value: "${SMTP_ALLOWED_SENDER_DOMAINS}"
