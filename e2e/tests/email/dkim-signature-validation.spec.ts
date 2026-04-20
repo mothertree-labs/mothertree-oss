@@ -62,13 +62,17 @@ test.describe('Email — DKIM Signature on Outbound Mail', () => {
   test.skip(!isImapConfigured(), 'IMAP not configured (E2E_STALWART_ADMIN_PASSWORD not set)');
 
   // Verifies PR-1 of issue #349: per-tenant Stalwart signs outbound mail with
-  // the tenant's DKIM key (d=<tenant email domain>, s=default). The test sends
-  // via Roundcube to the external echo group and inspects the delivered copy
-  // (received by a different group member) for Stalwart's signature.
+  // the tenant's DKIM key. Stalwart no longer signs directly — AWS SES Easy
+  // DKIM is the outbound signer (SES rewrites Message-ID and Date during
+  // relay, which would invalidate a Stalwart-applied signature). SES signs
+  // post-rewrite with its own rotated keys. The test asserts that *some*
+  // valid DKIM signature aligning with d=<tenant email domain> reaches the
+  // receiver, regardless of selector — the selector is SES-generated opaque
+  // and rotates.
   //
-  // Presence + correct tags are sufficient — cryptographic verification is the
-  // receiving MTA's job, not this test's.
-  test('Stalwart signs outbound mail with the tenant DKIM key', async ({
+  // Presence + d= alignment is sufficient here — cryptographic verification
+  // is the receiving MTA's job, not this test's.
+  test('Outbound mail carries a DKIM signature aligning with the tenant domain', async ({
     emailTestPage: senderPage,
   }) => {
     test.setTimeout(180_000);
@@ -122,12 +126,10 @@ test.describe('Email — DKIM Signature on Outbound Mail', () => {
         `Expected at least one DKIM-Signature header in delivered mail, got 0. Raw headers:\n${rawMime.split(/\r?\n\r?\n/, 1)[0]}`,
       ).toBeGreaterThan(0);
 
-      const tenantSig = signatures.find(
-        (sig) => sig.d === senderDomain && sig.s === 'default',
-      );
+      const tenantSig = signatures.find((sig) => sig.d === senderDomain);
       expect(
         tenantSig,
-        `Expected a DKIM-Signature with d=${senderDomain} and s=default. Found: ${JSON.stringify(signatures)}`,
+        `Expected a DKIM-Signature with d=${senderDomain} (any selector, typically SES-generated). Found: ${JSON.stringify(signatures)}`,
       ).toBeTruthy();
     } finally {
       if (isImapConfigured()) {

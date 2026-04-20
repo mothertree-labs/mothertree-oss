@@ -257,25 +257,16 @@ ${STALWART_OUTBOUND_ROUTE_TOML}
     ehlo = "disable"
     mail-from = "disable"
     
-    # DKIM: verify inbound signatures and sign outbound mail with the tenant's key.
-    # The private key is mounted from the dkim-key Secret at /opt/stalwart/dkim/dkim.private.
-    #
-    # Do NOT include Message-ID in the signed headers. AWS SES rewrites
-    # Message-ID during relay (to <bounce-token@email.amazonses.com> for
-    # bounce correlation), which invalidates any DKIM signature that signed
-    # it. Confirmed via dkimpy against a delivered prod message on 2026-04-19:
-    # body hash matched (body intact), signature failed on the header hash.
-    [signature."rsa"]
-    private-key = "%{file:/opt/stalwart/dkim/dkim.private}%"
-    domain = "${EMAIL_DOMAIN}"
-    selector = "default"
-    headers = ["From", "To", "Date", "Subject"]
-    algorithm = "rsa-sha256"
-    canonicalization = "relaxed/relaxed"
-
+    # DKIM: verify inbound signatures only. Outbound DKIM signing is delegated
+    # to AWS SES Easy DKIM — SES signs with its own rotated keys after its
+    # relay-time header mutations (Message-ID, Date), so Stalwart-side signing
+    # is always invalidated by the time the message reaches the receiver.
+    # Confirmed via dkimpy against prod-delivered messages on 2026-04-19:
+    # Stalwart's s=default signature failed because SES rewrites Message-ID
+    # and Date (1s drift); SES's own signature passes end-to-end.
+    # DMARC for outbound mail carries via SES's d=<tenant-domain> signature.
     [auth.dkim]
     verify = true
-    sign = "['rsa']"
 
     [auth.dmarc]
     verify = true
@@ -295,8 +286,7 @@ ${STALWART_OUTBOUND_ROUTE_TOML}
                   "storage.lookup", "storage.fts", "storage.directory", "certificate.*",
                   "session.rcpt.*", "queue.strategy.*", "queue.route.*", "queue.limiter.*", "oauth.*",
                   "spam.*", "spam-filter.list.*",
-                  "auth.iprev.*", "auth.spf.*", "auth.dkim.*", "auth.dmarc.*",
-                  "signature.*"]
+                  "auth.iprev.*", "auth.spf.*", "auth.dkim.*", "auth.dmarc.*"]
 
 ---
 apiVersion: apps/v1
@@ -415,9 +405,6 @@ spec:
         - name: tls
           mountPath: /opt/stalwart/tls
           readOnly: true
-        - name: dkim
-          mountPath: /opt/stalwart/dkim
-          readOnly: true
         resources:
           requests:
             memory: "${STALWART_MEMORY_REQUEST}"
@@ -447,12 +434,6 @@ spec:
           secretName: wildcard-tls-${TENANT_NAME}
       - name: data
         emptyDir: {}
-      - name: dkim
-        secret:
-          secretName: dkim-key
-          items:
-          - key: dkim.private
-            path: dkim.private
 
 ---
 apiVersion: v1

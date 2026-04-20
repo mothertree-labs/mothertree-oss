@@ -138,14 +138,13 @@ print_status "Master-user secret hash generated"
 #     smart host. Cluster egress IP has no PTR/SPF so receivers may tempfail,
 #     but that matches the existing dev behavior (see project_mail_paths_per_env).
 
-# Load tenant DKIM private key from tenant secrets YAML. Fail fast when mail is
-# enabled but the key is missing — DKIM is load-bearing once Stalwart signs.
-DKIM_PRIVATE_KEY=$(yq '.dkim.private_key' "$TENANT_SECRETS")
-if [ -z "$DKIM_PRIVATE_KEY" ] || [ "$DKIM_PRIVATE_KEY" = "null" ]; then
-    print_error "Missing '.dkim.private_key' in tenant secrets ($TENANT_SECRETS) — required for Stalwart DKIM signing."
-    print_error "Generate with: openssl genrsa 2048"
-    exit 1
-fi
+# Outbound DKIM signing is delegated to AWS SES Easy DKIM — Stalwart doesn't
+# sign. SES rewrites Message-ID and Date during relay, which invalidates any
+# Stalwart-side signature by the time it reaches the receiver. SES signs
+# post-mutation with its own rotated keys, and DMARC carries via that
+# signature's d=<tenant-domain> alignment. `.dkim.private_key` in tenant
+# secrets is still consumed by OpenDKIM on infra-Postfix and stays there
+# until PR-4 of #349.
 
 if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
     # Reject endpoints containing characters that could inject TOML directives
@@ -184,10 +183,10 @@ fi
 # Generate config checksum for pod annotations. Include every value the pod
 # reads from a Secret/ConfigMap so rotating any of them forces a rollout.
 # STALWART_OUTBOUND_ROUTE_TOML is baked into RENDERED_CONFIG below, but we hash
-# DKIM key and SES creds separately because they are mounted (file or env) and
-# would otherwise roll silently on Secret-only changes.
+# SES creds separately because they are mounted as env vars and would
+# otherwise roll silently on Secret-only changes.
 RENDERED_CONFIG=$(envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" 2>/dev/null || echo "")
-export CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$S3_MAIL_ACCESS_KEY$DKIM_PRIVATE_KEY${SES_SMTP_ENDPOINT:-}${SES_SMTP_USERNAME:-}${SES_SMTP_PASSWORD:-}$RENDERED_CONFIG" | sha256sum | cut -d' ' -f1 | head -c 12)
+export CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$S3_MAIL_ACCESS_KEY${SES_SMTP_ENDPOINT:-}${SES_SMTP_USERNAME:-}${SES_SMTP_PASSWORD:-}$RENDERED_CONFIG" | sha256sum | cut -d' ' -f1 | head -c 12)
 print_status "Config checksum: $CONFIG_CHECKSUM"
 
 # Ensure namespace exists
@@ -196,22 +195,15 @@ kubectl create namespace "$NS_MAIL" --dry-run=client -o yaml | kubectl apply -f 
 print_success "Namespace ready: $NS_MAIL"
 
 # =============================================================================
-# DKIM key Secret (tenant namespace)
+# Clean up stale dkim-key Secret
 # =============================================================================
-# Stalwart reads the key via %{file:/opt/stalwart/dkim/dkim.private}%.
-# Use --from-file (not --from-literal) so the PEM never appears in kubectl's argv.
-# The tmp file is small and gets `rm -f`'d right after; we deliberately don't
-# register a trap here because mt_deploy_start already owns the EXIT trap for
-# the deploy-end notification, and `trap - EXIT` would clobber it globally.
-# A leak on early failure is acceptable — the next run creates a fresh tmp.
-print_status "Applying DKIM key Secret in $NS_MAIL..."
-DKIM_TMP=$(mktemp)
-printf '%s' "$DKIM_PRIVATE_KEY" > "$DKIM_TMP"
-kubectl create secret generic dkim-key -n "$NS_MAIL" \
-    --from-file=dkim.private="$DKIM_TMP" \
-    --dry-run=client -o yaml | kubectl apply -f -
-rm -f "$DKIM_TMP"
-print_success "DKIM key Secret applied"
+# PR #353 created a dkim-key Secret here for Stalwart-side DKIM signing. That
+# approach was abandoned — SES Easy DKIM handles outbound signing now (see the
+# comment above, and the [auth.dkim] block in stalwart.yaml.tpl). The Secret
+# in the tenant namespace is no longer mounted by Stalwart. Delete any stale
+# copy left over from a prior deploy. --ignore-not-found handles the benign
+# "already gone" case; real failures (auth, connectivity) still surface.
+kubectl delete secret dkim-key -n "$NS_MAIL" --ignore-not-found=true >/dev/null
 
 # =============================================================================
 # SES credentials Secret (tenant namespace, only when SES is configured)
