@@ -63,19 +63,17 @@ data:
   CSRF_COOKIE_SECURE: "True"
   CSRF_TRUSTED_ORIGINS: "https://${DOCS_HOST},https://${AUTH_HOST}"
   
-  # Email backend - SMTP via Postfix submission port (587)
-  # Uses postfix-internal service which allows relay to external domains
+  # Email backend — authenticated submission to the tenant's Stalwart on port 588.
+  # Host/port/username/password come from the `smtp-credentials` Secret
+  # provisioned by scripts/provision-smtp-service-accounts (mapped into env vars
+  # in backend-deployment.yaml). STARTTLS is required on Stalwart:588.
   EMAIL_BACKEND: "django.core.mail.backends.smtp.EmailBackend"
-  EMAIL_HOST: "postfix-internal.infra-mail.svc.cluster.local"
-  EMAIL_PORT: "587"
-  EMAIL_USE_TLS: "False"
+  EMAIL_USE_TLS: "True"
   EMAIL_USE_SSL: "False"
   DEFAULT_FROM_EMAIL: "MotherTree Docs <noreply@${SMTP_DOMAIN}>"
 
-  # Impress/LaSuite Docs specific email settings
-  DJANGO_EMAIL_HOST: "postfix-internal.infra-mail.svc.cluster.local"
-  DJANGO_EMAIL_PORT: "587"
-  DJANGO_EMAIL_USE_TLS: "False"
+  # Impress/LaSuite Docs specific email settings (host/port/user/password from Secret)
+  DJANGO_EMAIL_USE_TLS: "True"
   DJANGO_EMAIL_FROM: "MotherTree Docs <noreply@${SMTP_DOMAIN}>"
   DJANGO_EMAIL_BRAND_NAME: "Mother Tree Docs"
   
