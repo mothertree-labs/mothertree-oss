@@ -185,10 +185,10 @@ function writeSecret({ namespace, name, host, port, username, password }) {
   const yaml = kubectl([
     'create', 'secret', 'generic', name,
     '-n', namespace,
-    `--from-literal=SMTP_HOST=${host}`,
-    `--from-literal=SMTP_PORT=${port}`,
-    `--from-literal=SMTP_USERNAME=${username}`,
-    `--from-literal=SMTP_PASSWORD=${password}`,
+    `--from-literal=SMTP_RELAY_HOST=${host}`,
+    `--from-literal=SMTP_RELAY_PORT=${port}`,
+    `--from-literal=SMTP_RELAY_USERNAME=${username}`,
+    `--from-literal=SMTP_RELAY_PASSWORD=${password}`,
     '--dry-run=client', '-o', 'yaml',
   ]);
   kubectl(['apply', '-f', '-'], yaml);

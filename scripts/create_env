@@ -695,6 +695,12 @@ if [ "$MAIL_ENABLED" = "true" ]; then
       kubectl --kubeconfig "$KUBECONFIG" -n "$NS_DOCS" rollout restart deployment/backend >/dev/null
       print_status "Docs backend: rollout restart (pick up smtp-credentials Secret)"
     fi
+    for portal in admin-portal account-portal; do
+      if kubectl --kubeconfig "$KUBECONFIG" -n "$NS_ADMIN" get deployment "$portal" >/dev/null 2>&1; then
+        kubectl --kubeconfig "$KUBECONFIG" -n "$NS_ADMIN" rollout restart deployment/"$portal" >/dev/null
+        print_status "${portal}: rollout restart (pick up smtp-credentials Secret)"
+      fi
+    done
   fi
 fi
 

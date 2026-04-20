@@ -138,25 +138,25 @@ spec:
             valueFrom:
               secretKeyRef:
                 name: smtp-credentials
-                key: SMTP_HOST
+                key: SMTP_RELAY_HOST
                 optional: true
           - name: DJANGO_EMAIL_PORT
             valueFrom:
               secretKeyRef:
                 name: smtp-credentials
-                key: SMTP_PORT
+                key: SMTP_RELAY_PORT
                 optional: true
           - name: DJANGO_EMAIL_HOST_USER
             valueFrom:
               secretKeyRef:
                 name: smtp-credentials
-                key: SMTP_USERNAME
+                key: SMTP_RELAY_USERNAME
                 optional: true
           - name: DJANGO_EMAIL_HOST_PASSWORD
             valueFrom:
               secretKeyRef:
                 name: smtp-credentials
-                key: SMTP_PASSWORD
+                key: SMTP_RELAY_PASSWORD
                 optional: true
           startupProbe:
             httpGet:
