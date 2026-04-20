@@ -665,6 +665,46 @@ else
 fi
 
 # =============================================================================
+# Provision per-caller SMTP service accounts in Stalwart
+# =============================================================================
+# Creates service-account principals + app passwords + smtp-credentials K8s
+# Secrets so tenant callers (Docs, portals, Synapse, Nextcloud) can submit mail
+# via the tenant's own Stalwart instead of the shared infra-mail Postfix.
+#
+# Runs only when mail is enabled; idempotent on re-runs. After provisioning,
+# rollout-restart callers that were deployed before Stalwart so they pick up
+# the newly created Secret.
+if [ "$MAIL_ENABLED" = "true" ]; then
+  print_status "SMTP service accounts: provisioning in Stalwart"
+  set +e
+  "$REPO_ROOT/scripts/provision-smtp-service-accounts" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1))
+  provision_rc=$?
+  set -e
+
+  case "$provision_rc" in
+    0) smtp_changed=true ;;   # provisioned or rotated — bounce affected callers
+    2) smtp_changed=false ;;  # already up to date — preserve existing pods
+    *) print_error "provision-smtp-service-accounts failed (exit $provision_rc)"; exit 1 ;;
+  esac
+
+  # Conditional restart: only bounce callers that were deployed before Stalwart
+  # when credentials actually changed, to avoid disrupting active editing
+  # sessions (see CLAUDE.md "Conditional Restart System").
+  if [ "$smtp_changed" = "true" ]; then
+    if kubectl --kubeconfig "$KUBECONFIG" -n "$NS_DOCS" get deployment backend >/dev/null 2>&1; then
+      kubectl --kubeconfig "$KUBECONFIG" -n "$NS_DOCS" rollout restart deployment/backend >/dev/null
+      print_status "Docs backend: rollout restart (pick up smtp-credentials Secret)"
+    fi
+    for portal in admin-portal account-portal; do
+      if kubectl --kubeconfig "$KUBECONFIG" -n "$NS_ADMIN" get deployment "$portal" >/dev/null 2>&1; then
+        kubectl --kubeconfig "$KUBECONFIG" -n "$NS_ADMIN" rollout restart deployment/"$portal" >/dev/null
+        print_status "${portal}: rollout restart (pick up smtp-credentials Secret)"
+      fi
+    done
+  fi
+fi
+
+# =============================================================================
 # Deploy Email Probe (if enabled) - non-fatal on failure
 # =============================================================================
 if [ "$EMAIL_PROBE_ENABLED" = "true" ] && [ "$MAIL_ENABLED" = "true" ]; then

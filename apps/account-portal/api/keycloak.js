@@ -211,10 +211,11 @@ async function findUserByEmail(email) {
 async function sendNotificationEmail(toEmail, subject, message) {
   const nodemailer = require('nodemailer');
 
-  // SMTP relay for sending emails (not SMTP_HOST, which is the external hostname for UI display)
-  const smtpHost = process.env.SMTP_RELAY_HOST || 'postfix-internal.infra-mail.svc.cluster.local';
-  const smtpPort = process.env.SMTP_PORT || 587;
-  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.TENANT_DOMAIN || 'example.com'}`;
+  // SMTP relay for sending emails. SMTP_RELAY_* from the smtp-credentials Secret;
+  // SMTP_HOST (no RELAY prefix) is the external hostname for UI display.
+  const smtpHost = process.env.SMTP_RELAY_HOST;
+  const smtpPort = parseInt(process.env.SMTP_RELAY_PORT || '588', 10);
+  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.EMAIL_DOMAIN || process.env.TENANT_DOMAIN || 'example.com'}`;
   const smtpFromName = process.env.SMTP_FROM_NAME || 'MotherTree';
 
   console.log(`[NOTIFICATION EMAIL] Sending to: ${toEmail}`);
@@ -233,10 +234,13 @@ async function sendNotificationEmail(toEmail, subject, message) {
     const transporter = nodemailer.createTransport({
       host: smtpHost,
       port: smtpPort,
-      secure: false,  // Internal cluster communication
-      tls: {
-        rejectUnauthorized: false,  // Internal service
+      secure: false,
+      requireTLS: true,
+      auth: {
+        user: process.env.SMTP_RELAY_USERNAME,
+        pass: process.env.SMTP_RELAY_PASSWORD,
       },
+      tls: { rejectUnauthorized: false },
     });
 
     await transporter.sendMail({
