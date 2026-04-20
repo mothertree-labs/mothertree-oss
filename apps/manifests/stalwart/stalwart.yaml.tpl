@@ -259,11 +259,17 @@ ${STALWART_OUTBOUND_ROUTE_TOML}
     
     # DKIM: verify inbound signatures and sign outbound mail with the tenant's key.
     # The private key is mounted from the dkim-key Secret at /opt/stalwart/dkim/dkim.private.
+    #
+    # Do NOT include Message-ID in the signed headers. AWS SES rewrites
+    # Message-ID during relay (to <bounce-token@email.amazonses.com> for
+    # bounce correlation), which invalidates any DKIM signature that signed
+    # it. Confirmed via dkimpy against a delivered prod message on 2026-04-19:
+    # body hash matched (body intact), signature failed on the header hash.
     [signature."rsa"]
     private-key = "%{file:/opt/stalwart/dkim/dkim.private}%"
     domain = "${EMAIL_DOMAIN}"
     selector = "default"
-    headers = ["From", "To", "Date", "Subject", "Message-ID"]
+    headers = ["From", "To", "Date", "Subject"]
     algorithm = "rsa-sha256"
     canonicalization = "relaxed/relaxed"
 
