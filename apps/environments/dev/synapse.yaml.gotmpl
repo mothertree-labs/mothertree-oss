@@ -53,14 +53,10 @@ extraConfig:
     enabled: true
     search_all_users: true
     prefer_local_users: true
-  # Email configuration - Postfix SMTP (dev)
-  # Per Synapse homeserver.yaml documentation
-  email:
-    smtp_host: "postfix-internal.infra-mail.svc.cluster.local"
-    smtp_port: 587
-    notif_from: 'Matrix Notifications <noreply@{{ env "TENANT_DOMAIN" }}>'
-    enable_notifs: true
-    require_transport_security: false
+  # Email: the full `email:` block is defined in extraSecrets below so the
+  # SMTP password lives in a K8s Secret (not a ConfigMap). The chart
+  # concatenates extraSecrets into /synapse/config/conf.d/secrets.yaml at
+  # pod start, which Synapse loads alongside homeserver.yaml.
   # Disable password login - all auth goes through Keycloak OIDC
   password_config:
     enabled: false
@@ -110,8 +106,25 @@ extraConfig:
       per_second: 0.1
       burst_count: 10
 
-# S3 credentials in extraSecrets (rendered as K8s Secret, not ConfigMap)
+# S3 credentials + SMTP submission credentials in extraSecrets (rendered as
+# K8s Secret, not ConfigMap). The ananace/matrix-synapse chart merges these
+# into /synapse/config/conf.d/secrets.yaml at pod start.
+#
+# SMTP_RELAY_* env vars are read from the `smtp-credentials` K8s Secret by
+# deploy-matrix.sh before calling helmfile (the Secret is provisioned by
+# scripts/provision-smtp-service-accounts before Matrix deploys in create_env).
 extraSecrets:
+  email:
+    smtp_host: '{{ env "SMTP_RELAY_HOST" }}'
+    smtp_port: {{ env "SMTP_RELAY_PORT" | default 588 }}
+    smtp_user: '{{ env "SMTP_RELAY_USERNAME" }}'
+    smtp_pass: '{{ env "SMTP_RELAY_PASSWORD" }}'
+    # EMAIL_DOMAIN includes the env prefix (e.g. dev.<tenant>) so the From
+    # address matches one of the aliases on the `mailer@` principal — required
+    # for Stalwart's MAIL FROM alignment check on authenticated submission.
+    notif_from: 'Matrix Notifications <noreply@{{ env "EMAIL_DOMAIN" }}>'
+    enable_notifs: true
+    require_transport_security: true
   media_storage_providers:
     - module: s3_storage_provider.S3StorageProviderBackend
       store_local: true
