@@ -165,6 +165,18 @@ else
     print_warning "Mail or files namespace does not exist, skipping mail-to-files egress policy"
 fi
 
+# =============================================================================
+# Apply mail SMTP egress (Stalwart → external MX on 25 / SES submission on 587)
+# =============================================================================
+if kubectl get namespace "$NS_STALWART" &>/dev/null; then
+    export NAMESPACE="$NS_STALWART"
+    print_status "[$NS_STALWART] Applying allow-mail-smtp-egress (Stalwart → external SMTP 25/465/587)..."
+    envsubst '${NAMESPACE}' < "$MANIFEST_DIR/allow-mail-smtp-egress.yaml.tpl" | kubectl apply -f -
+    print_success "[$NS_STALWART] Mail SMTP egress policy applied"
+else
+    print_warning "Mail namespace $NS_STALWART does not exist, skipping mail SMTP egress policy"
+fi
+
 if kubectl get namespace "$NS_WEBMAIL" &>/dev/null; then
     export NAMESPACE="$NS_WEBMAIL"
     print_status "[$NS_WEBMAIL] Applying allow-webmail-to-mail-egress (Roundcube → Stalwart)..."

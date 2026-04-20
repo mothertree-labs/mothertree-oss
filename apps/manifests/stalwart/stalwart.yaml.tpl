@@ -194,24 +194,17 @@ data:
     
     # Message routing strategy (v0.15+ format)
     # - Local domain recipients: deliver to local mailbox
-    # - External recipients: relay through Postfix for DKIM signing
+    # - External recipients: outbound route chosen by deploy-stalwart.sh.
+    #   Prod (SES configured): relay through AWS SES with SASL auth.
+    #   Dev (no SES): direct MX delivery to the destination's mail servers.
     [queue.strategy]
-    route = [{if = "is_local_domain('', rcpt_domain)", then = "'local'"}, {else = "'relay'"}]
-    
+    route = [{if = "is_local_domain('', rcpt_domain)", then = "'local'"}, {else = "'${STALWART_OUTBOUND_ROUTE_NAME}'"}]
+
     # Local delivery route - deliver to internal mailbox
     [queue.route."local"]
     type = "local"
-    
-    # Relay route - send through Postfix for DKIM signing
-    [queue.route."relay"]
-    type = "relay"
-    address = "postfix-internal.infra-mail.svc.cluster.local"
-    port = 587
-    protocol = "smtp"
-    
-    [queue.route."relay".tls]
-    implicit = false
-    allow-invalid-certs = true
+
+${STALWART_OUTBOUND_ROUTE_TOML}
     
     # Authentication
     [authentication]
@@ -264,9 +257,20 @@ data:
     ehlo = "disable"
     mail-from = "disable"
     
+    # DKIM: verify inbound signatures and sign outbound mail with the tenant's key.
+    # The private key is mounted from the dkim-key Secret at /opt/stalwart/dkim/dkim.private.
+    [signature."rsa"]
+    private-key = "%{file:/opt/stalwart/dkim/dkim.private}%"
+    domain = "${EMAIL_DOMAIN}"
+    selector = "default"
+    headers = ["From", "To", "Date", "Subject", "Message-ID"]
+    algorithm = "rsa-sha256"
+    canonicalization = "relaxed/relaxed"
+
     [auth.dkim]
     verify = true
-    
+    sign = "['rsa']"
+
     [auth.dmarc]
     verify = true
     
@@ -285,7 +289,8 @@ data:
                   "storage.lookup", "storage.fts", "storage.directory", "certificate.*",
                   "session.rcpt.*", "queue.strategy.*", "queue.route.*", "queue.limiter.*", "oauth.*",
                   "spam.*", "spam-filter.list.*",
-                  "auth.iprev.*", "auth.spf.*", "auth.dkim.*", "auth.dmarc.*"]
+                  "auth.iprev.*", "auth.spf.*", "auth.dkim.*", "auth.dmarc.*",
+                  "signature.*"]
 
 ---
 apiVersion: apps/v1
@@ -375,6 +380,27 @@ spec:
             secretKeyRef:
               name: stalwart-secrets
               key: S3_SECRET_KEY
+        # SES SMTP credentials for outbound relay (prod only; absent on dev → direct MX).
+        # Stalwart reads these via %{env:...}% in [queue.route."relay"].
+        # optional:true so dev (no ses-credentials Secret) starts cleanly.
+        - name: SES_SMTP_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: ses-credentials
+              key: endpoint
+              optional: true
+        - name: SES_SMTP_USER
+          valueFrom:
+            secretKeyRef:
+              name: ses-credentials
+              key: username
+              optional: true
+        - name: SES_SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ses-credentials
+              key: password
+              optional: true
         volumeMounts:
         - name: config
           mountPath: /opt/stalwart/etc
@@ -382,6 +408,9 @@ spec:
           mountPath: /opt/stalwart/data
         - name: tls
           mountPath: /opt/stalwart/tls
+          readOnly: true
+        - name: dkim
+          mountPath: /opt/stalwart/dkim
           readOnly: true
         resources:
           requests:
@@ -412,6 +441,12 @@ spec:
           secretName: wildcard-tls-${TENANT_NAME}
       - name: data
         emptyDir: {}
+      - name: dkim
+        secret:
+          secretName: dkim-key
+          items:
+          - key: dkim.private
+            path: dkim.private
 
 ---
 apiVersion: v1
