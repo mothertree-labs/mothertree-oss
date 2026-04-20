@@ -74,9 +74,10 @@ spec:
           port: 8080
         - protocol: TCP
           port: 588
-    # Tenant callers (Docs, Synapse, Nextcloud) submitting authenticated mail
-    # via the submission-app listener (:588). Creds come from the
-    # smtp-credentials Secret written by provision-smtp-service-accounts.
+    # Tenant callers (Docs, Synapse, Nextcloud) + Keycloak (shared infra-auth,
+    # configured per-realm with this tenant's mailer credentials) submitting
+    # authenticated mail via the submission-app listener (:588). Creds come
+    # from the smtp-credentials Secret written by provision-smtp-service-accounts.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -87,6 +88,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: tn-${TENANT_NAME}-files
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infra-auth
       ports:
         - protocol: TCP
           port: 588

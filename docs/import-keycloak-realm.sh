@@ -352,18 +352,32 @@ else
     fi
 fi
 
-# Update SMTP server configuration (realm PUT doesn't always update smtpServer)
-print_status "Updating SMTP server configuration..."
+# Update SMTP server configuration (realm PUT doesn't always update smtpServer).
+# Credentials come from the tenant's smtp-credentials Secret (written by
+# scripts/provision-smtp-service-accounts into tn-<tenant>-admin). Required;
+# fail fast if missing — Keycloak magic-link / password-reset flows rely on
+# this and silent degradation is dangerous.
+NS_ADMIN="${NS_ADMIN:-tn-${TENANT_NAME:-example}-admin}"
+source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
+mt_export_smtp_relay_env "$NS_ADMIN"
+: "${SMTP_RELAY_HOST:?smtp-credentials Secret is missing in $NS_ADMIN — run scripts/provision-smtp-service-accounts first}"
+: "${SMTP_RELAY_USERNAME:?smtp-credentials.SMTP_RELAY_USERNAME missing}"
+: "${SMTP_RELAY_PASSWORD:?smtp-credentials.SMTP_RELAY_PASSWORD missing}"
+SMTP_RELAY_PORT="${SMTP_RELAY_PORT:-588}"
+
+print_status "Updating SMTP server configuration (relay ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT} as ${SMTP_RELAY_USERNAME})..."
 SMTP_CONFIG='{
-  "host": "postfix-internal.infra-mail.svc.cluster.local",
-  "port": "587",
+  "host": "'"${SMTP_RELAY_HOST}"'",
+  "port": "'"${SMTP_RELAY_PORT}"'",
   "from": "noreply@'"${SMTP_DOMAIN}"'",
   "fromDisplayName": "'"${TENANT_DISPLAY_NAME}"' Team",
   "replyTo": "noreply@'"${SMTP_DOMAIN}"'",
   "replyToDisplayName": "'"${TENANT_DISPLAY_NAME}"' Team",
   "ssl": "false",
-  "starttls": "false",
-  "auth": "false"
+  "starttls": "true",
+  "auth": "true",
+  "user": "'"${SMTP_RELAY_USERNAME}"'",
+  "password": "'"${SMTP_RELAY_PASSWORD}"'"
 }'
 SMTP_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/smtp_update.json -X PUT \
   "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM" \
@@ -372,7 +386,7 @@ SMTP_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/smtp
   -d "{\"smtpServer\": $SMTP_CONFIG}")
 
 if [ "$SMTP_UPDATE" = "204" ]; then
-    print_success "SMTP server configuration updated (host: postfix-internal.infra-mail.svc.cluster.local:587, from: noreply@${SMTP_DOMAIN})"
+    print_success "SMTP server configuration updated (relay ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}, from: noreply@${SMTP_DOMAIN})"
 else
     print_warning "Failed to update SMTP configuration (HTTP $SMTP_UPDATE), continuing..."
     if [ -f /tmp/smtp_update.json ]; then
