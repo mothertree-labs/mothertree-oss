@@ -901,15 +901,26 @@ async function sendMagicLinkUrlToEmail(userId, redirectUri, targetEmail, emailSu
   const subject = emailSubject || 'Sign in to MotherTree';
 
   const nodemailer = require('nodemailer');
-  const smtpHost = process.env.SMTP_RELAY_HOST || 'postfix-internal.infra-mail.svc.cluster.local';
-  const smtpPort = process.env.SMTP_PORT || 587;
-  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.TENANT_DOMAIN || 'example.com'}`;
+  // Same SMTP relay wiring as sendNotificationEmail — SMTP_RELAY_* come from
+  // the smtp-credentials Secret (envFrom). The earlier hardcoded fallbacks
+  // (SMTP_PORT=587, no auth) pointed at the retired unauthenticated Postfix
+  // relay; post-PR-2b Stalwart:588 requires STARTTLS + SASL PLAIN so the
+  // old transporter just hung, blocking /switch-to-magic-link for 30s+ and
+  // tripping Playwright's 15s click timeout in shard-6 magic-link tests.
+  const smtpHost = process.env.SMTP_RELAY_HOST;
+  const smtpPort = parseInt(process.env.SMTP_RELAY_PORT || '588', 10);
+  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.EMAIL_DOMAIN || process.env.TENANT_DOMAIN || 'example.com'}`;
   const smtpFromName = process.env.SMTP_FROM_NAME || 'MotherTree';
 
   const transporter = nodemailer.createTransport({
     host: smtpHost,
     port: smtpPort,
     secure: false,
+    requireTLS: true,
+    auth: {
+      user: process.env.SMTP_RELAY_USERNAME,
+      pass: process.env.SMTP_RELAY_PASSWORD,
+    },
     tls: { rejectUnauthorized: false },
   });
 
