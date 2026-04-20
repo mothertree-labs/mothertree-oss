@@ -39,6 +39,7 @@ function requireEnv(name) {
 const STALWART_API_URL = requireEnv('STALWART_API_URL');
 const STALWART_ADMIN_PASSWORD = requireEnv('STALWART_ADMIN_PASSWORD');
 const EMAIL_DOMAIN = requireEnv('EMAIL_DOMAIN');
+const MAIL_HOST = requireEnv('MAIL_HOST');
 const TENANT = requireEnv('MT_TENANT');
 const NS_STALWART = requireEnv('NS_STALWART');
 const NS_ADMIN = requireEnv('NS_ADMIN');
@@ -48,7 +49,12 @@ const NS_FILES = requireEnv('NS_FILES');
 const KUBECONFIG = requireEnv('KUBECONFIG');
 const ROTATE = process.env.ROTATE === 'true';
 
-const STALWART_SERVICE_HOST = `stalwart.${NS_STALWART}.svc.cluster.local`;
+// Callers dial MAIL_HOST (the external mail FQDN, e.g. mail.<tenant-domain>)
+// rather than the in-cluster svc FQDN. A per-tenant CoreDNS rewrite (applied
+// by deploy-stalwart.sh) makes that name resolve to the Stalwart ClusterIP
+// inside the cluster, so TLS verifies against the existing wildcard cert
+// while traffic stays in-cluster.
+const SMTP_RELAY_HOST = MAIL_HOST;
 const SUBMISSION_APP_PORT = '588';
 const APP_PASSWORD_NAME = 'smtp';
 const SECRET_NAME = 'smtp-credentials';
@@ -247,7 +253,7 @@ async function main() {
       writeSecret({
         namespace: ns,
         name: SECRET_NAME,
-        host: STALWART_SERVICE_HOST,
+        host: SMTP_RELAY_HOST,
         port: SUBMISSION_APP_PORT,
         username: PRINCIPAL_EMAIL,
         password,
