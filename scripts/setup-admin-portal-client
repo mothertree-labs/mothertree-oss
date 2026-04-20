@@ -195,32 +195,13 @@ curl -s -X PUT "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM/users/profile" \
 print_status "User Profile updated"
 
 #############################################
-# 1. Configure Realm SMTP Settings
+# Realm SMTP settings are owned by apps/scripts/ensure-keycloak-smtp.sh,
+# which runs during deploy-stalwart with the tenant's Stalwart submission
+# credentials. Previously this script overwrote that config with a stale
+# hardcoded Postfix relay (no auth, no password), clearing the password
+# Keycloak needs to authenticate against Stalwart:588 and breaking every
+# transactional email flow (invite / verify / recovery). See PR-2b notes.
 #############################################
-print_status "Configuring realm SMTP settings..."
-
-# Get current realm config
-REALM_CONFIG=$(curl -s "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM" \
-    -H "Authorization: Bearer $TOKEN")
-
-# Update SMTP settings
-UPDATED_REALM=$(echo "$REALM_CONFIG" | jq --arg fromEmail "noreply@$TENANT_DOMAIN" '.smtpServer = {
-    "host": "postfix-internal.infra-mail.svc.cluster.local",
-    "port": "587",
-    "from": $fromEmail,
-    "fromDisplayName": "MotherTree",
-    "replyTo": ("support@" + .realm),
-    "ssl": "false",
-    "starttls": "false",
-    "auth": "false"
-}')
-
-curl -s -X PUT "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$UPDATED_REALM" > /dev/null
-
-print_status "SMTP configured"
 
 #############################################
 # 2. Configure Session Timeouts
@@ -735,7 +716,7 @@ echo "Configuration:"
 echo "  Admin Portal:   client_id=admin-portal   redirect=https://$ADMIN_HOST/*"
 echo "  Account Portal: client_id=account-portal redirect=https://$ACCOUNT_HOST/*"
 echo "  Auth flow: passkey browser (supports passkey + password)"
-echo "  SMTP: postfix-internal.infra-mail.svc.cluster.local:587"
+echo "  SMTP: managed separately by apps/scripts/ensure-keycloak-smtp.sh"
 echo ""
 echo "Next steps:"
 echo "  1. Deploy admin portal: ./scripts/create_env -e $MT_ENV -t $MT_TENANT"
