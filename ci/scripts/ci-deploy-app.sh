@@ -201,6 +201,26 @@ case "$MODE" in
 
     if [ "${MAIL_ENABLED:-false}" = "true" ]; then
       "$REPO_ROOT/apps/deploy-stalwart.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0
+
+      # Provision the shared `mailer@` principal + smtp-credentials Secret
+      # before the chart-backed callers (matrix, nextcloud) deploy. Those
+      # pipelines add `depends_on: - deploy-dev-stalwart` so they serialise
+      # behind this step.
+      echo "=== Provisioning SMTP service accounts ==="
+      set +e
+      "$REPO_ROOT/scripts/provision-smtp-service-accounts" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0
+      rc=$?
+      set -e
+      case "$rc" in
+        0|2) : ;;  # 0 = changed, 2 = no-op — both OK
+        *) echo "FATAL: provision-smtp-service-accounts failed (exit $rc)"; exit "$rc" ;;
+      esac
+
+      # Drift-correct the Keycloak realm SMTP config now that creds exist.
+      # Non-fatal — ensure-keycloak-smtp can be re-run manually.
+      echo "=== Drift-correcting Keycloak realm SMTP ==="
+      "$REPO_ROOT/apps/scripts/ensure-keycloak-smtp.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0 || \
+        echo "WARNING: ensure-keycloak-smtp failed (non-fatal)"
     else
       echo "Stalwart: skipping (mail_enabled is not true)"
     fi

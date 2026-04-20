@@ -353,20 +353,20 @@ else
 fi
 
 # Update SMTP server configuration (realm PUT doesn't always update smtpServer).
-# Credentials come from the tenant's smtp-credentials Secret (written by
-# scripts/provision-smtp-service-accounts into tn-<tenant>-admin). Required;
-# fail fast if missing — Keycloak magic-link / password-reset flows rely on
-# this and silent degradation is dangerous.
+# This block runs during create_env PREP, which executes before Stalwart is
+# deployed and before provision-smtp-service-accounts runs — so smtp-credentials
+# may not exist yet. When that's the case, skip the SMTP block with a warning;
+# ensure-keycloak-smtp.sh runs later in create_env (post-provision) and will
+# drift-correct the realm's smtpServer block with the real creds.
 NS_ADMIN="${NS_ADMIN:-tn-${TENANT_NAME:-example}-admin}"
 source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
 mt_export_smtp_relay_env "$NS_ADMIN"
-: "${SMTP_RELAY_HOST:?smtp-credentials Secret is missing in $NS_ADMIN — run scripts/provision-smtp-service-accounts first}"
-: "${SMTP_RELAY_USERNAME:?smtp-credentials.SMTP_RELAY_USERNAME missing}"
-: "${SMTP_RELAY_PASSWORD:?smtp-credentials.SMTP_RELAY_PASSWORD missing}"
-SMTP_RELAY_PORT="${SMTP_RELAY_PORT:-588}"
-
-print_status "Updating SMTP server configuration (relay ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT} as ${SMTP_RELAY_USERNAME})..."
-SMTP_CONFIG='{
+if [ -z "${SMTP_RELAY_HOST:-}" ] || [ -z "${SMTP_RELAY_USERNAME:-}" ] || [ -z "${SMTP_RELAY_PASSWORD:-}" ]; then
+    print_warning "smtp-credentials missing in $NS_ADMIN — skipping realm SMTP config (ensure-keycloak-smtp.sh will set it later)"
+else
+    SMTP_RELAY_PORT="${SMTP_RELAY_PORT:-588}"
+    print_status "Updating SMTP server configuration (relay ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT} as ${SMTP_RELAY_USERNAME})..."
+    SMTP_CONFIG='{
   "host": "'"${SMTP_RELAY_HOST}"'",
   "port": "'"${SMTP_RELAY_PORT}"'",
   "from": "noreply@'"${SMTP_DOMAIN}"'",
@@ -379,18 +379,19 @@ SMTP_CONFIG='{
   "user": "'"${SMTP_RELAY_USERNAME}"'",
   "password": "'"${SMTP_RELAY_PASSWORD}"'"
 }'
-SMTP_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/smtp_update.json -X PUT \
-  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM" \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"smtpServer\": $SMTP_CONFIG}")
+    SMTP_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/smtp_update.json -X PUT \
+      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"smtpServer\": $SMTP_CONFIG}")
 
-if [ "$SMTP_UPDATE" = "204" ]; then
-    print_success "SMTP server configuration updated (relay ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}, from: noreply@${SMTP_DOMAIN})"
-else
-    print_warning "Failed to update SMTP configuration (HTTP $SMTP_UPDATE), continuing..."
-    if [ -f /tmp/smtp_update.json ]; then
-        print_warning "Details: $(cat /tmp/smtp_update.json)"
+    if [ "$SMTP_UPDATE" = "204" ]; then
+        print_success "SMTP server configuration updated (relay ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}, from: noreply@${SMTP_DOMAIN})"
+    else
+        print_warning "Failed to update SMTP configuration (HTTP $SMTP_UPDATE), continuing..."
+        if [ -f /tmp/smtp_update.json ]; then
+            print_warning "Details: $(cat /tmp/smtp_update.json)"
+        fi
     fi
 fi
 

@@ -625,6 +625,17 @@ if [ "$MAIL_ENABLED" = "true" ]; then
       fi
     done
   fi
+
+  # Drift-correct the Keycloak realm's SMTP config now that smtp-credentials
+  # exists. import-keycloak-realm.sh (run during PREP) skipped the SMTP block
+  # when the Secret wasn't yet provisioned. Safe to run on every deploy —
+  # the script is idempotent and will no-op if nothing changed.
+  if [ -x "$REPO_ROOT/apps/scripts/ensure-keycloak-smtp.sh" ]; then
+    print_status "Keycloak: drift-correcting realm SMTP config"
+    if ! "$REPO_ROOT/apps/scripts/ensure-keycloak-smtp.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
+      print_warning "ensure-keycloak-smtp.sh failed (non-fatal, can re-run manually)"
+    fi
+  fi
 fi
 
 # Deploy Collabora CODE (per-tenant office suite for in-browser document editing)
