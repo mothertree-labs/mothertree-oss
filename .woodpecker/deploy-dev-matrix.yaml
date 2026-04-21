@@ -5,6 +5,10 @@ when:
 
 depends_on:
   - deploy-dev-prep
+  # Synapse reads smtp-credentials Secret at deploy time and injects the
+  # password into extraSecrets.email for the homeserver config. The Secret
+  # is written by provision-smtp-service-accounts in the stalwart pipeline.
+  - deploy-dev-stalwart
 
 clone:
   - name: clone

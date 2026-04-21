@@ -388,19 +388,23 @@ app.post('/api/invite', verifyOrigin, requireAuth, requireTenantAdmin, async (re
       recoveryEmail,
     });
 
-    // Step 2: Send invitation email (fatal — moved before service provisioning
-    // so the user gets their invite even if downstream services fail)
+    // Step 2: Provision Stalwart mailbox (must precede the invite email —
+    // Stalwart's submission-app listener validates RCPT TO against the
+    // internal directory, so emailing a user before they have a principal
+    // fails with "mailbox does not exist"). Fail-fast: if this breaks we
+    // can't deliver the invite anyway.
+    const displayName = `${firstName} ${lastName}`;
+    await stalwartApi.ensureUserExists(
+      email,
+      displayName,
+      parseInt(process.env.DEFAULT_EMAIL_QUOTA_MB || '5120', 10) * 1024 * 1024,
+    );
+
+    // Step 3: Send invitation email
     await keycloakApi.sendInvitationEmail(result.userId);
 
-    // Respond immediately — the critical path (Keycloak + email) is done.
-    // Downstream provisioning runs in the background so it doesn't block the
-    // HTTP response (Stalwart and Synapse can take 10+ seconds under load).
+    // Respond immediately — critical path (Keycloak + Stalwart + email) done.
     res.json({ success: true, userId: result.userId });
-
-    // Step 3: Provision Stalwart email account (non-fatal, background)
-    const displayName = `${firstName} ${lastName}`;
-    stalwartApi.ensureUserExists(email, displayName, parseInt(process.env.DEFAULT_EMAIL_QUOTA_MB || '5120', 10) * 1024 * 1024)
-      .catch(err => console.error('Stalwart provisioning failed (non-fatal):', err.message));
 
     // Step 4: Provision Matrix/Synapse account (non-fatal, background)
     synapseApi.ensureMatrixUser(email, displayName)

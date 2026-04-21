@@ -5,6 +5,10 @@ when:
 
 depends_on:
   - deploy-dev-prep
+  # Nextcloud reads smtp-credentials Secret at deploy time and injects the
+  # password into the chart-generated mail Secret. The Secret is written by
+  # provision-smtp-service-accounts in the stalwart pipeline.
+  - deploy-dev-stalwart
 
 clone:
   - name: clone

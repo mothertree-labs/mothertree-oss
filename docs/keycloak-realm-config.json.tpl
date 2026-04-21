@@ -26,17 +26,6 @@
   "webAuthnPolicyPasswordlessCreateTimeout": 0,
   "webAuthnPolicyPasswordlessAvoidSameAuthenticatorRegister": false,
   "webAuthnPolicyPasswordlessAcceptableAaguids": [],
-  "smtpServer": {
-    "host": "postfix-internal.infra-mail.svc.cluster.local",
-    "port": "587",
-    "from": "noreply@${TENANT_DOMAIN}",
-    "fromDisplayName": "${TENANT_DISPLAY_NAME}",
-    "replyTo": "noreply@${TENANT_DOMAIN}",
-    "replyToDisplayName": "${TENANT_DISPLAY_NAME}",
-    "ssl": "false",
-    "starttls": "false",
-    "auth": "false"
-  },
   "clients": [
     {
       "clientId": "docs-app",

@@ -39,6 +39,7 @@ function requireEnv(name) {
 const STALWART_API_URL = requireEnv('STALWART_API_URL');
 const STALWART_ADMIN_PASSWORD = requireEnv('STALWART_ADMIN_PASSWORD');
 const EMAIL_DOMAIN = requireEnv('EMAIL_DOMAIN');
+const MAIL_HOST = requireEnv('MAIL_HOST');
 const TENANT = requireEnv('MT_TENANT');
 const NS_STALWART = requireEnv('NS_STALWART');
 const NS_ADMIN = requireEnv('NS_ADMIN');
@@ -48,7 +49,12 @@ const NS_FILES = requireEnv('NS_FILES');
 const KUBECONFIG = requireEnv('KUBECONFIG');
 const ROTATE = process.env.ROTATE === 'true';
 
-const STALWART_SERVICE_HOST = `stalwart.${NS_STALWART}.svc.cluster.local`;
+// Callers dial MAIL_HOST (the external mail FQDN, e.g. mail.<tenant-domain>)
+// rather than the in-cluster svc FQDN. A per-tenant CoreDNS rewrite (applied
+// by deploy-stalwart.sh) makes that name resolve to the Stalwart ClusterIP
+// inside the cluster, so TLS verifies against the existing wildcard cert
+// while traffic stays in-cluster.
+const SMTP_RELAY_HOST = MAIL_HOST;
 const SUBMISSION_APP_PORT = '588';
 const APP_PASSWORD_NAME = 'smtp';
 const SECRET_NAME = 'smtp-credentials';
@@ -181,6 +187,21 @@ function secretExists(namespace, name) {
   }
 }
 
+// Read a single key from a Secret as plain text (base64-decoded), or null if
+// either the Secret or the key is absent.
+function readSecretField(namespace, name, key) {
+  try {
+    const b64 = execFileSync('kubectl', [
+      'get', 'secret', name, '-n', namespace,
+      '-o', `jsonpath={.data.${key}}`,
+    ], { env: { ...process.env, KUBECONFIG }, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+    if (!b64) return null;
+    return Buffer.from(b64, 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
 function writeSecret({ namespace, name, host, port, username, password }) {
   const yaml = kubectl([
     'create', 'secret', 'generic', name,
@@ -247,12 +268,40 @@ async function main() {
       writeSecret({
         namespace: ns,
         name: SECRET_NAME,
-        host: STALWART_SERVICE_HOST,
+        host: SMTP_RELAY_HOST,
         port: SUBMISSION_APP_PORT,
         username: PRINCIPAL_EMAIL,
         password,
       });
       console.log(`[provision-smtp]   Secret ${SECRET_NAME} written to ${ns}`);
+    }
+  } else {
+    // Password unchanged — but the host we write may have drifted (e.g. this
+    // deploy switched from the in-cluster svc FQDN to MAIL_HOST). Detect drift
+    // on any caller's Secret and rewrite all of them with the current host,
+    // preserving the stored password.
+    const hostMismatch = CALLER_NAMESPACES.some(
+      (ns) => readSecretField(ns, SECRET_NAME, 'SMTP_RELAY_HOST') !== SMTP_RELAY_HOST,
+    );
+    if (hostMismatch) {
+      const existingPassword = readSecretField(NS_ADMIN, SECRET_NAME, 'SMTP_RELAY_PASSWORD');
+      if (!existingPassword) {
+        throw new Error(
+          `[provision-smtp] SMTP_RELAY_HOST drift detected but cannot read existing password from ${NS_ADMIN}/${SECRET_NAME}. Re-run with --rotate to regenerate.`,
+        );
+      }
+      for (const ns of CALLER_NAMESPACES) {
+        writeSecret({
+          namespace: ns,
+          name: SECRET_NAME,
+          host: SMTP_RELAY_HOST,
+          port: SUBMISSION_APP_PORT,
+          username: PRINCIPAL_EMAIL,
+          password: existingPassword,
+        });
+        console.log(`[provision-smtp]   Secret ${SECRET_NAME} host updated in ${ns} (→ ${SMTP_RELAY_HOST})`);
+      }
+      changed = true;
     }
   }
 

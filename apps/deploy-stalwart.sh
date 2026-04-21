@@ -46,7 +46,7 @@ mt_load_infra_config
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy-stalwart"
 
-mt_require_commands kubectl envsubst
+mt_require_commands kubectl envsubst jq
 
 # Override NS_MAIL for envsubst templates that use ${NS_MAIL} to mean
 # the tenant mail namespace (stalwart templates expect this)
@@ -406,6 +406,31 @@ for port_info in "smtps-${TENANT}:${STALWART_SMTPS_PORT}" "submission-${TENANT}:
     fi
 done
 print_success "Tenant mail ports configured on LB and nginx TCP proxy"
+
+# =============================================================================
+# CoreDNS rewrite: make mail.<tenant-domain> resolve to the in-cluster Stalwart
+# service so authenticated submission from callers (Keycloak, Synapse, Impress,
+# Nextcloud, portals) can connect with strict TLS verification. The external
+# hostname is covered by the existing wildcard cert; the svc.cluster.local name
+# is not. Without this rewrite, callers that verify TLS hostnames fail with a
+# null-message exception (JavaMail, Twisted, Python smtplib) or fall back to
+# skip-verify workarounds. See CHANGELOG / PR-2b for context.
+#
+# LKE exposes CoreDNS extension via the optional coredns-custom ConfigMap in
+# kube-system, imported by the base Corefile via `import custom/*.include`.
+# Each tenant owns its own key so concurrent deploys don't clash.
+# =============================================================================
+print_status "Ensuring CoreDNS rewrite for $MAIL_HOST → stalwart.$NS_MAIL.svc.cluster.local"
+if ! kubectl -n kube-system get configmap coredns-custom >/dev/null 2>&1; then
+    kubectl -n kube-system create configmap coredns-custom
+fi
+# jq builds the JSON merge-patch so we don't hand-escape keys/values.
+_coredns_patch=$(jq -cn \
+    --arg key "mail-${TENANT}.include" \
+    --arg body "rewrite name ${MAIL_HOST} stalwart.${NS_MAIL}.svc.cluster.local"$'\n' \
+    '{data: {($key): $body}}')
+kubectl -n kube-system patch configmap coredns-custom --type=merge -p "$_coredns_patch"
+print_success "CoreDNS rewrite applied (takes effect within ~30s via CoreDNS reload)"
 
 # Wait for Deployment to be ready
 print_status "Waiting for Stalwart Deployment to be ready..."

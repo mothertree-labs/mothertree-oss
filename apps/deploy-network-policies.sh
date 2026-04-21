@@ -187,16 +187,33 @@ else
 fi
 
 # =============================================================================
-# Apply admin-to-mail egress (admin portal → Stalwart HTTP API for provisioning/quotas)
+# Apply admin-to-mail egress (admin portal → Stalwart HTTP API for provisioning/quotas
+# + SMTP submission-app:588 for authenticated mail relay)
 # =============================================================================
 if kubectl get namespace "$NS_ADMIN" &>/dev/null && kubectl get namespace "$NS_STALWART" &>/dev/null; then
     export NAMESPACE="$NS_ADMIN"
-    print_status "[$NS_ADMIN] Applying allow-admin-to-mail-egress (Admin Portal → Stalwart API)..."
+    print_status "[$NS_ADMIN] Applying allow-admin-to-mail-egress (Admin Portal → Stalwart API + SMTP)..."
     envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-admin-to-mail-egress.yaml.tpl" | kubectl apply -f -
     print_success "[$NS_ADMIN] Admin-to-mail egress policy applied"
 else
     print_warning "Admin or mail namespace does not exist, skipping admin-to-mail egress policy"
 fi
+
+# =============================================================================
+# Apply caller-to-mail-smtp egress for Docs, Synapse, Nextcloud.
+# These callers use SASL-authenticated SMTP submission on port 588 (post
+# step-2/PR-2 migration off the shared infra-mail Postfix).
+# =============================================================================
+for caller_ns in "$NS_DOCS" "$NS_MATRIX" "$NS_FILES"; do
+    if kubectl get namespace "$caller_ns" &>/dev/null && kubectl get namespace "$NS_STALWART" &>/dev/null; then
+        export NAMESPACE="$caller_ns"
+        print_status "[$caller_ns] Applying allow-caller-to-mail-smtp-egress (→ Stalwart :588)..."
+        envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-caller-to-mail-smtp-egress.yaml.tpl" | kubectl apply -f -
+        print_success "[$caller_ns] Caller-to-mail-smtp egress policy applied"
+    else
+        print_warning "Namespace $caller_ns or $NS_STALWART does not exist, skipping caller-to-mail-smtp egress policy"
+    fi
+done
 
 # =============================================================================
 # Apply admin-to-matrix egress (admin portal → Synapse Admin API for user provisioning)

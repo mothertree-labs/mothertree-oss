@@ -64,7 +64,7 @@ spec:
         - protocol: TCP
           port: 994
     # Admin/Account portals (admin namespace) accessing Stalwart HTTP API
-    # for user provisioning and quota management
+    # for user provisioning and quota management + SMTP submission
     - from:
         - namespaceSelector:
             matchLabels:
@@ -72,6 +72,28 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+        - protocol: TCP
+          port: 588
+    # Tenant callers (Docs, Synapse, Nextcloud) + Keycloak (shared infra-auth,
+    # configured per-realm with this tenant's mailer credentials) submitting
+    # authenticated mail via the submission-app listener (:588). Creds come
+    # from the smtp-credentials Secret written by provision-smtp-service-accounts.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tn-${TENANT_NAME}-docs
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tn-${TENANT_NAME}-matrix
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tn-${TENANT_NAME}-files
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infra-auth
+      ports:
+        - protocol: TCP
+          port: 588
     # Calendar automation (same namespace) connecting to Stalwart for IMAP and admin API
     - from:
         - podSelector:
