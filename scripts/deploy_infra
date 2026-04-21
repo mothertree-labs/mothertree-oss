@@ -275,16 +275,22 @@ fi
 # can mount the Secret on first install.
 if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
   print_status "Applying SES credentials Secret to $NS_MONITORING (for Alertmanager)..."
+  # Save + restore umask so the rest of the script keeps its default perms.
+  # Don't use `trap EXIT` for cleanup here — mt_deploy_start already installed
+  # a completion-notification trap on EXIT that we must not clobber.
   AM_SES_SECRET_DIR=$(mktemp -d)
-  trap 'rm -rf "$AM_SES_SECRET_DIR"' EXIT
+  _AM_SES_PREV_UMASK=$(umask)
   umask 077
   printf '%s' "$SES_SMTP_USERNAME" > "$AM_SES_SECRET_DIR/username"
   printf '%s' "$SES_SMTP_PASSWORD" > "$AM_SES_SECRET_DIR/password"
+  umask "$_AM_SES_PREV_UMASK"
+  unset _AM_SES_PREV_UMASK
   kubectl create secret generic ses-credentials -n "$NS_MONITORING" \
     --from-file=username="$AM_SES_SECRET_DIR/username" \
     --from-file=password="$AM_SES_SECRET_DIR/password" \
     --dry-run=client -o yaml | mt_apply kubectl apply -f -
   rm -rf "$AM_SES_SECRET_DIR"
+  unset AM_SES_SECRET_DIR
 else
   # Remove stale Secret if SES was previously configured but isn't now.
   kubectl delete secret ses-credentials -n "$NS_MONITORING" --ignore-not-found=true >/dev/null 2>&1 || true
