@@ -542,6 +542,13 @@ if kubectl get hpa nextcloud -n "$NS_FILES" --show-managed-fields \
     kubectl delete hpa nextcloud -n "$NS_FILES"
 fi
 
+# Load SMTP submission creds from smtp-credentials Secret so helmfile can
+# render mail.smtp.{host,port,name,password} into the chart's generated
+# Secret. Missing Secret → empty fields (mail disabled until a subsequent
+# deploy after provision runs).
+source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
+mt_export_smtp_relay_env "$NS_FILES"
+
 print_status "Deploying Nextcloud via helmfile..."
 pushd "$REPO_ROOT/apps" >/dev/null
   # Use sync instead of apply to skip slow diff operation

@@ -518,9 +518,10 @@ async function swapToTenantEmailIfNeeded(userId) {
 async function sendNotificationEmail(toEmail, subject, message) {
   const nodemailer = require('nodemailer');
 
-  const smtpHost = process.env.SMTP_HOST || 'postfix-internal.infra-mail.svc.cluster.local';
-  const smtpPort = process.env.SMTP_PORT || 587;
-  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.TENANT_DOMAIN || 'example.com'}`;
+  // SMTP_RELAY_* from the smtp-credentials Secret (authenticated submission to tenant Stalwart).
+  const smtpHost = process.env.SMTP_RELAY_HOST;
+  const smtpPort = parseInt(process.env.SMTP_RELAY_PORT || '588', 10);
+  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.EMAIL_DOMAIN || process.env.TENANT_DOMAIN || 'example.com'}`;
   const smtpFromName = process.env.SMTP_FROM_NAME || 'MotherTree';
 
   try {
@@ -528,6 +529,11 @@ async function sendNotificationEmail(toEmail, subject, message) {
       host: smtpHost,
       port: smtpPort,
       secure: false,
+      requireTLS: true,
+      auth: {
+        user: process.env.SMTP_RELAY_USERNAME,
+        pass: process.env.SMTP_RELAY_PASSWORD,
+      },
       tls: { rejectUnauthorized: false },
     });
 

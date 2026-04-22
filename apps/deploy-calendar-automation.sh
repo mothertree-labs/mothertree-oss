@@ -279,65 +279,11 @@ fi
 print_status "Applying calendar automation manifests..."
 
 # Use explicit variable list for envsubst to avoid substituting unintended variables
-envsubst '${NS_MAIL} ${NS_FILES} ${TENANT_NAME} ${FILES_HOST} ${NEXTCLOUD_ADMIN_USER} ${NEXTCLOUD_ADMIN_PASSWORD} ${STALWART_ADMIN_PASSWORD} ${CALENDAR_AUTOMATION_MEMORY_REQUEST} ${CALENDAR_AUTOMATION_MEMORY_LIMIT} ${CALENDAR_AUTOMATION_CPU_REQUEST} ${POLL_INTERVAL_SECONDS} ${CONFIG_CHECKSUM}' \
+export POLL_CONCURRENCY="${POLL_CONCURRENCY:-5}"
+
+envsubst '${NS_MAIL} ${NS_FILES} ${TENANT_NAME} ${FILES_HOST} ${NEXTCLOUD_ADMIN_USER} ${NEXTCLOUD_ADMIN_PASSWORD} ${STALWART_ADMIN_PASSWORD} ${CALENDAR_AUTOMATION_MEMORY_REQUEST} ${CALENDAR_AUTOMATION_MEMORY_LIMIT} ${CALENDAR_AUTOMATION_CPU_REQUEST} ${POLL_INTERVAL_SECONDS} ${POLL_CONCURRENCY} ${CONFIG_CHECKSUM}' \
     < "$REPO_ROOT/apps/manifests/calendar-automation/deployment.yaml.tpl" | kubectl apply -f -
 print_success "Calendar Automation Deployment and Service applied"
-
-# =============================================================================
-# Patch deployment to add init container for npm install
-# =============================================================================
-# The deployment template uses a ConfigMap volume for the app code.
-# We need an init container that copies the code and installs dependencies
-# into an emptyDir volume shared with the main container.
-print_status "Patching deployment with init container for npm dependencies..."
-
-kubectl patch deployment calendar-automation -n "$NS_MAIL" --type='json' -p='[
-  {
-    "op": "add",
-    "path": "/spec/template/spec/initContainers",
-    "value": [
-      {
-        "name": "npm-install",
-        "image": "node:22-alpine",
-        "command": ["sh", "/install/install.sh"],
-        "env": [
-          {"name": "HOME", "value": "/app"},
-          {"name": "npm_config_cache", "value": "/app/.npm-cache"}
-        ],
-        "securityContext": {
-          "allowPrivilegeEscalation": false,
-          "capabilities": {"drop": ["ALL"]},
-          "runAsNonRoot": true,
-          "runAsUser": 1001
-        },
-        "volumeMounts": [
-          {"name": "app-src", "mountPath": "/app-src", "readOnly": true},
-          {"name": "app", "mountPath": "/app"},
-          {"name": "install-script", "mountPath": "/install", "readOnly": true}
-        ]
-      }
-    ]
-  },
-  {
-    "op": "replace",
-    "path": "/spec/template/spec/volumes",
-    "value": [
-      {"name": "app-src", "configMap": {"name": "calendar-automation-app"}},
-      {"name": "app", "emptyDir": {}},
-      {"name": "install-script", "configMap": {"name": "calendar-automation-install", "defaultMode": 493}},
-      {"name": "caldav-tokens", "secret": {"secretName": "calendar-automation-caldav-tokens", "optional": true}}
-    ]
-  },
-  {
-    "op": "replace",
-    "path": "/spec/template/spec/containers/0/volumeMounts",
-    "value": [
-      {"name": "app", "mountPath": "/app", "readOnly": false},
-      {"name": "caldav-tokens", "mountPath": "/config", "readOnly": true}
-    ]
-  }
-]'
-print_success "Init container patched"
 
 # Wait for Deployment to be ready
 print_status "Waiting for Calendar Automation Deployment to be ready..."

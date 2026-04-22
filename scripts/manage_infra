@@ -244,7 +244,6 @@ TURN_SERVER_IP="$(terraform output -raw turn_server_ip 2>/dev/null || echo "")"
 LKE_CLUSTER_ID="$(terraform output -raw cluster_id 2>/dev/null || echo "")"
 HEADSCALE_SERVER_IP="$(terraform output -raw headscale_server_ip 2>/dev/null || echo "")"
 POSTGRES_SERVER_IP="$(terraform output -raw postgres_server_ip 2>/dev/null || echo "")"
-POSTFIX_RELAY_SERVER_IP="$(terraform output -raw postfix_relay_ip 2>/dev/null || echo "")"
 TFEOF
         print_status "Terraform outputs file written — include in CI deploy vault when updating secrets"
       else
@@ -393,7 +392,6 @@ if [ "$RUN_ANSIBLE" = "true" ] && [ "$PLAN_ONLY" != "true" ] && [ "$DESTROY" != 
   [ -n "${TURN_SERVER_IP:-}" ] && _has_targets=true
   [ -n "${HEADSCALE_SERVER_IP:-}" ] && [ "${HEADSCALE_SERVER_IP}" != "null" ] && _has_targets=true
   [ -n "${POSTGRES_SERVER_IP:-}" ] && [ "${POSTGRES_SERVER_IP}" != "null" ] && _has_targets=true
-  [ -n "${POSTFIX_RELAY_SERVER_IP:-}" ] && [ "${POSTFIX_RELAY_SERVER_IP}" != "null" ] && _has_targets=true
 
   if [ "$_has_targets" = "false" ]; then
     print_status "No server IPs found in Terraform outputs — skipping Ansible"
@@ -458,21 +456,6 @@ EOF
         print_status "PostgreSQL server ${_pg_ansible_host} added to inventory"
       fi
 
-      # Postfix relay server — prefer Tailscale IP (public SSH may be blocked at cloud firewall)
-      if [ -n "${POSTFIX_RELAY_SERVER_IP:-}" ] && [ "$POSTFIX_RELAY_SERVER_IP" != "null" ]; then
-        _postfix_ansible_host="${POSTFIX_RELAY_SERVER_IP}"
-        if [ -n "${POSTFIX_RELAY_IP:-}" ] && [ "$POSTFIX_RELAY_IP" != "null" ]; then
-          _postfix_ansible_host="${POSTFIX_RELAY_IP}"
-          print_status "Postfix relay using Tailscale IP ${POSTFIX_RELAY_IP} for Ansible (public SSH may be blocked)"
-        fi
-        cat >> "$TEMP_INVENTORY" <<EOF
-
-[postfix_relay_servers]
-postfix-relay ansible_host=${_postfix_ansible_host} ansible_user=root
-EOF
-        print_status "Postfix relay server ${_postfix_ansible_host} added to inventory"
-      fi
-
       # Source env-specific secrets if available (for tls_email, etc.)
       if [ -f "$REPO_ROOT/secrets.$MT_ENV.tfvars.env" ]; then
         # shellcheck disable=SC1090
@@ -527,13 +510,6 @@ EOF
       # Microsocks SOCKS5 proxy authentication
       if [ -n "${MICROSOCKS_PASSWORD:-}" ]; then
         echo "microsocks_password: \"${MICROSOCKS_PASSWORD}\"" >> "$TEMP_EXTRA_VARS"
-      fi
-
-      # AWS SES SMTP relay (outbound mail via SES instead of direct delivery)
-      if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
-        echo "ses_smtp_endpoint: \"${SES_SMTP_ENDPOINT}\"" >> "$TEMP_EXTRA_VARS"
-        echo "ses_smtp_username: \"${SES_SMTP_USERNAME}\"" >> "$TEMP_EXTRA_VARS"
-        echo "ses_smtp_password: \"${SES_SMTP_PASSWORD}\"" >> "$TEMP_EXTRA_VARS"
       fi
 
       # Headscale configuration
@@ -652,7 +628,6 @@ EOF
       print_status "TURN IP:            ${TURN_SERVER_IP:-<not deployed>}"
       print_status "Headscale IP:       ${HEADSCALE_SERVER_IP:-<not deployed>}"
       print_status "PostgreSQL IP:      ${POSTGRES_SERVER_IP:-<not deployed>}"
-      print_status "Postfix relay IP:   ${POSTFIX_RELAY_SERVER_IP:-<not deployed>}"
       print_status "==============================="
 
       # Run playbook
@@ -666,7 +641,7 @@ EOF
       rm -f "$TEMP_INVENTORY" "$TEMP_EXTRA_VARS"
 
       if [ $ANSIBLE_EXIT -eq 0 ]; then
-        print_success "Ansible playbook completed —${TURN_SERVER_IP:+ TURN ($TURN_SERVER_IP)}${HEADSCALE_SERVER_IP:+ Headscale ($HEADSCALE_SERVER_IP)}${POSTGRES_SERVER_IP:+ PostgreSQL ($POSTGRES_SERVER_IP)}${POSTFIX_RELAY_SERVER_IP:+ Postfix relay ($POSTFIX_RELAY_SERVER_IP)}"
+        print_success "Ansible playbook completed —${TURN_SERVER_IP:+ TURN ($TURN_SERVER_IP)}${HEADSCALE_SERVER_IP:+ Headscale ($HEADSCALE_SERVER_IP)}${POSTGRES_SERVER_IP:+ PostgreSQL ($POSTGRES_SERVER_IP)}"
       else
         print_error "Ansible playbook failed with exit code $ANSIBLE_EXIT"
         exit 1

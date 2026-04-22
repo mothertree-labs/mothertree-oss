@@ -10,14 +10,14 @@
 #   ./scripts/rotate-tailscale-keys.sh -e <env> [options]
 #
 # Options:
-#   --component=<name>   Component to rotate: pgbouncer, postfix, metrics, or all (default: all)
+#   --component=<name>   Component to rotate: pgbouncer, metrics, or all (default: all)
 #   --apply-now          Patch K8s secrets and restart pods immediately
 #   --rebuild-vaults     Rebuild CI deploy vaults after rotation
 #   --expiration=<dur>   Key expiration (default: 8760h = 1 year)
 #
 # Examples:
 #   ./scripts/rotate-tailscale-keys.sh -e dev
-#   ./scripts/rotate-tailscale-keys.sh -e prod --component=postfix --apply-now
+#   ./scripts/rotate-tailscale-keys.sh -e prod --component=pgbouncer --apply-now
 #   ./scripts/rotate-tailscale-keys.sh -e dev --apply-now --rebuild-vaults
 
 set -euo pipefail
@@ -27,13 +27,13 @@ source "${REPO_ROOT}/scripts/lib/common.sh"
 source "${REPO_ROOT}/scripts/lib/args.sh"
 
 mt_usage() {
-  echo "Usage: $0 -e <env> [--component=<pgbouncer|postfix|metrics|all>] [--apply-now] [--rebuild-vaults]"
+  echo "Usage: $0 -e <env> [--component=<pgbouncer|metrics|all>] [--apply-now] [--rebuild-vaults]"
   echo ""
   echo "Rotate Tailscale pre-auth keys on the Headscale server."
   echo ""
   echo "Options:"
   echo "  -e <env>              Environment (e.g., dev, prod, prod-eu)"
-  echo "  --component=<name>    Component: pgbouncer, postfix, metrics, or all (default: all)"
+  echo "  --component=<name>    Component: pgbouncer, metrics, or all (default: all)"
   echo "  --apply-now           Patch K8s secrets and restart pods immediately"
   echo "  --rebuild-vaults      Rebuild CI deploy vaults after rotation"
   echo "  --expiration=<dur>    Key expiration duration (default: 8760h = 1 year)"
@@ -51,8 +51,8 @@ KEY_EXPIRATION=$(mt_get_flag_value "--expiration" || echo "8760h")
 
 # Validate component
 case "$COMPONENT" in
-  pgbouncer|postfix|metrics|all) ;;
-  *) print_error "Invalid component: $COMPONENT (must be pgbouncer, postfix, metrics, or all)"; exit 1 ;;
+  pgbouncer|metrics|all) ;;
+  *) print_error "Invalid component: $COMPONENT (must be pgbouncer, metrics, or all)"; exit 1 ;;
 esac
 
 # Validate expiration format (prevent command injection via SSH)
@@ -85,7 +85,6 @@ fi
 _component_tag() {
   case "$1" in
     pgbouncer) echo "tag:pgbouncer" ;;
-    postfix)   echo "tag:postfix-k8s" ;;
     metrics)   echo "tag:monitoring" ;;
   esac
 }
@@ -93,7 +92,6 @@ _component_tag() {
 _component_secrets_key() {
   case "$1" in
     pgbouncer) echo "pgbouncer_authkey" ;;
-    postfix)   echo "postfix_authkey" ;;
     metrics)   echo "metrics_authkey" ;;
   esac
 }
@@ -101,7 +99,6 @@ _component_secrets_key() {
 _component_k8s_secret() {
   case "$1" in
     pgbouncer) echo "pgbouncer-tailscale-auth" ;;
-    postfix)   echo "postfix-tailscale-auth" ;;
     metrics)   echo "pg-metrics-bridge-tailscale-auth" ;;
   esac
 }
@@ -109,7 +106,6 @@ _component_k8s_secret() {
 _component_k8s_namespace() {
   case "$1" in
     pgbouncer) echo "infra-db" ;;
-    postfix)   echo "infra-mail" ;;
     metrics)   echo "infra-db" ;;
   esac
 }
@@ -117,14 +113,13 @@ _component_k8s_namespace() {
 _component_k8s_deployment() {
   case "$1" in
     pgbouncer) echo "deployment/pgbouncer" ;;
-    postfix)   echo "deployment/postfix" ;;
     metrics)   echo "deployment/pg-metrics-bridge" ;;
   esac
 }
 
 # Build component list
 if [ "$COMPONENT" = "all" ]; then
-  COMPONENTS=(pgbouncer postfix metrics)
+  COMPONENTS=(pgbouncer metrics)
 else
   COMPONENTS=("$COMPONENT")
 fi

@@ -32,8 +32,21 @@ SMTP_DOMAIN="${SMTP_DOMAIN:-${TENANT_DOMAIN}}"
 DISPLAY_NAME="${TENANT_DISPLAY_NAME:-${TENANT_KEYCLOAK_REALM}}"
 NS_AUTH="${NS_AUTH:-infra-auth}"
 
+# Load SMTP submission creds from the tenant's smtp-credentials Secret.
+# The provisioner (scripts/provision-smtp-service-accounts) writes this Secret
+# into tn-<tenant>-admin (among other namespaces) with the shared `mailer@`
+# principal's app password. Fail-fast if missing — Keycloak SMTP is required
+# for magic-link / password-reset flows and silent degradation is dangerous.
+source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
+mt_export_smtp_relay_env "$NS_ADMIN"
+: "${SMTP_RELAY_HOST:?smtp-credentials Secret is missing in $NS_ADMIN — run scripts/provision-smtp-service-accounts first}"
+: "${SMTP_RELAY_USERNAME:?smtp-credentials.SMTP_RELAY_USERNAME missing}"
+: "${SMTP_RELAY_PASSWORD:?smtp-credentials.SMTP_RELAY_PASSWORD missing}"
+SMTP_RELAY_PORT="${SMTP_RELAY_PORT:-588}"
+
 print_status "Ensuring SMTP config for realm '$TENANT_KEYCLOAK_REALM' (env=$MT_ENV)"
-print_status "  SMTP from: noreply@${SMTP_DOMAIN}"
+print_status "  SMTP relay: ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT} (SASL as ${SMTP_RELAY_USERNAME})"
+print_status "  SMTP from:  noreply@${SMTP_DOMAIN}"
 print_status "  Display name: ${DISPLAY_NAME}"
 
 # Wait for Keycloak pod to be ready
@@ -92,17 +105,22 @@ else
     print_status "No SMTP configured (will set)"
 fi
 
-# Build SMTP config
+# Build SMTP config — authenticated submission to the tenant's Stalwart:588
+# with STARTTLS + SASL PLAIN. From/reply-to uses noreply@<EMAIL_DOMAIN>, which
+# the provisioner adds as an alias on the shared `mailer@` principal so
+# Stalwart's MAIL FROM alignment check passes.
 SMTP_CONFIG='{
-  "host": "postfix-internal.infra-mail.svc.cluster.local",
-  "port": "587",
+  "host": "'"${SMTP_RELAY_HOST}"'",
+  "port": "'"${SMTP_RELAY_PORT}"'",
   "from": "noreply@'"${SMTP_DOMAIN}"'",
   "fromDisplayName": "'"${DISPLAY_NAME}"'",
   "replyTo": "noreply@'"${SMTP_DOMAIN}"'",
   "replyToDisplayName": "'"${DISPLAY_NAME}"'",
   "ssl": "false",
-  "starttls": "false",
-  "auth": "false"
+  "starttls": "true",
+  "auth": "true",
+  "user": "'"${SMTP_RELAY_USERNAME}"'",
+  "password": "'"${SMTP_RELAY_PASSWORD}"'"
 }'
 
 # PUT SMTP config to realm
@@ -113,7 +131,7 @@ SMTP_UPDATE=$(curl -s -w "%{http_code}" -o /tmp/smtp_update.json -X PUT \
   -d "{\"smtpServer\": $SMTP_CONFIG}")
 
 if [ "$SMTP_UPDATE" = "204" ]; then
-    print_success "SMTP configured: postfix-internal.infra-mail.svc.cluster.local:587, from=noreply@${SMTP_DOMAIN}"
+    print_success "SMTP configured: ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT} (SASL as ${SMTP_RELAY_USERNAME}), from=noreply@${SMTP_DOMAIN}"
 else
     print_error "Failed to update SMTP (HTTP $SMTP_UPDATE)"
     if [ -f /tmp/smtp_update.json ]; then
@@ -128,8 +146,8 @@ VERIFY_HOST=$(curl -s \
   -H "Authorization: Bearer $ACCESS_TOKEN" | \
   jq -r '.smtpServer.host // empty')
 
-if [ "$VERIFY_HOST" = "postfix-internal.infra-mail.svc.cluster.local" ]; then
+if [ "$VERIFY_HOST" = "$SMTP_RELAY_HOST" ]; then
     print_success "Verified: SMTP config is active"
 else
-    print_warning "Verification returned unexpected host: $VERIFY_HOST"
+    print_warning "Verification returned unexpected host: $VERIFY_HOST (expected $SMTP_RELAY_HOST)"
 fi

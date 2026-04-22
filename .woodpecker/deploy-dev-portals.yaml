@@ -5,6 +5,10 @@ when:
 
 depends_on:
   - deploy-dev-prep
+  # Portals mount smtp-credentials via envFrom (optional:true) so they can
+  # start without the Secret, but mail would be broken in that window. Wait
+  # for stalwart+provision so the first-deploy pod already has creds.
+  - deploy-dev-stalwart
 
 clone:
   - name: clone

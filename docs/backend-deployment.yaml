@@ -129,6 +129,35 @@ spec:
                 key: OIDC_RP_CLIENT_SECRET
           - name: DEFAULT_FILE_STORAGE
             value: "storage_backends.LinodeS3Boto3Storage"
+          # SMTP credentials — tenant Stalwart submission listener on port 588.
+          # Secret is written by scripts/provision-smtp-service-accounts.
+          # `optional: true` lets the pod start on a fresh tenant before the
+          # secret is provisioned; callers can't send mail until then. Impress
+          # settings use the DJANGO_ prefix (django-configurations default).
+          - name: DJANGO_EMAIL_HOST
+            valueFrom:
+              secretKeyRef:
+                name: smtp-credentials
+                key: SMTP_RELAY_HOST
+                optional: true
+          - name: DJANGO_EMAIL_PORT
+            valueFrom:
+              secretKeyRef:
+                name: smtp-credentials
+                key: SMTP_RELAY_PORT
+                optional: true
+          - name: DJANGO_EMAIL_HOST_USER
+            valueFrom:
+              secretKeyRef:
+                name: smtp-credentials
+                key: SMTP_RELAY_USERNAME
+                optional: true
+          - name: DJANGO_EMAIL_HOST_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: smtp-credentials
+                key: SMTP_RELAY_PASSWORD
+                optional: true
           startupProbe:
             httpGet:
               path: /__lbheartbeat__

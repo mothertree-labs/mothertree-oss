@@ -134,7 +134,7 @@ kustomize version && yq --version && jq --version && envsubst --version && node 
 
 Optional tools:
 ```bash
-# Ansible (for VM configuration — Headscale, PostgreSQL, Postfix relay, TURN)
+# Ansible (for VM configuration — Headscale, PostgreSQL, TURN)
 sudo dnf install -y ansible-core
 
 # GitHub CLI
@@ -189,7 +189,7 @@ kustomize version && yq --version && jq --version && envsubst --version && node 
 
 Optional tools:
 ```bash
-# Ansible (for VM configuration — Headscale, PostgreSQL, Postfix relay, TURN)
+# Ansible (for VM configuration — Headscale, PostgreSQL, TURN)
 sudo apt-get install -y ansible
 
 # GitHub CLI (https://github.com/cli/cli/blob/trunk/docs/install_linux.md)

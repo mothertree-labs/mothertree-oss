@@ -248,8 +248,11 @@ if kubectl get configmap tcp-services -n "$NS_INGRESS" >/dev/null 2>&1; then
   EXISTING_DATA=$(kubectl get configmap tcp-services -n "$NS_INGRESS" -o jsonpath='{.data}' 2>/dev/null || echo "{}")
   if [ -n "$EXISTING_DATA" ] && [ "$EXISTING_DATA" != "{}" ]; then
     print_status "Migrating tcp-services entries to PROXY protocol format..."
+    # Port 25 is excluded: Linode's PROXY v2 handshake to ingress-nginx hangs
+    # specifically on port 25, so inbound MX traffic runs without PROXY.
+    # See apps/values/ingress-nginx.yaml for the per-port proxy-protocol override.
     kubectl get configmap tcp-services -n "$NS_INGRESS" -o json \
-      | jq '.data |= with_entries(.value |= if test(":PROXY:$") then . else . + ":PROXY:" end)' \
+      | jq '.data |= with_entries(if .key == "25" then . else .value |= if test(":PROXY:$") then . else . + ":PROXY:" end end)' \
       | kubectl apply -f -
     print_status "tcp-services entries migrated to PROXY protocol format"
   else
@@ -561,7 +564,22 @@ fi
 # =============================================================================
 # Deploy K8s Postfix (ConfigMaps, Deployment, Services, NetworkPolicy)
 # =============================================================================
-if [ -n "${POSTFIX_RELAY_IP:-}" ]; then
+# Gate on whether any tenant in this env has mail enabled — prod and dev both
+# have tenants with mail, while prod-eu currently doesn't. SES credentials are
+# orthogonal (prod has them, dev direct-sends without SES).
+_mail_enabled_any=false
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_tenants_dir
+for _tdir in "$MT_TENANTS_DIR"/*/; do
+  _tcfg="${_tdir}/${MT_ENV}.config.yaml"
+  [ -f "$_tcfg" ] || continue
+  if [ "$(yq '.features.mail_enabled // false' "$_tcfg")" = "true" ]; then
+    _mail_enabled_any=true
+    break
+  fi
+done
+
+if [ "$_mail_enabled_any" = "true" ]; then
   print_status "Deploying K8s Postfix..."
   if [ -x "$REPO_ROOT/apps/deploy-postfix.sh" ]; then
     "$REPO_ROOT/apps/deploy-postfix.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
@@ -581,11 +599,12 @@ if [ -n "${POSTFIX_RELAY_IP:-}" ]; then
   fi
 
   # =============================================================================
-  # Configure nginx TCP proxy for inbound SMTP (port 30025 -> Postfix:25)
+  # Configure nginx TCP proxy for inbound SMTP (port 25 -> Postfix:25)
   # =============================================================================
-  # Routes inbound mail through the ingress-nginx NodeBalancer TCP proxy.
-  # The NodeBalancer has a stable IP (lb1.<env>.<domain>) and its subnet is permanently
-  # allowed through the LKE firewall. This avoids reliance on hardcoded K8s node VPC IPs.
+  # Inbound MX traffic: internet → NodeBalancer:25 → nginx:25 → infra-mail/postfix:25.
+  # The Linode NodeBalancer adds PROXY protocol v2 headers (via the
+  # linode-loadbalancer-default-proxy-protocol annotation on the ingress service),
+  # so nginx sees real client IPs via PROXY.
   # Two things are needed:
   #   1. tcp-services ConfigMap entries (tells nginx where to proxy)
   #   2. LB service ports (tells the cloud LB to forward to nginx's NodePort)
@@ -596,19 +615,41 @@ if [ -n "${POSTFIX_RELAY_IP:-}" ]; then
     kubectl create configmap tcp-services -n "$NS_INGRESS"
   fi
 
-  kubectl patch configmap tcp-services -n "$NS_INGRESS" --type merge -p '{"data": {"30025": "infra-mail/postfix:25:PROXY:"}}'
-  print_status "tcp-services ConfigMap updated with 30025 -> infra-mail/postfix:25:PROXY:"
+  # Migrate any stale "30025" entry (from the pre-relay-VM-removal era) to port 25
+  if kubectl get configmap tcp-services -n "$NS_INGRESS" -o jsonpath='{.data.30025}' 2>/dev/null | grep -q .; then
+    print_status "Removing stale tcp-services entry for port 30025..."
+    kubectl patch configmap tcp-services -n "$NS_INGRESS" --type=json \
+      -p='[{"op": "remove", "path": "/data/30025"}]' || true
+  fi
+
+  # NOTE: port 25 does NOT use PROXY protocol (see apps/values/ingress-nginx.yaml for
+  # the rationale). Linode's PROXY v2 to nginx hangs specifically on port 25; disabling
+  # it is the workaround. Postfix sees nginx pod IPs instead of real client IPs.
+  kubectl patch configmap tcp-services -n "$NS_INGRESS" --type merge -p '{"data": {"25": "infra-mail/postfix:25"}}'
+  print_status "tcp-services ConfigMap updated with 25 -> infra-mail/postfix:25 (no PROXY)"
 
   EXISTING_PORTS=$(kubectl get svc ingress-nginx-controller -n "$NS_INGRESS" -o jsonpath='{.spec.ports[*].port}' 2>/dev/null || echo "")
-  if ! echo "$EXISTING_PORTS" | grep -qw "30025"; then
-    print_status "Adding port 30025 (smtp-inbound) to ingress-nginx LB service..."
+  # Remove stale 30025 port from LB service (from the pre-relay-VM-removal era)
+  if echo "$EXISTING_PORTS" | grep -qw "30025"; then
+    print_status "Removing stale port 30025 from ingress-nginx LB service..."
+    STALE_INDEX=$(kubectl get svc ingress-nginx-controller -n "$NS_INGRESS" \
+      -o json | jq '.spec.ports | to_entries | map(select(.value.port == 30025)) | .[0].key // empty')
+    if [ -n "$STALE_INDEX" ]; then
+      kubectl patch svc ingress-nginx-controller -n "$NS_INGRESS" --type='json' \
+        -p="[{\"op\": \"remove\", \"path\": \"/spec/ports/${STALE_INDEX}\"}]" || true
+    fi
+  fi
+  # Re-fetch after possible stale-port removal
+  EXISTING_PORTS=$(kubectl get svc ingress-nginx-controller -n "$NS_INGRESS" -o jsonpath='{.spec.ports[*].port}' 2>/dev/null || echo "")
+  if ! echo "$EXISTING_PORTS" | grep -qw "25"; then
+    print_status "Adding port 25 (smtp-inbound) to ingress-nginx LB service..."
     kubectl patch svc ingress-nginx-controller -n "$NS_INGRESS" --type='json' \
-      -p='[{"op": "add", "path": "/spec/ports/-", "value": {"name": "smtp-inbound", "port": 30025, "targetPort": 30025, "protocol": "TCP"}}]'
+      -p='[{"op": "add", "path": "/spec/ports/-", "value": {"name": "smtp-inbound", "port": 25, "targetPort": 25, "protocol": "TCP"}}]'
   else
-    print_status "Port 30025 already present on ingress-nginx LB service"
+    print_status "Port 25 already present on ingress-nginx LB service"
   fi
 else
-  print_status "Skipping K8s Postfix (no postfix_relay.tailscale_ip in infra config)"
+  print_status "Skipping K8s Postfix (no tenant has features.mail_enabled=true in $MT_ENV)"
 fi
 
 # NOTE: VPN route DaemonSet removed — replaced by Tailscale mesh (Headscale).

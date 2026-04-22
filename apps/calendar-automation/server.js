@@ -55,6 +55,9 @@ const config = {
     tokenFile: process.env.CALDAV_TOKEN_FILE || '/app/caldav-tokens.json',
   },
   pollIntervalMs: parseInt(process.env.POLL_INTERVAL_SECONDS || '60', 10) * 1000,
+  // Number of users to scan in parallel per poll cycle. Bounded to avoid
+  // overwhelming Stalwart IMAP; each worker opens one connection at a time.
+  pollConcurrency: Math.max(1, parseInt(process.env.POLL_CONCURRENCY || '5', 10)),
   healthPort: parseInt(process.env.HEALTH_PORT || '8080', 10),
   logLevel: process.env.LOG_LEVEL || 'info',
 };
@@ -125,16 +128,29 @@ const metrics = {
   healthy: true,
 };
 
+// Probe state: flips to true after the first pollCycle returns (success or
+// failure). Readiness depends only on "has the service finished initializing" —
+// a transient Stalwart hiccup must not flap the probe and trigger pod restarts.
+let readyForProbe = false;
+
 // ---------------------------------------------------------------------------
 // Health check HTTP server
 // ---------------------------------------------------------------------------
 
 function startHealthServer() {
   const server = http.createServer((req, res) => {
-    if (req.url === '/healthz') {
-      const status = metrics.healthy ? 200 : 503;
+    if (req.url === '/livez' || req.url === '/healthz') {
+      // Liveness: the HTTP server is responding — the process is alive.
+      // Intentionally does NOT depend on poll-cycle success: a failed poll
+      // (e.g., Stalwart 500) must not trigger a pod restart.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'alive' }));
+    } else if (req.url === '/readyz') {
+      // Readiness: flips to true after the initial poll returns. Never
+      // flips back: a transient dependency failure shouldn't stall rollouts.
+      const status = readyForProbe ? 200 : 503;
       res.writeHead(status, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: metrics.healthy ? 'ok' : 'unhealthy' }));
+      res.end(JSON.stringify({ status: readyForProbe ? 'ready' : 'starting' }));
     } else if (req.url === '/metrics') {
       metrics.retryTrackerSize = retryTracker.size;
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1263,20 +1279,29 @@ async function pollCycle() {
       return;
     }
 
-    log('debug', `Scanning ${users.length} user(s)`);
+    log('debug', `Scanning ${users.length} user(s)`, { concurrency: config.pollConcurrency });
 
-    // Process users sequentially to avoid overwhelming IMAP/CalDAV
-    for (const user of users) {
-      try {
-        await processUser(user);
-      } catch (err) {
-        metrics.errors++;
-        log('error', 'Unexpected error processing user', {
-          user,
-          error: err.message,
-        });
+    // Process users with bounded parallelism. Each worker pulls the next user
+    // from a shared queue — this caps concurrent IMAP connections to Stalwart
+    // while keeping total cycle time ≈ (total work) / concurrency.
+    const queue = users.slice();
+    const runWorker = async () => {
+      while (queue.length > 0) {
+        const user = queue.shift();
+        if (!user) return;
+        try {
+          await processUser(user);
+        } catch (err) {
+          metrics.errors++;
+          log('error', 'Unexpected error processing user', {
+            user,
+            error: err.message,
+          });
+        }
       }
-    }
+    };
+    const workers = Array.from({ length: Math.min(config.pollConcurrency, users.length) }, runWorker);
+    await Promise.all(workers);
 
     metrics.healthy = true;
   } catch (err) {
@@ -1286,6 +1311,9 @@ async function pollCycle() {
   } finally {
     metrics.lastPollTime = new Date().toISOString();
     metrics.lastPollDurationMs = Date.now() - startTime;
+    // Readiness flips to true on the first cycle completing — regardless of
+    // pass/fail — so a Stalwart hiccup during startup doesn't stall rollouts.
+    readyForProbe = true;
     log('debug', 'Poll cycle complete', {
       durationMs: metrics.lastPollDurationMs,
       messagesProcessed: metrics.messagesProcessed,

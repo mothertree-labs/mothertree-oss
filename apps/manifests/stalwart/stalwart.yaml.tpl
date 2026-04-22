@@ -194,24 +194,17 @@ data:
     
     # Message routing strategy (v0.15+ format)
     # - Local domain recipients: deliver to local mailbox
-    # - External recipients: relay through Postfix for DKIM signing
+    # - External recipients: outbound route chosen by deploy-stalwart.sh.
+    #   Prod (SES configured): relay through AWS SES with SASL auth.
+    #   Dev (no SES): direct MX delivery to the destination's mail servers.
     [queue.strategy]
-    route = [{if = "is_local_domain('', rcpt_domain)", then = "'local'"}, {else = "'relay'"}]
-    
+    route = [{if = "is_local_domain('', rcpt_domain)", then = "'local'"}, {else = "'${STALWART_OUTBOUND_ROUTE_NAME}'"}]
+
     # Local delivery route - deliver to internal mailbox
     [queue.route."local"]
     type = "local"
-    
-    # Relay route - send through Postfix for DKIM signing
-    [queue.route."relay"]
-    type = "relay"
-    address = "postfix-internal.infra-mail.svc.cluster.local"
-    port = 587
-    protocol = "smtp"
-    
-    [queue.route."relay".tls]
-    implicit = false
-    allow-invalid-certs = true
+
+${STALWART_OUTBOUND_ROUTE_TOML}
     
     # Authentication
     [authentication]
@@ -264,9 +257,17 @@ data:
     ehlo = "disable"
     mail-from = "disable"
     
+    # DKIM: verify inbound signatures only. Outbound DKIM signing is delegated
+    # to AWS SES Easy DKIM — SES signs with its own rotated keys after its
+    # relay-time header mutations (Message-ID, Date), so Stalwart-side signing
+    # is always invalidated by the time the message reaches the receiver.
+    # Confirmed via dkimpy against prod-delivered messages on 2026-04-19:
+    # Stalwart's s=default signature failed because SES rewrites Message-ID
+    # and Date (1s drift); SES's own signature passes end-to-end.
+    # DMARC for outbound mail carries via SES's d=<tenant-domain> signature.
     [auth.dkim]
     verify = true
-    
+
     [auth.dmarc]
     verify = true
     
@@ -375,6 +376,27 @@ spec:
             secretKeyRef:
               name: stalwart-secrets
               key: S3_SECRET_KEY
+        # SES SMTP credentials for outbound relay (prod only; absent on dev → direct MX).
+        # Stalwart reads these via %{env:...}% in [queue.route."relay"].
+        # optional:true so dev (no ses-credentials Secret) starts cleanly.
+        - name: SES_SMTP_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: ses-credentials
+              key: endpoint
+              optional: true
+        - name: SES_SMTP_USER
+          valueFrom:
+            secretKeyRef:
+              name: ses-credentials
+              key: username
+              optional: true
+        - name: SES_SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ses-credentials
+              key: password
+              optional: true
         volumeMounts:
         - name: config
           mountPath: /opt/stalwart/etc
