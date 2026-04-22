@@ -31,12 +31,25 @@ alertmanager:
         hosts:
           - 'alertmanager.internal.{{ env "INFRA_DOMAIN" }}'
           - 'alertmanager.prod.{{ env "INFRA_DOMAIN" }}'
+  alertmanagerSpec:
+    # SES password is mounted as a file — Alertmanager reads smtp_auth_password_file.
+    # Created by deploy_infra before the helmfile sync.
+    volumes:
+      - name: ses-credentials
+        secret:
+          secretName: ses-credentials
+    volumeMounts:
+      - name: ses-credentials
+        mountPath: /etc/alertmanager/ses
+        readOnly: true
   # AlertManager configuration for production alerting
   config:
     global:
-      smtp_smarthost: 'postfix-internal.infra-mail.svc.cluster.local:587'
+      smtp_smarthost: '{{ requiredEnv "SES_SMTP_ENDPOINT" }}:587'
       smtp_from: 'alertmanager@{{ env "INFRA_DOMAIN" }}'
-      smtp_require_tls: false
+      smtp_auth_username: '{{ requiredEnv "SES_SMTP_USERNAME" }}'
+      smtp_auth_password_file: '/etc/alertmanager/ses/password'
+      smtp_require_tls: true
     route:
       receiver: 'default'
       group_by: ['alertname', 'severity', 'namespace']
