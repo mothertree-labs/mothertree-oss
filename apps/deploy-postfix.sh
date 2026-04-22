@@ -48,7 +48,7 @@ mt_require_env
 source "${REPO_ROOT}/scripts/lib/infra-config.sh"
 mt_load_infra_config
 
-mt_require_commands kubectl envsubst shasum
+mt_require_commands kubectl envsubst shasum jq
 
 MANIFESTS_DIR="$REPO_ROOT/apps/manifests/postfix"
 
@@ -151,11 +151,52 @@ kubectl delete rolebinding postfix-tailscale -n "$NS_MAIL" --ignore-not-found=tr
 kubectl delete secret ses-credentials -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
 kubectl delete configmap postfix-ses-env -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
 kubectl delete configmap opendkim-config -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+# The submission-only Service is gone too.
+kubectl delete service postfix-internal -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+
+# Pre-PR-4 create_env added the opendkim sidecar's per-tenant `dkim-key-<tenant>`
+# volumes + volumeMounts via imperative `kubectl patch`, so those entries live
+# outside last-applied-configuration and the 3-way merge apply below would not
+# remove them — leaving the Deployment with orphan volumes referencing Secrets
+# we're about to delete. Strategic-merge-delete the opendkim container (takes
+# its volumeMounts with it, atomically) and any dkim-key-* volumes at pod level.
+# Idempotent no-op on envs that never had them.
+dep_live=$(kubectl get deployment postfix -n "$NS_MAIL" -o json 2>/dev/null || true)
+if [ -n "$dep_live" ]; then
+  # printf '%s' (not echo) — echo may mangle embedded backslashes/control bytes.
+  cleanup_patch=$(printf '%s' "$dep_live" | jq -c '
+    ([ .spec.template.spec.volumes[]?.name
+       | select(startswith("dkim-key-")) ]) as $orphan_vols
+    | ([ .spec.template.spec.containers[]?.name
+         | select(. == "opendkim") ]) as $dead_containers
+    | if ($orphan_vols | length) == 0 and ($dead_containers | length) == 0 then null
+      else {
+        spec: {
+          template: {
+            spec: (
+              ( if ($dead_containers | length) > 0
+                then {containers: ($dead_containers | map({name: ., "$patch": "delete"}))}
+                else {} end )
+              + ( if ($orphan_vols | length) > 0
+                  then {volumes: ($orphan_vols | map({name: ., "$patch": "delete"}))}
+                  else {} end )
+            )
+          }
+        }
+      } end
+  ')
+  if [ "$cleanup_patch" != "null" ]; then
+    print_status "Cleaning up pre-PR-4 Deployment orphans (opendkim container + dkim-key-* volumes)..."
+    kubectl patch deployment postfix -n "$NS_MAIL" --type=strategic -p "$cleanup_patch" >/dev/null
+  fi
+fi
+
+# After the Deployment spec is clean, delete the per-tenant dkim-key Secrets.
+# Order matters: deleting Secrets while the Deployment still referenced them
+# would leave the pod FailedMount until the next apply.
 for legacy_dkim in $(kubectl get secrets -n "$NS_MAIL" -o name 2>/dev/null | grep -E '^secret/dkim-key-' || true); do
   kubectl delete "$legacy_dkim" -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
 done
-# The submission-only Service is gone too.
-kubectl delete service postfix-internal -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
 
 # =============================================================================
 # Create/update ConfigMaps
