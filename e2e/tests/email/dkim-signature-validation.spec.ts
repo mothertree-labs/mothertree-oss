@@ -13,6 +13,17 @@ const config = fs.existsSync(configPath)
 
 const echoGroupAddress = process.env.E2E_ECHO_GROUP_ADDRESS || config.echoGroupAddress;
 
+/**
+ * DKIM signing on outbound mail requires AWS SES Easy DKIM to be in the path
+ * (post-PR-1 commit 411c3aa: Stalwart no longer signs; SES signs post-relay
+ * with its own rotated keys). Dev has no SES credentials → direct-MX delivery
+ * → no designed signer, so this test's invariant does not hold on dev.
+ *
+ * Opt in via E2E_EXPECT_DKIM_SIGNED=true (set in prod CI when SES is wired up).
+ */
+const expectDkimSigned =
+  process.env.E2E_EXPECT_DKIM_SIGNED === 'true' || config.expectDkimSigned === true;
+
 async function roundcubeLogin(page: import('@playwright/test').Page, username: string, password: string) {
   await page.goto(`${urls.webmail}/?_task=login&_action=oauth`);
   await page.waitForLoadState('networkidle');
@@ -60,6 +71,11 @@ function parseDkimSignatures(rawMime: string): Array<Record<string, string>> {
 
 test.describe('Email — DKIM Signature on Outbound Mail', () => {
   test.skip(!isImapConfigured(), 'IMAP not configured (E2E_STALWART_ADMIN_PASSWORD not set)');
+  test.skip(
+    !expectDkimSigned,
+    'DKIM signing path not configured for this environment (no SES Easy DKIM). ' +
+      'Set E2E_EXPECT_DKIM_SIGNED=true in envs where an outbound signer is in the path.',
+  );
 
   // Verifies PR-1 of issue #349: per-tenant Stalwart signs outbound mail with
   // the tenant's DKIM key. Stalwart no longer signs directly — AWS SES Easy
