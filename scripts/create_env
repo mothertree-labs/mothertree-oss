@@ -418,64 +418,11 @@ else
     print_success "Email DNS records created for $EMAIL_DOMAIN"
 
     # =============================================================================
-    # Email: Create/update DKIM key secret and OpenDKIM config
-    # =============================================================================
-    print_status "Email: Configuring DKIM signing for $EMAIL_DOMAIN..."
-
-    kubectl create secret generic "dkim-key-${TENANT_NAME}" \
-      -n "$NS_MAIL" \
-      --from-literal="dkim.private=${DKIM_PRIVATE_KEY}" \
-      --dry-run=client -o yaml | kubectl apply -f -
-    print_status "DKIM key secret created: dkim-key-${TENANT_NAME}"
-
-    # Patch OpenDKIM ConfigMap to include this tenant's email domain
-    CURRENT_SIGNING=$(kubectl get configmap opendkim-config -n "$NS_MAIL" -o jsonpath='{.data.SigningTable}' 2>/dev/null || echo "")
-    CURRENT_KEYTABLE=$(kubectl get configmap opendkim-config -n "$NS_MAIL" -o jsonpath='{.data.KeyTable}' 2>/dev/null || echo "")
-
-    if echo "$CURRENT_SIGNING" | grep -q "$EMAIL_DOMAIN"; then
-      print_status "OpenDKIM already configured for $EMAIL_DOMAIN"
-    else
-      NEW_SIGNING="${CURRENT_SIGNING}
-*@${EMAIL_DOMAIN} default._domainkey.${EMAIL_DOMAIN}"
-      NEW_KEYTABLE="${CURRENT_KEYTABLE}
-default._domainkey.${EMAIL_DOMAIN} ${EMAIL_DOMAIN}:default:/etc/dkim-keys/${TENANT_NAME}/dkim.private"
-
-      PATCH_JSON=$(jq -n \
-        --arg signing "$NEW_SIGNING" \
-        --arg keytable "$NEW_KEYTABLE" \
-        '{"data": {"SigningTable": $signing, "KeyTable": $keytable}}')
-
-      kubectl patch configmap opendkim-config -n "$NS_MAIL" --type=merge -p "$PATCH_JSON"
-
-      print_status "OpenDKIM ConfigMap updated for $EMAIL_DOMAIN"
-    fi
-
-    # Patch Postfix deployment to mount this tenant's DKIM key
-    EXISTING_VOLUMES=$(kubectl get deployment postfix -n "$NS_MAIL" -o jsonpath='{.spec.template.spec.volumes[*].name}' 2>/dev/null || echo "")
-    if echo "$EXISTING_VOLUMES" | grep -q "dkim-key-${TENANT_NAME}"; then
-      print_status "DKIM key volume already mounted for $TENANT_NAME"
-    else
-      print_status "Patching Postfix deployment to mount DKIM key for $TENANT_NAME..."
-      kubectl patch deployment postfix -n "$NS_MAIL" --type=json -p="[
-        {\"op\": \"add\", \"path\": \"/spec/template/spec/volumes/-\", \"value\": {
-          \"name\": \"dkim-key-${TENANT_NAME}\",
-          \"secret\": {
-            \"secretName\": \"dkim-key-${TENANT_NAME}\",
-            \"items\": [{\"key\": \"dkim.private\", \"path\": \"dkim.private\"}]
-          }
-        }},
-        {\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/volumeMounts/-\", \"value\": {
-          \"name\": \"dkim-key-${TENANT_NAME}\",
-          \"mountPath\": \"/etc/dkim-keys/${TENANT_NAME}\",
-          \"readOnly\": true
-        }}
-      ]" 2>/dev/null || print_warning "Could not patch Postfix deployment - may need manual configuration"
-      print_status "Postfix deployment patched with DKIM key mount"
-    fi
-
-    # =============================================================================
     # Email: Configure Postfix mail routing for all tenants
     # =============================================================================
+    # DKIM signing is handled by tenant Stalwart → AWS SES Easy DKIM. No in-cluster
+    # signer exists anymore — the OpenDKIM sidecar, the dkim-key-<tenant> Secret in
+    # infra-mail, and the opendkim-config ConfigMap were all removed in step 2 PR-4.
     print_status "Email: Configuring Postfix mail routing for all tenants..."
     if [ -x "$REPO_ROOT/scripts/configure-mail-routing" ]; then
       "$REPO_ROOT/scripts/configure-mail-routing" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
@@ -484,8 +431,6 @@ default._domainkey.${EMAIL_DOMAIN} ${EMAIL_DOMAIN}:default:/etc/dkim-keys/${TENA
       print_warning "configure-mail-routing script not found - skipping routing config"
       kubectl rollout restart deployment/postfix -n "$NS_MAIL" 2>/dev/null || print_warning "Could not restart Postfix (may not exist yet)"
     fi
-
-    print_success "Email signing configured for $EMAIL_DOMAIN"
   fi
 fi
 

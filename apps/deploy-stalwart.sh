@@ -126,9 +126,11 @@ print_status "Master-user secret hash generated"
 # =============================================================================
 # Outbound mail path: SES relay (prod) or direct MX (dev)
 # =============================================================================
-# Stalwart signs outbound mail with the tenant's DKIM key (same key and selector
-# infra-Postfix/OpenDKIM still uses for other callers during the PR-2/PR-3/PR-4
-# transition). Receivers accepting multiple signatures is fine per RFC 6376.
+# Outbound DKIM signing is delegated to AWS SES Easy DKIM — Stalwart doesn't
+# sign. SES rewrites Message-ID and Date during relay, which invalidates any
+# Stalwart-side signature by the time it reaches the receiver. SES signs
+# post-mutation with its own rotated keys, and DMARC carries via that
+# signature's d=<tenant-domain> alignment.
 #
 # Route choice is environment-dependent:
 #   - SES configured (prod): relay via AWS SES on 587 with SASL auth. The
@@ -137,14 +139,10 @@ print_status "Master-user secret hash generated"
 #   - SES unset (dev): direct MX delivery from the cluster's egress IP. No
 #     smart host. Cluster egress IP has no PTR/SPF so receivers may tempfail,
 #     but that matches the existing dev behavior (see project_mail_paths_per_env).
-
-# Outbound DKIM signing is delegated to AWS SES Easy DKIM — Stalwart doesn't
-# sign. SES rewrites Message-ID and Date during relay, which invalidates any
-# Stalwart-side signature by the time it reaches the receiver. SES signs
-# post-mutation with its own rotated keys, and DMARC carries via that
-# signature's d=<tenant-domain> alignment. `.dkim.private_key` in tenant
-# secrets is still consumed by OpenDKIM on infra-Postfix and stays there
-# until PR-4 of #349.
+#
+# `.dkim.private_key` in tenant secrets is now unused by any cluster component
+# (the OpenDKIM sidecar and infra-mail dkim-key-<tenant> Secrets were removed
+# in step 2 PR-4). The field is kept in the secrets YAML for rollback safety.
 
 if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
     # Reject endpoints containing characters that could inject TOML directives

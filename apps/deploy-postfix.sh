@@ -1,14 +1,18 @@
 #!/bin/bash
 
 # Deploy Postfix K8s Resources
-# Purpose: Deploy Postfix SMTP server with OpenDKIM + Tailscale sidecars to infra-mail namespace
+# Purpose: Deploy Postfix SMTP server to infra-mail namespace for inbound MX dispatch.
+#
+# After step 2 PR-4, this pod runs a single Postfix container (no OpenDKIM sidecar,
+# no submission port, no outbound SES relay). Outbound signing + relay is handled
+# per-tenant by Stalwart → AWS SES Easy DKIM.
 #
 # Creates:
-#   - ServiceAccount + RBAC (for Tailscale state Secret management)
-#   - ConfigMaps (postfix-config, opendkim-config, postfix-init-scripts)
-#   - Secrets (Tailscale auth key)
-#   - Deployment (Postfix + OpenDKIM sidecar + Tailscale sidecar + prepare-routing init container)
-#   - Services (ClusterIP port 25, NodePort 30025, ClusterIP port 587)
+#   - ServiceAccount + RBAC (legacy — retained for rollback safety)
+#   - ConfigMaps (postfix-config, postfix-init-scripts)
+#   - Deployment (single Postfix container + prepare-routing init container)
+#   - Service (ClusterIP port 25)
+#   - Service (NodePort 30025, for inbound MX from the NodeBalancer)
 #   - NetworkPolicy
 #
 # Called by: deploy_infra (before configure-mail-routing)
@@ -49,34 +53,12 @@ mt_require_commands kubectl envsubst shasum
 MANIFESTS_DIR="$REPO_ROOT/apps/manifests/postfix"
 
 # =============================================================================
-# Load Postfix-specific config
-# =============================================================================
-
-# AWS SES SMTP credentials are optional. When set, K8s Postfix relays outbound through SES
-# (prod path). When unset, Postfix direct-delivers using the cluster node's egress IP
-# (dev path). All three SES_SMTP_* fields must be present together or the whole block
-# is treated as "not configured".
-SES_ENABLED=false
-if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
-  # Reject endpoints containing characters that could inject main.cf/sasl_passwd directives
-  # via newlines or backticks. Operator-controlled input, but defense-in-depth.
-  if ! [[ "$SES_SMTP_ENDPOINT" =~ ^[A-Za-z0-9.-]+$ ]]; then
-    print_error "SES_SMTP_ENDPOINT '$SES_SMTP_ENDPOINT' contains invalid characters (allowed: A-Za-z0-9.-)"
-    exit 1
-  fi
-  SES_ENABLED=true
-  export SES_SMTP_ENDPOINT
-fi
-
-# =============================================================================
 # Compute derived variables
 # =============================================================================
 
 # Postfix uses "relay" hostname to avoid conflicts with tenant Stalwart servers
 # Tenant Stalwarts use "mail.<domain>" as their hostname for user-facing SMTP
 export SMTP_HOSTNAME="relay.${SMTP_DOMAIN}"
-
-export DKIM_SELECTOR="default"
 
 # SECURITY: Trusted relay networks for K8s Postfix
 # Components:
@@ -112,11 +94,6 @@ export SMTP_ALLOWED_SENDER_DOMAINS
 print_status "Deploying Postfix to $NS_MAIL (env: $MT_ENV)"
 print_status "  SMTP domain: $SMTP_DOMAIN"
 print_status "  SMTP hostname: $SMTP_HOSTNAME"
-if [ "$SES_ENABLED" = "true" ]; then
-  print_status "  Outbound relay: AWS SES (endpoint: $SES_SMTP_ENDPOINT)"
-else
-  print_status "  Outbound relay: direct (no SES configured for this env)"
-fi
 print_status "  Trusted networks: $POSTFIX_MYNETWORKS"
 print_status "  Allowed sender domains: ${SMTP_ALLOWED_SENDER_DOMAINS:-<none>}"
 
@@ -132,45 +109,18 @@ trap "rm -rf $WORK_DIR" EXIT
 envsubst '${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${POSTFIX_MYNETWORKS}' \
   < "$MANIFESTS_DIR/postfix-main.cf.tpl" > "$WORK_DIR/main.cf"
 
-# SES outbound config is delivered to Postfix via POSTFIX_* env vars in the
-# postfix-ses-env ConfigMap (applied below, loaded via envFrom in the Deployment).
-# The boky/postfix image builds main.cf from POSTFIX_* env vars at container
-# startup, so relayhost and SASL/TLS settings must be env vars — appending them
-# to main.cf in a ConfigMap has no effect because main.cf is not mounted.
-
 # Process aliases template
 envsubst '${SMTP_DOMAIN}' \
   < "$MANIFESTS_DIR/postfix-aliases.tpl" > "$WORK_DIR/aliases"
-
-# Process OpenDKIM config template
-envsubst '${SMTP_DOMAIN} ${DKIM_SELECTOR}' \
-  < "$MANIFESTS_DIR/opendkim.conf.tpl" > "$WORK_DIR/opendkim.conf"
-
-# Create TrustedHosts file
-cat > "$WORK_DIR/TrustedHosts" <<'EOF'
-127.0.0.1
-localhost
-10.0.0.0/8
-172.16.0.0/12
-192.168.0.0/16
-EOF
 
 # =============================================================================
 # Compute config checksums for deployment annotations
 # =============================================================================
 
-# Include SES env var contents so a change to relayhost (or toggling SES on/off)
-# bumps the checksum and forces a pod restart even if main.cf hasn't changed.
-if [ "$SES_ENABLED" = "true" ]; then
-  SES_ENV_FINGERPRINT="[${SES_SMTP_ENDPOINT}]:587"
-else
-  SES_ENV_FINGERPRINT="direct-send"
-fi
-CHECKSUM_POSTFIX_CONFIG=$(cat "$WORK_DIR/main.cf" "$MANIFESTS_DIR/postfix-master.cf" "$WORK_DIR/aliases" <(printf '%s\n' "$SES_ENV_FINGERPRINT") | shasum -a 256 | cut -d' ' -f1)
-CHECKSUM_OPENDKIM_CONFIG=$(cat "$WORK_DIR/opendkim.conf" "$WORK_DIR/TrustedHosts" | shasum -a 256 | cut -d' ' -f1)
+CHECKSUM_POSTFIX_CONFIG=$(cat "$WORK_DIR/main.cf" "$MANIFESTS_DIR/postfix-master.cf" "$WORK_DIR/aliases" | shasum -a 256 | cut -d' ' -f1)
 CHECKSUM_INIT_SCRIPTS=$(shasum -a 256 "$MANIFESTS_DIR/10-master-cf-overrides.sh" | cut -d' ' -f1)
 
-export CHECKSUM_POSTFIX_CONFIG CHECKSUM_OPENDKIM_CONFIG CHECKSUM_INIT_SCRIPTS
+export CHECKSUM_POSTFIX_CONFIG CHECKSUM_INIT_SCRIPTS
 
 # =============================================================================
 # Apply RBAC (ServiceAccount, Role, RoleBinding for Tailscale state Secrets)
@@ -191,46 +141,21 @@ kubectl delete role postfix-tailscale -n "$NS_MAIL" --ignore-not-found=true >/de
 kubectl delete rolebinding postfix-tailscale -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
 
 # =============================================================================
-# Apply SES credentials Secret (only when SES is configured for this env)
+# Clean up legacy PR-4 artifacts (SES relay + OpenDKIM sidecar)
 # =============================================================================
-# Format matches Postfix SASL password map syntax — initContainer runs postmap
-# on the copy placed in /etc/postfix/tables/. TLS policy map enforces CA-verified
-# TLS for the SES endpoint. Writes via temp files (not --from-literal) so the
-# SES password never appears in kubectl's /proc/<pid>/cmdline.
-
-if [ "$SES_ENABLED" = "true" ]; then
-  SES_SECRET_DIR=$(mktemp -d)
-  trap 'rm -rf "$WORK_DIR" "$SES_SECRET_DIR"' EXIT
-  umask 077
-  printf '[%s]:587 %s:%s\n' "$SES_SMTP_ENDPOINT" "$SES_SMTP_USERNAME" "$SES_SMTP_PASSWORD" \
-    > "$SES_SECRET_DIR/sasl_passwd"
-  printf '[%s]:587 secure\n' "$SES_SMTP_ENDPOINT" > "$SES_SECRET_DIR/tls_policy"
-
-  print_status "Applying SES credentials Secret..."
-  kubectl create secret generic ses-credentials -n "$NS_MAIL" \
-    --from-file=sasl_passwd="$SES_SECRET_DIR/sasl_passwd" \
-    --from-file=tls_policy="$SES_SECRET_DIR/tls_policy" \
-    --dry-run=client -o yaml | mt_apply kubectl apply -f -
-
-  # SES outbound config delivered as POSTFIX_* env vars via envFrom in the Deployment.
-  # boky/postfix builds main.cf from POSTFIX_* env vars at startup; ConfigMap appends
-  # to main.cf have no effect because /etc/postfix/main.cf isn't mounted.
-  # smtp_sasl_mechanism_filter restricts to PLAIN/LOGIN because SES doesn't support SCRAM.
-  print_status "Applying postfix-ses-env ConfigMap..."
-  kubectl create configmap postfix-ses-env -n "$NS_MAIL" \
-    --from-literal=POSTFIX_relayhost="[${SES_SMTP_ENDPOINT}]:587" \
-    --from-literal=POSTFIX_smtp_use_tls="yes" \
-    --from-literal=POSTFIX_smtp_sasl_auth_enable="yes" \
-    --from-literal=POSTFIX_smtp_sasl_security_options="noanonymous" \
-    --from-literal=POSTFIX_smtp_sasl_mechanism_filter="plain, login" \
-    --from-literal=POSTFIX_smtp_sasl_password_maps="hash:/etc/postfix/tables/sasl_passwd" \
-    --from-literal=POSTFIX_smtp_tls_policy_maps="hash:/etc/postfix/tables/tls_policy" \
-    --dry-run=client -o yaml | mt_apply kubectl apply -f -
-else
-  # Direct-send mode — ensure no stale SES artefacts linger from a prior SES-enabled deploy.
-  kubectl delete secret ses-credentials -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
-  kubectl delete configmap postfix-ses-env -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
-fi
+# After step 2 PR-4, infra-Postfix no longer relays outbound (tenant Stalwarts do
+# that) and no longer signs DKIM (AWS SES Easy DKIM does). Drop the Secrets and
+# ConfigMaps that only those two features needed. Per-tenant dkim-key-<tenant>
+# Secrets are cleaned up in the PR-4 rollout notes — they were only consumed by
+# the OpenDKIM sidecar which is gone, and nothing in-cluster references them.
+kubectl delete secret ses-credentials -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+kubectl delete configmap postfix-ses-env -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+kubectl delete configmap opendkim-config -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+for legacy_dkim in $(kubectl get secrets -n "$NS_MAIL" -o name 2>/dev/null | grep -E '^secret/dkim-key-' || true); do
+  kubectl delete "$legacy_dkim" -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
+done
+# The submission-only Service is gone too.
+kubectl delete service postfix-internal -n "$NS_MAIL" --ignore-not-found=true >/dev/null 2>&1 || true
 
 # =============================================================================
 # Create/update ConfigMaps
@@ -244,21 +169,6 @@ kubectl create configmap postfix-config -n "$NS_MAIL" \
   --from-file=aliases="$WORK_DIR/aliases" \
   --dry-run=client -o yaml | mt_apply kubectl apply -f -
 
-# OpenDKIM config ConfigMap
-# IMPORTANT: Preserve existing KeyTable and SigningTable (managed by create_env per-tenant)
-print_status "Applying opendkim-config ConfigMap..."
-EXISTING_KEYTABLE=$(kubectl get configmap opendkim-config -n "$NS_MAIL" \
-  -o jsonpath='{.data.KeyTable}' 2>/dev/null || echo "# Managed by create_env - tenant keys added dynamically")
-EXISTING_SIGNINGTABLE=$(kubectl get configmap opendkim-config -n "$NS_MAIL" \
-  -o jsonpath='{.data.SigningTable}' 2>/dev/null || echo "# Managed by create_env - tenant domains added dynamically")
-
-kubectl create configmap opendkim-config -n "$NS_MAIL" \
-  --from-file=opendkim.conf="$WORK_DIR/opendkim.conf" \
-  --from-literal=KeyTable="$EXISTING_KEYTABLE" \
-  --from-literal=SigningTable="$EXISTING_SIGNINGTABLE" \
-  --from-file=TrustedHosts="$WORK_DIR/TrustedHosts" \
-  --dry-run=client -o yaml | mt_apply kubectl apply -f -
-
 # Init scripts ConfigMap
 print_status "Applying postfix-init-scripts ConfigMap..."
 kubectl create configmap postfix-init-scripts -n "$NS_MAIL" \
@@ -268,13 +178,10 @@ kubectl create configmap postfix-init-scripts -n "$NS_MAIL" \
 # =============================================================================
 # Apply Deployment
 # =============================================================================
-# Use server-side apply with field manager to preserve DKIM volumes added by create_env.
-# create_env patches the Deployment to add per-tenant DKIM key volumes and volume mounts.
-# SSA ensures those fields (owned by kubectl-patch) are not removed when we re-apply.
 print_status "Applying Postfix Deployment..."
-envsubst '${NS_MAIL} ${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${SMTP_ALLOWED_SENDER_DOMAINS} ${POSTFIX_MYNETWORKS} ${CHECKSUM_POSTFIX_CONFIG} ${CHECKSUM_OPENDKIM_CONFIG} ${CHECKSUM_INIT_SCRIPTS}' \
+envsubst '${NS_MAIL} ${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${SMTP_ALLOWED_SENDER_DOMAINS} ${POSTFIX_MYNETWORKS} ${CHECKSUM_POSTFIX_CONFIG} ${CHECKSUM_INIT_SCRIPTS}' \
   < "$MANIFESTS_DIR/deployment.yaml.tpl" \
-  | kubectl apply -f - --server-side --field-manager=deploy-postfix --force-conflicts
+  | mt_apply kubectl apply -f -
 
 # =============================================================================
 # Apply Services
@@ -282,7 +189,6 @@ envsubst '${NS_MAIL} ${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${SMTP_ALLOWED_SENDER_DOMAI
 print_status "Applying Postfix Services..."
 envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/service-smtp.yaml.tpl" | kubectl apply -f -
 envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/service-nodeport.yaml.tpl" | kubectl apply -f -
-envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/service-internal.yaml.tpl" | kubectl apply -f -
 
 # =============================================================================
 # Apply NetworkPolicy
