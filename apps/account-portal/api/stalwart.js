@@ -19,12 +19,16 @@ function getAdminAuth() {
  * Called after principal changes to ensure RCPT TO reflects current state.
  */
 async function reloadConfig() {
-  const adminAuth = getAdminAuth();
-  const response = await fetch(`${STALWART_API_URL}/api/reload`, {
-    headers: { 'Authorization': adminAuth },
-  });
-  if (!response.ok) {
-    console.warn(`Stalwart: config reload returned ${response.status}`);
+  try {
+    const adminAuth = getAdminAuth();
+    const response = await fetch(`${STALWART_API_URL}/api/reload`, {
+      headers: { 'Authorization': adminAuth },
+    });
+    if (!response.ok) {
+      console.warn(`Stalwart: config reload returned ${response.status}`);
+    }
+  } catch (err) {
+    console.warn(`Stalwart: config reload failed: ${err.message}`);
   }
 }
 
