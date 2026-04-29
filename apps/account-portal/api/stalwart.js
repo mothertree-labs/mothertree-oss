@@ -19,16 +19,12 @@ function getAdminAuth() {
  * Called after principal changes to ensure RCPT TO reflects current state.
  */
 async function reloadConfig() {
-  try {
-    const adminAuth = getAdminAuth();
-    const response = await fetch(`${STALWART_API_URL}/api/reload`, {
-      headers: { 'Authorization': adminAuth },
-    });
-    if (!response.ok) {
-      console.warn(`Stalwart: config reload returned ${response.status}`);
-    }
-  } catch (err) {
-    console.warn(`Stalwart: config reload failed: ${err.message}`);
+  const adminAuth = getAdminAuth();
+  const response = await fetch(`${STALWART_API_URL}/api/reload`, {
+    headers: { 'Authorization': adminAuth },
+  });
+  if (!response.ok) {
+    console.warn(`Stalwart: config reload returned ${response.status}`);
   }
 }
 
@@ -79,14 +75,16 @@ async function ensureUserExists(email, name, quotaBytes) {
   }
 
   if (!createResponse.ok) {
-    // Don't fail - principal might exist via OIDC directory
-    console.log(`Stalwart: principal may exist via directory (status ${createResponse.status})`);
+    const error = await createResponse.text();
+    throw new Error(`Failed to create Stalwart principal: ${createResponse.status} ${error}`);
   }
 
   const responseData = await createResponse.json();
-  // Don't throw - user might exist via directory even if deploy fails
-  if (responseData.error && responseData.error !== 'fieldAlreadyExists') {
-    console.log(`Stalwart: principal may exist via directory: ${responseData.error}`);
+  if (responseData.error === 'fieldAlreadyExists') {
+    return { created: false };
+  }
+  if (responseData.error) {
+    throw new Error(`Stalwart principal creation failed: ${responseData.error} - ${responseData.details || 'no details'}`);
   }
 
   // Clear directory cache so RCPT TO picks up the new principal immediately
@@ -226,10 +224,9 @@ async function setUserCrypto(email, pgpPublicKey, algo = 'Aes256', allowSpamTrai
   }
 
   const data = await getResponse.json();
-  if (data.error === 'notFound') {
+  if (data.error) {
     throw new Error(`Principal not found: ${data.error}`);
   }
-  // Note: Some responses include error key even for existing principals - ignore those
 
   // Set crypto via account API using master-user authentication
   // Format: user@domain%master:admin_password
