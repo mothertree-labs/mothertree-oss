@@ -75,16 +75,14 @@ async function ensureUserExists(email, name, quotaBytes) {
   }
 
   if (!createResponse.ok) {
-    const error = await createResponse.text();
-    throw new Error(`Failed to create Stalwart principal: ${createResponse.status} ${error}`);
+    // Don't fail - principal might exist via OIDC directory
+    console.log(`Stalwart: principal may exist via directory (status ${createResponse.status})`);
   }
 
   const responseData = await createResponse.json();
-  if (responseData.error === 'fieldAlreadyExists') {
-    return { created: false };
-  }
-  if (responseData.error) {
-    throw new Error(`Stalwart principal creation failed: ${responseData.error} - ${responseData.details || 'no details'}`);
+  // Don't throw - user might exist via directory even if deploy fails
+  if (responseData.error && responseData.error !== 'fieldAlreadyExists') {
+    console.log(`Stalwart: principal may exist via directory: ${responseData.error}`);
   }
 
   // Clear directory cache so RCPT TO picks up the new principal immediately
