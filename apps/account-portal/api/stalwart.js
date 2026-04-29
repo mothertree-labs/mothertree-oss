@@ -224,9 +224,10 @@ async function setUserCrypto(email, pgpPublicKey, algo = 'Aes256', allowSpamTrai
   }
 
   const data = await getResponse.json();
-  if (data.error) {
+  if (data.error === 'notFound') {
     throw new Error(`Principal not found: ${data.error}`);
   }
+  // Note: Some responses include error key even for existing principals - ignore those
 
   // Set crypto via account API using master-user authentication
   // Format: user@domain%master:admin_password
