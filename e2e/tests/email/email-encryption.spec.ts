@@ -171,7 +171,7 @@ test.describe('Email — Encryption at Rest', () => {
     console.log('  [crypto] Encryption enable result:', JSON.stringify(encryptionResult));
     expect(encryptionResult.error, 'Should not have error enabling encryption').toBeUndefined();
 
-    // ── Step 2: Sender sends email to echo group ──
+    // ── Step 4: Sender sends email to echo group ──
     console.log('  [crypto] Step 4: Sender logs in and sends email to echo group');
     await roundcubeLogin(senderPage, sender.username, sender.password);
 
@@ -196,14 +196,21 @@ test.describe('Email — Encryption at Rest', () => {
     const bodyFrame = senderPage.frameLocator('iframe').first();
     await bodyFrame.locator('body').fill('E2E encryption at rest test');
 
-    await senderPage.getByRole('button', { name: 'Send' }).click();
+    const sendButton = senderPage.getByRole('button', { name: 'Send' });
+    await sendButton.waitFor({ state: 'visible', timeout: 10_000 });
+    // Click the send button using JavaScript to ensure Roundcube's onclick handler fires
+    await senderPage.evaluate(() => {
+      const btn = document.querySelector('button.btn-primary.send') as HTMLElement;
+      if (btn) btn.click();
+    });
     await senderPage.waitForFunction(
       () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
       { timeout: 30_000 },
     );
 
-    // ── Step 3: Receiver polls for the forwarded email ──
+    // ── Step 5: Receiver polls for the forwarded email ──
     console.log('  [crypto] Step 5: Receiver polls for encrypted email in inbox');
+    await roundcubeLogin(receiverPage, receiver.username, receiver.password);
 
     const maxWait = 120_000;
     const pollInterval = 5000;
@@ -236,7 +243,7 @@ test.describe('Email — Encryption at Rest', () => {
 
     expect(found, `Expected email with subject "${subject}" to appear in inbox`).toBe(true);
 
-    // ── Step 4: Verify email is encrypted (not plaintext) ──
+    // ── Step 6: Verify email is encrypted (not plaintext) ──
     console.log('  [crypto] Step 6: Verify email body is encrypted (not plaintext)');
     await receiverPage.locator(`td:has-text("${subject}")`).first().click();
     await receiverPage.waitForTimeout(2000);
