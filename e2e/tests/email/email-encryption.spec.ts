@@ -198,20 +198,34 @@ test.describe('Email — Encryption at Rest', () => {
 
     const sendButton = senderPage.getByRole('button', { name: 'Send' });
     await sendButton.waitFor({ state: 'visible', timeout: 10_000 });
-    // Click the send button using JavaScript to ensure Roundcube's onclick handler fires
-    await senderPage.evaluate(() => {
-      const btn = document.querySelector('button.btn-primary.send') as HTMLElement;
-      if (btn) btn.click();
+
+    // Log button state before clicking
+    const buttonText = await sendButton.textContent();
+    const isEnabled = await sendButton.isEnabled();
+    console.log(`  [crypto] Send button text: "${buttonText}", enabled: ${isEnabled}`);
+
+    // Try triggering Roundcube's send command directly via rcmail.command()
+    const sendResult = await senderPage.evaluate(() => {
+      if (!(window as any).rcmail) return 'rcmail not found';
+      try {
+        (window as any).rcmail.command('send', '', null);
+        return 'send command triggered';
+      } catch(e) {
+        return 'error: ' + e;
+      }
     });
+    console.log(`  [crypto] Send command result: ${sendResult}`);
+
+    await senderPage.waitForTimeout(5000);
     await senderPage.waitForFunction(
       () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
       { timeout: 30_000 },
     );
 
-    // ── Step 5: Receiver polls for the forwarded email ──
-    console.log('  [crypto] Step 5: Receiver polls for encrypted email in inbox');
+    console.log('  [crypto] Step 5: Receiver logs in');
     await roundcubeLogin(receiverPage, receiver.username, receiver.password);
 
+    console.log('  [crypto] Step 6: Receiver polls for encrypted email in inbox');
     const maxWait = 120_000;
     const pollInterval = 5000;
     let found = false;
