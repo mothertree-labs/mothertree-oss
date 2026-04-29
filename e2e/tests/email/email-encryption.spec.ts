@@ -2,6 +2,7 @@ import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
+import { isImapConfigured } from '../../helpers/imap';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as https from 'https';
@@ -18,22 +19,27 @@ const stalwartAdminPassword = process.env.E2E_STALWART_ADMIN_PASSWORD || config.
 const STALWART_API_URL = `https://mail.${baseDomain}`;
 
 const TEST_PGP_PUBLIC_KEY = `-----BEGIN PGP PUBLIC KEY BLOCK-----
-mQENBF+4rWIBAATLAksQ7v0xN0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7J3dIJPBZ
-wE4X+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X
-+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF
-4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7
-J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7J3dIJPBZ
-wE4X+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X
-+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X+Mi20E
-EHrF4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF
-4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+
-JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0j7J3dIJPBZwE4X+Mi20EEHrF4n+JB0
-j7J3dIJPBZw=
+
+mQENBGnyOzUBCADPLRI3CExFwCyWyRQ34ljlnCwa9tii+XhB45Db7ESCrucUUgnM
++oUNekpY0kJMcLaveWnH0GFCBFMMkX644sWrBFO20LvhEYlzC9az7WcV/wl/MYs1
+biYBAay7mkfOsDy6OC8HyqGDtPu6aLh2zh618LNwu7nRdlL5d+8/+gg8vSPHR1zO
+VqnZJESjdLrSJrOdKwkZz7UNBQ6tre994WnUzmwSW/C6f87cf+q0tnqNh2qhQHEM
+yO8psf/wYZwPupLKugV+iWU/rsk5J/wNJhsSHeHFgH8cp0fbDDri8Z01Ea3sidZx
+AC3hN7c416hMfO1Y3iQJbk2Neu6JwMJuzmcfABEBAAG0HEUyRSBUZXN0IDxlMmUt
+dGVzdEB0ZXN0LmNvbT6JAVIEEwEKADwWIQSvKKFNWpF26o3+orZKrM8y/MBk8gUC
+afI7NQMbLwQFCwkIBwICIgIGFQoJCAsCBBYCAwECHgcCF4AACgkQSqzPMvzAZPIX
+iwf9GJAcfhKwbBD7/li34NwLx71gokvmjBftvx3O4XfA4AI4JIPO3gS3Utg7AEzz
+EGNKlBrOZ2qCdrXDqUTjUk68SYt5m9pIg24wM6xBzaE9moih4JduXzBVdbnmj5EE
+NGcnhCb5q1zj48KSV6VXrImgvitw263ty5AGd/GzcSA3aS8HzIPIovtgao8IWMlt
+LEDhKp9KAtj+XXWovrfEg+bGLrwSGcysHata6gAB9sU09OMVUoc9WLl66ut5ZsCu
+1F0z361PA+KEqweGLSIVwaJ4x0UMru5HT4LlHN5051RaKvA474mCWN/SN25xLbzl
+V/0aH45DOGJN/WbpAssESdXrXg==
+=tpxP
 -----END PGP PUBLIC KEY BLOCK-----
 `;
 
 function stalwartRequest(
-  requestPath: string,
+  fullUrl: string,
   options: {
     method?: string;
     body?: object;
@@ -41,7 +47,8 @@ function stalwartRequest(
   }
 ): Promise<any> {
   return new Promise((resolve, reject) => {
-    const url = new URL(requestPath, STALWART_API_URL);
+    // Support both absolute URLs (for JMAP port) and relative paths (for API)
+    const url = fullUrl.startsWith('http') ? new URL(fullUrl) : new URL(fullUrl, STALWART_API_URL);
 
     const authHeader = options.auth
       ? 'Basic ' + Buffer.from(options.auth).toString('base64')
@@ -59,9 +66,9 @@ function stalwartRequest(
       rejectUnauthorized: false,
     };
 
-    const req = https.request(requestOptions, (res) => {
+    const req = https.request(requestOptions, (res: any) => {
       let data = '';
-      res.on('data', (chunk) => (data += chunk));
+      res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         try {
           resolve(data ? JSON.parse(data) : { status: res.statusCode });
@@ -98,50 +105,86 @@ async function roundcubeLogin(
 }
 
 test.describe('Email — Encryption at Rest', () => {
-  test('enable encryption via Stalwart API, send email, verify delivery', async ({
-    emailRecvPage,
+  test('enable encryption, send email via echo group, verify delivery', async ({
+    emailTestPage: senderPage,
+    emailRecvPage: receiverPage,
   }) => {
     test.setTimeout(180_000);
 
-    expect(
-      echoGroupAddress,
-      'Set E2E_ECHO_GROUP_ADDRESS env var'
-    ).toBeTruthy();
+    expect(echoGroupAddress, 'Set E2E_ECHO_GROUP_ADDRESS env var').toBeTruthy();
+    expect(stalwartAdminPassword, 'Set E2E_STALWART_ADMIN_PASSWORD env var').toBeTruthy();
 
-    expect(
-      stalwartAdminPassword,
-      'Set E2E_STALWART_ADMIN_PASSWORD env var'
-    ).toBeTruthy();
-
+    const sender = TEST_USERS.emailTest;
     const receiver = TEST_USERS.emailRecv;
-
-    console.log('  [crypto] Step 1: Verify Stalwart API is accessible');
-
-    // Use admin auth to verify API access
     const adminAuth = `admin:${stalwartAdminPassword}`;
-    const apiResult = await stalwartRequest(`/api/principal/${encodeURIComponent(receiver.email)}`, {
-      method: 'GET',
-      auth: adminAuth,
-    });
 
-    console.log('  [crypto] API response:', JSON.stringify(apiResult));
+    // ── Step 1: Enable encryption for receiver ──
+    console.log('  [crypto] Step 1: Log in as receiver to create Stalwart principal');
+    await roundcubeLogin(receiverPage, receiver.username, receiver.password);
 
-    // The API should respond (even if user not found, it should NOT timeout or return 504)
-    expect(apiResult.status, 'API should be accessible (no 504 timeout)').not.toBe(504);
+    const principalName = receiver.username;
+    console.log(`  [crypto] Using principal name: ${principalName}`);
 
-    console.log('  [crypto] Step 2: Send email to echo group via Roundcube');
+    // Poll for principal to appear in API
+    let principalResult: any = { error: 'notFound' };
+    for (let i = 0; i < 10; i++) {
+      principalResult = await stalwartRequest(
+        `/api/principal/${encodeURIComponent(principalName)}`,
+        { method: 'GET', auth: adminAuth }
+      );
+      if (!principalResult.error) break;
+      console.log(`  [crypto] Principal not found, retrying... (${i + 1}/10)`);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    console.log('  [crypto] Principal response:', JSON.stringify(principalResult));
+    expect(principalResult.error, 'Principal should exist after login').toBeUndefined();
 
-    await roundcubeLogin(emailRecvPage, receiver.username, receiver.password);
-
-    await emailRecvPage.waitForFunction(
-      () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
-      { timeout: 30_000 }
+    console.log('  [crypto] Step 2: Create app password for crypto API');
+    const appPassword = `e2ecrypto${Date.now()}`;
+    const appPasswordResult = await stalwartRequest(
+      `/api/principal/${encodeURIComponent(principalName)}`,
+      {
+        method: 'PATCH',
+        auth: adminAuth,
+        body: [
+          { action: 'addItem', field: 'secrets', value: `$app$crypto-test$${appPassword}` },
+        ],
+      }
     );
-    await emailRecvPage.getByRole('button', { name: 'Compose' }).click();
-    const subjectInput = emailRecvPage.getByRole('textbox', { name: 'Subject' });
+    console.log('  [crypto] App password result:', JSON.stringify(appPasswordResult));
+    expect(appPasswordResult.error, 'App password creation should succeed').toBeUndefined();
+
+    console.log('  [crypto] Step 3: Enable PGP encryption via /api/account/crypto');
+    const encryptionResult = await stalwartRequest(
+      `/api/account/crypto`,
+      {
+        method: 'POST',
+        auth: `${principalName}:${appPassword}`,
+        body: {
+          type: 'pGP',
+          algo: 'Aes256',
+          certs: TEST_PGP_PUBLIC_KEY,
+          allow_spam_training: true,
+        },
+      }
+    );
+    console.log('  [crypto] Encryption enable result:', JSON.stringify(encryptionResult));
+    expect(encryptionResult.error, 'Should not have error enabling encryption').toBeUndefined();
+
+    // ── Step 2: Sender sends email to echo group ──
+    console.log('  [crypto] Step 4: Sender logs in and sends email to echo group');
+    await roundcubeLogin(senderPage, sender.username, sender.password);
+
+    await senderPage.waitForFunction(
+      () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
+      { timeout: 30_000 },
+    );
+    await senderPage.getByRole('button', { name: 'Compose' }).click();
+
+    const subjectInput = senderPage.getByRole('textbox', { name: 'Subject' });
     await subjectInput.waitFor({ timeout: 15_000 });
 
-    const toInput = emailRecvPage.locator('.recipient-input input').first();
+    const toInput = senderPage.locator('.recipient-input input').first();
     await toInput.waitFor({ state: 'visible', timeout: 10_000 });
     await toInput.click();
     await toInput.pressSequentially(echoGroupAddress);
@@ -150,16 +193,17 @@ test.describe('Email — Encryption at Rest', () => {
     const subject = `E2E Encryption Test ${Date.now()}`;
     await subjectInput.fill(subject);
 
-    const bodyFrame = emailRecvPage.frameLocator('iframe').first();
+    const bodyFrame = senderPage.frameLocator('iframe').first();
     await bodyFrame.locator('body').fill('E2E encryption at rest test');
 
-    await emailRecvPage.getByRole('button', { name: 'Send' }).click();
+    await senderPage.getByRole('button', { name: 'Send' }).click();
+    await senderPage.waitForFunction(
+      () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
+      { timeout: 30_000 },
+    );
 
-    await emailRecvPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', {
-      timeout: 30_000,
-    });
-
-    console.log('  [crypto] Step 3: Poll for email delivery');
+    // ── Step 3: Receiver polls for the forwarded email ──
+    console.log('  [crypto] Step 5: Receiver polls for encrypted email in inbox');
 
     const maxWait = 120_000;
     const pollInterval = 5000;
@@ -167,23 +211,19 @@ test.describe('Email — Encryption at Rest', () => {
     const start = Date.now();
 
     while (Date.now() - start < maxWait) {
-      const refreshed = await emailRecvPage
-        .getByRole('button', { name: /refresh|check/i })
-        .first()
+      const refreshed = await receiverPage
+        .getByRole('button', { name: /refresh|check/i }).first()
         .click({ timeout: 3000 })
         .then(() => true)
         .catch(() => false);
       if (!refreshed) {
-        await emailRecvPage.reload();
-        await emailRecvPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', {
-          timeout: 15000,
-        });
+        await receiverPage.reload();
+        await receiverPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 15_000 });
       }
-      await emailRecvPage.waitForTimeout(2000);
+      await receiverPage.waitForTimeout(2000);
 
-      const hasSubject = await emailRecvPage
-        .locator(`td:has-text("${subject}")`)
-        .first()
+      const hasSubject = await receiverPage
+        .locator(`td:has-text("${subject}")`).first()
         .isVisible()
         .catch(() => false);
 
@@ -191,15 +231,26 @@ test.describe('Email — Encryption at Rest', () => {
         found = true;
         break;
       }
-
-      await emailRecvPage.waitForTimeout(pollInterval);
+      await receiverPage.waitForTimeout(pollInterval);
     }
 
-    expect(
-      found,
-      `Expected email with subject "${subject}" to appear in inbox`
-    ).toBe(true);
+    expect(found, `Expected email with subject "${subject}" to appear in inbox`).toBe(true);
 
-    console.log('  [crypto] Test passed: email delivered');
+    // ── Step 4: Verify email is encrypted (not plaintext) ──
+    console.log('  [crypto] Step 6: Verify email body is encrypted (not plaintext)');
+    await receiverPage.locator(`td:has-text("${subject}")`).first().click();
+    await receiverPage.waitForTimeout(2000);
+
+    const emailBody = await receiverPage
+      .locator('#messagebody, .message-part, .mailvelope, iframe')
+      .textContent({ timeout: 5000 })
+      .catch(() => '');
+
+    console.log('  [crypto] Email body preview:', emailBody.substring(0, 200));
+    const isPlaintext = emailBody.includes('E2E encryption at rest test');
+    console.log('  [crypto] Is plaintext:', isPlaintext);
+
+    expect(isPlaintext, 'Email should NOT be plaintext when PGP encryption at rest is enabled').toBe(false);
+    console.log('  [crypto] Test passed: email delivered and is encrypted at rest');
   });
 });
