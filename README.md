@@ -32,7 +32,7 @@ Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Eleme
 - **K8s Deployment**: Helmfile + Helm charts + raw manifests
 - **DNS**: Cloudflare API
 - **Auth**: Keycloak (OIDC, per-tenant realms, passkey support)
-- **Email**: Internet → cluster NodeBalancer:25 → K8s Postfix+OpenDKIM → per-tenant Stalwart (inbound); K8s Postfix → AWS SES (outbound)
+- **Email**: Internet → cluster NodeBalancer:25 → K8s Postfix → per-tenant Stalwart (inbound); tenant Stalwart → AWS SES (outbound, SES Easy DKIM signing)
 - **Monitoring**: Prometheus + Grafana + AlertManager + Vector (logs)
 
 ## Quick Start

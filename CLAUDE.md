@@ -12,7 +12,7 @@ Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Docs,
 - **DNS**: Cloudflare API (A, CNAME, MX, TXT, SRV records)
 - **Storage**: PostgreSQL (dedicated external VM per env, connected via Tailscale mesh; PgBouncer in K8s), S3 (Linode Objects, us-lax-1), Redis (per-tenant)
 - **Auth**: Keycloak (OIDC, per-tenant realms)
-- **Email**: Internet → cluster NodeBalancer:25 → K8s Postfix+OpenDKIM → per-tenant Stalwart (inbound); K8s Postfix → AWS SES (outbound)
+- **Email**: Internet → cluster NodeBalancer:25 → K8s Postfix → per-tenant Stalwart (inbound); tenant Stalwart → AWS SES (outbound, SES Easy DKIM signing)
 - **Mesh Network**: Headscale (self-hosted Tailscale control plane) — all VMs and K8s PgBouncer pods join the WireGuard mesh (100.64.0.0/10 CGNAT)
 - **Monitoring**: Prometheus + Grafana + AlertManager + Vector (logs)
 - **Tools**: helmfile, yq, kubectl, terraform, ansible, gh (GitHub CLI)
@@ -254,7 +254,7 @@ To cut a release: update `VERSION`, add a `CHANGELOG.md` entry, commit, tag `v<v
 
 - Kubeconfig files: `kubeconfig.prod.yaml`, `kubeconfig.dev.yaml` (at repo root)
 - Secrets files are gitignored — use `.example` files as templates
-- Postfix image: `boky/postfix:v5.1.0`, OpenDKIM sidecar: `instrumentisto/opendkim:2.10`
+- Postfix image: `boky/postfix:v5.1.0` (inbound MX dispatch only; OpenDKIM sidecar was removed in step 2 PR-4, outbound DKIM signing is delegated to AWS SES Easy DKIM)
 - Keycloak image: `quay.io/keycloak/keycloak:26.5.1`
 - DKIM selector: `default` (e.g., `default._domainkey.example.com`)
 - Stalwart ports are unique per tenant (hostPort mapping): SMTPS 465xx, Submission 587xx, IMAPS 993x

@@ -212,7 +212,7 @@ spec:
               # SMTP configuration for calendar invitations and notifications is now
               # handled via smtp.config.php in the Helm ConfigMap (see nextcloud.yaml.gotmpl).
               # This ensures all pods have consistent SMTP settings that survive restarts.
-              echo "SMTP: configured via ConfigMap (calendar@$SMTP_DOMAIN → postfix-internal:587)"
+              echo "SMTP: configured via ConfigMap (calendar@$SMTP_DOMAIN → tenant Stalwart :588 SASL)"
               
               # Collabora Online (richdocuments) — enable or disable based on office feature flag
               if [ "$OFFICE_ENABLED" = "true" ]; then
