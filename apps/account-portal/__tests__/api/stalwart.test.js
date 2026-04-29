@@ -90,22 +90,22 @@ describe('stalwart.js', () => {
       expect(result).toEqual({ created: false });
     });
 
-    it('returns success when deploy returns fieldAlreadyExists', async () => {
+    it('returns { created: false } when deploy endpoint returns fieldAlreadyExists', async () => {
       global.fetch
         .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'exists@example.com' }))
         .mockResolvedValueOnce(mockResponse(200, { error: 'fieldAlreadyExists' }));
 
       const result = await stalwart.ensureUserExists('exists@example.com', 'Existing User');
-      expect(result.created).toBe(true);
+      expect(result).toEqual({ created: false });
     });
 
-    it('returns success when deploy returns non-200 status', async () => {
+    it('throws on non-409 creation failure', async () => {
       global.fetch
         .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'user@example.com' }))
         .mockResolvedValueOnce(mockResponse(500, 'Internal Server Error'));
 
-      const result = await stalwart.ensureUserExists('user@example.com', 'User');
-      expect(result.created).toBe(true);
+      await expect(stalwart.ensureUserExists('user@example.com', 'User'))
+        .rejects.toThrow('Failed to create Stalwart principal: 500');
     });
 
     it('uses empty string for description when name is not provided', async () => {
@@ -120,7 +120,7 @@ describe('stalwart.js', () => {
       expect(body.description).toBe('');
     });
 
-    it('returns success when API returns unsupported error (OIDC directory mode)', async () => {
+    it('throws when API returns unsupported error (OIDC directory mode)', async () => {
       global.fetch
         .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'oidc@example.com' }))
         .mockResolvedValueOnce(mockResponse(200, {
@@ -128,8 +128,8 @@ describe('stalwart.js', () => {
           details: 'OpenID directory cannot be managed.',
         }));
 
-      const result = await stalwart.ensureUserExists('oidc@example.com', 'OIDC User', 0);
-      expect(result.created).toBe(true);
+      await expect(stalwart.ensureUserExists('oidc@example.com', 'OIDC User', 0))
+        .rejects.toThrow('Stalwart principal creation failed: unsupported');
     });
   });
 
