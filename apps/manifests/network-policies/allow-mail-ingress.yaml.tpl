@@ -47,7 +47,7 @@ spec:
           port: 587
         - protocol: TCP
           port: 4190
-    # NGINX ingress controller (TCP passthrough for external mail clients)
+    # NGINX ingress controller (TCP passthrough for external mail clients + HTTPS for JMAP/API)
     - from:
         - namespaceSelector:
             matchLabels:
@@ -63,6 +63,8 @@ spec:
           port: 993
         - protocol: TCP
           port: 994
+        - protocol: TCP
+          port: 443
     # Admin/Account portals (admin namespace) accessing Stalwart HTTP API
     # for user provisioning and quota management + SMTP submission
     - from:
