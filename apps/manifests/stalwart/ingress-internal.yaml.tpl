@@ -18,7 +18,7 @@ metadata:
     tenant: ${TENANT_NAME}
   annotations:
     kubernetes.io/ingress.class: nginx-internal
-    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
     nginx.ingress.kubernetes.io/proxy-body-size: "50m"
 spec:
   ingressClassName: nginx-internal
