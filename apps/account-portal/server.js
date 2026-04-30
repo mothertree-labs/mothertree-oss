@@ -1284,53 +1284,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Admin API: Initialize user with encryption-at-rest
-// POST /api/admin/init-user-encryption
-// Body: { email, name?, publicKey? }
-// Uses admin authentication via STALWART_ADMIN_PASSWORD
-app.post('/api/admin/init-user-encryption', async (req, res) => {
-  try {
-    const { email, name, publicKey } = req.body;
-    if (!email) {
-      return res.status(400).json({ error: 'email is required' });
-    }
-
-    const emailDomain = process.env.EMAIL_DOMAIN;
-    if (!email.endsWith(`@${emailDomain}`)) {
-      return res.status(400).json({ error: `email must be in @${emailDomain} domain` });
-    }
-
-    const displayName = name || email;
-
-    console.log(`[INIT] Creating user: ${email}`);
-
-    // 1. Ensure user exists in Stalwart
-    await stalwartApi.ensureUserExists(email, displayName, 5 * 1024 * 1024 * 1024);
-
-    // 2. Create app password
-    const password = crypto.randomBytes(16).toString('base64url');
-    await stalwartApi.createAppPassword(email, 'init-api', password);
-
-    // 3. If public key provided, enable encryption
-    if (publicKey) {
-      await stalwartApi.setUserCrypto(email, publicKey);
-      console.log(`[INIT] Encryption enabled for: ${email}`);
-    }
-
-    res.json({
-      success: true,
-      email,
-      appPassword: password,
-      encryptionEnabled: !!publicKey,
-    });
-
-    console.log(`[INIT] User initialized: ${email}`);
-  } catch (error) {
-    console.error('[INIT] Error:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Start server
 async function start() {
   try {
