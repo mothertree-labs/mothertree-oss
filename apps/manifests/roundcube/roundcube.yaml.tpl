@@ -126,7 +126,6 @@ data:
         'managesieve',
         'markasjunk',
         'nextcloud_calendar',
-        'mailvelope_client',
         'keyboard_shortcuts',
         'oauth_name'
     ];
