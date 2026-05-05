@@ -112,6 +112,7 @@ data:
     $config['referer_check'] = false;
     $config['x_frame_options'] = 'sameorigin';
     $config['use_https'] = true;  // Generate HTTPS URLs (don't redirect - ingress handles TLS)
+    $config['mailvelope_main_keyring'] = true;
     
     // Default folders
     $config['drafts_mbox'] = 'Drafts';
