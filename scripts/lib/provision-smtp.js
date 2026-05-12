@@ -54,6 +54,13 @@ const ROTATE = process.env.ROTATE === 'true';
 // by deploy-stalwart.sh) makes that name resolve to the Stalwart ClusterIP
 // inside the cluster, so TLS verifies against the existing wildcard cert
 // while traffic stays in-cluster.
+//
+// TODO(security): the admin/account portal nodemailer transports still set
+// `tls: { rejectUnauthorized: false }`, which defeats the purpose of the
+// CoreDNS rewrite (the whole point is that TLS verifies against the wildcard
+// cert from in-cluster). Track and remove those flags in a follow-up PR so
+// the portals catch the same cert/hostname regressions this smoke test now
+// catches at deploy time.
 const SMTP_RELAY_HOST = MAIL_HOST;
 const SUBMISSION_APP_PORT = '588';
 const APP_PASSWORD_NAME = 'smtp';
@@ -202,6 +209,105 @@ function readSecretField(namespace, name, key) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// End-to-end SMTP smoke test.
+//
+// Why: the per-tenant CoreDNS rewrite (deploy-stalwart.sh) and the Stalwart
+// principal/listener config are both required for callers to actually submit
+// mail. A misconfiguration in either layer surfaces later as flaky e2e
+// magic-link tests; we'd rather fail the deploy here. The probe verifies the
+// full chain — TCP reach to MAIL_HOST:588 (proves CoreDNS rewrite resolved
+// to the in-cluster ClusterIP), SMTP banner + EHLO (proves Stalwart's
+// submission listener is up), STARTTLS upgrade with hostname verification
+// (proves the wildcard cert is presented and aligns with MAIL_HOST — this
+// is the regression that motivated the CoreDNS rewrite in the first place).
+//
+// We deliberately skip SASL auth: it requires adding nodemailer/python to
+// the probe image; the three checks above already catch the cold-start
+// races we care about (CoreDNS not propagated, Stalwart listener not ready,
+// TLS cert mismatch).
+//
+// The probe runs from a tenant namespace (NS_ADMIN) so the per-tenant
+// CoreDNS rewrite applies — DNS rewrites are scoped by the answering pod's
+// search domains.
+// ---------------------------------------------------------------------------
+function runSmtpSmokeTest() {
+  const podName = `smtp-smoke-${process.pid}-${Date.now()}`;
+  const shellScript = `
+    apk add --no-cache openssl >/dev/null 2>&1
+    printf 'EHLO probe\\nQUIT\\n' | openssl s_client \\
+      -connect ${MAIL_HOST}:588 \\
+      -starttls smtp \\
+      -verify_hostname ${MAIL_HOST} \\
+      -verify_return_error \\
+      -crlf -quiet 2>&1 | head -40
+  `;
+
+  console.log(`[provision-smtp] Running SMTP smoke test against ${MAIL_HOST}:588 from ${NS_ADMIN}`);
+
+  let output;
+  try {
+    output = execFileSync('kubectl', [
+      'run', podName,
+      '-n', NS_ADMIN,
+      '--rm', '-i', '--restart=Never',
+      '--image=alpine:3.20',
+      '--quiet',
+      '--command', '--',
+      'sh', '-c', shellScript,
+    ], {
+      env: { ...process.env, KUBECONFIG },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // Bounded 60s — pod startup ~5–10s, openssl handshake should complete
+      // in <5s when healthy.
+      timeout: 60_000,
+    }).toString();
+  } catch (err) {
+    // execFileSync throws on non-zero exit OR on timeout (err.signal === 'SIGTERM').
+    // Capture whatever output the openssl pipeline managed to print.
+    const captured = (err.stdout ? err.stdout.toString() : '') + (err.stderr ? err.stderr.toString() : '');
+    // Best-effort cleanup — the pod is `--rm`, but if execFileSync timed out,
+    // kubectl was killed before it could delete the pod.
+    try {
+      execFileSync('kubectl', ['delete', 'pod', podName, '-n', NS_ADMIN, '--ignore-not-found=true', '--force', '--grace-period=0'], {
+        env: { ...process.env, KUBECONFIG },
+        stdio: ['ignore', 'ignore', 'ignore'],
+        timeout: 15_000,
+      });
+    } catch { /* ignore cleanup errors */ }
+    const timedOut = err.signal === 'SIGTERM' || /ETIMEDOUT/.test(String(err.message || ''));
+    throw new Error(
+      `SMTP smoke test ${timedOut ? 'timed out after 60s' : 'failed'} for ${MAIL_HOST}:588.\n` +
+      `Likely causes:\n` +
+      `  • CoreDNS rewrite has not propagated (mail.<domain> still resolves to the public LB IP, which does not expose 588)\n` +
+      `  • Stalwart submission listener is not ready on port 588\n` +
+      `  • TLS cert mismatch (wildcard cert not presented or hostname does not align with ${MAIL_HOST})\n` +
+      `Probe output (truncated):\n${captured.slice(0, 2000)}`,
+    );
+  }
+
+  // openssl's STARTTLS smtp dialog with EHLO emits a 220 banner, the EHLO
+  // response (250-*), and a "Verify return code: 0 (ok)" line on successful
+  // hostname verification. All three must be present.
+  const checks = [
+    { name: 'SMTP banner (220)', pattern: /\b220\b/ },
+    { name: 'EHLO response (250)', pattern: /\b250[- ]/ },
+    { name: 'TLS verify ok', pattern: /Verify return code: 0 \(ok\)/ },
+  ];
+  const failed = checks.filter((c) => !c.pattern.test(output));
+  if (failed.length > 0) {
+    throw new Error(
+      `SMTP smoke test for ${MAIL_HOST}:588 did not see expected markers: ${failed.map((c) => c.name).join(', ')}.\n` +
+      `Likely causes:\n` +
+      `  • CoreDNS rewrite has not propagated (mail.<domain> still resolves to the public LB IP, which does not expose 588)\n` +
+      `  • Stalwart submission listener is not ready on port 588\n` +
+      `  • TLS cert mismatch (wildcard cert not presented or hostname does not align with ${MAIL_HOST})\n` +
+      `Probe output (truncated):\n${output.slice(0, 2000)}`,
+    );
+  }
+  console.log(`[provision-smtp] SMTP smoke test passed (TCP + EHLO + STARTTLS + hostname verify)`);
+}
+
 function writeSecret({ namespace, name, host, port, username, password }) {
   const yaml = kubectl([
     'create', 'secret', 'generic', name,
@@ -311,6 +417,14 @@ async function main() {
   } else {
     console.log('[provision-smtp] No changes needed');
   }
+
+  // Verify the full SMTP submission path end-to-end before declaring success.
+  // Runs on every invocation (changed AND unchanged paths) — the unchanged
+  // path still needs verification because nothing else in the deploy proves
+  // the listener, cert, and DNS rewrite all line up on a fresh provision.
+  // Throws on failure; the outer .catch reports it and exits 1.
+  runSmtpSmokeTest();
+
   // Exit 0 when something was provisioned/rotated, 2 when nothing changed.
   // The shell wrapper uses this to gate caller rollout restarts so re-running
   // create_env on an existing tenant doesn't bounce pods unnecessarily.
