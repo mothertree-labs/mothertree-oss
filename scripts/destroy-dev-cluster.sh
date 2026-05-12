@@ -270,30 +270,43 @@ if [ "$CLUSTER_EXISTS" = "true" ]; then
   print_status "Dropping tenant Nextcloud databases via in-cluster PgBouncer..."
   PG_PASSWORD=$("${KUBECTL[@]}" get secret postgres-credentials -n infra-db \
     -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d || true)
-  if [ -n "$PG_PASSWORD" ]; then
-    # Discover and drop every nextcloud_<tenant> database that exists.
-    DROP_SQL=$("${KUBECTL[@]}" run psql-drop-tenants --rm -i --restart=Never \
-      --image=postgres:16 --quiet -n default \
-      --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
-      --env "PGUSER=postgres" \
-      --env "PGPASSWORD=$PG_PASSWORD" \
-      -- psql -tAc "SELECT 'DROP DATABASE IF EXISTS \"' || datname || '\" WITH (FORCE);' FROM pg_database WHERE datname LIKE 'nextcloud\\_%' ESCAPE '\\';" \
-      2>/dev/null | grep -E '^DROP DATABASE' || true)
-    if [ -n "$DROP_SQL" ]; then
-      echo "$DROP_SQL" | sed 's/^/  will run: /'
-      "${KUBECTL[@]}" run psql-drop-tenants --rm -i --restart=Never \
+  if [ -z "$PG_PASSWORD" ]; then
+    print_error "Could not load postgres-credentials secret — refusing to continue."
+    print_error "Cold-start of Nextcloud on the next cycle would fail. Either drop the DBs"
+    print_error "manually before re-running this script, or fix the postgres-credentials Secret."
+    exit 4
+  fi
+  # Discover nextcloud_<tenant> databases. Output one name per line.
+  TENANT_DBS=$("${KUBECTL[@]}" run psql-list-tenants --rm -i --restart=Never \
+    --image=postgres:16 --quiet -n default \
+    --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
+    --env "PGUSER=postgres" \
+    --env "PGPASSWORD=$PG_PASSWORD" \
+    -- psql -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'nextcloud\\_%' ESCAPE '\\';" \
+    2>/dev/null | grep -E '^[a-z0-9_-]+$' || true)
+  if [ -z "$TENANT_DBS" ]; then
+    echo "  No nextcloud_* databases found, skipping drop"
+  else
+    while IFS= read -r db; do
+      # Allowlist regex defends against SQL identifier injection. tenant DB names
+      # are operator-controlled via deploy scripts and always match `nextcloud_<tenant>`
+      # with lowercase + digits + underscore/hyphen; anything else is suspicious.
+      if [[ ! "$db" =~ ^nextcloud_[a-z0-9][a-z0-9_-]*$ ]]; then
+        print_error "  Refusing to drop suspicious DB name: $db"
+        exit 5
+      fi
+      print_status "  Dropping $db"
+      # DROP DATABASE cannot run inside a transaction block, so each DROP must
+      # be its own psql -c invocation (one auto-commit transaction each).
+      "${KUBECTL[@]}" run psql-drop --rm -i --restart=Never \
         --image=postgres:16 --quiet -n default \
         --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
         --env "PGUSER=postgres" \
         --env "PGPASSWORD=$PG_PASSWORD" \
-        -- psql -v ON_ERROR_STOP=1 -c "$DROP_SQL" 2>&1 \
-        | sed 's/^/  /' || print_warning "  Some DROP statements may have failed"
-    else
-      echo "  No nextcloud_* databases found, skipping drop"
-    fi
-  else
-    print_warning "Could not load postgres-credentials secret — skipping tenant DB drop"
-    print_warning "Cold-start of Nextcloud on the next cycle will likely fail until you drop the DBs manually"
+        -- psql -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE);" 2>&1 \
+        | sed 's/^/    /' \
+        || { print_error "  Failed to drop $db — aborting"; exit 6; }
+    done <<< "$TENANT_DBS"
   fi
 fi
 
