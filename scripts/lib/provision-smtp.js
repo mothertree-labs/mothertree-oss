@@ -286,13 +286,17 @@ function runSmtpSmokeTest() {
     );
   }
 
-  // openssl's STARTTLS smtp dialog with EHLO emits a 220 banner, the EHLO
-  // response (250-*), and a "Verify return code: 0 (ok)" line on successful
-  // hostname verification. All three must be present.
+  // With `-quiet`, openssl suppresses the 220 banner and the
+  // "Verify return code: 0 (ok)" summary line, but it still emits
+  // per-cert `verify return:1` lines as the chain is validated and the
+  // post-STARTTLS 250-* EHLO response from the upgraded session. Both
+  // present means: cert chain validated against -verify_hostname and
+  // Stalwart's submission listener responded to EHLO over TLS.
+  // (If -verify_hostname or -verify_return_error had failed, openssl
+  // would have exited non-zero before we got here.)
   const checks = [
-    { name: 'SMTP banner (220)', pattern: /\b220\b/ },
+    { name: 'TLS chain verify (verify return:1)', pattern: /verify return:1/ },
     { name: 'EHLO response (250)', pattern: /\b250[- ]/ },
-    { name: 'TLS verify ok', pattern: /Verify return code: 0 \(ok\)/ },
   ];
   const failed = checks.filter((c) => !c.pattern.test(output));
   if (failed.length > 0) {
