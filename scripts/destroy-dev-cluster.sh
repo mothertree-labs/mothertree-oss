@@ -28,6 +28,17 @@
 #   ./scripts/destroy-dev-cluster.sh -e dev
 #   ./scripts/destroy-dev-cluster.sh -e dev --dry-run
 #   ./scripts/destroy-dev-cluster.sh -e dev --no-lock   # placeholder for Phase 3
+#
+# Exit codes:
+#   0 — success
+#   1 — generic failure (set -e, command failures)
+#   2 — wrong env (must be 'dev')
+#   3 — post-destroy assertion failed: an always-up resource disappeared
+#   4 — postgres-credentials Secret unavailable (would skip tenant DB drop)
+#   5 — discovered DB name failed the safe-identifier allowlist regex
+#   6 — DROP DATABASE failed on a discovered tenant DB
+#   7 — found a tagged 'dev' volume not in ALWAYS_UP_VOLUMES with an operator-style
+#       label (refuses to auto-delete; whitelist update needed)
 
 set -euo pipefail
 
@@ -213,10 +224,12 @@ fi
 # ---------------------------------------------------------------------------
 if [ "$CLUSTER_EXISTS" = "true" ]; then
 
-  # 2a — Force-evict known drain blockers. These three workload classes have
-  # consistently blocked node drain in dev (verified during Phase 1's pool roll).
-  # Each `|| true` covers the case where the resource is already gone.
-  print_status "Force-evicting known drain blockers..."
+  # 2a — Force-terminate pods that hold PVCs or have problematic finalizers,
+  # so the PVC sweep in 2b can release the underlying Linode block volumes
+  # cleanly. Without this, the orphan sweep in step 4 has to scoop up leaked
+  # CSI volumes. Each `|| true` covers the case where the resource is already
+  # gone (idempotency).
+  print_status "Force-evicting pods that block clean PVC release..."
 
   # Stuck Jitsi JVB pods (label is `app=jitsi-jvb`, NOT `app.kubernetes.io/name`).
   # Pods stick in Terminating for tens of days due to a hostPort/UDP cleanup quirk.
@@ -345,10 +358,13 @@ pushd "$REPO_ROOT/phase1" >/dev/null
     -var jitsi_tester_enabled=false
 
   # Defense in depth: confirm always-up VM modules survived the destroy.
+  # Anchor the match to a full module/resource path (entry + dot or end-of-line)
+  # so a future rename like `module.headscale_server` → `module.headscale` doesn't
+  # silently keep passing because something else still contains the substring.
   print_status "Asserting always-up VMs are still in terraform state..."
   STATE_LIST=$(terraform state list 2>/dev/null)
   for entry in "${ALWAYS_UP_TF_MODULES[@]}"; do
-    if ! echo "$STATE_LIST" | grep -q "$entry"; then
+    if ! echo "$STATE_LIST" | grep -qE "^${entry}(\.|$)"; then
       print_error "ASSERTION FAILED: $entry is missing from terraform state!"
       print_error "The destroy widened beyond the ephemeral cluster — this is a bug."
       exit 3
@@ -378,6 +394,16 @@ linode-cli volumes list --json 2>/dev/null | jq -r --arg region "$CLUSTER_REGION
     if [ "$skip" = "true" ]; then
       echo "  Preserving always-up volume: $label (id=$id)"
       continue
+    fi
+    # Defense: only auto-delete CSI-managed volumes (label `pvc-<uuid>`). A
+    # tagged 'dev' volume with a human label that ISN'T in ALWAYS_UP_VOLUMES is
+    # suspicious — it's probably a new always-up resource whose maintainer
+    # forgot to add it to the whitelist. Refuse rather than silently destroy.
+    if ! echo "$label" | grep -qE '^pvc-'; then
+      print_error "Refusing to delete tagged 'dev' volume with operator-style label: $label (id=$id)"
+      print_error "If this is a new always-up resource, add it to ALWAYS_UP_VOLUMES in this script."
+      print_error "If this is a real orphan, delete it manually: linode-cli volumes delete $id"
+      exit 7
     fi
     print_status "  Detaching + deleting tagged orphan: $label (id=$id)"
     linode-cli volumes detach "$id" 2>/dev/null || true

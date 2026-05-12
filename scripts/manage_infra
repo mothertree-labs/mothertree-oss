@@ -100,6 +100,9 @@ if mt_has_flag "--destroy-cluster-only"; then
   if mt_has_flag "--dry-run"; then
     DELEGATE_FLAGS+=("--dry-run")
   fi
+  if mt_has_flag "--no-lock"; then
+    DELEGATE_FLAGS+=("--no-lock")
+  fi
   exec "${REPO_ROOT}/scripts/destroy-dev-cluster.sh" "${DELEGATE_FLAGS[@]}"
 fi
 
