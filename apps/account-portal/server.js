@@ -42,7 +42,16 @@ app.use(helmet({
       baseUri: ["'self'"],
       formAction: ["'self'"],
     }
-  }
+  },
+  // helmet's default Referrer-Policy is `no-referrer`, which strips Referer
+  // on same-origin form POSTs. verifyOrigin then has nothing to validate
+  // against (Origin is also not set for same-origin form submits by some
+  // browsers) and falls through to the cookie-based check; if the session
+  // cookie isn't present (e.g. fresh context), the request gets 403'd
+  // before reaching the handler. Using `same-origin` preserves Referer
+  // on same-origin requests while stripping it cross-origin, which is
+  // exactly what verifyOrigin needs to distinguish the two cases.
+  referrerPolicy: { policy: 'same-origin' },
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
