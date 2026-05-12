@@ -67,10 +67,13 @@ spec:
           GRANT ALL PRIVILEGES ON DATABASE "${ROUNDCUBE_DB_NAME}" TO "${ROUNDCUBE_DB_USER}";
           EOF
 
-          # Revoke default PUBLIC connect privilege so other tenant users cannot connect
+          # Revoke default PUBLIC connect privilege so other tenant users cannot connect.
+          # Also grant CONNECT to pgbouncer so it can run auth_query (looks up client
+          # password hash from pg_shadow on the client's requested DB).
           psql -h ${PG_HOST} -U postgres -d postgres <<EOF
           REVOKE CONNECT ON DATABASE "${ROUNDCUBE_DB_NAME}" FROM PUBLIC;
           GRANT CONNECT ON DATABASE "${ROUNDCUBE_DB_NAME}" TO "${ROUNDCUBE_DB_USER}";
+          GRANT CONNECT ON DATABASE "${ROUNDCUBE_DB_NAME}" TO "pgbouncer";
           EOF
 
           # Grant schema permissions (needed for newer PostgreSQL versions)

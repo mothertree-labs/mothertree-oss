@@ -9,11 +9,23 @@
 
 set -e
 
-# Guard: skip if Nextcloud isn't fully installed yet (first boot race condition).
-# The entrypoint generates config.php from env vars, but the app may not be
-# fully bootstrapped when this hook runs on a fresh emptyDir pod.
+# Install static support files unconditionally — these are required by the
+# readiness probe (oidc-health.php) and by deploy-calendar-automation.sh
+# (create-caldav-tokens.php). They must be in place BEFORE the install-state
+# guard below, because on a fresh cold-start pod Nextcloud is not yet
+# installed when this hook runs, so the guard would otherwise exit before
+# the cp runs and the readiness probe would fail forever (pod stays 1/2 Ready
+# because the probe re-runs but the install only completes once Apache is up,
+# and these hooks only fire once per container start).
+cp /docker-entrypoint-hooks.d/before-starting/oidc-health.php /var/www/html/oidc-health.php 2>/dev/null || true
+cp /docker-entrypoint-hooks.d/before-starting/create-caldav-tokens.php /var/www/html/create-caldav-tokens.php 2>/dev/null || true
+
+# Guard: skip the rest of the hook if Nextcloud isn't fully installed yet
+# (first boot race condition). The entrypoint generates config.php from env
+# vars, but the app may not be fully bootstrapped when this hook runs on a
+# fresh emptyDir pod. The occ commands below require an installed instance.
 if ! php /var/www/html/occ status --output=json 2>/dev/null | grep -q '"installed":true'; then
-    echo "[before-starting] Nextcloud not yet installed, skipping hook (will run on next restart)"
+    echo "[before-starting] Nextcloud not yet installed, skipping occ commands (will run on next restart)"
     exit 0
 fi
 
@@ -123,11 +135,5 @@ if [ -f "$LOGIN_CONTROLLER" ]; then
 else
     echo "[before-starting] user_oidc not installed yet, skipping Login Flow v2 patch"
 fi
-
-# Install OIDC health check script (exec readiness probe uses this via CLI)
-cp /docker-entrypoint-hooks.d/before-starting/oidc-health.php /var/www/html/oidc-health.php 2>/dev/null || true
-
-# Install CalDAV token creation script (deploy-calendar-automation.sh calls this via kubectl exec)
-cp /docker-entrypoint-hooks.d/before-starting/create-caldav-tokens.php /var/www/html/create-caldav-tokens.php 2>/dev/null || true
 
 echo "[before-starting] Done"
