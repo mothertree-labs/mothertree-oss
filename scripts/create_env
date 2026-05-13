@@ -525,6 +525,12 @@ if [ "$MAIL_ENABLED" = "true" ]; then
     print_error "deploy-stalwart.sh not found at $REPO_ROOT/apps/deploy-stalwart.sh"
     exit 1
   fi
+
+  # Cold-start gate: Stalwart's REST API can return 5xx for ~30-60s after
+  # pod-Ready on a fresh deploy (negative-RCPT cache + OIDC directory warm-up).
+  # provision-smtp-service-accounts (next step) hits /api/principal/deploy, so
+  # we wait until the REST layer responds. Non-fatal: caller retries on 5xx.
+  mt_wait_for_stalwart
 else
   print_status "Stalwart: skipping (features.mail_enabled is not true)"
 fi
@@ -748,6 +754,13 @@ if [ "$ACCOUNT_PORTAL_ENABLED" = "true" ]; then
   fi
 else
   print_status "Account Portal: skipping (features.account_portal_enabled is not true)"
+fi
+
+# Cold-start gate: confirm admin-portal /version is reachable end-to-end
+# (ingress + wildcard TLS + portal pod). Final "everything's up" assertion
+# before the cleanup/probe phase. Skipped when admin-portal isn't enabled.
+if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
+  mt_wait_for_admin_portal
 fi
 
 # ── END app deploys ──────────────────────────────────────────────────

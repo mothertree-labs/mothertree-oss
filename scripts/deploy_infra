@@ -553,6 +553,15 @@ mt_restart_if_changed statefulset/keycloak-keycloakx -n "$NS_AUTH"
 # This returns immediately if no rollout is in progress.
 kubectl -n "$NS_AUTH" rollout status statefulset/keycloak-keycloakx --timeout=300s
 
+# Cold-start gate: confirm Keycloak's OIDC discovery is actually serving.
+# Pod-Ready + rollout-complete is necessary but not sufficient — Keycloak takes
+# another 30-90s after pod-Ready to fully boot the realm and start serving
+# /.well-known/openid-configuration. Downstream callers (admin-portal,
+# ci-lease-tenant, every OIDC client) will 503 if they hit Keycloak in this
+# window. Master realm covers the full HTTP stack; tenant realms are checked
+# per-tenant by create_env.
+mt_wait_for_keycloak_oidc master
+
 # Sync Keycloak admin password.
 # The KEYCLOAK_ADMIN_PASSWORD env var only applies on first boot; afterwards the
 # password is stored in Keycloak's database. We use kcadm.sh to verify/update it,

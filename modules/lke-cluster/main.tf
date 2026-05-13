@@ -19,18 +19,9 @@ resource "linode_lke_cluster" "cluster" {
   # Linode API/provider may return tags in a different order; sort to avoid noisy diffs.
   tags = sort(var.tags)
 
-  # IMPORTANT:
-  # If Linode autoscaler is enabled on a pool, Linode will change the *current* pool size
-  # (pool.count) outside Terraform. If Terraform manages pool.count, plans will constantly
-  # try to revert the pool back to the configured value (fighting autoscaling).
-  #
-  # We deliberately ignore drift in pool.count so autoscaling can work without noisy plans.
-  # NOTE: ignore_changes requires static paths (no splats).
-  lifecycle {
-    ignore_changes = [
-      pool[0].count,
-    ]
-  }
+  # pool.count is managed by Terraform. Was previously ignored so the autoscaler
+  # could adjust without noisy plans, but that silently dropped tfvars changes.
+  # For autoscaler envs, set tfvars `count` to autoscaler.min so plans stay clean.
 
   # Node pools - defined inline as required by provider
   dynamic "pool" {
