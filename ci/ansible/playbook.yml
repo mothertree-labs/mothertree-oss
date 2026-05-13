@@ -408,27 +408,30 @@
         dest: /usr/local/bin/kubectl
         mode: "0755"
 
-    - name: Install jq, envsubst, ansible-core, awscli, python3-pip
+    - name: Install jq, envsubst, ansible-core, python3-pip
       ansible.builtin.apt:
         name:
           - jq
           - gettext-base
           - ansible-core
-          # awscli is used by scripts/dev-heartbeat.sh + dev-reaper.sh (s3 cp
-          # against Linode Object Storage). The Debian-packaged v1 is fine —
-          # we only need basic `s3 cp` with --endpoint-url.
-          - awscli
-          # pip is used to install linode-cli below (no apt package available).
+          # pip is used to install awscli + linode-cli below; the apt-packaged
+          # awscli was removed from the default repos starting in Ubuntu 24.04
+          # / Debian 13, so we install both via pip instead.
           - python3-pip
         state: present
 
-    - name: Install linode-cli (on-demand-dev bring-up + reaper)
-      # Used by scripts/dev-bringup.sh (cluster existence check + kubeconfig
-      # fetch via `linode-cli lke kubeconfig-view`) and by destroy-dev-cluster.sh
-      # (orphan sweep). `--break-system-packages` is needed on Ubuntu 23.04+
-      # because the OS enforces PEP 668 against site-packages writes.
+    - name: Install awscli + linode-cli via pip (on-demand-dev bring-up + reaper)
+      # awscli: used by scripts/dev-heartbeat.sh + dev-reaper.sh for `s3 cp`
+      # against the Linode Object Storage heartbeat bucket.
+      # linode-cli: used by scripts/dev-bringup.sh (cluster existence check +
+      # kubeconfig fetch via `linode-cli lke kubeconfig-view`) and by
+      # destroy-dev-cluster.sh (orphan sweep).
+      # `--break-system-packages` is needed on Ubuntu 23.04+ / Debian 12+
+      # because the OS enforces PEP 668 against system site-packages writes.
       ansible.builtin.pip:
-        name: linode-cli
+        name:
+          - awscli
+          - linode-cli
         state: present
         extra_args: --break-system-packages
 
@@ -610,14 +613,14 @@
     # heartbeat bucket itself) are preserved by destroy-dev-cluster.sh's
     # whitelist + post-destroy assertion.
     - name: Clone mothertree-oss for the idle reaper
-      # The reaper runs `git fetch && reset --hard origin/master` at the top of
+      # The reaper runs `git fetch && reset --hard origin/main` at the top of
       # every run so it always invokes the latest destroy-dev-cluster.sh.
       ansible.builtin.git:
         repo: "https://github.com/mothertree-labs/mothertree-oss.git"
         dest: /home/woodpecker/mothertree-checkout
-        version: master
+        version: main
         # Don't auto-update on every playbook run — the reaper does that. But
-        # ensure the clone exists and is on master.
+        # ensure the clone exists and is on main.
         update: false
         force: false
       become: true
