@@ -257,29 +257,55 @@ fi
 print_success "Nextcloud database initialized"
 
 # Step 5a.1: Ensure nextcloud-credentials Secret exists (chart `existingSecret`)
-# This is the single source of truth for the admin user/password. The install
-# Job uses the same Secret so the password ends up matching the DB-stored hash.
-# Preserve across redeploys — never regenerate once present.
-CREDS_EXISTS=$(kubectl get secret nextcloud-credentials -n "$NS_FILES" --ignore-not-found -o name 2>/dev/null || true)
-if [ -z "$CREDS_EXISTS" ]; then
-    print_status "Generating nextcloud-credentials Secret (admin user)..."
-    # Character set is explicitly URL-safe + shell-safe: A-Z, a-z, 0-9, _, -.
-    # Avoids `$<digit>` patterns that historically broke the Docker entrypoint's
-    # eval-based install path (Phase 2 progress notes). The install Job we use
-    # is argv-safe regardless, but a clean charset future-proofs callers.
+# This is the single source of truth for admin creds + SMTP creds. The install
+# Job reads the same Secret so the password ends up matching the DB-stored
+# hash. We:
+#   - Preserve the admin password across redeploys (rotating it would break
+#     login against the DB).
+#   - Refresh the SMTP keys on every deploy from the tenant's smtp-credentials
+#     Secret (provisioned by create_env), so SMTP relay rotations are picked
+#     up automatically.
+#
+# Why all five keys in one Secret: the upstream Nextcloud chart's
+# `existingSecret` block unconditionally wires NEXTCLOUD_ADMIN_USER/PASSWORD
+# and (when mail.enabled=true) SMTP_HOST/SMTP_NAME/SMTP_PASSWORD from the
+# same Secret name. There is no per-field guard in the chart's _helpers.tpl
+# — if any *Key is non-empty (the chart defaults are non-empty), the chart
+# emits a secretKeyRef for it. Omitting smtp-* keys causes pod
+# CreateContainerConfigError ("couldn't find key smtp-host in Secret ...").
+
+# Load SMTP relay creds from the tenant's smtp-credentials Secret first —
+# we need them inside nextcloud-credentials below. Was previously called
+# right before helmfile sync; moved up so the Secret has the values.
+source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
+mt_export_smtp_relay_env "$NS_FILES"
+
+EXISTING_ADMIN_PASSWORD=$(kubectl get secret nextcloud-credentials -n "$NS_FILES" \
+    -o jsonpath='{.data.nextcloud-password}' 2>/dev/null | base64 -d 2>/dev/null || true)
+if [ -z "$EXISTING_ADMIN_PASSWORD" ]; then
+    print_status "Generating new admin password for nextcloud-credentials..."
+    # URL-safe + shell-safe character set: A-Z, a-z, 0-9, _, -. The install
+    # Job is argv-safe regardless, but a clean charset future-proofs callers.
     ADMIN_PASSWORD=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 32)
     if [ "${#ADMIN_PASSWORD}" -lt 32 ]; then
         print_error "Failed to generate 32-char admin password (got ${#ADMIN_PASSWORD} chars)"
         exit 1
     fi
-    kubectl create secret generic nextcloud-credentials \
-        --namespace "$NS_FILES" \
-        --from-literal=nextcloud-username=admin \
-        --from-literal=nextcloud-password="$ADMIN_PASSWORD"
-    print_success "Created nextcloud-credentials Secret"
 else
-    print_status "nextcloud-credentials Secret already exists; preserving"
+    print_status "Preserving existing nextcloud-credentials admin password"
+    ADMIN_PASSWORD="$EXISTING_ADMIN_PASSWORD"
 fi
+
+# Apply (not create) so the Secret is updated in place when SMTP creds rotate.
+kubectl create secret generic nextcloud-credentials \
+    --namespace "$NS_FILES" \
+    --from-literal=nextcloud-username=admin \
+    --from-literal=nextcloud-password="$ADMIN_PASSWORD" \
+    --from-literal=smtp-host="${SMTP_RELAY_HOST:-}" \
+    --from-literal=smtp-username="${SMTP_RELAY_USERNAME:-}" \
+    --from-literal=smtp-password="${SMTP_RELAY_PASSWORD:-}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+print_success "Applied nextcloud-credentials Secret (admin + smtp keys)"
 
 # Step 5a.2: Run install Job on cold start (when nextcloud-identity is missing).
 # The Job runs `occ maintenance:install` against the fresh DB with argv quoting
@@ -602,10 +628,10 @@ if kubectl get hpa nextcloud -n "$NS_FILES" --show-managed-fields \
     kubectl delete hpa nextcloud -n "$NS_FILES"
 fi
 
-# Load SMTP submission creds from smtp-credentials Secret so helmfile can
-# render mail.smtp.{host,port,name,password} into the chart's generated
-# Secret. Missing Secret → empty fields (mail disabled until a subsequent
-# deploy after provision runs).
+# SMTP relay creds were sourced earlier (Step 5a.1) so the nextcloud-credentials
+# Secret could include smtp-host/smtp-username/smtp-password keys for the
+# chart's `existingSecret` wiring. Re-source as a no-op safety net in case the
+# block above was bypassed.
 source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
 mt_export_smtp_relay_env "$NS_FILES"
 
