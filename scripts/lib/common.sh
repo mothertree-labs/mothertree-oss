@@ -353,3 +353,102 @@ mt_psql() {
         --env="PGPASSWORD=$pg_pass" \
         --command -- psql -h pgbouncer -U postgres -v ON_ERROR_STOP=1 "$@" 2>/dev/null
 }
+
+# ---------------------------------------------------------------------------
+# Cold-start readiness gates (on-demand-dev Phase 3)
+# ---------------------------------------------------------------------------
+# Helmfile `wait: true` and `kubectl rollout status` only confirm pods are
+# Ready — they don't confirm the application's external endpoints are actually
+# serving. On a fresh cold-cycle these helpers protect the rest of the deploy
+# (and downstream CI steps) from racing the application's warm-up window.
+# See on-demand-dev/03-phase3-ci-orchestration.md §B for the empirical
+# evidence (CI pipelines #1163, #1164) that motivates each gate.
+# ---------------------------------------------------------------------------
+
+# Wait for Keycloak's OIDC discovery endpoint to actually serve.
+# Use this from any path that depends on Keycloak being usable (not just up).
+#
+# Usage: mt_wait_for_keycloak_oidc [realm]   (default realm: "master")
+# Required env: AUTH_HOST
+#
+# The master realm is always present and exercises the full HTTP stack
+# (ingress + Keycloak + realm machinery). Pass a tenant realm explicitly when
+# you need to gate on that specific realm being registered and serving.
+mt_wait_for_keycloak_oidc() {
+    local realm="${1:-master}"
+    local auth_host="${AUTH_HOST:-}"
+    if [ -z "$auth_host" ]; then
+        print_error "mt_wait_for_keycloak_oidc: AUTH_HOST is not set"
+        return 1
+    fi
+    local url="https://${auth_host}/realms/${realm}/.well-known/openid-configuration"
+    print_status "Waiting for Keycloak OIDC discovery: $url"
+    local i
+    for i in $(seq 1 60); do
+        if curl -sf -m 5 "$url" >/dev/null 2>&1; then
+            print_success "Keycloak OIDC discovery responsive after $((i*5))s (realm=$realm)"
+            return 0
+        fi
+        sleep 5
+    done
+    print_error "Keycloak OIDC discovery never became responsive at $url"
+    return 1
+}
+
+# Wait for Stalwart's REST API to respond without 5xx.
+# Use this before any script triggers /api/principal/* calls (admin-portal,
+# account-portal, provision-smtp-service-accounts). Pod-Ready isn't enough —
+# the REST API can return 5xx for ~30-60s after pod-Ready on first deploy
+# (negative-RCPT cache warm-up + OIDC directory lookups).
+#
+# Usage: mt_wait_for_stalwart [mail_host]
+# Required env: MAIL_HOST (or pass mail_host as $1)
+#
+# This is intentionally a *warning*, not an error: admin-portal retries on
+# 5xx, and a slow Stalwart shouldn't block the entire deploy. The warning
+# surfaces the issue in CI logs for diagnosis if downstream calls flake.
+mt_wait_for_stalwart() {
+    local mail_host="${1:-${MAIL_HOST:-}}"
+    if [ -z "$mail_host" ]; then
+        print_warning "mt_wait_for_stalwart: MAIL_HOST not set, skipping"
+        return 0
+    fi
+    local url="https://${mail_host}/api/principal"
+    print_status "Waiting for Stalwart REST API: $url"
+    local code="000" i
+    for i in $(seq 1 30); do
+        code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$url" 2>/dev/null || echo "000")
+        # 200 / 401 / 403 all mean the REST layer is responding (auth-required
+        # responses count). 5xx or "000" (timeout/refused) mean keep waiting.
+        if [[ "$code" =~ ^(200|401|403)$ ]]; then
+            print_success "Stalwart REST API responsive after $((i*5))s (HTTP $code)"
+            return 0
+        fi
+        sleep 5
+    done
+    print_warning "Stalwart REST API never became responsive (last code: $code) — proceeding"
+    return 0
+}
+
+# Wait for admin-portal's /version endpoint to return 200.
+# Lightest sanity check that the full ingress + portal + version-injection
+# chain is up. Use as a final "everything's up" assertion.
+#
+# Usage: mt_wait_for_admin_portal [admin_host]
+# Required env: ADMIN_HOST (or pass admin_host as $1)
+mt_wait_for_admin_portal() {
+    local admin_host="${1:-${ADMIN_HOST:-}}"
+    if [ -z "$admin_host" ]; then
+        print_warning "mt_wait_for_admin_portal: ADMIN_HOST not set, skipping"
+        return 0
+    fi
+    local url="https://${admin_host}/version"
+    print_status "Waiting for admin-portal /version: $url"
+    if curl -sf -m 5 --retry 30 --retry-delay 5 --retry-all-errors \
+        "$url" >/dev/null 2>&1; then
+        print_success "admin-portal /version returned 200"
+        return 0
+    fi
+    print_error "admin-portal /version never returned 200 at $url"
+    return 1
+}
