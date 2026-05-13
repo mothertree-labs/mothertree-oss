@@ -80,8 +80,10 @@ test.describe('Email — Round-Trip via Echo Group', () => {
 
       await senderPage.getByRole('button', { name: 'Send' }).click();
 
-      // Wait for send to complete (returns to inbox)
-      await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
+      // Wait for send to complete (returns to inbox). Cold-start dev SMTP
+      // submission to Stalwart occasionally takes >30s; 60s gives headroom
+      // before the test gives up. (#386)
+      await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 60_000 });
 
       // ── Step 2: Receiver logs into Roundcube and polls for the forwarded email ──
       await roundcubeLogin(receiverPage, receiver.username, receiver.password);
