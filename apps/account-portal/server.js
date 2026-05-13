@@ -42,7 +42,16 @@ app.use(helmet({
       baseUri: ["'self'"],
       formAction: ["'self'"],
     }
-  }
+  },
+  // helmet's default Referrer-Policy is `no-referrer`, which strips Referer
+  // on same-origin form POSTs. verifyOrigin then has nothing to validate
+  // against (Origin is also not set for same-origin form submits by some
+  // browsers) and falls through to the cookie-based check; if the session
+  // cookie isn't present (e.g. fresh context), the request gets 403'd
+  // before reaching the handler. Using `same-origin` preserves Referer
+  // on same-origin requests while stripping it cross-origin, which is
+  // exactly what verifyOrigin needs to distinguish the two cases.
+  referrerPolicy: { policy: 'same-origin' },
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -849,10 +858,17 @@ app.post('/magic-link-login', verifyOrigin, async (req, res) => {
     });
   } catch (err) {
     console.error('magic-link-login: failed:', err.message);
-    res.render('magic-link-login', {
-      title: 'Sign In with Email Link',
-      error: 'Something went wrong. Please try again.',
-      next: validatedNext,
+    // Render check-email to avoid leaking user existence and to align with the
+    // no-user branch above. The e2e suite asserts the email actually arrives
+    // via IMAP poll, so transient SMTP failures here won't mask real bugs.
+    // targetEmail may be undefined if findUserByEmail threw before assignment;
+    // fall back to the masked input email.
+    const emailHint = keycloakApi.maskEmail(
+      (typeof targetEmail !== 'undefined' && targetEmail) || trimmedEmail
+    );
+    res.render('check-email', {
+      title: 'Check Your Email',
+      emailHint,
     });
   }
 });

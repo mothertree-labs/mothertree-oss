@@ -535,6 +535,9 @@ async function sendNotificationEmail(toEmail, subject, message) {
         pass: process.env.SMTP_RELAY_PASSWORD,
       },
       tls: { rejectUnauthorized: false },
+      connectionTimeout: 5000,
+      greetingTimeout: 5000,
+      socketTimeout: 10000,
     });
 
     await transporter.sendMail({
