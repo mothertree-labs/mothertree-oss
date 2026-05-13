@@ -133,9 +133,9 @@ if [ ! -d "$REPO_DIR" ]; then
 fi
 
 # Pull latest code so we run with whatever destroy logic is on main.
-log "syncing $REPO_DIR to origin/master"
+log "syncing $REPO_DIR to origin/main"
 git -C "$REPO_DIR" fetch --quiet origin
-git -C "$REPO_DIR" reset --hard --quiet origin/master
+git -C "$REPO_DIR" reset --hard --quiet origin/main
 git -C "$REPO_DIR" submodule update --init --recursive --quiet 2>/dev/null || true
 
 # Files we write into the repo dir that contain the Linode API token / kubeconfig.
