@@ -133,10 +133,14 @@ if [ ! -d "$REPO_DIR" ]; then
 fi
 
 # Pull latest code so we run with whatever destroy logic is on main.
-log "syncing $REPO_DIR to origin/main"
-git -C "$REPO_DIR" fetch --quiet origin
-git -C "$REPO_DIR" reset --hard --quiet origin/main
-git -C "$REPO_DIR" submodule update --init --recursive --quiet 2>/dev/null || true
+# The checkout is owned by `woodpecker` (Ansible clones it as that user); cron
+# runs us as root, and git refuses with "dubious ownership" when the worktree
+# owner differs from the caller. Run the sync as woodpecker via sudo. `-H` sets
+# HOME so git can find woodpecker's ~/.gitconfig if any.
+log "syncing $REPO_DIR to origin/main (as woodpecker)"
+sudo -u woodpecker -H git -C "$REPO_DIR" fetch --quiet origin
+sudo -u woodpecker -H git -C "$REPO_DIR" reset --hard --quiet origin/main
+sudo -u woodpecker -H git -C "$REPO_DIR" submodule update --init --recursive --quiet 2>/dev/null || true
 
 # Files we write into the repo dir that contain the Linode API token / kubeconfig.
 # Mode 0600 root-owned, but still: scrub on exit so a compromise of the
