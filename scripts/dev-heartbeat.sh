@@ -31,9 +31,21 @@ export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 TS=$(date +%s)
 echo "[dev-heartbeat] writing ts=$TS to s3://$DEV_STATE_BUCKET/last-used.txt"
 
+# Normalize the endpoint URL. `linode_object_storage_bucket.hostname` (which
+# manage_infra writes into terraform-outputs.dev.env as DEV_STATE_S3_ENDPOINT)
+# returns a bucket-style hostname like
+# `mothertree-dev-state.us-lax-1.linodeobjects.com`. aws-cli's --endpoint-url
+# wants the cluster endpoint without the bucket prefix; otherwise the SDK
+# constructs `https://<bucket>.<endpoint>/<key>` and ends up with a doubled
+# bucket name. Strip everything up to the first dot to get the cluster host.
+case "$DEV_STATE_S3_ENDPOINT" in
+    https://*) ENDPOINT_URL="$DEV_STATE_S3_ENDPOINT" ;;
+    *)         ENDPOINT_URL="https://${DEV_STATE_S3_ENDPOINT#*.}" ;;
+esac
+
 # Use stdin to avoid creating a temp file. `aws s3 cp - s3://...` reads stdin.
 printf '%s' "$TS" | aws s3 cp - "s3://${DEV_STATE_BUCKET}/last-used.txt" \
-    --endpoint-url "$DEV_STATE_S3_ENDPOINT" \
+    --endpoint-url "$ENDPOINT_URL" \
     --content-type "text/plain" \
     --no-progress
 

@@ -67,12 +67,22 @@ log "found cluster id=$EXISTING_ID; checking idle state"
 # exists; if nothing has written a heartbeat ever, it's been up since before
 # heartbeating started — definitely stale).
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+
+# Normalize the endpoint URL — DEV_STATE_S3_ENDPOINT is the bucket-style
+# hostname (e.g. `mothertree-dev-state.us-lax-1.linodeobjects.com`); aws-cli
+# wants the cluster endpoint. See scripts/dev-heartbeat.sh for the full
+# rationale.
+case "$DEV_STATE_S3_ENDPOINT" in
+    https://*) ENDPOINT_URL="$DEV_STATE_S3_ENDPOINT" ;;
+    *)         ENDPOINT_URL="https://${DEV_STATE_S3_ENDPOINT#*.}" ;;
+esac
+
 # Use the bucket-scoped key for the heartbeat read (read_write). The TF state
 # key is separately scoped to mothertree-tf-state-dev.
 HB_RAW=$(AWS_ACCESS_KEY_ID="$DEV_STATE_S3_KEY" \
          AWS_SECRET_ACCESS_KEY="$DEV_STATE_S3_SECRET" \
          aws s3 cp "s3://${DEV_STATE_BUCKET}/last-used.txt" - \
-              --endpoint-url "$DEV_STATE_S3_ENDPOINT" \
+              --endpoint-url "$ENDPOINT_URL" \
               --no-progress 2>/dev/null || true)
 
 NOW=$(date +%s)
