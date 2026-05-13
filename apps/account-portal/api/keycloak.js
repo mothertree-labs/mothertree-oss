@@ -241,6 +241,9 @@ async function sendNotificationEmail(toEmail, subject, message) {
         pass: process.env.SMTP_RELAY_PASSWORD,
       },
       tls: { rejectUnauthorized: false },
+      connectionTimeout: 5000,
+      greetingTimeout: 5000,
+      socketTimeout: 10000,
     });
 
     await transporter.sendMail({
@@ -907,6 +910,11 @@ async function sendMagicLinkUrlToEmail(userId, redirectUri, targetEmail, emailSu
   // relay; post-PR-2b Stalwart:588 requires STARTTLS + SASL PLAIN so the
   // old transporter just hung, blocking /switch-to-magic-link for 30s+ and
   // tripping Playwright's 15s click timeout in shard-6 magic-link tests.
+  // Explicit connection/greeting/socket timeouts are required: nodemailer
+  // defaults are effectively unbounded (no socketTimeout), so a cold or
+  // dead SMTP path (fresh provision, Stalwart restart, CoreDNS reload race)
+  // would still hang ~30s and trip Playwright's 15s waitForResponse even
+  // with the correct port. Fail fast and let the caller render check-email.
   const smtpHost = process.env.SMTP_RELAY_HOST;
   const smtpPort = parseInt(process.env.SMTP_RELAY_PORT || '588', 10);
   const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.EMAIL_DOMAIN || process.env.TENANT_DOMAIN || 'example.com'}`;
@@ -922,6 +930,9 @@ async function sendMagicLinkUrlToEmail(userId, redirectUri, targetEmail, emailSu
       pass: process.env.SMTP_RELAY_PASSWORD,
     },
     tls: { rejectUnauthorized: false },
+    connectionTimeout: 5000,
+    greetingTimeout: 5000,
+    socketTimeout: 10000,
   });
 
   await transporter.sendMail({

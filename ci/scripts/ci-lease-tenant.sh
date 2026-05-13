@@ -124,6 +124,27 @@ echo ""
 echo "--- Creating test users (prefix: ${PREFIX})"
 echo "Keycloak: ${KEYCLOAK_URL} | Realm: ${REALM}"
 
+# Cold-start gate: wait for the tenant realm's OIDC discovery endpoint to
+# serve before requesting a token. On a freshly-rolled or cold-started
+# cluster, Keycloak takes another 30-90s after pod-Ready to fully boot the
+# realm. Pipeline #1163 (Phase 1 PR #376) failed here when the lease step
+# requested a token mid-warm-up and got HTTP 503 from nginx. The deploy_infra
+# gate covers cold-start; this re-check covers warm-cluster reuse and
+# defense-in-depth.
+DISCOVERY_URL="${KEYCLOAK_URL}/realms/${REALM}/.well-known/openid-configuration"
+echo "Waiting for Keycloak OIDC discovery: ${DISCOVERY_URL}"
+for i in $(seq 1 60); do
+  if curl -sf -m 5 "$DISCOVERY_URL" >/dev/null 2>&1; then
+    echo "  OIDC discovery responsive after $((i*5))s"
+    break
+  fi
+  if (( i == 60 )); then
+    echo "ERROR: Keycloak OIDC discovery never became responsive at $DISCOVERY_URL"
+    exit 1
+  fi
+  sleep 5
+done
+
 # Get service account token — capture response first to diagnose failures.
 # The previous curl -sf | python3 pipe crashed on empty input (curl suppresses
 # error bodies with -f, python3 gets empty stdin, JSONDecodeError kills the

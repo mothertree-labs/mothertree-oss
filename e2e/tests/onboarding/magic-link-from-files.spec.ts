@@ -56,6 +56,7 @@ test.describe('Magic Link from Files (Keycloak Login)', () => {
 
       const responsePromise = adminPage.waitForResponse(
         (r) => r.url().includes('/api/invite') && r.request().method() === 'POST',
+        { timeout: 60_000 }, // cold-start: see #389
       );
       await adminPage.click(ap.inviteSubmitBtn);
       const apiResponse = await responsePromise;

@@ -223,7 +223,7 @@ async function listStalwartUsers() {
  * The name must be the Stalwart principal name (not email), e.g. "e2e-member" not "e2e-member@domain".
  */
 function createImapClient(stalwartName) {
-  return new ImapFlow({
+  const client = new ImapFlow({
     host: config.imap.host,
     port: config.imap.port,
     secure: config.imap.secure,
@@ -234,6 +234,31 @@ function createImapClient(stalwartName) {
     tls: config.imap.tls,
     logger: false, // Suppress imapflow internal logging
   });
+
+  // imapflow's TLS-end handler internally invokes client.close() on a
+  // possibly-already-closed flow, which rejects with "Connection not available".
+  // Nobody awaits that promise, so it surfaces as a process unhandledRejection
+  // (issue #386). Wrap close to swallow the benign post-disconnect rejection.
+  const originalClose = client.close.bind(client);
+  client.close = async (...args) => {
+    try {
+      return await originalClose(...args);
+    } catch (err) {
+      if (err && (err.code === 'NoConnection' || err.message === 'Connection not available')) {
+        return; // idempotent close on already-disconnected flow
+      }
+      throw err;
+    }
+  };
+
+  // An emitted 'error' event with no listener will crash the process. Stalwart
+  // occasionally drops connections (or our wrapper triggers asynchronously);
+  // log at debug level and let the per-call try/catch above handle recovery.
+  client.on('error', (err) => {
+    log('debug', 'IMAP client error event', { user: stalwartName, error: err?.message });
+  });
+
+  return client;
 }
 
 /**
@@ -244,12 +269,22 @@ function createImapClient(stalwartName) {
 async function scanUserInbox(stalwartName) {
   const client = createImapClient(stalwartName);
   const results = [];
+  const scanStart = Date.now();
+  let connectMs = 0;
+  let mailboxOpenMs = 0;
+  let searchMs = 0;
+  let fetchMs = 0;
+  let downloadMs = 0;
 
   try {
+    const tConnect = Date.now();
     await client.connect();
+    connectMs = Date.now() - tConnect;
 
+    const tOpen = Date.now();
     const mailbox = await client.mailboxOpen('INBOX');
-    log('debug', 'Opened INBOX', { user: stalwartName, exists: mailbox.exists });
+    mailboxOpenMs = Date.now() - tOpen;
+    log('debug', 'Opened INBOX', { user: stalwartName, exists: mailbox.exists, connectMs, mailboxOpenMs });
     if (!mailbox.exists || mailbox.exists === 0) {
       return results;
     }
@@ -258,6 +293,7 @@ async function scanUserInbox(stalwartName) {
     // Stalwart may not support keyword flag searches ($CalendarProcessed),
     // returning undefined instead of throwing. Fall back to all messages
     // and filter by flags client-side in the fetch loop.
+    const tSearch = Date.now();
     let uids;
     try {
       uids = await client.search({
@@ -271,8 +307,9 @@ async function scanUserInbox(stalwartName) {
       log('debug', 'Keyword search not supported, falling back to all messages', { user: stalwartName });
       uids = await client.search({ all: true });
     }
+    searchMs = Date.now() - tSearch;
 
-    log('debug', 'Search results', { user: stalwartName, unprocessedCount: uids?.length || 0 });
+    log('debug', 'Search results', { user: stalwartName, unprocessedCount: uids?.length || 0, searchMs });
 
     if (!uids || uids.length === 0) {
       return results;
@@ -285,6 +322,7 @@ async function scanUserInbox(stalwartName) {
     // Do NOT issue download commands inside the fetch iterator — IMAP
     // doesn't allow interleaved commands during a multi-message FETCH.
     const candidates = [];
+    const tFetch = Date.now();
     for await (const msg of client.fetch(recentUids, {
       uid: true,
       flags: true,
@@ -313,8 +351,10 @@ async function scanUserInbox(stalwartName) {
         from: msg.envelope?.from?.[0]?.address || 'unknown',
       });
     }
+    fetchMs = Date.now() - tFetch;
 
     // Phase 2: Download calendar data from each candidate message.
+    const tDownload = Date.now();
     for (const candidate of candidates) {
       for (const part of candidate.calendarParts) {
         try {
@@ -344,6 +384,7 @@ async function scanUserInbox(stalwartName) {
         }
       }
     }
+    downloadMs = Date.now() - tDownload;
   } catch (err) {
     // Auth failures manifest as "Unexpected close" when Stalwart closes the
     // connection after rejecting auth. These are common for misconfigured
@@ -358,6 +399,22 @@ async function scanUserInbox(stalwartName) {
     } catch {
       // Ignore logout errors
     }
+  }
+
+  const totalMs = Date.now() - scanStart;
+  if (results.length > 0 || totalMs > 5_000) {
+    // Surface slow scans (>5s) at info, otherwise only when there's work to do.
+    // Cold-start dev (issue #386) sometimes lags here past the 90s test budget.
+    log(totalMs > 5_000 ? 'info' : 'debug', 'IMAP scan timing', {
+      user: stalwartName,
+      totalMs,
+      connectMs,
+      mailboxOpenMs,
+      searchMs,
+      fetchMs,
+      downloadMs,
+      candidates: results.length,
+    });
   }
 
   return results;
@@ -1122,6 +1179,7 @@ async function processCancel(userEmail, icalData) {
  */
 async function processUser(user) {
   const { name: stalwartName, email: userEmail } = user;
+  const userStart = Date.now();
 
   // Check per-user backoff — skip entirely if user is in backoff window
   const ub = userBackoff.get(stalwartName);
@@ -1136,6 +1194,7 @@ async function processUser(user) {
   }
 
   let messages;
+  const tScan = Date.now();
   try {
     messages = await scanUserInbox(stalwartName);
   } catch (err) {
@@ -1168,13 +1227,15 @@ async function processUser(user) {
     return;
   }
 
+  const scanMs = Date.now() - tScan;
+
   if (messages.length === 0) {
     // Successful scan (even if empty) clears any connection-failure backoff
     userBackoff.delete(stalwartName);
     return;
   }
 
-  log('info', `Found ${messages.length} iTIP message(s)`, { user: userEmail });
+  log('info', `Found ${messages.length} iTIP message(s)`, { user: userEmail, scanMs });
 
   let anySucceeded = false;
 
@@ -1191,6 +1252,7 @@ async function processUser(user) {
 
     try {
       let processed = false;
+      const tMsg = Date.now();
 
       switch (msg.method) {
         case 'REQUEST':
@@ -1210,11 +1272,21 @@ async function processUser(user) {
           // Still mark as processed to avoid re-scanning
           processed = true;
       }
+      const processMs = Date.now() - tMsg;
 
       if (processed) {
+        const tMark = Date.now();
         await markAsProcessed(stalwartName, msg.uid);
+        const markMs = Date.now() - tMark;
         metrics.messagesProcessed++;
         anySucceeded = true;
+        log('info', 'iTIP message processed', {
+          user: userEmail,
+          uid: msg.uid,
+          method: msg.method,
+          processMs,
+          markMs,
+        });
       }
     } catch (err) {
       metrics.errors++;
@@ -1253,6 +1325,17 @@ async function processUser(user) {
     });
   } else if (anySucceeded) {
     userBackoff.delete(stalwartName);
+  }
+
+  const userTotalMs = Date.now() - userStart;
+  if (userTotalMs > 10_000) {
+    // Surface users that take >10s end-to-end — chasing #386 cold-start lag.
+    log('info', 'Slow user processing', {
+      user: stalwartName,
+      totalMs: userTotalMs,
+      scanMs,
+      messageCount: messages.length,
+    });
   }
 }
 

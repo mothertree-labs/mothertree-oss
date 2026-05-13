@@ -428,7 +428,58 @@ _coredns_patch=$(jq -cn \
     --arg body "rewrite name ${MAIL_HOST} stalwart.${NS_MAIL}.svc.cluster.local"$'\n' \
     '{data: {($key): $body}}')
 kubectl -n kube-system patch configmap coredns-custom --type=merge -p "$_coredns_patch"
-print_success "CoreDNS rewrite applied (takes effect within ~30s via CoreDNS reload)"
+print_success "CoreDNS rewrite applied (waiting for CoreDNS reload to propagate)"
+
+# -----------------------------------------------------------------------------
+# Actively wait for the rewrite to take effect. CoreDNS auto-reloads the
+# Corefile via the `reload` plugin (~30s), but downstream callers connecting to
+# mail.<tenant-domain>:588 during the propagation window resolve to the public
+# LB IP (which does not expose 588) and hang. We MUST NOT return from this
+# script until the rewrite is live inside the cluster — otherwise the SMTP
+# smoke test in provision-smtp.js and any real caller (Synapse, Docs, Files,
+# portals) can race against an unresolved rewrite.
+#
+# Strategy: spin up a single short-lived busybox pod in NS_MAIL that runs an
+# internal poll loop (cheaper than relaunching a pod every iteration on LKE
+# where pod cold-start is ~5–10s). The pod compares the resolved address of
+# MAIL_HOST against the Stalwart ClusterIP and exits 0 on match / 1 on
+# timeout. Note: busybox `nslookup` prints the DNS server's own address line
+# first ("Address: 10.96.0.10#53") and only then the answer addresses after
+# "Name:" — the awk filter below skips lines until "Name:" appears.
+# -----------------------------------------------------------------------------
+print_status "Waiting for CoreDNS rewrite to propagate ($MAIL_HOST → ClusterIP)"
+_stalwart_cluster_ip=$(kubectl -n "$NS_MAIL" get svc stalwart -o jsonpath='{.spec.clusterIP}')
+if [ -z "$_stalwart_cluster_ip" ]; then
+    print_error "Could not read Stalwart ClusterIP from svc/stalwart in $NS_MAIL"
+    exit 1
+fi
+print_status "Expecting $MAIL_HOST to resolve to $_stalwart_cluster_ip inside the cluster"
+
+# 18 attempts × 5s = ~90s budget, plus pod startup overhead.
+_dns_probe_pod="smtp-dns-probe-$$"
+if kubectl run "$_dns_probe_pod" -n "$NS_MAIL" \
+    --rm -i --restart=Never --image=busybox:1.36 --quiet \
+    --command -- sh -c "
+        for i in \$(seq 1 18); do
+            ip=\$(nslookup ${MAIL_HOST} 2>/dev/null | awk '/^Name:/{f=1; next} f && /^Address/{print \$2; exit}')
+            if [ \"\$ip\" = \"${_stalwart_cluster_ip}\" ]; then
+                echo \"OK: \$ip\"
+                exit 0
+            fi
+            echo \"  attempt \$i: got '\$ip' (want ${_stalwart_cluster_ip}), retrying in 5s\"
+            sleep 5
+        done
+        echo \"FAIL: ${MAIL_HOST} did not resolve to ${_stalwart_cluster_ip} after 90s (last seen: '\$ip')\"
+        exit 1
+    "; then
+    print_success "CoreDNS rewrite propagated: $MAIL_HOST → $_stalwart_cluster_ip"
+else
+    print_error "CoreDNS rewrite for $MAIL_HOST did not propagate within 90s"
+    print_error "Check kube-system/coredns-custom ConfigMap and CoreDNS pod logs:"
+    print_error "  kubectl -n kube-system get configmap coredns-custom -o yaml"
+    print_error "  kubectl -n kube-system logs -l k8s-app=kube-dns --tail=100"
+    exit 1
+fi
 
 # Wait for Deployment to be ready
 print_status "Waiting for Stalwart Deployment to be ready..."

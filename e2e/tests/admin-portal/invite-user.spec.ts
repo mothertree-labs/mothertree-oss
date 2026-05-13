@@ -22,7 +22,7 @@ test.describe('Admin Portal — Invite User', () => {
 
       // Submit invite — the API creates Keycloak + Stalwart + Matrix accounts (slow)
       // Intercept the response to capture the userId for reliable cleanup
-      const responsePromise = page.waitForResponse((r) => r.url().includes('/api/invite') && r.request().method() === 'POST');
+      const responsePromise = page.waitForResponse((r) => r.url().includes('/api/invite') && r.request().method() === 'POST', { timeout: 60_000 }); // cold-start: see #389
       await page.click(ap.inviteSubmitBtn);
       const apiResponse = await responsePromise;
       const apiResult = await apiResponse.json();
@@ -92,7 +92,7 @@ test.describe('Admin Portal — Invite User', () => {
       await page.fill(ap.emailUsernameInput, uniqueUsername);
       await page.fill(ap.recoveryEmailInput, `${e2ePrefix('cleanup')}-${uniqueId}@example.com`);
 
-      const responsePromise = page.waitForResponse((r) => r.url().includes('/api/invite') && r.request().method() === 'POST');
+      const responsePromise = page.waitForResponse((r) => r.url().includes('/api/invite') && r.request().method() === 'POST', { timeout: 60_000 }); // cold-start: see #389
       await page.click(ap.inviteSubmitBtn);
       const apiResponse = await responsePromise;
       const apiResult = await apiResponse.json();

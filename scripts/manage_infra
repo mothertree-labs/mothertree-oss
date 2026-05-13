@@ -20,6 +20,7 @@
 #   ./scripts/manage_infra -e dev --jitsi_tester=yes  # All phases with jitsi tester
 #   ./scripts/manage_infra -e prod --plan             # Show what would change (TF only)
 #   ./scripts/manage_infra -e prod --destroy          # Tear down (requires confirmation)
+#   ./scripts/manage_infra -e dev --destroy-cluster-only  # Ephemeral: nuke LKE only, keep VMs
 #   ./scripts/manage_infra -e dev --dns               # Only update DNS records
 #   ./scripts/manage_infra -e dev --firewall --ansible  # Firewall + Ansible only
 
@@ -44,7 +45,11 @@ mt_usage() {
   echo "  -e <env>               Environment (e.g., prod, dev)"
   echo "  --jitsi_tester=yes|no  Enable/disable Jitsi tester VM (default: no)"
   echo "  --plan                 Show planned changes without applying (phase1 only)"
-  echo "  --destroy              Tear down infrastructure (phase1 only, requires confirmation)"
+  echo "  --destroy              Tear down ALL infrastructure incl. always-up VMs (phase1 only, requires confirmation)"
+  echo "  --destroy-cluster-only Ephemeral: destroy ONLY the dev LKE cluster + LKE-side resources."
+  echo "                         Preserves postgres-dev, headscale-dev, turn-server-dev VMs."
+  echo "                         Dev environment only. Delegates to scripts/destroy-dev-cluster.sh."
+  echo "  --dry-run              With --destroy-cluster-only, print resolved targets without destroying"
   echo "  --lb-ip=X.X.X.X       Override ingress LB IP for DNS (auto-detected if omitted)"
   echo "  -h, --help             Show this help"
   echo ""
@@ -80,6 +85,25 @@ fi
 
 if mt_has_flag "--destroy"; then
   DESTROY="true"
+fi
+
+# --destroy-cluster-only delegates to a separate script that destroys only the
+# ephemeral dev LKE cluster + LKE-side resources, preserving the always-up VMs
+# (postgres-dev, headscale-dev, turn-server-dev). This is the Phase 2 entrypoint
+# of the on-demand-dev plan; Phase 3 will call it from a CI reaper.
+if mt_has_flag "--destroy-cluster-only"; then
+  if [ "$MT_ENV" != "dev" ]; then
+    print_error "--destroy-cluster-only is only supported for env=dev (got '$MT_ENV')"
+    exit 2
+  fi
+  DELEGATE_FLAGS=("-e" "$MT_ENV")
+  if mt_has_flag "--dry-run"; then
+    DELEGATE_FLAGS+=("--dry-run")
+  fi
+  if mt_has_flag "--no-lock"; then
+    DELEGATE_FLAGS+=("--no-lock")
+  fi
+  exec "${REPO_ROOT}/scripts/destroy-dev-cluster.sh" "${DELEGATE_FLAGS[@]}"
 fi
 
 # Parse phase selection flags

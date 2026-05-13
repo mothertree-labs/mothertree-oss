@@ -78,6 +78,12 @@ spec:
               psql -v ON_ERROR_STOP=1 -c "REVOKE CONNECT ON DATABASE \"$DB_NAME\" FROM PUBLIC"
               psql -v ON_ERROR_STOP=1 -c "GRANT CONNECT ON DATABASE \"$DB_NAME\" TO \"$DB_USER\""
 
+              # Grant CONNECT to pgbouncer so it can run auth_query against this DB.
+              # PgBouncer connects to the client's requested DB to look up the client's
+              # password hash from pg_shadow; without CONNECT it fails with "permission
+              # denied for database" — see PR notes for full cold-start incident.
+              psql -v ON_ERROR_STOP=1 -c "GRANT CONNECT ON DATABASE \"$DB_NAME\" TO \"pgbouncer\""
+
               # Grant permissions to per-tenant user on nextcloud database
               echo "Granting permissions to $DB_USER..."
               psql -v ON_ERROR_STOP=1 -d "$DB_NAME" -c "REVOKE ALL ON SCHEMA public FROM PUBLIC"
