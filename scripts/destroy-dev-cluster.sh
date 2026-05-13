@@ -11,11 +11,11 @@
 #   - headscale-dev  (Linode VM + 10 Gi data volume)
 #   - turn-server-dev (Linode VM)
 #
-# Also does NOT touch the shared VPC (matrix-cluster-<env>-vpc). Even though it
-# is defined inside module.lke_cluster, it contains both the LKE cluster_subnet
-# (ephemeral) AND the support_subnet (which holds the always-up VMs). Destroying
-# the VPC would require evicting the always-up VMs. The cluster_subnet is
-# destroyed and recreated each cycle; the VPC + support_subnet persist.
+# Also does NOT touch the LKE VPC (matrix-cluster-<env>-vpc) or the on-demand-dev
+# heartbeat bucket. Both live in phase1-dev's S3-backed state and are preserved
+# across destroy/recreate cycles: the cluster_subnet is the only VPC-side
+# resource that cycles, and the heartbeat bucket must outlive the cluster so
+# the Phase 3 reaper can see "the cluster was last used at T".
 #
 # These are kept across destroy/recreate cycles. The cost/benefit of cycling
 # postgres-dev (~$13/mo) is poor: it's outside K8s, schema bootstrap is painful,
@@ -85,14 +85,18 @@ ALWAYS_UP_VOLUMES=(
 # these disappear, the -target list is wrong and we have widened the blast
 # radius beyond the ephemeral cluster.
 #
-# The VPC is included here even though it lives inside module.lke_cluster: it
-# is shared with the support_subnet (always-up VMs) and must persist across
-# destroy/recreate cycles. See header for the full rationale.
-ALWAYS_UP_TF_MODULES=(
+# Two states are checked: phase1 (dev workspace; always-up VMs) and phase1-dev
+# (Linode Object Storage backend; LKE VPC + heartbeat bucket).
+ALWAYS_UP_TF_MODULES_PHASE1=(
   "module.headscale_server"
   "module.postgres_server"
   "linode_instance.turn_server"
+)
+
+ALWAYS_UP_TF_MODULES_PHASE1_DEV=(
   "module.lke_cluster.linode_vpc.cluster_vpc"
+  "linode_object_storage_bucket.dev_state"
+  "linode_object_storage_key.dev_state"
 )
 
 CLUSTER_REGION="us-lax"
@@ -149,17 +153,18 @@ if [ "$DRY_RUN" = "true" ]; then
   echo "Region:         $CLUSTER_REGION"
   echo ""
 
-  echo "Terraform targets that would be destroyed:"
+  echo "Terraform targets that would be destroyed (phase1-dev / S3-backed state):"
   echo "  -target=module.lke_cluster.linode_lke_cluster.cluster"
   echo "  -target=module.lke_cluster.linode_vpc_subnet.cluster_subnet"
   echo "  -target=local_file.kubeconfig"
   echo ""
 
   echo "Always-up resources (will be preserved):"
-  echo "  - postgres-dev (VM + 10 Gi data volume)"
-  echo "  - headscale-dev (VM + 10 Gi data volume)"
-  echo "  - turn-server-dev (VM)"
-  echo "  - matrix-cluster-${MT_ENV}-vpc (shared with support_subnet → always-up VMs)"
+  echo "  - postgres-dev (VM + 10 Gi data volume)               [phase1 dev workspace]"
+  echo "  - headscale-dev (VM + 10 Gi data volume)              [phase1 dev workspace]"
+  echo "  - turn-server-dev (VM)                                [phase1 dev workspace]"
+  echo "  - matrix-cluster-${MT_ENV}-vpc                        [phase1-dev]"
+  echo "  - mothertree-dev-state Object Storage bucket + key    [phase1-dev]"
   echo ""
 
   if [ "$CLUSTER_EXISTS" = "true" ]; then
@@ -325,54 +330,69 @@ fi
 
 # ---------------------------------------------------------------------------
 # Step 3: terraform destroy (LKE cluster only — never the always-up VMs)
+#
+# The LKE cluster lives in phase1-dev/ (its own S3-backed state). The dev VMs
+# live in phase1/ (dev workspace, local state) and are NOT touched here.
 # ---------------------------------------------------------------------------
-print_status "Running terraform destroy (LKE cluster only)..."
+print_status "Running terraform destroy (LKE cluster only, in phase1-dev)..."
 
-ENV_DNS_LABEL="$MT_ENV"   # 'dev' (per manage_infra convention; only 'prod' is empty)
+if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+  print_error "phase1-dev S3 backend requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in your secrets env."
+  print_error "See phase1-dev/MIGRATION.md."
+  exit 1
+fi
 
-pushd "$REPO_ROOT/phase1" >/dev/null
+VAR_FILE_FLAGS=()
+if [ -f "$REPO_ROOT/terraform.tfvars" ]; then
+  VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.tfvars")
+fi
+if [ -f "$REPO_ROOT/terraform.${MT_ENV}.tfvars" ]; then
+  VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.${MT_ENV}.tfvars")
+fi
+
+pushd "$REPO_ROOT/phase1-dev" >/dev/null
 
   terraform init -input=false >/dev/null
-  terraform workspace select "$MT_ENV"
 
-  VAR_FILE_FLAGS=()
-  if [ -f "$REPO_ROOT/terraform.tfvars" ]; then
-    VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.tfvars")
-  fi
-  if [ -f "$REPO_ROOT/terraform.${MT_ENV}.tfvars" ]; then
-    VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.${MT_ENV}.tfvars")
-  fi
-
-  # Target only the ephemeral cluster pieces — explicitly NOT the VPC. The VPC
-  # is defined inside module.lke_cluster but it is shared with the support_subnet
-  # (always-up VMs); targeting `module.lke_cluster` as a whole pulls the VPC in
-  # and Linode rejects the delete because the VPC still has resources in it.
-  # The post-destroy assertion below double-checks the VPC + always-up VMs
-  # survive in state.
+  # Target only the ephemeral cluster pieces — NOT the VPC, the heartbeat
+  # bucket, or its access key. The post-destroy assertion below double-checks
+  # they survive in state.
   terraform destroy -auto-approve "${VAR_FILE_FLAGS[@]}" \
     -target=module.lke_cluster.linode_lke_cluster.cluster \
     -target=module.lke_cluster.linode_vpc_subnet.cluster_subnet \
-    -target=local_file.kubeconfig \
-    -var env="$MT_ENV" \
-    -var env_dns_label="$ENV_DNS_LABEL" \
-    -var jitsi_tester_enabled=false
+    -target=local_file.kubeconfig
 
-  # Defense in depth: confirm always-up VM modules survived the destroy.
-  # Anchor the match to a full module/resource path (entry + dot or end-of-line)
-  # so a future rename like `module.headscale_server` → `module.headscale` doesn't
-  # silently keep passing because something else still contains the substring.
-  print_status "Asserting always-up VMs are still in terraform state..."
-  STATE_LIST=$(terraform state list 2>/dev/null)
-  for entry in "${ALWAYS_UP_TF_MODULES[@]}"; do
-    if ! echo "$STATE_LIST" | grep -qE "^${entry}(\.|$)"; then
-      print_error "ASSERTION FAILED: $entry is missing from terraform state!"
+  # Defense in depth: confirm VPC + heartbeat bucket survived. Anchor the match
+  # to a full module/resource path so substring rename collisions don't slip by.
+  print_status "Asserting VPC + heartbeat bucket are still in phase1-dev state..."
+  STATE_LIST_PHASE1_DEV=$(terraform state list 2>/dev/null)
+  for entry in "${ALWAYS_UP_TF_MODULES_PHASE1_DEV[@]}"; do
+    if ! echo "$STATE_LIST_PHASE1_DEV" | grep -qE "^${entry}(\.|$)"; then
+      print_error "ASSERTION FAILED: $entry is missing from phase1-dev terraform state!"
       print_error "The destroy widened beyond the ephemeral cluster — this is a bug."
       exit 3
     fi
   done
-  print_success "All always-up resources (postgres-dev, headscale-dev, turn-server-dev, VPC) preserved in state"
+  print_success "VPC + heartbeat bucket preserved in phase1-dev state"
 
 popd >/dev/null
+
+# Also verify the phase1 dev workspace VMs are untouched (defense in depth
+# even though this script never invokes terraform against phase1).
+print_status "Asserting always-up VMs are still in phase1 dev state..."
+pushd "$REPO_ROOT/phase1" >/dev/null
+  terraform init -input=false >/dev/null
+  terraform workspace select "$MT_ENV" >/dev/null
+  STATE_LIST_PHASE1=$(terraform state list 2>/dev/null)
+  for entry in "${ALWAYS_UP_TF_MODULES_PHASE1[@]}"; do
+    if ! echo "$STATE_LIST_PHASE1" | grep -qE "^${entry}(\.|$)"; then
+      print_error "ASSERTION FAILED: $entry is missing from phase1 dev state!"
+      print_error "The dev VMs should be untouched by destroy-dev-cluster.sh — investigate."
+      exit 3
+    fi
+  done
+popd >/dev/null
+print_success "All always-up resources (postgres-dev, headscale-dev, turn-server-dev, VPC, heartbeat bucket) preserved"
 
 # ---------------------------------------------------------------------------
 # Step 4: orphan sweep — block volumes (two-pass)
@@ -460,7 +480,8 @@ echo "Always-up resources preserved:"
 echo "  - postgres-dev VM + 10 Gi data volume"
 echo "  - headscale-dev VM + 10 Gi data volume"
 echo "  - turn-server-dev VM"
-echo "  - matrix-cluster-${MT_ENV}-vpc (shared with support_subnet → always-up VMs)"
+echo "  - matrix-cluster-${MT_ENV}-vpc (LKE VPC, in phase1-dev state)"
+echo "  - mothertree-dev-state Object Storage bucket + scoped access key"
 echo "  - DNS records (Cloudflare)"
 echo ""
 echo "To rebuild the cluster: ./scripts/manage_infra -e $MT_ENV --phase1 \\"

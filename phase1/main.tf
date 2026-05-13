@@ -32,8 +32,15 @@ provider "cloudflare" {
 
 # Kubernetes resources are managed in infra/ to avoid kubeconfig timing issues
 
-# Create LKE Cluster
+# Create LKE Cluster.
+#
+# Dev's LKE cluster (and only the LKE cluster — the always-up dev VMs continue
+# to live here in the dev workspace) was moved to ../phase1-dev/ in order to
+# back its state with Linode Object Storage. CI needs durable shared state to
+# implement the on-demand-dev model. Prod and prod-eu continue to keep their
+# LKE clusters in this directory with local state.
 module "lke_cluster" {
+  count  = var.env == "dev" ? 0 : 1
   source = "../modules/lke-cluster"
 
   cluster_label    = "${var.cluster_label}-${var.env}"
@@ -46,13 +53,28 @@ module "lke_cluster" {
 
 # Save kubeconfig to project root directory
 resource "local_file" "kubeconfig" {
-  content  = base64decode(module.lke_cluster.kubeconfig)
+  count    = var.env == "dev" ? 0 : 1
+  content  = base64decode(module.lke_cluster[0].kubeconfig)
   filename = "${path.root}/../kubeconfig.${var.env}.yaml"
 
   depends_on = [module.lke_cluster]
 }
 
-# Configure Kubernetes provider to query service CIDR
+# Track the address change introduced by adding `count = var.env == "dev" ? 0 : 1`
+# above so existing prod / prod-eu workspaces don't see a destroy + recreate.
+moved {
+  from = module.lke_cluster
+  to   = module.lke_cluster[0]
+}
+
+moved {
+  from = local_file.kubeconfig
+  to   = local_file.kubeconfig[0]
+}
+
+# Configure Kubernetes provider to query service CIDR.
+# Only used by prod / prod-eu (no kubernetes resources are declared in phase1
+# for dev after the split — the kubeconfig path won't exist for dev workspace).
 provider "kubernetes" {
   config_path = "${path.root}/../kubeconfig.${var.env}.yaml"
 }

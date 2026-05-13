@@ -1,31 +1,36 @@
+# LKE outputs are guarded with `length(module.lke_cluster) > 0` so the dev
+# workspace (where the module count is 0 — see phase1/main.tf) can `terraform
+# apply` cleanly. Dev's LKE cluster lives in ../phase1-dev/ and exposes the
+# same outputs from there.
+
 output "cluster_id" {
   description = "The ID of the LKE cluster"
-  value       = module.lke_cluster.cluster_id
+  value       = length(module.lke_cluster) > 0 ? module.lke_cluster[0].cluster_id : null
 }
 
 output "cluster_label" {
   description = "The label of the LKE cluster"
-  value       = module.lke_cluster.cluster_label
+  value       = length(module.lke_cluster) > 0 ? module.lke_cluster[0].cluster_label : null
 }
 
 output "cluster_region" {
   description = "The region of the LKE cluster"
-  value       = module.lke_cluster.cluster_region
+  value       = length(module.lke_cluster) > 0 ? module.lke_cluster[0].cluster_region : null
 }
 
 output "cluster_status" {
   description = "The status of the LKE cluster"
-  value       = module.lke_cluster.cluster_status
+  value       = length(module.lke_cluster) > 0 ? module.lke_cluster[0].cluster_status : null
 }
 
 output "cluster_ip_address" {
   description = "The IP address of the LKE cluster"
-  value       = module.lke_cluster.cluster_ip_address
+  value       = length(module.lke_cluster) > 0 ? module.lke_cluster[0].cluster_ip_address : null
 }
 
 output "kubeconfig" {
   description = "Base64 encoded kubeconfig for the LKE cluster"
-  value       = module.lke_cluster.kubeconfig
+  value       = length(module.lke_cluster) > 0 ? module.lke_cluster[0].kubeconfig : null
   sensitive   = true
 }
 
@@ -36,12 +41,12 @@ output "kubeconfig_path" {
 
 output "cluster_endpoint" {
   description = "The endpoint for the LKE cluster"
-  value       = module.lke_cluster.cluster_endpoint
+  value       = length(module.lke_cluster) > 0 ? module.lke_cluster[0].cluster_endpoint : null
 }
 
 output "node_pools" {
   description = "Information about the node pools"
-  value       = module.lke_cluster.node_pools
+  value       = length(module.lke_cluster) > 0 ? module.lke_cluster[0].node_pools : null
 }
 
 output "matrix_domain" {
@@ -58,19 +63,19 @@ output "next_steps" {
   description = "Instructions for Phase 2 deployment"
   value       = <<-EOT
     Phase 1 completed successfully!
-    
+
     Next steps for Phase 2:
     1. The kubeconfig has been automatically saved to:
        ${path.root}/../kubeconfig.${var.env}.yaml
-    
+
     2. Navigate to the phase2 directory:
        cd ${path.root}/../phase2
-       
+
     3. Initialize and apply Phase 2:
        terraform init
        terraform plan
        terraform apply
-    
+
     Matrix will be available at:
     - Synapse: https://${var.matrix_subdomain}.${var.domain}
     - Element: https://${var.element_subdomain}.${var.domain}
@@ -80,23 +85,19 @@ output "next_steps" {
 
 output "deployment_summary" {
   description = "Summary of the deployment"
-  value       = <<-EOT
-    Matrix infrastructure deployed successfully!
-    
-    Cluster Details:
-    - Cluster ID: ${module.lke_cluster.cluster_id}
-    - Region: ${module.lke_cluster.cluster_region}
-    - Status: ${module.lke_cluster.cluster_status}
-    - Kubeconfig: ${path.root}/../kubeconfig.${var.env}.yaml
-    
-    Matrix Domain: ${var.matrix_subdomain}.${var.domain}
-    ${var.turn_server_enabled ? "TURN Server: ${linode_instance.turn_server[0].ip_address}" : ""}
-    
-    Next Steps:
-    1. Run 'terraform apply' in phase2/ to deploy Matrix services
-    2. Wait for DNS propagation (5-10 minutes)
-    3. Access Matrix at https://${var.element_subdomain}.${var.domain}
-  EOT
+  value = length(module.lke_cluster) == 0 ? "LKE cluster managed in ../phase1-dev/ — see that directory's outputs." : format(
+    "Matrix infrastructure deployed successfully!\n\nCluster Details:\n- Cluster ID: %s\n- Region: %s\n- Status: %s\n- Kubeconfig: %s/../kubeconfig.%s.yaml\n\nMatrix Domain: %s.%s\n%s\n\nNext Steps:\n1. Run 'terraform apply' in phase2/ to deploy Matrix services\n2. Wait for DNS propagation (5-10 minutes)\n3. Access Matrix at https://%s.%s\n",
+    module.lke_cluster[0].cluster_id,
+    module.lke_cluster[0].cluster_region,
+    module.lke_cluster[0].cluster_status,
+    path.root,
+    var.env,
+    var.matrix_subdomain,
+    var.domain,
+    var.turn_server_enabled ? "TURN Server: ${linode_instance.turn_server[0].ip_address}" : "",
+    var.element_subdomain,
+    var.domain,
+  )
 }
 
 # TURN Server Outputs
@@ -183,4 +184,3 @@ output "postgres_server_label" {
   description = "Label of the PostgreSQL server"
   value       = var.postgres_enabled ? module.postgres_server[0].postgres_server_label : null
 }
-
