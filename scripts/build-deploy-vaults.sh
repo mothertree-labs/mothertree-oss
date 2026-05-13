@@ -35,9 +35,8 @@ LPASS_VAULT_ENTRY="7375668101991863677"
 
 # ── LastPass entry for the phase1-dev Terraform-state bucket creds ─
 # Created during the phase1-dev migration (see phase1-dev/MIGRATION.md).
-# The note must contain two lines, exactly:
-#   AWS_ACCESS_KEY_ID=<linode obj key>
-#   AWS_SECRET_ACCESS_KEY=<linode obj secret>
+# The entry stores the access key in the Username field and the secret key
+# in the Password field (standard lpass credential format).
 # Dev only — CI doesn't run terraform for prod or prod-eu.
 LPASS_TF_STATE_ENTRY="mothertree-tf-state-dev-s3-credentials"
 
@@ -118,24 +117,22 @@ for env in "${ENVS[@]}"; do
   # is stored in LastPass and pulled into the vault on every rebuild.
   if [[ "$env" == "dev" ]]; then
     print_status "  Fetching phase1-dev tf-state creds from LastPass ($LPASS_TF_STATE_ENTRY)..."
-    TF_STATE_NOTE=$(lpass show --note "$LPASS_TF_STATE_ENTRY" 2>/dev/null || true)
-    if [[ -z "$TF_STATE_NOTE" ]]; then
-      ERRORS+=("LastPass entry '$LPASS_TF_STATE_ENTRY' not found or empty. See phase1-dev/MIGRATION.md for setup.")
+    TF_STATE_AK=$(lpass show --username "$LPASS_TF_STATE_ENTRY" 2>/dev/null || true)
+    TF_STATE_SK=$(lpass show --password "$LPASS_TF_STATE_ENTRY" 2>/dev/null || true)
+    if [[ -z "$TF_STATE_AK" || -z "$TF_STATE_SK" ]]; then
+      ERRORS+=("LastPass entry '$LPASS_TF_STATE_ENTRY' is missing Username or Password (access/secret key). See phase1-dev/MIGRATION.md for setup.")
     else
-      # Sanity-check the note has both expected lines.
-      if ! grep -q '^AWS_ACCESS_KEY_ID=' <<< "$TF_STATE_NOTE" \
-        || ! grep -q '^AWS_SECRET_ACCESS_KEY=' <<< "$TF_STATE_NOTE"; then
-        ERRORS+=("LastPass entry '$LPASS_TF_STATE_ENTRY' is missing AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY lines")
-      else
-        # Strip carriage returns + leading/trailing whitespace; keep only the
-        # two expected lines (defends against extra notes the user may add).
-        printf '%s\n' "$TF_STATE_NOTE" \
-          | tr -d '\r' \
-          | grep -E '^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)=' \
-          > "$STAGING/tf-state-creds.env"
-        chmod 0600 "$STAGING/tf-state-creds.env"
-        print_status "  Added tf-state-creds.env (phase1-dev backend)"
-      fi
+      # printf with %s avoids any shell interpolation on the secret values —
+      # an unquoted heredoc would expand `$`/backticks/backslashes if the
+      # keys ever contained those characters (Linode keys are alphanumeric
+      # in practice, but defending against the future change is cheap).
+      umask 077
+      {
+          printf 'AWS_ACCESS_KEY_ID=%s\n' "$TF_STATE_AK"
+          printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$TF_STATE_SK"
+      } > "$STAGING/tf-state-creds.env"
+      umask 022
+      print_status "  Added tf-state-creds.env (phase1-dev backend)"
     fi
   fi
 
