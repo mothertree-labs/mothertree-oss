@@ -256,6 +256,66 @@ if ! poll_job_complete "$NS_FILES" "nextcloud-db-init" 180 5; then
 fi
 print_success "Nextcloud database initialized"
 
+# Step 5a.1: Ensure nextcloud-credentials Secret exists (chart `existingSecret`)
+# This is the single source of truth for the admin user/password. The install
+# Job uses the same Secret so the password ends up matching the DB-stored hash.
+# Preserve across redeploys — never regenerate once present.
+CREDS_EXISTS=$(kubectl get secret nextcloud-credentials -n "$NS_FILES" --ignore-not-found -o name 2>/dev/null || true)
+if [ -z "$CREDS_EXISTS" ]; then
+    print_status "Generating nextcloud-credentials Secret (admin user)..."
+    # Character set is explicitly URL-safe + shell-safe: A-Z, a-z, 0-9, _, -.
+    # Avoids `$<digit>` patterns that historically broke the Docker entrypoint's
+    # eval-based install path (Phase 2 progress notes). The install Job we use
+    # is argv-safe regardless, but a clean charset future-proofs callers.
+    ADMIN_PASSWORD=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 32)
+    if [ "${#ADMIN_PASSWORD}" -lt 32 ]; then
+        print_error "Failed to generate 32-char admin password (got ${#ADMIN_PASSWORD} chars)"
+        exit 1
+    fi
+    kubectl create secret generic nextcloud-credentials \
+        --namespace "$NS_FILES" \
+        --from-literal=nextcloud-username=admin \
+        --from-literal=nextcloud-password="$ADMIN_PASSWORD"
+    print_success "Created nextcloud-credentials Secret"
+else
+    print_status "nextcloud-credentials Secret already exists; preserving"
+fi
+
+# Step 5a.2: Run install Job on cold start (when nextcloud-identity is missing).
+# The Job runs `occ maintenance:install` against the fresh DB with argv quoting
+# so passwords containing `$<digit>` never get shell-expanded. It then POSTs the
+# nextcloud-identity Secret to the K8s API (via the pod SA), never echoing
+# identity values to pod logs.
+#
+# When nextcloud-identity already exists (warm cluster, redeploy, prod), skip
+# the Job entirely — the chart's seed-identity init container will reseed
+# config.php from the existing Secret on every pod boot.
+IDENTITY_SECRET_EXISTS_PRE=$(kubectl get secret nextcloud-identity -n "$NS_FILES" --ignore-not-found -o name 2>/dev/null || true)
+if [ -z "$IDENTITY_SECRET_EXISTS_PRE" ]; then
+    print_status "Cold start detected (no nextcloud-identity Secret); running install Job"
+
+    # Apply the install Job's RBAC (ServiceAccount + Role + RoleBinding).
+    NS_FILES="$NS_FILES" envsubst '${NS_FILES}' \
+        < "$REPO_ROOT/apps/manifests/nextcloud/install-job-rbac.yaml.tpl" \
+        | kubectl apply -f -
+
+    # Apply the Job (delete prior in case of retry).
+    kubectl -n "$NS_FILES" delete job/nextcloud-install --ignore-not-found=true || true
+    NS_FILES="$NS_FILES" envsubst '${NS_FILES}' \
+        < "$REPO_ROOT/apps/manifests/nextcloud/install-job.yaml.tpl" \
+        | kubectl apply -f -
+
+    if ! poll_job_complete "$NS_FILES" "nextcloud-install" 300 5; then
+        print_error "Nextcloud install Job failed; dumping pod logs..."
+        kubectl -n "$NS_FILES" logs -l app.kubernetes.io/component=install --tail=200 --all-containers=true 2>/dev/null || true
+        kubectl -n "$NS_FILES" describe job/nextcloud-install 2>/dev/null || true
+        exit 1
+    fi
+    print_success "Nextcloud install Job complete; nextcloud-identity Secret created"
+else
+    print_status "nextcloud-identity Secret exists; skipping install Job (warm path)"
+fi
+
 # Step 5b: Update PostgreSQL table statistics (ANALYZE)
 # Autoanalyze only triggers after enough row modifications (50 + 10% of rows).
 # Tables like oc_preferences and oc_mimetypes are bulk-loaded once and barely
@@ -727,6 +787,15 @@ print_status "Waiting for Nextcloud pod to be ready (this may take a few minutes
 if ! poll_pod_ready "$NS_FILES" "app.kubernetes.io/instance=nextcloud" 600 5; then
     print_error "Nextcloud pod did not become ready."
     print_error "Refusing to continue (OIDC job / kubectl exec / kubectl cp require a scheduled, running pod)."
+    exit 1
+fi
+
+# Step 7.0: Readiness Gate 4 — Nextcloud occ status reports installed=true.
+# Pod-Ready is necessary but not sufficient: seed-identity may finish writing
+# config.php while occ status still reports installed=false for a short window.
+# This is the canonical "Nextcloud will actually serve" signal.
+if ! mt_wait_for_nextcloud_installed "$NS_FILES"; then
+    print_error "Nextcloud occ status never reported installed=true; aborting"
     exit 1
 fi
 

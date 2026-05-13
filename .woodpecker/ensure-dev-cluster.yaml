@@ -1,13 +1,10 @@
 when:
   - event: pull_request
-  - event: push
-    branch: main
 
 depends_on:
   - validate
   - build-images
   - ci-lease
-  - ensure-dev-cluster
 
 clone:
   - name: clone
@@ -16,7 +13,7 @@ clone:
       recursive: false
 
 steps:
-  - name: deploy-dev-prep
+  - name: ensure-dev-cluster
     image: bash
     when:
       - event: pull_request
@@ -28,6 +25,8 @@ steps:
         from_secret: deploy_vault_password
       GITHUB_PAT:
         from_secret: github_pat
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
       E2E_POOL1_TENANT:
         from_secret: e2e_pool1_tenant
       E2E_POOL2_TENANT:
@@ -37,4 +36,4 @@ steps:
       E2E_POOL2_BASE_DOMAIN:
         from_secret: e2e_pool2_base_domain
     commands:
-      - ci/scripts/ci-deploy.sh dev --prep-only
+      - ci/scripts/ci-deploy.sh dev --bringup-only

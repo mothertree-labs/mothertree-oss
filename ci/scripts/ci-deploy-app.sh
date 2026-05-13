@@ -48,6 +48,12 @@ WORK_DIR=$(mktemp -d /tmp/mt-deploy-XXXXXX)
 chmod 0700 "$WORK_DIR"
 
 _cleanup() {
+  # On-demand-dev heartbeat — touch the bucket so the idle reaper sees this
+  # CI step as recent activity. Mirrors ci-deploy.sh; runs on every exit for
+  # dev only. Tolerant of failure.
+  if [[ "$MT_ENV" == "dev" ]] && [[ -n "${DEV_STATE_BUCKET:-}" ]]; then
+    "$REPO_ROOT/scripts/dev-heartbeat.sh" || true
+  fi
   rm -rf "$WORK_DIR"
   if [[ -d "$REPO_ROOT/config/tenants" ]]; then
     find "$REPO_ROOT/config/tenants" -name "*.secrets.yaml" -newer "$0" -delete 2>/dev/null || true
@@ -62,11 +68,26 @@ tar xzf "$WORK_DIR/secrets.tar.gz" -C "$WORK_DIR"
 rm -f "$WORK_DIR/secrets.tar.gz"
 
 # ── Set up environment ───────────────────────────────────────────
+# Prefer a fresh kubeconfig written into the workspace by the bring-up step in
+# the same pipeline (on-demand-dev cold start). See ci-deploy.sh for details.
+FRESH_KCFG="$REPO_ROOT/kubeconfig.${MT_ENV}.yaml"
+if [[ "$MT_ENV" == "dev" ]] && [[ -f "$FRESH_KCFG" ]] && [[ -s "$FRESH_KCFG" ]]; then
+  echo "Using fresh kubeconfig from bring-up: $FRESH_KCFG"
+  cp "$FRESH_KCFG" "$WORK_DIR/kubeconfig.yaml"
+fi
 export KUBECONFIG="$WORK_DIR/kubeconfig.yaml"
 export MT_TERRAFORM_OUTPUTS_FILE="$WORK_DIR/terraform-outputs.env"
 
 [[ -f "$KUBECONFIG" ]] || { echo "ERROR: kubeconfig.yaml not found in vault"; exit 1; }
 [[ -f "$MT_TERRAFORM_OUTPUTS_FILE" ]] || { echo "ERROR: terraform-outputs.env not found in vault"; exit 1; }
+
+# Source the terraform outputs so child scripts (dev-heartbeat.sh) see
+# DEV_STATE_BUCKET / DEV_STATE_S3_*. Prod / prod-eu have these as empty
+# strings, harmless.
+set -a
+# shellcheck disable=SC1090
+source "$MT_TERRAFORM_OUTPUTS_FILE"
+set +a
 
 # ── Clone private config submodules ───────────────────────────────
 cd "$REPO_ROOT"

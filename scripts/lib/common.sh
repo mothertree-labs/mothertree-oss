@@ -452,3 +452,39 @@ mt_wait_for_admin_portal() {
     print_error "admin-portal /version never returned 200 at $url"
     return 1
 }
+
+# Wait for Nextcloud's occ status to report installed=true.
+# This is the "Gate 4" readiness check after the install Job + helmfile sync:
+# pod-Ready is necessary but not sufficient (the seed-identity init container
+# may finish while config.php is still being seeded, and `occ status` is the
+# canonical signal that Nextcloud will actually serve requests).
+#
+# Usage: mt_wait_for_nextcloud_installed <namespace>
+mt_wait_for_nextcloud_installed() {
+    local namespace="$1"
+    if [ -z "$namespace" ]; then
+        print_error "mt_wait_for_nextcloud_installed: namespace required"
+        return 1
+    fi
+    print_status "Waiting for Nextcloud occ status installed=true in $namespace"
+    for i in $(seq 1 30); do
+        local pod
+        pod=$(kubectl -n "$namespace" get pod \
+                -l app.kubernetes.io/instance=nextcloud \
+                -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null \
+              | awk '{print $1}')
+        if [ -n "$pod" ]; then
+            local installed
+            installed=$(kubectl -n "$namespace" exec "$pod" -c nextcloud -- \
+                bash -c "php /var/www/html/occ status --output=json 2>/dev/null | grep -o '\"installed\":true'" \
+                2>/dev/null || true)
+            if [ -n "$installed" ]; then
+                print_success "Nextcloud installed=true after $((i*10))s"
+                return 0
+            fi
+        fi
+        sleep 10
+    done
+    print_error "Nextcloud never reported installed=true in $namespace"
+    return 1
+}

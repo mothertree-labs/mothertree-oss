@@ -33,6 +33,14 @@ print_error() { echo -e "${RED}[vault]${NC} $1" >&2; }
 # ── LastPass entry for the vault password ─────────────────────────
 LPASS_VAULT_ENTRY="7375668101991863677"
 
+# ── LastPass entry for the phase1-dev Terraform-state bucket creds ─
+# Created during the phase1-dev migration (see phase1-dev/MIGRATION.md).
+# The note must contain two lines, exactly:
+#   AWS_ACCESS_KEY_ID=<linode obj key>
+#   AWS_SECRET_ACCESS_KEY=<linode obj secret>
+# Dev only — CI doesn't run terraform for prod or prod-eu.
+LPASS_TF_STATE_ENTRY="mothertree-tf-state-dev-s3-credentials"
+
 # ── Validate prerequisites ────────────────────────────────────────
 for cmd in ansible-vault lpass tar; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -104,7 +112,34 @@ for env in "${ENVS[@]}"; do
     ERRORS+=("Terraform outputs not found: $TF_OUTPUTS_SRC")
   fi
 
-  # 3. Tenant secrets (config files come from git submodules, not the vault)
+  # 3. Phase1-dev Terraform-state bucket creds (dev only).
+  # CI's bring-up step runs `terraform apply` against phase1-dev's S3 backend
+  # (bucket `mothertree-tf-state-dev`). The scoped access key for that bucket
+  # is stored in LastPass and pulled into the vault on every rebuild.
+  if [[ "$env" == "dev" ]]; then
+    print_status "  Fetching phase1-dev tf-state creds from LastPass ($LPASS_TF_STATE_ENTRY)..."
+    TF_STATE_NOTE=$(lpass show --note "$LPASS_TF_STATE_ENTRY" 2>/dev/null || true)
+    if [[ -z "$TF_STATE_NOTE" ]]; then
+      ERRORS+=("LastPass entry '$LPASS_TF_STATE_ENTRY' not found or empty. See phase1-dev/MIGRATION.md for setup.")
+    else
+      # Sanity-check the note has both expected lines.
+      if ! grep -q '^AWS_ACCESS_KEY_ID=' <<< "$TF_STATE_NOTE" \
+        || ! grep -q '^AWS_SECRET_ACCESS_KEY=' <<< "$TF_STATE_NOTE"; then
+        ERRORS+=("LastPass entry '$LPASS_TF_STATE_ENTRY' is missing AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY lines")
+      else
+        # Strip carriage returns + leading/trailing whitespace; keep only the
+        # two expected lines (defends against extra notes the user may add).
+        printf '%s\n' "$TF_STATE_NOTE" \
+          | tr -d '\r' \
+          | grep -E '^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)=' \
+          > "$STAGING/tf-state-creds.env"
+        chmod 0600 "$STAGING/tf-state-creds.env"
+        print_status "  Added tf-state-creds.env (phase1-dev backend)"
+      fi
+    fi
+  fi
+
+  # 4. Tenant secrets (config files come from git submodules, not the vault)
   TENANT_COUNT=0
   for tenant_dir in "$TENANTS_DIR"/*/; do
     [[ -d "$tenant_dir" ]] || continue
@@ -138,12 +173,12 @@ for env in "${ENVS[@]}"; do
     exit 1
   fi
 
-  # 4. Create tarball
+  # 5. Create tarball
   TARBALL="$STAGING.tar.gz"
   tar czf "$TARBALL" -C "$STAGING" .
   rm -rf "$STAGING"
 
-  # 5. Encrypt with ansible-vault
+  # 6. Encrypt with ansible-vault
   VAULT_FILE="$OUTPUT_DIR/deploy-vault-${env}.vault"
   print_status "  Encrypting → $VAULT_FILE"
 
