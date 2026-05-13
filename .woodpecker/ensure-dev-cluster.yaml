@@ -1,5 +1,14 @@
+# Workflow-level `when` MUST match `deploy-dev-prep.yaml` — that workflow lists
+# ensure-dev-cluster in its depends_on, and Woodpecker blocks a workflow if any
+# dependency is filtered out for the current event. On `push` to main the dev
+# bring-up is a no-op (the step-level `when` below gates the actual command),
+# but the workflow must still exist in the DAG so deploy-dev-prep can resolve.
+# Without this, the merge-to-main pipeline short-circuits BEFORE deploy-prod —
+# see pipelines #1216 / #1219 for the bug behaviour.
 when:
   - event: pull_request
+  - event: push
+    branch: main
 
 depends_on:
   - validate
