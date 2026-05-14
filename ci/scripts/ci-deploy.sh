@@ -142,6 +142,28 @@ git submodule update --init config/platform config/tenants || {
   exit 1
 }
 
+# ── Copy secrets from vault into workspace ────────────────────────
+# Config files come from submodules; secrets come from the encrypted vault.
+# Done BEFORE the --bringup-only shortcut so dev-bringup.sh can resolve the
+# infra-tenant secrets file (for Cloudflare creds used by manage_infra
+# --dns) via infra-config.sh. Pipeline #1255 surfaced this.
+if [[ -d "$WORK_DIR/tenants" ]]; then
+  for tenant_secrets_dir in "$WORK_DIR/tenants"/*/; do
+    [[ -d "$tenant_secrets_dir" ]] || continue
+    tenant_name=$(basename "$tenant_secrets_dir")
+    target_dir="$REPO_ROOT/config/tenants/$tenant_name"
+    if [[ -d "$target_dir" ]]; then
+      cp "$tenant_secrets_dir"/*.secrets.yaml "$target_dir/" 2>/dev/null || true
+      echo "  Copied secrets for tenant: $tenant_name"
+    else
+      echo "  WARNING: Tenant config dir not found: $target_dir (skipping secrets)"
+    fi
+  done
+else
+  echo "ERROR: No tenants/ directory in vault archive"
+  exit 1
+fi
+
 # ── On-demand-dev bring-up shortcut ───────────────────────────────
 # dev-bringup.sh ensures the LKE cluster exists and runs deploy_infra. It does
 # NOT do tenant-level deploys — those happen in subsequent pipeline steps that
@@ -158,25 +180,6 @@ if [[ "$BRINGUP_ONLY" == "true" ]]; then
   # heartbeat on success; the double-touch is harmless (last writer wins).
   "$REPO_ROOT/scripts/dev-bringup.sh"
   exit 0
-fi
-
-# ── Copy secrets from vault into workspace ────────────────────────
-# Config files come from submodules; secrets come from the encrypted vault.
-if [[ -d "$WORK_DIR/tenants" ]]; then
-  for tenant_secrets_dir in "$WORK_DIR/tenants"/*/; do
-    [[ -d "$tenant_secrets_dir" ]] || continue
-    tenant_name=$(basename "$tenant_secrets_dir")
-    target_dir="$REPO_ROOT/config/tenants/$tenant_name"
-    if [[ -d "$target_dir" ]]; then
-      cp "$tenant_secrets_dir"/*.secrets.yaml "$target_dir/" 2>/dev/null || true
-      echo "  Copied secrets for tenant: $tenant_name"
-    else
-      echo "  WARNING: Tenant config dir not found: $target_dir (skipping secrets)"
-    fi
-  done
-else
-  echo "ERROR: No tenants/ directory in vault archive"
-  exit 1
 fi
 
 # ── Resolve tenant(s) to deploy ──────────────────────────────────
