@@ -38,3 +38,34 @@ steps:
         from_secret: e2e_pool2_base_domain
     commands:
       - ci/scripts/ci-deploy.sh dev --prep-only
+
+  # Test-user creation moved here (out of ci-lease) so it runs AFTER the
+  # tenant realm is guaranteed to exist. On PR: deploy-dev-prep above creates
+  # the realm via create_env --prep-only. On main push: that step is a
+  # no-op and the realm exists from prior runs. Either way, by the time
+  # this step runs, Keycloak + the tenant realm are reachable — fixing the
+  # cold-start chicken-and-egg from pipeline #1245.
+  - name: create-test-users
+    image: bash
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL1_KC_REALM:
+        from_secret: e2e_pool1_kc_realm
+      E2E_POOL1_KC_CLIENT_SECRET:
+        from_secret: e2e_pool1_kc_client_secret
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+      E2E_POOL2_KC_REALM:
+        from_secret: e2e_pool2_kc_realm
+      E2E_POOL2_KC_CLIENT_SECRET:
+        from_secret: e2e_pool2_kc_client_secret
+    commands:
+      - ci/scripts/ci-create-test-users.sh
