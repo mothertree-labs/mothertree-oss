@@ -2,8 +2,9 @@
 # dev-bringup.sh — Ensure the dev LKE cluster exists. Called from the
 # Woodpecker `ensure-dev-cluster` step on every PR. Idempotent:
 #   - If the cluster already exists: noop apart from a heartbeat touch.
-#   - If missing: run `manage_infra -e dev --phase1` (which dispatches to
-#     phase1-dev/) and `deploy_infra -e dev`, then touch the heartbeat.
+#   - If missing: run `manage_infra -e dev --phase1-dev-only` (skips the
+#     local-state phase1 root — operator-managed always-up VMs are not
+#     touched from CI) and `deploy_infra -e dev`, then touch the heartbeat.
 #
 # Required env (set by ci/scripts/ci-deploy.sh after vault decrypt):
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY — for phase1-dev's S3 backend
@@ -44,12 +45,11 @@ else
     : "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required for phase1-dev backend (vault: tf-state-creds.env)}"
 
     # manage_infra requires `secrets.tfvars.env` at the repo root for any
-    # phase1 dispatch. For dev, phase1 is a no-op (module count=0) and
-    # phase1-dev only needs TF_VAR_linode_token, but the gate at
-    # scripts/manage_infra:147 fires before that dispatch. Write the file
-    # here on cold start (mirrors the reaper's behaviour in dev-reaper.sh).
-    # Pipeline #1247 surfaced this — the bringup path had never been hit
-    # end-to-end via CI before the first post-reaper-destroy run.
+    # phase1 dispatch. phase1-dev only needs TF_VAR_linode_token; mirror
+    # the reaper's behaviour in dev-reaper.sh which writes the same file
+    # before invoking destroy. Pipeline #1247 surfaced this — the CI
+    # bringup path had never been hit end-to-end before the first
+    # post-reaper-destroy run.
     SECRETS_FILE="$REPO_ROOT/secrets.tfvars.env"
     umask 077
     cat > "$SECRETS_FILE" <<EOF
@@ -59,8 +59,13 @@ EOF
     umask 022
     print_status "dev-bringup: wrote $SECRETS_FILE"
 
-    print_status "dev-bringup: running manage_infra --phase1..."
-    "$REPO_ROOT/scripts/manage_infra" -e dev --phase1
+    # --phase1-dev-only: provision only the ephemeral phase1-dev (LKE
+    # cluster + subnet). The local-state phase1 root holds
+    # operator-managed always-up VMs (postgres-dev / headscale-dev /
+    # turn-server-dev); CI doesn't have phase1's state and running
+    # terraform there would try to recreate those VMs.
+    print_status "dev-bringup: running manage_infra --phase1-dev-only..."
+    "$REPO_ROOT/scripts/manage_infra" -e dev --phase1-dev-only
 
     print_status "dev-bringup: running deploy_infra..."
     "$REPO_ROOT/scripts/deploy_infra" -e dev

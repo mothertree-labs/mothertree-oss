@@ -37,6 +37,9 @@ mt_usage() {
   echo ""
   echo "Phases (run all by default):"
   echo "  --phase1               Phase 1 Terraform only (LKE, VPN, TURN)"
+  echo "  --phase1-dev-only      Like --phase1 but skips the local-state phase1 root"
+  echo "                         (dev cluster only; for CI bringup — operator-managed"
+  echo "                         always-up VMs live in phase1 and stay untouched)"
   echo "  --dns                  DNS records only (Cloudflare + Linode rDNS)"
   echo "  --firewall             LKE firewall rules only (JVB UDP, SMTP NodePort)"
   echo "  --ansible              Ansible playbook only (VPN Postfix, TURN, Unbound)"
@@ -111,11 +114,19 @@ RUN_PHASE1=false
 RUN_DNS=false
 RUN_FIREWALL=false
 RUN_ANSIBLE=false
+PHASE1_DEV_ONLY=false
 
 if mt_has_flag "--phase1"; then RUN_PHASE1=true; fi
 if mt_has_flag "--dns"; then RUN_DNS=true; fi
 if mt_has_flag "--firewall"; then RUN_FIREWALL=true; fi
 if mt_has_flag "--ansible"; then RUN_ANSIBLE=true; fi
+# --phase1-dev-only implies --phase1 but skips the local-state phase1 root.
+# Used by CI (scripts/dev-bringup.sh) to provision only the ephemeral dev
+# LKE cluster without touching operator-managed always-up VMs.
+if mt_has_flag "--phase1-dev-only"; then
+  RUN_PHASE1=true
+  PHASE1_DEV_ONLY=true
+fi
 
 # --plan and --destroy imply phase1 only
 if [ "$PLAN_ONLY" = "true" ] || [ "$DESTROY" = "true" ]; then
@@ -176,28 +187,38 @@ fi
 # Phase 1: Terraform
 # =============================================================================
 if [ "$RUN_PHASE1" = "true" ]; then
+  # Build variable file flags (common first, then env-specific overrides).
+  # Used by BOTH phase1 and phase1-dev; hoisted here so --phase1-dev-only
+  # (which skips the inner phase1 block) can still reach them.
+  #
+  # Common defaults: $REPO_ROOT/terraform.tfvars
+  # Env overrides:   $REPO_ROOT/terraform.<env>.tfvars (e.g., terraform.dev.tfvars)
+  # Later files override earlier ones.
+  VAR_FILE_FLAGS=()
+  if [ -f "$REPO_ROOT/terraform.tfvars" ]; then
+    VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.tfvars")
+  fi
+  if [ -f "$REPO_ROOT/terraform.${MT_ENV}.tfvars" ]; then
+    print_status "Using environment-specific overrides: $REPO_ROOT/terraform.${MT_ENV}.tfvars"
+    VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.${MT_ENV}.tfvars")
+  fi
+
+  # --phase1-dev-only: CI's bringup path runs this to provision only the
+  # ephemeral dev LKE cluster (phase1-dev root). The phase1 root holds
+  # operator-managed always-up VMs (postgres-dev, headscale-dev,
+  # turn-server-dev) whose state lives only on the operator's laptop —
+  # running phase1 from CI would see an empty state and try to recreate
+  # those VMs. Mirrors the asymmetry that destroy-dev-cluster.sh already
+  # has on the destroy side (touches only phase1-dev).
+  if [ "$PHASE1_DEV_ONLY" = "true" ] && [ "$MT_ENV" = "dev" ]; then
+    print_status "Phase1: skipped (--phase1-dev-only set; running phase1-dev only)"
+  else
   pushd "$REPO_ROOT/phase1" >/dev/null
     print_status "Phase1: Initializing Terraform..."
     terraform init -input=false
 
     print_status "Phase1: Selecting workspace '$MT_ENV'..."
     terraform workspace select "$MT_ENV" 2>/dev/null || terraform workspace new "$MT_ENV"
-
-    # Build variable file flags (common first, then env-specific overrides)
-    #
-    # This enables different cluster/node-pool/autoscaler settings for dev vs prod:
-    # - Common defaults live in:    $REPO_ROOT/terraform.tfvars
-    # - Env overrides live in:      $REPO_ROOT/terraform.<env>.tfvars  (e.g., terraform.dev.tfvars)
-    #
-    # Terraform applies var-files in order; later files override earlier ones.
-    VAR_FILE_FLAGS=()
-    if [ -f "$REPO_ROOT/terraform.tfvars" ]; then
-      VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.tfvars")
-    fi
-    if [ -f "$REPO_ROOT/terraform.${MT_ENV}.tfvars" ]; then
-      print_status "Using environment-specific overrides: $REPO_ROOT/terraform.${MT_ENV}.tfvars"
-      VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.${MT_ENV}.tfvars")
-    fi
 
     if [ "$DESTROY" = "true" ]; then
       echo ""
@@ -262,6 +283,7 @@ if [ "$RUN_PHASE1" = "true" ]; then
       echo "  Kubeconfig: $REPO_ROOT/kubeconfig.$MT_ENV.yaml"
     fi
   popd >/dev/null
+  fi  # end --phase1-dev-only gate
 
   # ---------------------------------------------------------------------------
   # Phase1-dev: dev-only second Terraform root that manages the ephemeral LKE
@@ -315,9 +337,14 @@ if [ "$RUN_PHASE1" = "true" ]; then
   # Write terraform outputs to static env file for CI / deploy_infra. The file
   # is the union of phase1 (TURN/Headscale/PostgreSQL) and, for dev, phase1-dev
   # (LKE_CLUSTER_ID + DEV_STATE_*). Skipped on --plan / --destroy so we don't
-  # clobber the prior env file with empties.
+  # clobber the prior env file with empties. Also skipped under
+  # --phase1-dev-only: phase1's outputs weren't read in this run, so writing
+  # would zero out the operator's TURN_SERVER_IP / HEADSCALE_SERVER_IP /
+  # POSTGRES_SERVER_IP. CI doesn't consume LKE_CLUSTER_ID/DEV_STATE_* mid-
+  # pipeline (deploy_infra uses the kubeconfig path; DEV_STATE_* values
+  # persist across bringups), so skipping is safe.
   # ---------------------------------------------------------------------------
-  if [ "$DESTROY" != "true" ] && [ "$PLAN_ONLY" != "true" ]; then
+  if [ "$DESTROY" != "true" ] && [ "$PLAN_ONLY" != "true" ] && [ "$PHASE1_DEV_ONLY" != "true" ]; then
     source "${REPO_ROOT}/scripts/lib/paths.sh"
     _mt_resolve_infra_config "$MT_ENV"
     if [ -n "${MT_INFRA_CONFIG:-}" ]; then
