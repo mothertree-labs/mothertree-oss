@@ -67,6 +67,15 @@ EOF
     print_status "dev-bringup: running manage_infra --phase1-dev-only..."
     "$REPO_ROOT/scripts/manage_infra" -e dev --phase1-dev-only
 
+    # manage_infra wrote a fresh kubeconfig for the NEW cluster at
+    # $REPO_ROOT/kubeconfig.dev.yaml (via the lke_cluster module's
+    # local_file resource). The KUBECONFIG env var inherited from
+    # ci-deploy.sh points at the vault's stale copy (the FRESH_KCFG check
+    # in ci-deploy.sh ran BEFORE bringup, when no fresh file existed yet).
+    # Repoint KUBECONFIG so deploy_infra talks to the cluster we just made.
+    export KUBECONFIG="$REPO_ROOT/kubeconfig.${MT_ENV:-dev}.yaml"
+    print_status "dev-bringup: KUBECONFIG repointed to $KUBECONFIG"
+
     print_status "dev-bringup: running deploy_infra..."
     "$REPO_ROOT/scripts/deploy_infra" -e dev
 
