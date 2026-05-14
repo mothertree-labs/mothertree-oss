@@ -32,9 +32,11 @@ EXISTING_ID=$(linode-cli lke clusters-list --json 2>/dev/null \
     | jq -r --arg label "$CLUSTER_LABEL" '.[] | select(.label==$label) | .id' \
     | head -n1 || true)
 
+DID_PROVISION=false
 if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
     print_success "dev-bringup: cluster exists (id=$EXISTING_ID); reusing"
 else
+    DID_PROVISION=true
     print_status "dev-bringup: no cluster found; provisioning..."
 
     # phase1-dev's S3 backend needs these env vars. Fail fast if missing —
@@ -79,30 +81,46 @@ EOF
     print_status "dev-bringup: running deploy_infra..."
     "$REPO_ROOT/scripts/deploy_infra" -e dev
 
-    # On cold start the dev cluster gets a brand-new ingress LoadBalancer
-    # IP. Cloudflare DNS still points lb1.dev.<base> at the destroyed
-    # cluster's IP, so every hostname behind ingress (auth, files, matrix,
-    # …) is unreachable until DNS is updated. Pipeline #1253 surfaced this:
-    # mt_wait_for_keycloak_oidc in deploy_infra timed out because it was
-    # querying the OLD cluster's IP.
-    #
-    # manage_infra --dns → manage-dns.sh sources infra-config.sh on its
-    # own (which exports TF_VAR_cloudflare_{api_token,zone_id} from the
-    # infra-tenant secrets file). Pass --lb-ip explicitly so we don't race
-    # with stale-cache lookups.
-    NEW_LB_IP=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress \
-        get svc ingress-nginx-controller \
-        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
-    if [ -z "$NEW_LB_IP" ]; then
-        print_error "dev-bringup: could not read new ingress LB IP; aborting"
-        print_error "DNS would otherwise stay pointed at the destroyed cluster's IP."
-        exit 1
-    fi
-    print_status "dev-bringup: running manage_infra --dns --lb-ip=$NEW_LB_IP"
-    "$REPO_ROOT/scripts/manage_infra" -e dev --dns --lb-ip="$NEW_LB_IP"
-
-    print_success "dev-bringup: cluster + infra + DNS ready"
+    print_success "dev-bringup: cluster + infra ready (DNS update follows)"
 fi
+
+# Always reconcile Cloudflare DNS for `lb1.dev.<base>` with the live ingress
+# LB IP — runs on both the cold-start and reuse branches.
+#
+# Why unconditional: the cluster from a previous CI bringup persists across
+# pipelines until the reaper destroys it, so most CI runs hit the "reuse"
+# path. But every reaper cycle moves the LB to a new IP, and the deploy
+# vault's kubeconfig (committed by the operator out-of-band) can lag the
+# real DNS state. Pipeline #1254 surfaced this: cluster reused, DNS still
+# pointed at a destroyed cluster's IP, every ingress-served gate hung.
+# manage-dns.sh is idempotent — same IP is a no-op.
+#
+# Use the workspace kubeconfig if dev-bringup just provisioned (so we
+# query the cluster manage_infra wrote a kubeconfig for), else trust the
+# inherited KUBECONFIG from ci-deploy.sh (vault's copy).
+if [ "$DID_PROVISION" = "true" ]; then
+    export KUBECONFIG="$REPO_ROOT/kubeconfig.${MT_ENV:-dev}.yaml"
+fi
+NEW_LB_IP=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress \
+    get svc ingress-nginx-controller \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+if [ -z "$NEW_LB_IP" ]; then
+    print_error "dev-bringup: could not read ingress LB IP; aborting"
+    print_error "DNS may be stale (pointing at a destroyed cluster's IP)."
+    exit 1
+fi
+# secrets.tfvars.env is required by manage_infra; write it if absent
+# (reuse path doesn't run the cold-start block above).
+if [ ! -f "$REPO_ROOT/secrets.tfvars.env" ]; then
+    umask 077
+    cat > "$REPO_ROOT/secrets.tfvars.env" <<EOF
+# CI bring-up generated; do not edit by hand.
+export TF_VAR_linode_token="$LINODE_CLI_TOKEN"
+EOF
+    umask 022
+fi
+print_status "dev-bringup: reconciling DNS lb1.dev.<base> → $NEW_LB_IP"
+"$REPO_ROOT/scripts/manage_infra" -e dev --dns --lb-ip="$NEW_LB_IP"
 
 # Always touch the heartbeat. The whole point of the on-demand-dev flow is
 # that the reaper destroys the cluster when no CI step has touched it for
