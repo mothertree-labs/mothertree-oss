@@ -43,6 +43,22 @@ else
     : "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required for phase1-dev backend (vault: tf-state-creds.env)}"
     : "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required for phase1-dev backend (vault: tf-state-creds.env)}"
 
+    # manage_infra requires `secrets.tfvars.env` at the repo root for any
+    # phase1 dispatch. For dev, phase1 is a no-op (module count=0) and
+    # phase1-dev only needs TF_VAR_linode_token, but the gate at
+    # scripts/manage_infra:147 fires before that dispatch. Write the file
+    # here on cold start (mirrors the reaper's behaviour in dev-reaper.sh).
+    # Pipeline #1247 surfaced this — the bringup path had never been hit
+    # end-to-end via CI before the first post-reaper-destroy run.
+    SECRETS_FILE="$REPO_ROOT/secrets.tfvars.env"
+    umask 077
+    cat > "$SECRETS_FILE" <<EOF
+# CI bring-up generated; do not edit by hand.
+export TF_VAR_linode_token="$LINODE_CLI_TOKEN"
+EOF
+    umask 022
+    print_status "dev-bringup: wrote $SECRETS_FILE"
+
     print_status "dev-bringup: running manage_infra --phase1..."
     "$REPO_ROOT/scripts/manage_infra" -e dev --phase1
 
