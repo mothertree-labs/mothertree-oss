@@ -357,7 +357,7 @@
 
     - name: Install Terraform
       ansible.builtin.unarchive:
-        src: https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip
+        src: https://releases.hashicorp.com/terraform/1.13.3/terraform_1.13.3_linux_amd64.zip
         dest: /usr/local/bin
         remote_src: true
         mode: "0755"
