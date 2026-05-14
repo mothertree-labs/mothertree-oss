@@ -35,6 +35,26 @@ EXISTING_ID=$(linode-cli lke clusters-list --json 2>/dev/null \
 DID_PROVISION=false
 if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
     print_success "dev-bringup: cluster exists (id=$EXISTING_ID); reusing"
+
+    # The vault's kubeconfig can lag a real cluster recreation by an entire
+    # operator vault-rebuild cycle. Pipeline #1262 surfaced this: a previous
+    # pipeline recreated the cluster (new API endpoint) but failed mid-deploy,
+    # so the next pipeline's kubectl calls hit the destroyed cluster's
+    # endpoint and the bringup aborted before DNS reconcile. Fetch a fresh
+    # kubeconfig from Linode for the current cluster id and write it to
+    # $REPO_ROOT — mirrors dev-reaper.sh's pattern for the destroy side.
+    print_status "dev-bringup: fetching fresh kubeconfig for cluster id=$EXISTING_ID"
+    KCFG_B64=$(linode-cli lke kubeconfig-view --json "$EXISTING_ID" 2>/dev/null \
+        | jq -r '.[0].kubeconfig // empty')
+    if [ -z "$KCFG_B64" ]; then
+        print_error "dev-bringup: could not fetch kubeconfig from Linode API; aborting"
+        exit 1
+    fi
+    umask 077
+    echo "$KCFG_B64" | base64 -d > "$REPO_ROOT/kubeconfig.${MT_ENV:-dev}.yaml"
+    umask 022
+    export KUBECONFIG="$REPO_ROOT/kubeconfig.${MT_ENV:-dev}.yaml"
+    print_status "dev-bringup: KUBECONFIG repointed to $KUBECONFIG (fresh from Linode)"
 else
     DID_PROVISION=true
     print_status "dev-bringup: no cluster found; provisioning..."
