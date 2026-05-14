@@ -382,16 +382,23 @@ mt_wait_for_keycloak_oidc() {
         return 1
     fi
     local url="https://${auth_host}/realms/${realm}/.well-known/openid-configuration"
+    # 180 iterations × 5s = 900s (15 min). Cold-start Keycloak — image
+    # pull on a brand-new node pool + JGroups cluster init + Quarkus boot
+    # + master realm import — has been observed at ~6-8 min in pipeline
+    # #1252/#1253. The previous 60-iter (5 min) ceiling fired before
+    # Keycloak finished initialising. Warm-restart still responds in
+    # 30-90s, so the longer ceiling is only paid on actual cold starts
+    # (≤ once per reaper cycle).
     print_status "Waiting for Keycloak OIDC discovery: $url"
     local i
-    for i in $(seq 1 60); do
+    for i in $(seq 1 180); do
         if curl -sf -m 5 "$url" >/dev/null 2>&1; then
             print_success "Keycloak OIDC discovery responsive after $((i*5))s (realm=$realm)"
             return 0
         fi
         sleep 5
     done
-    print_error "Keycloak OIDC discovery never became responsive at $url"
+    print_error "Keycloak OIDC discovery never became responsive at $url (900s)"
     return 1
 }
 

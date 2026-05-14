@@ -79,7 +79,29 @@ EOF
     print_status "dev-bringup: running deploy_infra..."
     "$REPO_ROOT/scripts/deploy_infra" -e dev
 
-    print_success "dev-bringup: cluster + infra ready"
+    # On cold start the dev cluster gets a brand-new ingress LoadBalancer
+    # IP. Cloudflare DNS still points lb1.dev.<base> at the destroyed
+    # cluster's IP, so every hostname behind ingress (auth, files, matrix,
+    # …) is unreachable until DNS is updated. Pipeline #1253 surfaced this:
+    # mt_wait_for_keycloak_oidc in deploy_infra timed out because it was
+    # querying the OLD cluster's IP.
+    #
+    # manage_infra --dns → manage-dns.sh sources infra-config.sh on its
+    # own (which exports TF_VAR_cloudflare_{api_token,zone_id} from the
+    # infra-tenant secrets file). Pass --lb-ip explicitly so we don't race
+    # with stale-cache lookups.
+    NEW_LB_IP=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress \
+        get svc ingress-nginx-controller \
+        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+    if [ -z "$NEW_LB_IP" ]; then
+        print_error "dev-bringup: could not read new ingress LB IP; aborting"
+        print_error "DNS would otherwise stay pointed at the destroyed cluster's IP."
+        exit 1
+    fi
+    print_status "dev-bringup: running manage_infra --dns --lb-ip=$NEW_LB_IP"
+    "$REPO_ROOT/scripts/manage_infra" -e dev --dns --lb-ip="$NEW_LB_IP"
+
+    print_success "dev-bringup: cluster + infra + DNS ready"
 fi
 
 # Always touch the heartbeat. The whole point of the on-demand-dev flow is
