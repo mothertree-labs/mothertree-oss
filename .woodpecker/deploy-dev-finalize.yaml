@@ -42,3 +42,33 @@ steps:
         from_secret: e2e_pool2_base_domain
     commands:
       - ci/scripts/ci-deploy-app.sh dev finalize
+
+  # Pipeline-scoped test users for E2E. Lives here so it runs AFTER the
+  # tenant auth ingress is up (created in apps/deploy-matrix.sh, which
+  # this workflow depends on). The step itself runs on both PR and push
+  # so users are provisioned for every pipeline; on main push the
+  # deploy-dev-finalize step above is a no-op but this one still runs.
+  - name: create-test-users
+    image: bash
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL1_KC_REALM:
+        from_secret: e2e_pool1_kc_realm
+      E2E_POOL1_KC_CLIENT_SECRET:
+        from_secret: e2e_pool1_kc_client_secret
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+      E2E_POOL2_KC_REALM:
+        from_secret: e2e_pool2_kc_realm
+      E2E_POOL2_KC_CLIENT_SECRET:
+        from_secret: e2e_pool2_kc_client_secret
+    commands:
+      - ci/scripts/ci-create-test-users.sh
