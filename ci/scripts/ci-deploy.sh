@@ -79,15 +79,19 @@ rm -f "$WORK_DIR/secrets.tar.gz"
 echo "Vault decrypted successfully"
 
 # ── Set up environment ───────────────────────────────────────────
-# Prefer a fresh kubeconfig written into the workspace by a prior bring-up
-# step in the same pipeline (on-demand-dev cold start). Each Woodpecker step
-# runs in its own container but shares the workspace volume, so a kubeconfig
-# written by `ensure-dev-cluster` to $REPO_ROOT/kubeconfig.dev.yaml is visible
-# to every downstream step.
-FRESH_KCFG="$REPO_ROOT/kubeconfig.${MT_ENV}.yaml"
-if [[ "$MT_ENV" == "dev" ]] && [[ -f "$FRESH_KCFG" ]] && [[ -s "$FRESH_KCFG" ]]; then
-  echo "Using fresh kubeconfig from bring-up: $FRESH_KCFG"
-  cp "$FRESH_KCFG" "$WORK_DIR/kubeconfig.yaml"
+# For dev, refetch the kubeconfig directly from the Linode API so each
+# workflow gets the live cluster's API endpoint — every Woodpecker
+# workflow has its own workspace, so the kubeconfig written by
+# ensure-dev-cluster's dev-bringup is NOT visible here. Vault copies
+# lag the real cluster id by a reaper cycle (operator rebuilds vault out
+# of band). Pipelines #1262/#1263 surfaced this. Falls through to the
+# vault's copy on prod or if the fetch fails.
+if [[ "$MT_ENV" == "dev" ]] && [[ -n "${LINODE_CLI_TOKEN:-}" ]]; then
+  if ci_fetch_dev_kubeconfig "$WORK_DIR/kubeconfig.yaml"; then
+    echo "Fetched fresh kubeconfig from Linode API for env=dev"
+  else
+    echo "WARNING: Linode kubeconfig fetch failed; falling back to vault copy"
+  fi
 fi
 export KUBECONFIG="$WORK_DIR/kubeconfig.yaml"
 export MT_TERRAFORM_OUTPUTS_FILE="$WORK_DIR/terraform-outputs.env"
