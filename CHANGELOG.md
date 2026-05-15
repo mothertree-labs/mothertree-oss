@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Certificate puts each authz on its own Order, sidestepping the dedup. The
   `matrix-wellknown` ingress now references the `apex-tls-${TENANT_NAME}`
   secret.
+- deploy-stalwart: force CoreDNS rollout (and node-local-dns DaemonSet, when present) on rewrite change so all replicas converge before the SMTP smoke test runs. Closes the cold-start race where provision-smtp's smoke test resolved `mail.<domain>` to the public LB IP via a lagging CoreDNS replica or a stale node-local cache.
 
 ## [0.9.3] - 2026-03-13
 
