@@ -56,6 +56,11 @@ steps:
       CI: "true"
       CI_VALKEY_PASSWORD:
         from_secret: ci_valkey_password
+      # Required by the in-cluster Keycloak OIDC pre-check (cold-start gap #15).
+      # Used to fetch a live dev kubeconfig from the Linode API so we can probe
+      # Keycloak via the kubectl API-server proxy independently of public ingress.
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
       E2E_POOL1_TENANT:
         from_secret: e2e_pool1_tenant
       E2E_POOL1_BASE_DOMAIN:
