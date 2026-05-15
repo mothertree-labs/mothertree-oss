@@ -40,7 +40,15 @@
 mt_mint_caldav_tokens() {
     : "${NS_FILES:?mt_mint_caldav_tokens: NS_FILES required}"
     : "${NS_MAIL:?mt_mint_caldav_tokens: NS_MAIL required}"
-    : "${NEXTCLOUD_ADMIN_PASSWORD:?mt_mint_caldav_tokens: NEXTCLOUD_ADMIN_PASSWORD required}"
+    # NEXTCLOUD_ADMIN_PASSWORD is only used for the optional admin-password
+    # drift-correction below (occ user:resetpassword, wrapped in `|| true`).
+    # The actual token mint does NOT authenticate as admin (occ user:add runs
+    # as root in-container; create-caldav-tokens.php runs as www-data). The
+    # normal deploy path (deploy-calendar-automation.sh) still fails fast on
+    # this secret upstream before calling us; the CI re-mint path may legitly
+    # lack it (the drift-correction already ran at calendar deploy time), so
+    # it is soft-guarded rather than required here.
+    NEXTCLOUD_ADMIN_PASSWORD="${NEXTCLOUD_ADMIN_PASSWORD:-}"
 
     print_status "Creating per-user CalDAV app passwords..."
 
@@ -53,9 +61,16 @@ mt_mint_caldav_tokens() {
         return 0
     fi
 
-    # Ensure admin password matches K8s secret (may drift after Helm upgrades)
-    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-        env "OC_PASS=${NEXTCLOUD_ADMIN_PASSWORD}" php occ user:resetpassword --password-from-env admin 2>/dev/null || true
+    # Ensure admin password matches K8s secret (may drift after Helm upgrades).
+    # Optional: only attempt when we actually have the password. The token mint
+    # below does not authenticate as admin, so skipping this is harmless (and on
+    # the CI re-mint path the calendar deploy already did this minutes earlier).
+    if [ -n "$NEXTCLOUD_ADMIN_PASSWORD" ]; then
+        kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
+            env "OC_PASS=${NEXTCLOUD_ADMIN_PASSWORD}" php occ user:resetpassword --password-from-env admin 2>/dev/null || true
+    else
+        print_warning "NEXTCLOUD_ADMIN_PASSWORD not set — skipping admin password drift-correction (not required for token mint)"
+    fi
 
     # -------------------------------------------------------------------------
     # Provision Keycloak users into Nextcloud
