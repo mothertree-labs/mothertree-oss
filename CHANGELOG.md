@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- Wildcard TLS renewal deadlock: split per-tenant TLS into two Certificates
+  (`wildcard-tls` for `*.domain` + `*.internal-domain`, and `apex-tls` for the
+  bare apex). cert-manager's ACME scheduler deduplicates challenges by
+  `(DNSName, Type)` only — a single Certificate that combines `*.example.com`
+  with `example.com` produces two authorizations at the same
+  `_acme-challenge.example.com` FQDN and the scheduler will never process the
+  second one (cert-manager#8643, behavior is reaffirmed as design intent in
+  v1.20). The first issuance can succeed by luck when one authz is cached on
+  the Let's Encrypt account; every fresh renewal deadlocks. Splitting the
+  Certificate puts each authz on its own Order, sidestepping the dedup. The
+  `matrix-wellknown` ingress now references the `apex-tls-${TENANT_NAME}`
+  secret.
 - deploy-stalwart: force CoreDNS rollout (and node-local-dns DaemonSet, when present) on rewrite change so all replicas converge before the SMTP smoke test runs. Closes the cold-start race where provision-smtp's smoke test resolved `mail.<domain>` to the public LB IP via a lagging CoreDNS replica or a stale node-local cache.
 
 ## [0.9.3] - 2026-03-13
