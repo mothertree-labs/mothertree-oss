@@ -197,21 +197,30 @@ print_status "Reflector target namespaces: $TENANT_NAMESPACES"
 envsubst < "$REPO_ROOT/apps/manifests/wildcard/certificate.yaml.tpl" | kubectl apply -f -
 print_status "Wildcard certificate resources applied"
 
-# Wait for the certificate to be issued (DNS-01 can take 1-2 minutes)
-# cert-manager's Cloudflare DNS solver has a known issue where challenge cleanup
-# fails with an empty zone ID, causing a deadlock: validated challenges can't
-# finalize, blocking remaining challenges from starting. We detect this and
-# recover by removing finalizers from stuck challenges and letting cert-manager retry.
-print_status "Waiting for wildcard certificate to be ready (DNS-01 validation)..."
-if kubectl wait --for=condition=Ready certificate/wildcard-tls -n "$NS_MATRIX" --timeout=120s 2>/dev/null; then
-  print_success "Wildcard TLS certificate is ready"
-else
-  print_warning "Certificate not ready after 120s, checking for stuck challenges..."
+# Wait for the certificates to be issued (DNS-01 can take 1-2 minutes).
+# Both `wildcard-tls` (*.domain + *.internal-domain) and `apex-tls` (bare domain)
+# are issued independently. They live on separate Orders so they cannot deadlock
+# each other under cert-manager's same-FQDN scheduler dedup (see cert-manager#8643).
+# The recovery block below removes finalizers from any challenge stuck `valid` with
+# a finalizer (Cloudflare cleanup edge cases) and retries.
+print_status "Waiting for TLS certificates to be ready (DNS-01 validation)..."
+CERT_OK=true
+for cert in wildcard-tls apex-tls; do
+  if kubectl wait --for=condition=Ready "certificate/${cert}" -n "$NS_MATRIX" --timeout=120s 2>/dev/null; then
+    print_success "${cert} certificate is ready"
+  else
+    CERT_OK=false
+    print_warning "${cert} not ready after 120s"
+  fi
+done
+
+if [ "$CERT_OK" != "true" ]; then
+  print_warning "Checking for stuck challenges..."
 
   # Find challenges stuck in cleanup (valid state but finalizer prevents GC)
   STUCK_CHALLENGES=$(kubectl get challenges -n "$NS_MATRIX" -o json 2>/dev/null \
     | jq -r '.items[]
-             | select(.metadata.name | startswith("wildcard-tls-"))
+             | select((.metadata.name | startswith("wildcard-tls-")) or (.metadata.name | startswith("apex-tls-")))
              | select(.status.state == "valid")
              | select((.metadata.finalizers // []) | length > 0)
              | .metadata.name' 2>/dev/null)
@@ -224,31 +233,33 @@ else
         && print_status "  Removed finalizer from $ch"
     done
 
-    # Delete remaining wildcard challenges (e.g. ones that never started)
-    kubectl get challenges -n "$NS_MATRIX" -o name 2>/dev/null \
-      | grep "wildcard-tls-" \
-      | xargs -r kubectl delete -n "$NS_MATRIX" 2>/dev/null || true
+    # Delete remaining challenges, orders, CRs for both certs so cert-manager retries from scratch
+    for prefix in wildcard-tls- apex-tls-; do
+      kubectl get challenges -n "$NS_MATRIX" -o name 2>/dev/null \
+        | grep "$prefix" \
+        | xargs -r kubectl delete -n "$NS_MATRIX" 2>/dev/null || true
+      kubectl get orders -n "$NS_MATRIX" -o name 2>/dev/null \
+        | grep "$prefix" \
+        | xargs -r kubectl delete -n "$NS_MATRIX" 2>/dev/null || true
+      kubectl get certificaterequests -n "$NS_MATRIX" -o name 2>/dev/null \
+        | grep "$prefix" \
+        | xargs -r kubectl delete -n "$NS_MATRIX" 2>/dev/null || true
+    done
 
-    # Delete stale orders and certificate requests so cert-manager retries from scratch
-    kubectl get orders -n "$NS_MATRIX" -o name 2>/dev/null \
-      | grep "wildcard-tls-" \
-      | xargs -r kubectl delete -n "$NS_MATRIX" 2>/dev/null || true
-    kubectl get certificaterequests -n "$NS_MATRIX" -o name 2>/dev/null \
-      | grep "wildcard-tls-" \
-      | xargs -r kubectl delete -n "$NS_MATRIX" 2>/dev/null || true
-
-    print_status "Waiting for cert-manager to retry (up to 180s)..."
-    if kubectl wait --for=condition=Ready certificate/wildcard-tls -n "$NS_MATRIX" --timeout=180s 2>/dev/null; then
-      print_success "Wildcard TLS certificate is ready (after retry)"
-    else
-      print_warning "Wildcard certificate still not ready after retry"
-      print_warning "Check status: kubectl get certificate wildcard-tls -n $NS_MATRIX"
-      print_warning "Continuing deployment — ingresses will use the cert once it's issued"
-    fi
+    print_status "Waiting for cert-manager to retry (up to 180s per cert)..."
+    for cert in wildcard-tls apex-tls; do
+      if kubectl wait --for=condition=Ready "certificate/${cert}" -n "$NS_MATRIX" --timeout=180s 2>/dev/null; then
+        print_success "${cert} certificate is ready (after retry)"
+      else
+        print_warning "${cert} still not ready after retry"
+        print_warning "Check status: kubectl get certificate ${cert} -n $NS_MATRIX"
+      fi
+    done
+    print_warning "Continuing deployment — ingresses will use certs once they're issued"
   else
-    print_warning "No stuck challenges found — certificate may still be validating"
-    print_warning "Check status: kubectl get certificate wildcard-tls -n $NS_MATRIX"
-    print_warning "Continuing deployment — ingresses will use the cert once it's issued"
+    print_warning "No stuck challenges found — certificates may still be validating"
+    print_warning "Check status: kubectl get certificate -n $NS_MATRIX"
+    print_warning "Continuing deployment — ingresses will use certs once they're issued"
   fi
 fi
 

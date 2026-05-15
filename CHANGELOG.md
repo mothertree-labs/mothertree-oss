@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Wildcard TLS renewal deadlock: split per-tenant TLS into two Certificates
+  (`wildcard-tls` for `*.domain` + `*.internal-domain`, and `apex-tls` for the
+  bare apex). cert-manager's ACME scheduler deduplicates challenges by
+  `(DNSName, Type)` only — a single Certificate that combines `*.example.com`
+  with `example.com` produces two authorizations at the same
+  `_acme-challenge.example.com` FQDN and the scheduler will never process the
+  second one (cert-manager#8643, behavior is reaffirmed as design intent in
+  v1.20). The first issuance can succeed by luck when one authz is cached on
+  the Let's Encrypt account; every fresh renewal deadlocks. Splitting the
+  Certificate puts each authz on its own Order, sidestepping the dedup. The
+  `matrix-wellknown` ingress now references the `apex-tls-${TENANT_NAME}`
+  secret.
+
 ## [0.9.3] - 2026-03-13
 
 ### Added

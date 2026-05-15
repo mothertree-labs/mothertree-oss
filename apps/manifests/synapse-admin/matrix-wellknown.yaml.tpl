@@ -14,7 +14,7 @@ spec:
   tls:
     - hosts:
         - ${TENANT_DOMAIN}
-      secretName: wildcard-tls-${TENANT_NAME}
+      secretName: apex-tls-${TENANT_NAME}
   rules:
     - host: ${TENANT_DOMAIN}
       http:
