@@ -173,105 +173,13 @@ print_success "Install script ConfigMap created"
 # Create per-user CalDAV app passwords
 # =============================================================================
 # Nextcloud CalDAV is user-scoped — admin cannot access other users' calendars.
-# We create a Nextcloud app password for each user via `occ`, allowing
-# calendar-automation to authenticate as each user for CalDAV operations.
-print_status "Creating per-user CalDAV app passwords..."
-
-mt_require_commands jq
-
-NEXTCLOUD_POD=$(kubectl get pods -n "$NS_FILES" -l app.kubernetes.io/name=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-if [ -z "$NEXTCLOUD_POD" ]; then
-    print_warning "Nextcloud pod not found in $NS_FILES, skipping CalDAV token creation"
-else
-    # Ensure admin password matches K8s secret (may drift after Helm upgrades)
-    kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-        env "OC_PASS=${NEXTCLOUD_ADMIN_PASSWORD}" php occ user:resetpassword --password-from-env admin 2>/dev/null || true
-
-    # -------------------------------------------------------------------------
-    # Provision Keycloak users into Nextcloud
-    # -------------------------------------------------------------------------
-    # Nextcloud only creates user principals on first OIDC web login. Users that
-    # exist in Keycloak but have never logged into Nextcloud (e.g. CI mail users)
-    # won't have CalDAV principals, so calendar-automation can't create calendars
-    # for them. Pre-provision them here so CalDAV tokens can be created below.
-    KC_TOKEN=""
-    if [ -n "${KEYCLOAK_ADMIN_PASSWORD:-}" ] && [ -n "${AUTH_HOST:-}" ] && [ -n "${TENANT_KEYCLOAK_REALM:-}" ]; then
-        KEYCLOAK_URL="https://${AUTH_HOST}"
-        KC_TOKEN=$(curl -sf --connect-timeout 10 --max-time 15 -X POST \
-          "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
-          --data-urlencode "username=admin" \
-          --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
-          --data-urlencode "grant_type=password" \
-          --data-urlencode "client_id=admin-cli" | \
-          jq -r '.access_token // empty' 2>/dev/null) || true
-    fi
-
-    if [ -n "$KC_TOKEN" ]; then
-        KC_EMAILS=$(curl -sf --connect-timeout 10 --max-time 15 \
-          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/users?max=500" \
-          -H "Authorization: Bearer $KC_TOKEN" | \
-          jq -r '.[] | select(.email != null) | .email' 2>/dev/null || echo "")
-
-        NC_EXISTING=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-            php occ user:list --output=json 2>/dev/null | jq -r 'keys[]' 2>/dev/null || echo "")
-
-        PROVISIONED=0
-        while IFS= read -r kc_email; do
-            [ -z "$kc_email" ] && continue
-            # Validate email format (defense-in-depth against injection via crafted Keycloak data)
-            if ! [[ "$kc_email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+$ ]]; then
-                print_warning "Skipping invalid email from Keycloak: $kc_email"
-                continue
-            fi
-            # Skip if already in Nextcloud
-            if echo "$NC_EXISTING" | grep -qxF "$kc_email"; then
-                continue
-            fi
-            # Provision with a random password (OIDC handles real auth)
-            RAND_PASS=$(openssl rand -base64 32)
-            kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-                env "OC_PASS=$RAND_PASS" \
-                php occ user:add --password-from-env --display-name "$kc_email" -- "$kc_email" 2>/dev/null && \
-                PROVISIONED=$((PROVISIONED + 1)) || \
-                print_warning "Failed to provision Nextcloud user: $kc_email"
-        done <<< "$KC_EMAILS"
-
-        if [ "$PROVISIONED" -gt 0 ]; then
-            print_success "Provisioned $PROVISIONED Keycloak user(s) into Nextcloud"
-        fi
-    else
-        print_warning "Could not get Keycloak admin token — skipping user provisioning into Nextcloud"
-    fi
-
-    # Build combined user list: occ user:list (local users) + Keycloak emails (OIDC users).
-    # occ user:list doesn't enumerate OIDC-backend users, so we merge both sources
-    # to ensure CalDAV tokens are created for all users regardless of backend.
-    NC_USER_JSON=$(kubectl exec -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-        php occ user:list --output=json 2>/dev/null || echo "{}")
-    NC_EMAILS=$(echo "$NC_USER_JSON" | jq -r 'keys[] | select(. != "admin")' 2>/dev/null || echo "")
-    USER_EMAILS_JSON=$(printf '%s\n%s' "$NC_EMAILS" "${KC_EMAILS:-}" | sort -u | grep -v '^$' | jq -R . | jq -s . || echo "[]")
-
-    # Create app passwords in bulk via create-caldav-tokens.php.
-    # This uses Nextcloud's ITokenProvider::generateToken() directly, bypassing
-    # occ user:auth-tokens:add which requires allow_multiple_user_backends=1.
-    # Single PHP process, single kubectl exec, ~30s for 550 users instead of ~6min.
-    # Critically: allow_multiple_user_backends is never toggled, so the readiness
-    # probe (oidc-health.php) is never poisoned and no NextcloudDown alert fires.
-    CALDAV_TOKENS=$(echo "$USER_EMAILS_JSON" | kubectl exec -i -n "$NS_FILES" "$NEXTCLOUD_POD" -c nextcloud -- \
-        su -s /bin/sh www-data -c 'php /docker-entrypoint-hooks.d/before-starting/create-caldav-tokens.php calendar-automation' 2>/dev/null || echo "{}")
-    TOKEN_COUNT=$(echo "$CALDAV_TOKENS" | jq 'length' 2>/dev/null || echo "0")
-
-    if [ "$TOKEN_COUNT" -eq 0 ]; then
-        print_warning "No CalDAV tokens were created — calendar-automation will not be able to access user calendars"
-    fi
-
-    # Store tokens as a Secret (mounted read-only in the calendar-automation pod)
-    kubectl create secret generic calendar-automation-caldav-tokens \
-        --namespace="$NS_MAIL" \
-        --from-literal=caldav-tokens.json="$CALDAV_TOKENS" \
-        --dry-run=client -o yaml | kubectl apply -f -
-    print_success "CalDAV app passwords created for $TOKEN_COUNT user(s)"
-fi
+# The mint logic lives in apps/scripts/mint-caldav-tokens.sh so it can be reused
+# verbatim by the CI re-mint step (cold-start gap #17): test users created
+# *after* this deploy (e.g. e2e-mailrt, created in deploy-dev-finalize) would
+# otherwise have no token, and calendar-automation only reads the Secret at
+# startup. Keeping a single source of truth avoids drift between the two paths.
+source "${REPO_ROOT}/apps/scripts/mint-caldav-tokens.sh"
+mt_mint_caldav_tokens
 
 # =============================================================================
 # Apply deployment manifest
