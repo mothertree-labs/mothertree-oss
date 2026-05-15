@@ -16,21 +16,11 @@ steps:
       CI: "true"
       CI_VALKEY_PASSWORD:
         from_secret: ci_valkey_password
+      # Tenant + base_domain are only used here for log output. Keycloak
+      # secrets moved to deploy-dev-prep's create-test-users step.
       E2E_POOL1_TENANT:
         from_secret: e2e_pool1_tenant
-      E2E_POOL1_BASE_DOMAIN:
-        from_secret: e2e_pool1_base_domain
-      E2E_POOL1_KC_REALM:
-        from_secret: e2e_pool1_kc_realm
-      E2E_POOL1_KC_CLIENT_SECRET:
-        from_secret: e2e_pool1_kc_client_secret
       E2E_POOL2_TENANT:
         from_secret: e2e_pool2_tenant
-      E2E_POOL2_BASE_DOMAIN:
-        from_secret: e2e_pool2_base_domain
-      E2E_POOL2_KC_REALM:
-        from_secret: e2e_pool2_kc_realm
-      E2E_POOL2_KC_CLIENT_SECRET:
-        from_secret: e2e_pool2_kc_client_secret
     commands:
       - ci/scripts/ci-lease-tenant.sh

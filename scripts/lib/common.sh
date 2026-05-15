@@ -376,22 +376,37 @@ mt_psql() {
 # you need to gate on that specific realm being registered and serving.
 mt_wait_for_keycloak_oidc() {
     local realm="${1:-master}"
-    local auth_host="${AUTH_HOST:-}"
-    if [ -z "$auth_host" ]; then
-        print_error "mt_wait_for_keycloak_oidc: AUTH_HOST is not set"
+    # Probe Keycloak via the kubectl API-server proxy rather than the public
+    # ingress hostname. The Keycloak Helm chart has `ingress.enabled: false`
+    # (Mothertree creates per-tenant auth ingresses later, in
+    # apps/deploy-matrix.sh), so there is no ingress for `auth.${AUTH_HOST}`
+    # at deploy_infra time on a cold-started cluster — the warm-cluster
+    # case only worked because per-tenant ingresses persisted from prior
+    # deploys. Pipelines #1252/#1253/#1254/#1257 surfaced this.
+    #
+    # The kubectl proxy reads through the kubeconfig already in scope; no
+    # DNS, no TLS, no ingress dependency. Works for both master and tenant
+    # realms (the realm name is just part of the path).
+    if [ -z "${KUBECONFIG:-}" ]; then
+        print_error "mt_wait_for_keycloak_oidc: KUBECONFIG is not set"
         return 1
     fi
-    local url="https://${auth_host}/realms/${realm}/.well-known/openid-configuration"
-    print_status "Waiting for Keycloak OIDC discovery: $url"
+    local proxy_path="/api/v1/namespaces/infra-auth/services/keycloak-keycloakx-http:http/proxy/realms/${realm}/.well-known/openid-configuration"
+    # 180 iterations × 5s = 900s (15 min). Cold-start Keycloak — image
+    # pull on a brand-new node pool + JGroups cluster init + Quarkus boot
+    # + master realm import — has been observed at ~6-8 min in pipeline
+    # #1252/#1253. Warm-restart still responds in 30-90s.
+    print_status "Waiting for Keycloak OIDC discovery (in-cluster, realm=$realm)"
     local i
-    for i in $(seq 1 60); do
-        if curl -sf -m 5 "$url" >/dev/null 2>&1; then
+    for i in $(seq 1 180); do
+        if kubectl --kubeconfig="$KUBECONFIG" --request-timeout=5s \
+               get --raw="$proxy_path" >/dev/null 2>&1; then
             print_success "Keycloak OIDC discovery responsive after $((i*5))s (realm=$realm)"
             return 0
         fi
         sleep 5
     done
-    print_error "Keycloak OIDC discovery never became responsive at $url"
+    print_error "Keycloak OIDC discovery never became responsive via kubectl proxy (900s, realm=$realm)"
     return 1
 }
 

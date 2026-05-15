@@ -26,6 +26,8 @@ steps:
         from_secret: deploy_vault_password
       GITHUB_PAT:
         from_secret: github_pat
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
       E2E_POOL1_TENANT:
         from_secret: e2e_pool1_tenant
       E2E_POOL2_TENANT:

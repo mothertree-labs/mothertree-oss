@@ -68,12 +68,16 @@ tar xzf "$WORK_DIR/secrets.tar.gz" -C "$WORK_DIR"
 rm -f "$WORK_DIR/secrets.tar.gz"
 
 # ── Set up environment ───────────────────────────────────────────
-# Prefer a fresh kubeconfig written into the workspace by the bring-up step in
-# the same pipeline (on-demand-dev cold start). See ci-deploy.sh for details.
-FRESH_KCFG="$REPO_ROOT/kubeconfig.${MT_ENV}.yaml"
-if [[ "$MT_ENV" == "dev" ]] && [[ -f "$FRESH_KCFG" ]] && [[ -s "$FRESH_KCFG" ]]; then
-  echo "Using fresh kubeconfig from bring-up: $FRESH_KCFG"
-  cp "$FRESH_KCFG" "$WORK_DIR/kubeconfig.yaml"
+# For dev, refetch the kubeconfig from the Linode API so we hit the live
+# cluster. Each Woodpecker workflow has its own workspace; the
+# kubeconfig the bringup writes is not visible here. See ci-deploy.sh
+# for details.
+if [[ "$MT_ENV" == "dev" ]] && [[ -n "${LINODE_CLI_TOKEN:-}" ]]; then
+  if ci_fetch_dev_kubeconfig "$WORK_DIR/kubeconfig.yaml"; then
+    echo "Fetched fresh kubeconfig from Linode API for env=dev"
+  else
+    echo "WARNING: Linode kubeconfig fetch failed; falling back to vault copy"
+  fi
 fi
 export KUBECONFIG="$WORK_DIR/kubeconfig.yaml"
 export MT_TERRAFORM_OUTPUTS_FILE="$WORK_DIR/terraform-outputs.env"

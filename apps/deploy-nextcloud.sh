@@ -413,14 +413,14 @@ if kubectl get secret nextcloud-identity -n "$NS_FILES" &>/dev/null; then
     if [ -z "$EXISTING_TD" ]; then
         print_status "Patching identity secret with trusted-domains (was missing)..."
         kubectl patch secret nextcloud-identity -n "$NS_FILES" \
-            -p "{\"data\":{\"trusted-domains\":\"$(echo -n "$DESIRED_TD" | base64)\"}}"
+            -p "{\"data\":{\"trusted-domains\":\"$(echo -n "$DESIRED_TD" | base64 -w 0)\"}}"
         print_success "trusted-domains added to identity secret"
     else
         DECODED_TD=$(echo "$EXISTING_TD" | base64 -d 2>/dev/null || true)
         if [ "$DECODED_TD" != "$DESIRED_TD" ]; then
             print_status "Updating trusted-domains in identity secret..."
             kubectl patch secret nextcloud-identity -n "$NS_FILES" \
-                -p "{\"data\":{\"trusted-domains\":\"$(echo -n "$DESIRED_TD" | base64)\"}}"
+                -p "{\"data\":{\"trusted-domains\":\"$(echo -n "$DESIRED_TD" | base64 -w 0)\"}}"
             print_success "trusted-domains updated in identity secret"
         else
             print_success "trusted-domains already correct in identity secret"
