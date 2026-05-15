@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Cert-expiry alerting was silently dead. The cert-manager `ServiceMonitor`
+  was missing the `release: kube-prometheus-stack` label that
+  kube-prometheus-stack's Prometheus uses to select ServiceMonitors, so
+  `certmanager_certificate_*` metrics were never scraped and the
+  `CertificateExpiringSoon` / `CertificateNotReady` alerts had no input data.
+  The Blackbox HTTPS endpoint probes were also blind: they traverse Cloudflare
+  and measure CF's edge cert (auto-renewed by CF, ~85 days remaining), not our
+  origin Let's Encrypt cert. Added the missing label, plus two new alerts on
+  metrics that are scraped independently of cert-manager:
+  `IngressCertExpiringSoon` (uses `nginx_ingress_controller_ssl_expire_time_seconds`,
+  per-host, sourced from the cert the ingress controller is actually serving)
+  and `CertificateRenewalStuck` (fires 24h after cert-manager's scheduled
+  renewal hasn't happened — catches stuck renewals ~30 days before expiry
+  instead of 7).
+
 ## [0.9.3] - 2026-03-13
 
 ### Added
