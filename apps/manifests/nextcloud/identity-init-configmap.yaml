@@ -133,6 +133,16 @@ data:
     # The rsync above populates /mnt/html but config/custom_apps/themes are separate subPaths
     # so they won't be populated by the rsync. That's fine — config.php goes to /mnt/config/.
 
+    # Defense-in-depth (cold-start gap #16): if the identity Secret somehow
+    # lacks a version (e.g. an old install Job that predated the version key),
+    # fall back to the image's own version rather than writing
+    # 'version' => '' into config.php — an empty version makes Nextcloud
+    # declare a multi-major DB upgrade and abort `occ upgrade`.
+    if [ -z "${NC_VERSION:-}" ]; then
+        NC_VERSION=$(php -r 'require "/usr/src/nextcloud/version.php"; echo implode(".", $OC_Version);')
+        echo "NC_VERSION empty — falling back to image version: $NC_VERSION"
+    fi
+
     # Write version.php with the stored version (for upgrade detection by entrypoint)
     # If NC_VERSION matches the image version, entrypoint skips rsync+install (fast boot).
     # If NC_VERSION is older, entrypoint detects upgrade and runs occ upgrade.
