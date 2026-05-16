@@ -391,7 +391,14 @@ popd >/dev/null
 # API by VM label rather than `terraform state list`. CI-safe, and a stronger
 # check (the VMs must actually exist, not merely be named in a state file).
 print_status "Asserting always-up VMs still exist (Linode API)..."
-ALL_LINODES_JSON=$(linode-cli linodes list --json 2>/dev/null)
+# Fail closed with a clear diagnostic on API failure, rather than a bare `set -e`
+# abort (which would otherwise misreport as "VM not found"). Either way nothing
+# has been swept yet, so this fails safe — but the operator/reaper log should
+# say *why*.
+if ! ALL_LINODES_JSON=$(linode-cli linodes list --json); then
+  print_error "linode-cli linodes list failed — cannot verify always-up VMs; aborting before any orphan sweep (fail closed)"
+  exit 3
+fi
 for vm in "${ALWAYS_UP_VMS[@]}"; do
   vm_status=$(echo "$ALL_LINODES_JSON" | jq -r --arg l "$vm" '.[] | select(.label == $l) | .status // empty')
   if [ -z "$vm_status" ]; then
