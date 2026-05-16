@@ -81,18 +81,26 @@ ALWAYS_UP_VOLUMES=(
   "headscale-dev-data"
 )
 
-# Terraform state entries that MUST still exist after the destroy. If any of
-# these disappear, the -target list is wrong and we have widened the blast
-# radius beyond the ephemeral cluster.
-#
-# Two states are checked: phase1 (dev workspace; always-up VMs) and phase1-dev
-# (Linode Object Storage backend; LKE VPC + heartbeat bucket).
-ALWAYS_UP_TF_MODULES_PHASE1=(
-  "module.headscale_server"
-  "module.postgres_server"
-  "linode_instance.turn_server"
+# VMs that must NEVER be touched by this script. Verified post-destroy via the
+# Linode API by label — NOT `terraform state list`. The phase1 dev VMs live in
+# a workspace with a LOCAL backend that exists only on an operator machine; it
+# is absent on the CI/reaper host, so a terraform-state assertion there fails
+# (`Workspace "dev" doesn't exist`) and, under `set -e`, used to abort the
+# script before the orphan sweeps in Steps 4–5 ever ran — leaking a
+# NodeBalancer + CSI volumes on every reaper recycle. An API check is both
+# CI-safe and stronger (asserts the VMs really exist + run, not just that a
+# state file names them).
+ALWAYS_UP_VMS=(
+  "postgres-${MT_ENV}"
+  "headscale-${MT_ENV}"
+  "turn-server-${MT_ENV}"
 )
 
+# Terraform state entries that MUST still exist after the destroy. If any of
+# these disappear, the -target list is wrong and we have widened the blast
+# radius beyond the ephemeral cluster. Only phase1-dev is checked here: it uses
+# a Linode Object Storage backend reachable from both operator and CI hosts
+# (the always-up VMs are asserted via ALWAYS_UP_VMS above instead).
 ALWAYS_UP_TF_MODULES_PHASE1_DEV=(
   "module.lke_cluster.linode_vpc.cluster_vpc"
   "linode_object_storage_bucket.dev_state"
@@ -377,21 +385,22 @@ pushd "$REPO_ROOT/phase1-dev" >/dev/null
 
 popd >/dev/null
 
-# Also verify the phase1 dev workspace VMs are untouched (defense in depth
-# even though this script never invokes terraform against phase1).
-print_status "Asserting always-up VMs are still in phase1 dev state..."
-pushd "$REPO_ROOT/phase1" >/dev/null
-  terraform init -input=false >/dev/null
-  terraform workspace select "$MT_ENV" >/dev/null
-  STATE_LIST_PHASE1=$(terraform state list 2>/dev/null)
-  for entry in "${ALWAYS_UP_TF_MODULES_PHASE1[@]}"; do
-    if ! echo "$STATE_LIST_PHASE1" | grep -qE "^${entry}(\.|$)"; then
-      print_error "ASSERTION FAILED: $entry is missing from phase1 dev state!"
-      print_error "The dev VMs should be untouched by destroy-dev-cluster.sh — investigate."
-      exit 3
-    fi
-  done
-popd >/dev/null
+# Verify the always-up dev VMs are untouched. This script never invokes
+# terraform against phase1/, and phase1's dev workspace uses a LOCAL backend
+# that does not exist on the CI/reaper host — so we assert against the Linode
+# API by VM label rather than `terraform state list`. CI-safe, and a stronger
+# check (the VMs must actually exist, not merely be named in a state file).
+print_status "Asserting always-up VMs still exist (Linode API)..."
+ALL_LINODES_JSON=$(linode-cli linodes list --json 2>/dev/null)
+for vm in "${ALWAYS_UP_VMS[@]}"; do
+  vm_status=$(echo "$ALL_LINODES_JSON" | jq -r --arg l "$vm" '.[] | select(.label == $l) | .status // empty')
+  if [ -z "$vm_status" ]; then
+    print_error "ASSERTION FAILED: always-up VM '$vm' not found in the Linode account!"
+    print_error "destroy-dev-cluster.sh must never touch the always-up VMs — investigate immediately."
+    exit 3
+  fi
+  print_status "  $vm: $vm_status"
+done
 print_success "All always-up resources (postgres-dev, headscale-dev, turn-server-dev, VPC, heartbeat bucket) preserved"
 
 # ---------------------------------------------------------------------------
@@ -435,16 +444,26 @@ linode-cli volumes list --json 2>/dev/null | jq -r --arg region "$CLUSTER_REGION
 # `pvc-<uuid>`, and uses `linode-block-storage-retain` so they won't auto-delete
 # when the cluster goes away. We catch them by label prefix + region + unattached.
 #
-# IMPORTANT: this filter relies on dev being the only cluster in $CLUSTER_REGION
-# with unattached pvc-* volumes at this moment. Prod's CSI volumes will still
-# be attached to running prod nodes, so they won't match. If prod ever moves
-# into us-lax, this filter must be tightened. (Prod is currently us-east, prod-eu
-# is nl-ams — Phase 1 verified.)
-print_status "Orphan sweep pass 2: CSI-provisioned orphans (label=pvc-*, unattached, region=$CLUSTER_REGION)..."
-linode-cli volumes list --json 2>/dev/null | jq -r --arg region "$CLUSTER_REGION" '
+# SAFETY: prod and dev are BOTH in us-lax (the old comment claiming prod is
+# us-east is stale — the prod cluster is also us-lax). A prod CSI volume that
+# is momentarily unattached (pod reschedule, node replacement) would otherwise
+# match this filter and be destroyed — irreversible prod data loss. Since CSI
+# volumes carry no cluster fingerprint (empty tags, opaque pvc-<uuid> label),
+# we discriminate by age: a dev cluster lives at most a few hours (reaper
+# IDLE_HOURS=2), so any genuine dev orphan was `created` very recently, whereas
+# prod CSI volumes are months old. We only delete unattached pvc-* created
+# within CSI_ORPHAN_MAX_AGE_DAYS. A robust dev/prod discriminator (e.g. tagging
+# CSI volumes at provision time) is a recommended follow-up.
+CSI_ORPHAN_MAX_AGE_DAYS="${CSI_ORPHAN_MAX_AGE_DAYS:-7}"
+CSI_ORPHAN_CUTOFF=$(date -u -d "-${CSI_ORPHAN_MAX_AGE_DAYS} days" +%Y-%m-%dT%H:%M:%S 2>/dev/null \
+  || date -u -v-"${CSI_ORPHAN_MAX_AGE_DAYS}"d +%Y-%m-%dT%H:%M:%S)
+print_status "Orphan sweep pass 2: CSI orphans (label=pvc-*, unattached, region=$CLUSTER_REGION, created≥${CSI_ORPHAN_CUTOFF}Z)..."
+linode-cli volumes list --json 2>/dev/null \
+  | jq -r --arg region "$CLUSTER_REGION" --arg cutoff "$CSI_ORPHAN_CUTOFF" '
   .[] | select(.label | startswith("pvc-"))
        | select(.region == $region)
        | select(.linode_id == null)
+       | select(.created > $cutoff)
   | "\(.id)\t\(.label)"' \
 | while IFS=$'\t' read -r id label; do
     print_status "  Deleting CSI orphan: $label (id=$id)"
@@ -454,21 +473,29 @@ linode-cli volumes list --json 2>/dev/null | jq -r --arg region "$CLUSTER_REGION
 # ---------------------------------------------------------------------------
 # Step 5: orphan sweep — NodeBalancers
 # ---------------------------------------------------------------------------
-# CCM-managed NBs are tagged ONLY ["kubernetes"] (no "dev" tag), so the reliable
-# signal is the label format `lke<cluster_id>-<hash>`. LKE *should* clean these
-# up on cluster destroy — this is belt-and-suspenders.
-if [ -n "${CLUSTER_ID:-}" ]; then
-  print_status "Orphan sweep: NodeBalancers labeled lke${CLUSTER_ID}-*..."
-  linode-cli nodebalancers list --json 2>/dev/null \
-    | jq -r --arg region "$CLUSTER_REGION" --arg prefix "lke${CLUSTER_ID}-" '
-        .[] | select(.region == $region) | select(.label | startswith($prefix)) | .id' \
-    | while read -r nb_id; do
-        print_status "  Deleting NodeBalancer id=$nb_id"
-        linode-cli nodebalancers delete "$nb_id" || print_warning "  Failed to delete NB $nb_id"
-      done
-else
-  print_status "Skipping NodeBalancer sweep (no cluster id captured)"
-fi
+# CCM-managed NBs are tagged ONLY ["kubernetes"] (no "dev" tag); the reliable
+# signal is the label format `lke<cluster_id>-<hash>`. LKE *should* delete these
+# on cluster destroy but doesn't always.
+#
+# We sweep ANY NodeBalancer whose embedded cluster id is not a currently-live
+# LKE cluster — NOT just the cluster destroyed this run. The old per-CLUSTER_ID
+# filter missed leaks from earlier recycle cycles entirely (and was skipped
+# whenever CLUSTER_ID was empty, e.g. an idempotent re-run after the cluster was
+# already gone — exactly the case that leaked). A dead cluster id can only
+# belong to a destroyed cluster, so live prod / prod-eu / fresh-dev NBs are
+# never at risk; this is unambiguous and self-heals historical leaks.
+print_status "Orphan sweep: NodeBalancers with no live LKE cluster..."
+LIVE_LKE_IDS=$(linode-cli lke clusters-list --json 2>/dev/null | jq -r '.[].id')
+linode-cli nodebalancers list --json 2>/dev/null \
+  | jq -r '.[] | select(.label | test("^lke[0-9]+-")) | "\(.id)\t\(.label)"' \
+  | while IFS=$'\t' read -r nb_id nb_label; do
+      nb_cluster_id=$(echo "$nb_label" | sed -E 's/^lke([0-9]+)-.*/\1/')
+      if echo "$LIVE_LKE_IDS" | grep -qx "$nb_cluster_id"; then
+        continue   # backed by a live cluster (prod, prod-eu, fresh dev) — keep
+      fi
+      print_status "  Deleting orphaned NodeBalancer id=$nb_id ($nb_label — dead cluster $nb_cluster_id)"
+      linode-cli nodebalancers delete "$nb_id" || print_warning "  Failed to delete NB $nb_id"
+    done
 
 # ---------------------------------------------------------------------------
 # Done
