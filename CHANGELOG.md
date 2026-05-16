@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Cert-expiry alerting was silently dead. The cert-manager `ServiceMonitor`
+  was missing the `release: kube-prometheus-stack` label that
+  kube-prometheus-stack's Prometheus uses to select ServiceMonitors, so
+  `certmanager_certificate_*` metrics were never scraped and the
+  `CertificateExpiringSoon` / `CertificateNotReady` alerts had no input data.
+  The Blackbox HTTPS endpoint probes were also blind: they traverse Cloudflare
+  and measure CF's edge cert (auto-renewed by CF, ~85 days remaining), not our
+  origin Let's Encrypt cert. Added the missing label, plus two new alerts on
+  metrics that are scraped independently of cert-manager:
+  `IngressCertExpiringSoon` (uses `nginx_ingress_controller_ssl_expire_time_seconds`,
+  per-host, sourced from the cert the ingress controller is actually serving)
+  and `CertificateRenewalStuck` (fires 24h after cert-manager's scheduled
+  renewal hasn't happened — catches stuck renewals ~30 days before expiry
+  instead of 7).
+- Wildcard TLS renewal deadlock: split per-tenant TLS into two Certificates
+  (`wildcard-tls` for `*.domain` + `*.internal-domain`, and `apex-tls` for the
+  bare apex). cert-manager's ACME scheduler deduplicates challenges by
+  `(DNSName, Type)` only — a single Certificate that combines `*.example.com`
+  with `example.com` produces two authorizations at the same
+  `_acme-challenge.example.com` FQDN and the scheduler will never process the
+  second one (cert-manager#8643, behavior is reaffirmed as design intent in
+  v1.20). The first issuance can succeed by luck when one authz is cached on
+  the Let's Encrypt account; every fresh renewal deadlocks. Splitting the
+  Certificate puts each authz on its own Order, sidestepping the dedup. The
+  `matrix-wellknown` ingress now references the `apex-tls-${TENANT_NAME}`
+  secret.
+- deploy-stalwart: force CoreDNS rollout (and node-local-dns DaemonSet, when present) on rewrite change so all replicas converge before the SMTP smoke test runs. Closes the cold-start race where provision-smtp's smoke test resolved `mail.<domain>` to the public LB IP via a lagging CoreDNS replica or a stale node-local cache.
+
 ## [0.9.3] - 2026-03-13
 
 ### Added
