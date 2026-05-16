@@ -14,9 +14,17 @@ set -euo pipefail
 
 : "${CI_PIPELINE_NUMBER:?CI_PIPELINE_NUMBER is required}"
 : "${CI_VALKEY_PASSWORD:?CI_VALKEY_PASSWORD is required}"
+# Required for the in-cluster Keycloak OIDC pre-check (cold-start gap #15).
+# We fetch a live dev kubeconfig from the Linode API so we can probe Keycloak
+# via the kubectl API-server proxy — this disambiguates cluster-level failures
+# (Keycloak not serving the realm) from edge/TLS/DNS failures on the public URL.
+: "${LINODE_CLI_TOKEN:?LINODE_CLI_TOKEN is required for in-cluster Keycloak pre-check}"
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=ci-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"
+# shellcheck source=../../scripts/lib/common.sh
+source "$REPO_ROOT/scripts/lib/common.sh"
 
 # ── Resolve leased pool slot from reverse-lookup ─────────────────
 LEASED_POOL=$(vcli GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || true)
@@ -64,25 +72,111 @@ echo "--- Creating test users (prefix: ${PREFIX})"
 echo "Keycloak: ${KEYCLOAK_URL} | Realm: ${REALM}"
 
 # Cold-start gate: wait for the tenant realm's OIDC discovery endpoint to
-# serve before requesting a token. On a freshly-rolled or cold-started
-# cluster, Keycloak takes another 30-90s after pod-Ready to fully boot the
-# realm. Pipeline #1163 (Phase 1 PR #376) failed here when an earlier
-# version of this code requested a token mid-warm-up and got HTTP 503 from
-# nginx. The deploy_infra gate covers cold-start; this re-check covers
-# warm-cluster reuse and defense-in-depth.
+# serve before requesting a token. Pipeline #1293 (cold-start gap #15) failed
+# here with no diagnostic detail — the previous probe silently swallowed HTTP
+# status, DNS, and TLS errors. Now we split the wait into two layers:
+#   (a) In-cluster probe via kubectl proxy — proves Keycloak+realm are up.
+#   (b) Public-URL probe with per-attempt diagnostics — surfaces edge/TLS/DNS
+#       failures distinctly from cluster-level failures.
+# If (a) passes but (b) fails, the cause is TLS/DNS/Cloudflare edge (e.g. a
+# wildcard cert that just renewed and hasn't propagated). If both fail,
+# Keycloak itself isn't serving the tenant realm.
+
+# ── (a) Fetch a live kubeconfig and gate on the in-cluster probe ──
+KCFG_PATH=$(mktemp -t ci-create-test-users-kcfg-XXXXXX)
+trap 'rm -f "$KCFG_PATH"' EXIT
+if ! ci_fetch_dev_kubeconfig "$KCFG_PATH"; then
+  echo "ERROR: Could not fetch dev kubeconfig from Linode API — cannot run in-cluster Keycloak pre-check"
+  exit 1
+fi
+export KUBECONFIG="$KCFG_PATH"
+# Mirror the AUTH_HOST convention expected by mt_wait_for_keycloak_oidc; the
+# helper itself uses kubectl proxy and ignores AUTH_HOST, but other helpers
+# in common.sh may read it.
+export AUTH_HOST="auth.${E2E_BASE_DOMAIN}"
+
+# Gate 1: wildcard Certificate ready. The Certificate is named "wildcard-tls"
+# (not the secret name) and lives in the tenant matrix namespace. PR #408
+# split apex from wildcard; the auth ingress consumes the *secret* derived
+# from the wildcard Certificate, so we only wait on wildcard here.
+NS_MATRIX="tn-${E2E_TENANT}-matrix"
+NS_AUTH="infra-auth"
+echo "Waiting for Certificate wildcard-tls in ${NS_MATRIX} to be Ready..."
+if ! kubectl wait --for=condition=Ready \
+        certificate/wildcard-tls -n "$NS_MATRIX" --timeout=120s 2>&1; then
+  echo "WARNING: wildcard-tls Certificate not Ready within 120s"
+  kubectl describe certificate/wildcard-tls -n "$NS_MATRIX" 2>&1 | sed 's/^/  /' || true
+fi
+
+# Gate 2: reflected wildcard secret exists where Keycloak's ingress reads it.
+echo "Checking reflected secret wildcard-tls-${E2E_TENANT} in ${NS_AUTH}..."
+if kubectl get secret "wildcard-tls-${E2E_TENANT}" -n "$NS_AUTH" >/dev/null 2>&1; then
+  echo "  reflected secret present"
+else
+  echo "  WARNING: reflected secret wildcard-tls-${E2E_TENANT} NOT found in ${NS_AUTH} (reflector may not have mirrored yet)"
+fi
+
+# Gate 3: in-cluster Keycloak OIDC discovery on the tenant realm (not master).
+# Uses kubectl API-server proxy — no DNS, no TLS, no ingress.
+if ! mt_wait_for_keycloak_oidc "$REALM"; then
+  echo "ERROR: In-cluster Keycloak OIDC discovery failed for realm=${REALM}"
+  echo "       This means Keycloak or the tenant realm itself is not serving."
+  echo "       The public probe is unlikely to succeed; exiting now."
+  exit 1
+fi
+
+# ── (b) Public-URL probe with per-attempt diagnostics ──────────────
+# ~10 min total budget, exponential backoff capped at 30s. Each failed
+# attempt emits one line with HTTP code, DNS lookup result, and any TLS
+# error so the failure mode is obvious from CI logs.
 DISCOVERY_URL="${KEYCLOAK_URL}/realms/${REALM}/.well-known/openid-configuration"
-echo "Waiting for Keycloak OIDC discovery: ${DISCOVERY_URL}"
-for i in $(seq 1 60); do
-  if curl -sf -m 5 "$DISCOVERY_URL" >/dev/null 2>&1; then
-    echo "  OIDC discovery responsive after $((i*5))s"
+AUTH_HOSTNAME="auth.${E2E_BASE_DOMAIN}"
+echo "Waiting for public Keycloak OIDC discovery: ${DISCOVERY_URL}"
+PROBE_DEADLINE=$(( $(date +%s) + 600 ))
+PROBE_SLEEP=2
+PROBE_OK=0
+ATTEMPT=0
+while (( $(date +%s) < PROBE_DEADLINE )); do
+  ATTEMPT=$((ATTEMPT + 1))
+  # Curl with verbose to a separate file so we can grep TLS errors without
+  # spamming logs on success. -k is NOT used — we want TLS failures to surface.
+  CURL_STDERR=$(mktemp -t ci-create-test-users-curl-XXXXXX)
+  HTTP_STATUS=$(curl -sS -o /dev/null -m 10 -w '%{http_code}' \
+                    "$DISCOVERY_URL" 2>"$CURL_STDERR" || echo "000")
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    echo "  attempt ${ATTEMPT}: HTTP 200 — OIDC discovery responsive"
+    rm -f "$CURL_STDERR"
+    PROBE_OK=1
     break
   fi
-  if (( i == 60 )); then
-    echo "ERROR: Keycloak OIDC discovery never became responsive at $DISCOVERY_URL"
-    exit 1
-  fi
-  sleep 5
+
+  # Failure diagnostics — one line, all key facts.
+  # Use getent (always present on glibc systems) instead of dig (not guaranteed
+  # to be installed on the CI host).
+  DNS_RESULT=$(getent hosts "$AUTH_HOSTNAME" 2>/dev/null | awk '{print $1}' | tr '\n' ',' | sed 's/,$//')
+  [[ -z "$DNS_RESULT" ]] && DNS_RESULT="NXDOMAIN/timeout"
+  TLS_ERR=$(grep -iE 'SSL|TLS|certificate|handshake' "$CURL_STDERR" 2>/dev/null \
+              | head -1 | tr -d '\r' | sed 's/^[[:space:]]*//')
+  [[ -z "$TLS_ERR" ]] && TLS_ERR="(none)"
+  CURL_ERR=$(grep -iE 'curl: \(|Could not resolve|Connection refused|timed out' "$CURL_STDERR" 2>/dev/null \
+              | head -1 | tr -d '\r' | sed 's/^[[:space:]]*//')
+  [[ -z "$CURL_ERR" ]] && CURL_ERR="(none)"
+  echo "  attempt ${ATTEMPT}: HTTP=${HTTP_STATUS} dns=[${DNS_RESULT}] tls=[${TLS_ERR}] curl=[${CURL_ERR}]"
+  rm -f "$CURL_STDERR"
+
+  sleep "$PROBE_SLEEP"
+  # Exponential backoff capped at 30s.
+  PROBE_SLEEP=$(( PROBE_SLEEP * 2 ))
+  (( PROBE_SLEEP > 30 )) && PROBE_SLEEP=30
 done
+
+if (( PROBE_OK == 0 )); then
+  echo "ERROR: Keycloak public OIDC discovery never became responsive at $DISCOVERY_URL"
+  echo "       In-cluster probe SUCCEEDED, so Keycloak is serving — the failure is"
+  echo "       at the edge layer (DNS, Cloudflare, ingress TLS, or wildcard cert"
+  echo "       not yet propagated). See per-attempt diagnostics above."
+  exit 1
+fi
 
 # Get service account token — capture response first to diagnose failures.
 # The previous curl -sf | python3 pipe crashed on empty input (curl suppresses

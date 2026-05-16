@@ -17,10 +17,16 @@ cainjector:
     limits:
       memory: 256Mi
 
-# Enable ServiceMonitor for Prometheus metrics (cert expiry alerts)
+# Enable ServiceMonitor for Prometheus metrics (cert expiry alerts).
+# kube-prometheus-stack's Prometheus selects ServiceMonitors with
+# `release: kube-prometheus-stack`. Without this label cert-manager's metrics
+# are silently never scraped — and the `CertificateExpiringSoon` /
+# `CertificateNotReady` alerts never fire because their input metrics don't exist.
 prometheus:
   servicemonitor:
     enabled: true
+    labels:
+      release: kube-prometheus-stack
 
 # Webhook resources
 webhook:
