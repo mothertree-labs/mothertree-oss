@@ -21,6 +21,10 @@ set -euo pipefail
 #   calendar        — apps/deploy-calendar-automation.sh
 #   email-probe     — apps/deploy-email-probe.sh
 #   portals         — apps/deploy-admin-portal.sh + deploy-account-portal.sh
+#   remint-caldav-tokens — re-mint CalDAV tokens + restart calendar-automation
+#                          (cold-start gap #17: run AFTER create-test-users so
+#                           late-created e2e users get tokens; calendar-automation
+#                           only reads the Secret at startup)
 #
 # Required environment variables:
 #   DEPLOY_VAULT_PASSWORD — Ansible Vault password
@@ -310,9 +314,106 @@ case "$MODE" in
     fi
     ;;
 
+  remint-caldav-tokens)
+    # Cold-start gap #17 — re-mint CalDAV tokens AFTER create-test-users.
+    #
+    # apps/deploy-calendar-automation.sh mints per-user CalDAV app-passwords at
+    # calendar-automation deploy time, enumerating the users that exist *then*.
+    # The fixed mail user `e2e-mailrt` is created later, in the create-test-users
+    # step of deploy-dev-finalize (it was moved there to fix pipeline #1258's
+    # OIDC-404). calendar-automation reads the token Secret only once at startup
+    # (server.js loadCaldavTokens()), so without a re-mint + restart the 3
+    # calendar-external-invite e2e tests time out waiting for CalDAV events
+    # (admin creds can't write another user's calendar).
+    #
+    # This re-mints (now that e2e-mailrt exists), rollout-restarts the
+    # calendar-automation Deployment so it reloads the Secret, and hard-asserts
+    # the e2e-mailrt token is present (project rule: fail loudly, never skip).
+    #
+    # Deferred prod ordering gap (real users created after a calendar-automation
+    # deploy) is OUT OF SCOPE — tracked in GitHub issue #412.
+    echo "=== Re-minting CalDAV tokens (cold-start gap #17) ==="
+    source "$REPO_ROOT/scripts/lib/config.sh"
+    mt_load_tenant_config
+
+    if [ "${CALENDAR_ENABLED:-false}" != "true" ] || [ "${MAIL_ENABLED:-false}" != "true" ] || [ "${FILES_ENABLED:-false}" != "true" ]; then
+      echo "Calendar/mail/files not all enabled for tenant $E2E_TENANT — nothing to re-mint"
+      echo "=== CI Deploy App complete: env=$MT_ENV mode=$MODE ==="
+      exit 0
+    fi
+
+    mt_require_commands kubectl jq
+
+    # calendar-automation shares the Stalwart (mail) namespace.
+    export NS_MAIL="$NS_STALWART"
+
+    # Nextcloud admin credentials live in the `nextcloud-credentials` K8s
+    # Secret (created by deploy-nextcloud.sh; the chart's `existingSecret`),
+    # NOT in tenant config. We read it the same way deploy-calendar-automation.sh
+    # does, but on the re-mint path the password is NOT functionally required:
+    # it's only used for the optional admin password drift-correction
+    # (occ user:resetpassword, `|| true`), which deploy-dev-calendar already
+    # performed ~minutes earlier in this same pipeline. The real token mint
+    # authenticates as root (occ user:add) / www-data
+    # (create-caldav-tokens.php), never as admin. So a read failure here is a
+    # warning, not fatal — failing hard would skip the re-mint and leave
+    # e2e-mailrt without a token (the exact regression this fix targets).
+    NEXTCLOUD_ADMIN_PASSWORD=$(kubectl get secret nextcloud-credentials -n "$NS_FILES" \
+      -o jsonpath='{.data.nextcloud-password}' 2>/dev/null | base64 -d || echo "")
+    if [ -z "$NEXTCLOUD_ADMIN_PASSWORD" ]; then
+      echo "WARNING: could not read Nextcloud admin password from secret 'nextcloud-credentials' in $NS_FILES"
+      echo "         Proceeding without it — the admin drift-correction is skipped;"
+      echo "         token minting does not depend on it. (Tracked: investigate the"
+      echo "         secret-read failure separately if it recurs.)"
+      NEXTCLOUD_ADMIN_PASSWORD=""
+    fi
+    export NEXTCLOUD_ADMIN_PASSWORD
+
+    # Fail-fast on the inputs the KC→Nextcloud provisioning + mint require.
+    # On this CI re-mint path these are non-optional: if any are missing the
+    # provisioning silently no-ops and e2e-mailrt never gets a token (the exact
+    # silent-skip failure mode this fix exists to eliminate).
+    : "${KEYCLOAK_ADMIN_PASSWORD:?FATAL: KEYCLOAK_ADMIN_PASSWORD required for CalDAV re-mint (KC->Nextcloud provisioning)}"
+    : "${AUTH_HOST:?FATAL: AUTH_HOST required for CalDAV re-mint}"
+    : "${TENANT_KEYCLOAK_REALM:?FATAL: TENANT_KEYCLOAK_REALM required for CalDAV re-mint}"
+    : "${NS_FILES:?FATAL: NS_FILES required for CalDAV re-mint}"
+    : "${NS_MAIL:?FATAL: NS_MAIL required for CalDAV re-mint}"
+
+    source "$REPO_ROOT/apps/scripts/mint-caldav-tokens.sh"
+    mt_mint_caldav_tokens
+
+    # calendar-automation reads the Secret only at startup. The Secret-only
+    # mutation does not change the deployment's CONFIG_CHECKSUM annotation, so
+    # an explicit rollout restart is required to reload the tokens.
+    echo "Restarting calendar-automation Deployment to reload CalDAV tokens..."
+    kubectl rollout restart deploy/calendar-automation -n "$NS_MAIL"
+    kubectl rollout status deploy/calendar-automation -n "$NS_MAIL" --timeout=180s
+
+    # Hard assertion: the e2e mail-roundtrip user MUST have a token now, or the
+    # calendar-external-invite tests will time out exactly as before. Key form
+    # is "<user>@<E2E_BASE_DOMAIN>" (ci-create-test-users.sh: EMAIL_DOMAIN=E2E_BASE_DOMAIN;
+    # server.js keys caldavTokens by the user email).
+    : "${E2E_BASE_DOMAIN:?FATAL: E2E_BASE_DOMAIN required to assert e2e-mailrt token}"
+    EXPECTED_KEY="e2e-mailrt@${E2E_BASE_DOMAIN}"
+    echo "Asserting CalDAV token present for ${EXPECTED_KEY}..."
+    if kubectl get secret calendar-automation-caldav-tokens -n "$NS_MAIL" \
+         -o jsonpath='{.data.caldav-tokens\.json}' 2>/dev/null | base64 -d \
+         | jq -e --arg k "$EXPECTED_KEY" 'has($k)' >/dev/null 2>&1; then
+      echo "OK: CalDAV token present for ${EXPECTED_KEY}"
+    else
+      echo "FATAL: no CalDAV token for ${EXPECTED_KEY} after re-mint."
+      echo "       calendar-external-invite e2e tests would time out. Failing the build."
+      echo "       Tokens present for (keys):"
+      kubectl get secret calendar-automation-caldav-tokens -n "$NS_MAIL" \
+        -o jsonpath='{.data.caldav-tokens\.json}' 2>/dev/null | base64 -d \
+        | jq -r 'keys[]' 2>/dev/null | sed 's/^/         /' || echo "         (secret missing or unparseable)"
+      exit 1
+    fi
+    ;;
+
   *)
     echo "ERROR: Unknown mode: $MODE"
-    echo "Valid modes: prep, finalize, matrix, nextcloud, jitsi, stalwart, roundcube, calendar, email-probe, portals"
+    echo "Valid modes: prep, finalize, matrix, nextcloud, jitsi, stalwart, roundcube, calendar, email-probe, portals, remint-caldav-tokens"
     exit 1
     ;;
 esac

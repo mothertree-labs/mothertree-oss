@@ -108,8 +108,18 @@ spec:
               PASSWORDSALT=$(extract passwordsalt)
               SECRET=$(extract secret)
 
-              if [ -z "$INSTANCEID" ] || [ -z "$PASSWORDSALT" ] || [ -z "$SECRET" ]; then
-                echo "ERROR: failed to extract identity values from config.php"
+              # Read the installed Nextcloud version straight from the image's
+              # version.php. We use the SAME form as deploy-nextcloud.sh step 7b
+              # and the seed-identity init container's IMAGE_VERSION comparison
+              # (implode(".", $OC_Version) — the full array, e.g. 32.0.5.1).
+              # Storing it here means the seed-identity init writes a non-empty
+              # 'version' into config.php on the very first cold boot, so
+              # Nextcloud does not see config.php version '' vs version.php and
+              # wrongly declare a multi-major DB upgrade (cold-start gap #16).
+              NC_VERSION=$(runuser -u www-data -- php -r 'require "/var/www/html/version.php"; echo implode(".", $OC_Version);')
+
+              if [ -z "$INSTANCEID" ] || [ -z "$PASSWORDSALT" ] || [ -z "$SECRET" ] || [ -z "$NC_VERSION" ]; then
+                echo "ERROR: failed to extract identity values from config.php / version.php"
                 exit 1
               fi
               echo "Identity extracted: instanceid=${INSTANCEID:0:6}... (values not logged)"
@@ -134,7 +144,8 @@ spec:
                 "data": {
                   "instanceid":   "$(b64 "$INSTANCEID")",
                   "passwordsalt": "$(b64 "$PASSWORDSALT")",
-                  "secret":       "$(b64 "$SECRET")"
+                  "secret":       "$(b64 "$SECRET")",
+                  "version":      "$(b64 "$NC_VERSION")"
                 }
               }
               EOF
