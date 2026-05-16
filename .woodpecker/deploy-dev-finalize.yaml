@@ -93,12 +93,15 @@ steps:
   # restarts calendar-automation so it reloads the Secret, and hard-asserts the
   # e2e-mailrt token is present (fail loudly, never silently skip).
   #
-  # Runs only on pull_request: on main push there is no leased dev tenant.
+  # Must run wherever e2e runs — both pull_request AND push:main — because
+  # create-test-users (above) also runs on both and e2e-shard-4 executes on
+  # the main-push pipeline too (it gates deploy-prod). No `when:` override:
+  # inherit the workflow-level `pull_request | push:main`, exactly like
+  # create-test-users. (A prior PR-only gate here left every main-merge red
+  # on shard-4 and blocked prod deploys — pipeline #1301.)
   # Deferred prod ordering gap tracked in GitHub issue #412.
   - name: remint-caldav-tokens
     image: bash
-    when:
-      - event: pull_request
     environment:
       CI: "true"
       CI_VALKEY_PASSWORD:
