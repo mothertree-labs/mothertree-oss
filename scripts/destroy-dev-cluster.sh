@@ -442,33 +442,45 @@ linode-cli volumes list --json 2>/dev/null | jq -r --arg region "$CLUSTER_REGION
 
 # Pass 2: CSI-provisioned orphans. Linode CSI tags volumes with `[]`, labels them
 # `pvc-<uuid>`, and uses `linode-block-storage-retain` so they won't auto-delete
-# when the cluster goes away. We catch them by label prefix + region + unattached.
+# when the cluster goes away.
 #
-# SAFETY: prod and dev are BOTH in us-lax (the old comment claiming prod is
-# us-east is stale — the prod cluster is also us-lax). A prod CSI volume that
-# is momentarily unattached (pod reschedule, node replacement) would otherwise
-# match this filter and be destroyed — irreversible prod data loss. Since CSI
-# volumes carry no cluster fingerprint (empty tags, opaque pvc-<uuid> label),
-# we discriminate by age: a dev cluster lives at most a few hours (reaper
-# IDLE_HOURS=2), so any genuine dev orphan was `created` very recently, whereas
-# prod CSI volumes are months old. We only delete unattached pvc-* created
-# within CSI_ORPHAN_MAX_AGE_DAYS. A robust dev/prod discriminator (e.g. tagging
-# CSI volumes at provision time) is a recommended follow-up.
-CSI_ORPHAN_MAX_AGE_DAYS="${CSI_ORPHAN_MAX_AGE_DAYS:-7}"
-CSI_ORPHAN_CUTOFF=$(date -u -d "-${CSI_ORPHAN_MAX_AGE_DAYS} days" +%Y-%m-%dT%H:%M:%S 2>/dev/null \
-  || date -u -v-"${CSI_ORPHAN_MAX_AGE_DAYS}"d +%Y-%m-%dT%H:%M:%S)
-print_status "Orphan sweep pass 2: CSI orphans (label=pvc-*, unattached, region=$CLUSTER_REGION, created≥${CSI_ORPHAN_CUTOFF}Z)..."
-linode-cli volumes list --json 2>/dev/null \
-  | jq -r --arg region "$CLUSTER_REGION" --arg cutoff "$CSI_ORPHAN_CUTOFF" '
-  .[] | select(.label | startswith("pvc-"))
-       | select(.region == $region)
-       | select(.linode_id == null)
-       | select(.created > $cutoff)
-  | "\(.id)\t\(.label)"' \
-| while IFS=$'\t' read -r id label; do
-    print_status "  Deleting CSI orphan: $label (id=$id)"
-    linode-cli volumes delete "$id" || print_warning "  Failed to delete volume $id"
-  done
+# OPT-IN ONLY (default OFF). prod and dev are BOTH in us-lax (the old comment
+# claiming prod is us-east is stale — the prod cluster is also us-lax), and CSI
+# pvc-* volumes carry NO cluster fingerprint (empty tags, opaque pvc-<uuid>
+# label). A prod CSI volume that is momentarily unattached (pod reschedule,
+# node replacement, fresh deploy) is indistinguishable from a dev orphan, so an
+# automatic region-wide sweep can irreversibly delete prod data. An age guard
+# alone is insufficient (a prod PVC created within the window and briefly
+# detached during a reaper run still matches). Until CSI volumes are tagged at
+# provision time (the proper fix — recommended follow-up), this sweep runs ONLY
+# when SWEEP_CSI_ORPHANS=true is explicitly set, and even then is bounded by
+# CSI_ORPHAN_MAX_AGE_DAYS. The reaper does NOT set it: dev pvc-* orphans
+# (~$1/mo each) are cleaned up by an operator who can verify them individually.
+# The NodeBalancer sweep below (the ~$10/mo-per-cycle cost) IS safe to automate
+# because NB labels embed the cluster id.
+if [ "${SWEEP_CSI_ORPHANS:-false}" = "true" ]; then
+  CSI_ORPHAN_MAX_AGE_DAYS="${CSI_ORPHAN_MAX_AGE_DAYS:-7}"
+  CSI_ORPHAN_CUTOFF=$(date -u -d "-${CSI_ORPHAN_MAX_AGE_DAYS} days" +%Y-%m-%dT%H:%M:%S 2>/dev/null \
+    || date -u -v-"${CSI_ORPHAN_MAX_AGE_DAYS}"d +%Y-%m-%dT%H:%M:%S)
+  print_warning "SWEEP_CSI_ORPHANS=true — pass 2: pvc-* unattached in $CLUSTER_REGION created≥${CSI_ORPHAN_CUTOFF}Z (prod shares this region — verify!)"
+  if ! CSI_VOLS_JSON=$(linode-cli volumes list --json); then
+    print_error "linode-cli volumes list failed — skipping CSI sweep (fail closed)"
+  else
+    echo "$CSI_VOLS_JSON" \
+      | jq -r --arg region "$CLUSTER_REGION" --arg cutoff "$CSI_ORPHAN_CUTOFF" '
+      .[] | select(.label | startswith("pvc-"))
+           | select(.region == $region)
+           | select(.linode_id == null)
+           | select(.created > $cutoff)
+      | "\(.id)\t\(.label)"' \
+    | while IFS=$'\t' read -r id label; do
+        print_status "  Deleting CSI orphan: $label (id=$id)"
+        linode-cli volumes delete "$id" || print_warning "  Failed to delete volume $id"
+      done
+  fi
+else
+  print_status "Skipping CSI volume orphan sweep (SWEEP_CSI_ORPHANS not set — prod shares us-lax; clean pvc-* manually)"
+fi
 
 # ---------------------------------------------------------------------------
 # Step 5: orphan sweep — NodeBalancers
@@ -485,17 +497,31 @@ linode-cli volumes list --json 2>/dev/null \
 # belong to a destroyed cluster, so live prod / prod-eu / fresh-dev NBs are
 # never at risk; this is unambiguous and self-heals historical leaks.
 print_status "Orphan sweep: NodeBalancers with no live LKE cluster..."
-LIVE_LKE_IDS=$(linode-cli lke clusters-list --json 2>/dev/null | jq -r '.[].id')
-linode-cli nodebalancers list --json 2>/dev/null \
-  | jq -r '.[] | select(.label | test("^lke[0-9]+-")) | "\(.id)\t\(.label)"' \
-  | while IFS=$'\t' read -r nb_id nb_label; do
-      nb_cluster_id=$(echo "$nb_label" | sed -E 's/^lke([0-9]+)-.*/\1/')
-      if echo "$LIVE_LKE_IDS" | grep -qx "$nb_cluster_id"; then
-        continue   # backed by a live cluster (prod, prod-eu, fresh dev) — keep
-      fi
-      print_status "  Deleting orphaned NodeBalancer id=$nb_id ($nb_label — dead cluster $nb_cluster_id)"
-      linode-cli nodebalancers delete "$nb_id" || print_warning "  Failed to delete NB $nb_id"
-    done
+# FAIL CLOSED. If we cannot positively enumerate live clusters, an empty list
+# would make EVERY lke<id>- NB (incl. prod + prod-eu) look orphaned — a single
+# transient API hiccup must never cascade into deleting production load
+# balancers. So: abort the sweep unless the live-cluster lookup succeeds AND
+# returns a non-empty, all-numeric id list. prod + prod-eu always exist, so an
+# empty result unambiguously means an API failure, not "no clusters."
+if ! LIVE_CLUSTERS_JSON=$(linode-cli lke clusters-list --json); then
+  print_error "linode-cli lke clusters-list failed — SKIPPING NodeBalancer sweep (fail closed; will retry next recycle)"
+else
+  LIVE_LKE_IDS=$(echo "$LIVE_CLUSTERS_JSON" | jq -r '.[].id // empty' | grep -E '^[0-9]+$' || true)
+  if [ -z "${LIVE_LKE_IDS//[[:space:]]/}" ]; then
+    print_error "Live LKE cluster list is empty/unparseable — SKIPPING NodeBalancer sweep (fail closed; prod/prod-eu must always be present)"
+  else
+    linode-cli nodebalancers list --json 2>/dev/null \
+      | jq -r '.[] | select(.label | test("^lke[0-9]+-")) | "\(.id)\t\(.label)"' \
+      | while IFS=$'\t' read -r nb_id nb_label; do
+          nb_cluster_id=$(echo "$nb_label" | sed -E 's/^lke([0-9]+)-.*/\1/')
+          if echo "$LIVE_LKE_IDS" | grep -qx "$nb_cluster_id"; then
+            continue   # backed by a live cluster (prod, prod-eu, fresh dev) — keep
+          fi
+          print_status "  Deleting orphaned NodeBalancer id=$nb_id ($nb_label — dead cluster $nb_cluster_id)"
+          linode-cli nodebalancers delete "$nb_id" || print_warning "  Failed to delete NB $nb_id"
+        done
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Done
