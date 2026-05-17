@@ -199,6 +199,26 @@ data:
     #   Dev (no SES): direct MX delivery to the destination's mail servers.
     [queue.strategy]
     route = [{if = "is_local_domain('', rcpt_domain)", then = "'local'"}, {else = "'${STALWART_OUTBOUND_ROUTE_NAME}'"}]
+    # Retry-schedule selector — local-domain delivery uses the aggressive
+    # cold-start schedule below; everything else uses the standard one.
+    schedule = [{if = "is_local_domain('', rcpt_domain)", then = "'local'"}, {else = "'remote'"}]
+
+    # Cold-start delivery-latency fix: on a fresh pod the first local delivery
+    # can lose its inline attempt to a cold S3 PUT / cold PG+FTS write,
+    # deferring the message to the queue. With no explicit schedule Stalwart's
+    # first retry is ~2m, so a deferred magic-link/invite email overshoots the
+    # e2e 180s budget (and real users wait ~2m). Front-load short retries for
+    # the local (intra-platform, transactional) path so a deferred message is
+    # redelivered in ~10-30s, then back off normally.
+    [queue.schedule.local]
+    retry = ["10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h"]
+    notify = ["1d", "3d"]
+
+    # Standard schedule for outbound/relayed mail — documented Stalwart
+    # interval set; unchanged behaviour for non-local recipients.
+    [queue.schedule.remote]
+    retry = ["2m", "5m", "10m", "15m", "30m", "1h", "2h"]
+    notify = ["1d", "3d"]
 
     # Local delivery route - deliver to internal mailbox
     [queue.route."local"]
@@ -284,7 +304,7 @@ ${STALWART_OUTBOUND_ROUTE_TOML}
                   "server.*", "authentication.fallback-admin.*", "authentication.master.*",
                   "cluster.*", "config.local-keys.*", "storage.data", "storage.blob",
                   "storage.lookup", "storage.fts", "storage.directory", "certificate.*",
-                  "session.rcpt.*", "queue.strategy.*", "queue.route.*", "queue.limiter.*", "oauth.*",
+                  "session.rcpt.*", "queue.strategy.*", "queue.route.*", "queue.schedule.*", "queue.limiter.*", "oauth.*",
                   "spam.*", "spam-filter.list.*",
                   "auth.iprev.*", "auth.spf.*", "auth.dkim.*", "auth.dmarc.*"]
 

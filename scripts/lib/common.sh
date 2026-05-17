@@ -560,6 +560,142 @@ sys.exit(1)
     return 1
 }
 
+# Deploy-time Stalwart delivery warm-up + per-deploy delivery-latency telemetry.
+#
+# PURPOSE: Gate #19 above proves the *submission* path (connect+STARTTLS+AUTH)
+# is usable, but it stops at NOOP — it never actually delivers a message. The
+# FIRST real local delivery on a fresh/just-restarted Stalwart pays a stack of
+# cold-path costs all at once: the cold S3 PUT (blob store), the cold PG +
+# full-text-search index write, and the spam-filter (SpamAssassin/Stalwart
+# sieve) warm-up. If that first message is a user-facing magic-link/invite, the
+# user waits seconds for their email. This function sends ONE authenticated
+# warm-up message mailer@ -> mailer@ through the local-delivery path and reads
+# it back, so all of those cold writes happen on a throwaway *deploy* message
+# instead — making the first real user message fast. The warm-up message is
+# marked \Deleted and EXPUNGEd, so it never lingers in the mailbox. It also
+# emits per-deploy delivery-latency telemetry (elapsed seconds from sendmail to
+# IMAP-visible) into the deploy log.
+#
+# NON-FATAL BY DESIGN: gate #19 (mt_wait_for_stalwart_submission) is the single
+# fatal submission guard for the deploy. This warm-up is purely an optimization
+# + telemetry probe layered on top of it; making it fail-closed would
+# reintroduce exactly the fail-closed fragility the cold-start work has been
+# burning down (a slow-but-eventually-fine first delivery must not abort a
+# deploy). The bash function therefore ALWAYS returns 0; outcome is surfaced
+# only via print_success / print_warning. The embedded Python likewise always
+# exit(0) and prints a single MT_WARM_{OK,TIMEOUT,ERROR} sentinel line.
+#
+# Required env: KUBECONFIG, NS_AUTH, SMTP_RELAY_HOST, SMTP_RELAY_USERNAME,
+#               SMTP_RELAY_PASSWORD (export via
+#               scripts/lib/smtp-credentials.sh :: mt_export_smtp_relay_env).
+# Optional env: SMTP_RELAY_PORT (default 588), MT_WARM_DEADLINE (default 180s).
+mt_warm_stalwart_delivery() {
+    : "${KUBECONFIG:?mt_warm_stalwart_delivery: KUBECONFIG must be set}"
+    : "${NS_AUTH:?mt_warm_stalwart_delivery: NS_AUTH must be set}"
+    : "${SMTP_RELAY_HOST:?mt_warm_stalwart_delivery: SMTP_RELAY_HOST must be set (run mt_export_smtp_relay_env first)}"
+    : "${SMTP_RELAY_USERNAME:?mt_warm_stalwart_delivery: SMTP_RELAY_USERNAME must be set}"
+    : "${SMTP_RELAY_PASSWORD:?mt_warm_stalwart_delivery: SMTP_RELAY_PASSWORD must be set}"
+    local port="${SMTP_RELAY_PORT:-588}"
+    local deadline="${MT_WARM_DEADLINE:-180}"
+
+    print_status "Stalwart delivery warm-up: priming cold S3/PG/FTS/spam via one mailer@→mailer@ message"
+    print_status "  from NS_AUTH=${NS_AUTH} → submit ${SMTP_RELAY_HOST}:${port}, read-back IMAPS 993 (as ${SMTP_RELAY_USERNAME}), deadline ${deadline}s"
+
+    # Single ephemeral probe pod. Password is fed via stdin so it never lands
+    # in the Pod spec, argv, or CI logs. Host/port/user are non-secret env.
+    local py
+    py='
+import os,sys,ssl,time,smtplib,imaplib,random
+host=os.environ["PHOST"]; port=int(os.environ["PPORT"])
+user=os.environ["PUSER"]
+deadline=float(os.environ["PDEADLINE"])
+pw=sys.stdin.readline().rstrip("\n")
+# Unverified TLS context: mirror gate #19 / Keycloak lenient STARTTLS. Cert
+# validity is a separate gap with its own gate — do not couple to cert-manager.
+ctx=ssl._create_unverified_context()
+token="MT-WARMUP-%d-%d"%(int(time.time()),random.randint(100000,999999))
+try:
+    msg=("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s\r\n"
+         %(user,user,token,"Deploy-time Stalwart delivery warm-up "+token))
+    s=smtplib.SMTP(host,port,timeout=20)
+    s.ehlo(); s.starttls(context=ctx); s.ehlo()
+    s.login(user,pw)
+    t0=time.time()
+    s.sendmail(user,[user],msg.encode("utf-8"))
+    s.quit()
+    M=imaplib.IMAP4_SSL(host,993,ssl_context=ctx)
+    M.login(user,pw)
+    end=t0+deadline
+    found=[]
+    while time.time()<end:
+        M.select("INBOX")
+        ids=set()
+        for crit in (["BODY",token],["SUBJECT",token]):
+            try:
+                typ,data=M.search(None,*crit)
+                if typ=="OK" and data and data[0]:
+                    ids.update(data[0].split())
+            except Exception:
+                pass
+        if ids:
+            found=sorted(ids)
+            break
+        time.sleep(5)
+    elapsed=int(round(time.time()-t0))
+    if found:
+        for i in found:
+            M.store(i,"+FLAGS",r"(\Deleted)")
+        M.expunge()
+        try: M.logout()
+        except Exception: pass
+        print("MT_WARM_OK elapsed=%ds"%elapsed)
+        sys.exit(0)
+    try: M.logout()
+    except Exception: pass
+    print("MT_WARM_TIMEOUT elapsed=%ds"%elapsed)
+    sys.exit(0)
+except Exception as e:
+    print("MT_WARM_ERROR %s: %s"%(type(e).__name__,str(e)))
+    sys.exit(0)
+'
+    local pod="stalwart-warmup-$$-${RANDOM}"
+    local out
+    out=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "kubectl --kubeconfig='$KUBECONFIG' -n '$NS_AUTH' delete pod '$pod' --ignore-not-found --force --grace-period=0 >/dev/null 2>&1; rm -f '$out'" RETURN
+
+    local rc=0
+    printf '%s' "$SMTP_RELAY_PASSWORD" | kubectl --kubeconfig="$KUBECONFIG" \
+        run "$pod" -i --rm --restart=Never \
+        --image=python:3.13-alpine \
+        -n "$NS_AUTH" \
+        --env "PHOST=${SMTP_RELAY_HOST}" \
+        --env "PPORT=${port}" \
+        --env "PUSER=${SMTP_RELAY_USERNAME}" \
+        --env "PDEADLINE=${deadline}" \
+        --command -- python3 -c "$py" >"$out" 2>&1 || rc=$?
+
+    # Surface the warm-up output in the deploy log (contains no secrets).
+    sed 's/^/    [warm] /' "$out" || true
+
+    local line
+    line=$(grep -m1 -E 'MT_WARM_(OK|TIMEOUT|ERROR)' "$out" 2>/dev/null || true)
+    if printf '%s' "$line" | grep -q 'MT_WARM_OK'; then
+        local n
+        n=$(printf '%s' "$line" | sed -n 's/.*elapsed=\([0-9]*\)s.*/\1/p')
+        print_success "Stalwart delivery warm-up OK (cold-path delivered in ${n:-?}s)"
+    elif printf '%s' "$line" | grep -q 'MT_WARM_TIMEOUT'; then
+        local n
+        n=$(printf '%s' "$line" | sed -n 's/.*elapsed=\([0-9]*\)s.*/\1/p')
+        print_warning "Stalwart delivery warm-up did not confirm within ${deadline}s (telemetry only, non-fatal): not IMAP-visible after ${n:-?}s"
+    elif printf '%s' "$line" | grep -q 'MT_WARM_ERROR'; then
+        print_warning "Stalwart delivery warm-up did not confirm within ${deadline}s (telemetry only, non-fatal): ${line#MT_WARM_ERROR }"
+    else
+        print_warning "Stalwart delivery warm-up did not confirm within ${deadline}s (telemetry only, non-fatal): no warm-up sentinel in pod output (rc=$rc)"
+    fi
+    return 0
+}
+
 # Wait for admin-portal's /version endpoint to return 200.
 # Lightest sanity check that the full ingress + portal + version-injection
 # chain is up. Use as a final "everything's up" assertion.

@@ -271,6 +271,9 @@ case "$MODE" in
         echo "FATAL: cold-start gate #19 — Stalwart SMTP submission connect/AUTH not usable"
         exit 1
       fi
+      # Warm the cold S3/PG/FTS/spam delivery path on a throwaway deploy message
+      # so the first real magic-link/invite is fast (non-fatal, telemetry only).
+      mt_warm_stalwart_delivery || true
     else
       echo "Stalwart: skipping (mail_enabled is not true)"
     fi

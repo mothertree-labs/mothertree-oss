@@ -617,6 +617,9 @@ if [ "$MAIL_ENABLED" = "true" ]; then
     print_error "Cold-start gate #19 failed: Stalwart SMTP submission connect/AUTH not usable"
     exit 1
   fi
+  # Warm the cold S3/PG/FTS/spam delivery path on a throwaway deploy message
+  # so the first real magic-link/invite is fast (non-fatal, telemetry only).
+  mt_warm_stalwart_delivery || true
 fi
 
 # Deploy Collabora CODE (per-tenant office suite for in-browser document editing)
