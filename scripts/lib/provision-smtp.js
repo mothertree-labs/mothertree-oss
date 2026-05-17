@@ -231,7 +231,12 @@ function readSecretField(namespace, name, key) {
 // CoreDNS rewrite applies — DNS rewrites are scoped by the answering pod's
 // search domains.
 // ---------------------------------------------------------------------------
-function runSmtpSmokeTest() {
+// One probe attempt. Returns { ok:true } on success, or
+// { ok:false, detail } when the path isn't ready yet. Never throws for a
+// not-ready result — the retry loop in runSmtpSmokeTest() owns fatality so
+// the deploy tolerates cold-start propagation (CoreDNS rewrite, listener
+// bind, cert issuance) instead of hard-failing on the first miss.
+function smtpSmokeAttempt() {
   const podName = `smtp-smoke-${process.pid}-${Date.now()}`;
   const shellScript = `
     apk add --no-cache openssl >/dev/null 2>&1
@@ -242,8 +247,6 @@ function runSmtpSmokeTest() {
       -verify_return_error \\
       -crlf -quiet 2>&1 | head -40
   `;
-
-  console.log(`[provision-smtp] Running SMTP smoke test against ${MAIL_HOST}:588 from ${NS_ADMIN}`);
 
   let output;
   try {
@@ -276,14 +279,7 @@ function runSmtpSmokeTest() {
       });
     } catch { /* ignore cleanup errors */ }
     const timedOut = err.signal === 'SIGTERM' || /ETIMEDOUT/.test(String(err.message || ''));
-    throw new Error(
-      `SMTP smoke test ${timedOut ? 'timed out after 60s' : 'failed'} for ${MAIL_HOST}:588.\n` +
-      `Likely causes:\n` +
-      `  • CoreDNS rewrite has not propagated (mail.<domain> still resolves to the public LB IP, which does not expose 588)\n` +
-      `  • Stalwart submission listener is not ready on port 588\n` +
-      `  • TLS cert mismatch (wildcard cert not presented or hostname does not align with ${MAIL_HOST})\n` +
-      `Probe output (truncated):\n${captured.slice(0, 2000)}`,
-    );
+    return { ok: false, detail: `probe ${timedOut ? 'timed out (60s)' : 'errored'}; output: ${captured.slice(0, 2000).replace(/\s+/g, ' ').trim()}` };
   }
 
   // With `-quiet`, openssl suppresses the 220 banner and the
@@ -300,16 +296,61 @@ function runSmtpSmokeTest() {
   ];
   const failed = checks.filter((c) => !c.pattern.test(output));
   if (failed.length > 0) {
-    throw new Error(
-      `SMTP smoke test for ${MAIL_HOST}:588 did not see expected markers: ${failed.map((c) => c.name).join(', ')}.\n` +
-      `Likely causes:\n` +
-      `  • CoreDNS rewrite has not propagated (mail.<domain> still resolves to the public LB IP, which does not expose 588)\n` +
-      `  • Stalwart submission listener is not ready on port 588\n` +
-      `  • TLS cert mismatch (wildcard cert not presented or hostname does not align with ${MAIL_HOST})\n` +
-      `Probe output (truncated):\n${output.slice(0, 2000)}`,
-    );
+    return { ok: false, detail: `missing markers: ${failed.map((c) => c.name).join(', ')}; output: ${output.slice(0, 2000).replace(/\s+/g, ' ').trim()}` };
   }
-  console.log(`[provision-smtp] SMTP smoke test passed (TCP + EHLO + STARTTLS + hostname verify)`);
+  return { ok: true };
+}
+
+// Cold-start gap #19 (provision layer): poll the SMTP smoke test until the
+// submission path (TCP→EHLO→STARTTLS→hostname-verify on MAIL_HOST:588) is
+// genuinely usable, or a deadline expires. This is the layer that trips
+// first on a fresh cluster (CoreDNS rewrite not yet propagated / listener
+// not bound / wildcard cert not issued). One-shot would fail deterministically
+// on every on-demand-dev cold-start. Still FATAL on the deadline — converts a
+// silent shard-6 magic-link flake into a loud, correctly-attributed failure;
+// the gate #19 AUTH assertion (mt_wait_for_stalwart_submission, from
+// infra-auth) runs after this and covers the distinct SASL-layer race.
+function runSmtpSmokeTest() {
+  // Defensive parse: a malformed override must not degrade to a NaN-driven
+  // busy loop — fall back to the default when not a positive finite number.
+  const numEnv = (name, def) => {
+    const v = Number(process.env[name]);
+    return Number.isFinite(v) && v > 0 ? v : def;
+  };
+  const DEADLINE_MS = numEnv('SMTP_SMOKE_DEADLINE_MS', 420_000);
+  const RETRY_SLEEP_MS = numEnv('SMTP_SMOKE_RETRY_SLEEP_MS', 15_000);
+
+  console.log(
+    `[provision-smtp] SMTP smoke test against ${MAIL_HOST}:588 from ${NS_ADMIN} ` +
+    `(deadline ~${Math.round(DEADLINE_MS / 1000)}s — tolerating cold-start propagation)`,
+  );
+
+  const sab = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + DEADLINE_MS;
+  let attempt = 0;
+  let last = '(no attempt completed)';
+  while (Date.now() < deadline) {
+    attempt += 1;
+    const r = smtpSmokeAttempt();
+    if (r.ok) {
+      console.log(`[provision-smtp] SMTP smoke test passed on attempt ${attempt} (TCP + EHLO + STARTTLS + hostname verify)`);
+      return;
+    }
+    last = r.detail;
+    console.log(`[provision-smtp]   attempt ${attempt} not ready yet: ${r.detail.slice(0, 200)}`);
+    if (Date.now() + RETRY_SLEEP_MS >= deadline) break;
+    // Synchronous sleep, no deps: wait on an un-notified SharedArrayBuffer.
+    Atomics.wait(sab, 0, 0, RETRY_SLEEP_MS);
+  }
+
+  throw new Error(
+    `SMTP smoke test for ${MAIL_HOST}:588 never succeeded after ${attempt} attempt(s) (~${Math.round(DEADLINE_MS / 1000)}s).\n` +
+    `Likely causes:\n` +
+    `  • CoreDNS rewrite has not propagated (mail.<domain> still resolves to the public LB IP, which does not expose 588)\n` +
+    `  • Stalwart submission listener is not ready on port 588\n` +
+    `  • TLS cert mismatch (wildcard cert not presented or hostname does not align with ${MAIL_HOST})\n` +
+    `Last probe result:\n${last}`,
+  );
 }
 
 function writeSecret({ namespace, name, host, port, username, password }) {

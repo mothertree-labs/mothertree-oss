@@ -445,6 +445,121 @@ mt_wait_for_stalwart() {
     return 0
 }
 
+# Wait until the Stalwart SMTP *submission* path is genuinely usable —
+# i.e. a client can connect, STARTTLS, and SASL-auth as the shared `mailer@`
+# principal on port 588 (then NOOP/QUIT — no MAIL/RCPT/DATA).
+#
+# Scope is deliberately connect+STARTTLS+AUTH, NOT recipient acceptance. Every
+# failure we have evidence for (1307/1308: `MailConnectException: Connection
+# refused`, `Password based SMTP connect failed`) is connect/AUTH stage — that
+# is the deterministic cold-start blocker and exactly what Keycloak does before
+# it can send. RCPT acceptance is intentionally excluded: `mailer@` is a SASL
+# sender service account, not a verified-deliverable mailbox, and Stalwart has
+# a documented negative-RCPT cache — probing RCPT risks a gate that fail-closes
+# forever and blocks every deploy, strictly worse than the flake it guards.
+#
+# This is the cold-start gap #19 gate. mt_wait_for_stalwart (above) only probes
+# the REST API and is warning-only; it does NOT prove the path Keycloak uses to
+# send invitation / magic-link / "execute actions" emails. On every on-demand-dev
+# cold-start (and around any Stalwart restart) the submission listener can be
+# bound while SASL still 5xxs (OIDC directory not warmed) or the connect is
+# refused/timed-out — which deterministically fails the shard-6 onboarding
+# e2e tests and, on a main-merge, silently blocks deploy-prod.
+#
+# Fidelity: the probe runs from an ephemeral pod in NS_AUTH (Keycloak's own
+# namespace) and connects to the *same* external FQDN Keycloak uses
+# (SMTP_RELAY_HOST). In-cluster, CoreDNS rewrites that FQDN to the Stalwart
+# ClusterIP and the `allow-mail-ingress` NetworkPolicy gates :588 from
+# infra-auth — so this exercises the identical DNS-rewrite + NetworkPolicy +
+# listener + SASL path as a real Keycloak invitation send. A probe from the CI
+# box would take the internet→NodeBalancer path and false-green.
+#
+# FATAL on timeout (unlike mt_wait_for_stalwart) — per the project's
+# "Fail Fast — Never Silently Skip" rule. Fails closed: anything other than an
+# explicit success sentinel + exit 0 is treated as failure.
+#
+# Required env: SMTP_RELAY_HOST, SMTP_RELAY_USERNAME, SMTP_RELAY_PASSWORD
+#               (export via scripts/lib/smtp-credentials.sh :: mt_export_smtp_relay_env),
+#               KUBECONFIG, NS_AUTH.
+# Optional env: SMTP_RELAY_PORT (default 588), MT_SMTP_GATE_DEADLINE (default 420s).
+mt_wait_for_stalwart_submission() {
+    : "${KUBECONFIG:?mt_wait_for_stalwart_submission: KUBECONFIG must be set}"
+    : "${NS_AUTH:?mt_wait_for_stalwart_submission: NS_AUTH must be set}"
+    : "${SMTP_RELAY_HOST:?mt_wait_for_stalwart_submission: SMTP_RELAY_HOST must be set (run mt_export_smtp_relay_env first)}"
+    : "${SMTP_RELAY_USERNAME:?mt_wait_for_stalwart_submission: SMTP_RELAY_USERNAME must be set}"
+    : "${SMTP_RELAY_PASSWORD:?mt_wait_for_stalwart_submission: SMTP_RELAY_PASSWORD must be set}"
+    local port="${SMTP_RELAY_PORT:-588}"
+    local deadline="${MT_SMTP_GATE_DEADLINE:-420}"
+
+    print_status "Cold-start gate #19: verifying Stalwart SMTP submission connect+STARTTLS+AUTH"
+    print_status "  from NS_AUTH=${NS_AUTH} → ${SMTP_RELAY_HOST}:${port} (SASL as ${SMTP_RELAY_USERNAME}), deadline ${deadline}s"
+
+    # Single long-lived probe pod; the Python script retries internally until
+    # it succeeds or its own deadline expires. Password is fed via stdin so it
+    # never lands in the Pod spec, argv, or CI logs. Host/port/user are
+    # non-secret and passed as env.
+    local py
+    py='
+import os,sys,ssl,time,smtplib
+host=os.environ["PHOST"]; port=int(os.environ["PPORT"])
+user=os.environ["PUSER"]
+deadline=time.time()+float(os.environ["PDEADLINE"])
+pw=sys.stdin.readline().rstrip("\n")
+# Unverified TLS context: mirror Keycloak'\''s lenient STARTTLS (it does not
+# enforce server-cert identity by default). Cert validity is a separate gap
+# with its own gate — do not couple this probe to cert-manager readiness.
+ctx=ssl._create_unverified_context()
+attempt=0; last="(no attempt)"
+while time.time()<deadline:
+    attempt+=1
+    try:
+        s=smtplib.SMTP(host,port,timeout=15)
+        s.ehlo(); s.starttls(context=ctx); s.ehlo()
+        s.login(user,pw)
+        c,m=s.noop()
+        s.quit()
+        if c!=250:
+            raise RuntimeError("NOOP after AUTH returned %s %r"%(c,m))
+        print("STALWART_SMTP_PROBE_OK attempt=%d %s:%d AUTH=%s"%(attempt,host,port,user))
+        sys.exit(0)
+    except Exception as e:
+        last=type(e).__name__+": "+str(e)
+        print("  attempt %d connect/auth not ready yet: %s"%(attempt,last),flush=True)
+        time.sleep(10)
+print("STALWART_SMTP_PROBE_FAIL last_error: %s"%last)
+sys.exit(1)
+'
+    local pod="smtp-submission-probe-$$-${RANDOM}"
+    local out
+    out=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "kubectl --kubeconfig='$KUBECONFIG' -n '$NS_AUTH' delete pod '$pod' --ignore-not-found --force --grace-period=0 >/dev/null 2>&1; rm -f '$out'" RETURN
+
+    local rc=0
+    printf '%s' "$SMTP_RELAY_PASSWORD" | kubectl --kubeconfig="$KUBECONFIG" \
+        run "$pod" -i --rm --restart=Never \
+        --image=python:3.13-alpine \
+        -n "$NS_AUTH" \
+        --env "PHOST=${SMTP_RELAY_HOST}" \
+        --env "PPORT=${port}" \
+        --env "PUSER=${SMTP_RELAY_USERNAME}" \
+        --env "PDEADLINE=${deadline}" \
+        --command -- python3 -c "$py" >"$out" 2>&1 || rc=$?
+
+    # Surface the probe's progress in CI logs (contains no secrets).
+    sed 's/^/    [smtp-probe] /' "$out" || true
+
+    # Fail closed: require BOTH a clean exit AND the explicit success sentinel.
+    if [ "$rc" -eq 0 ] && grep -q 'STALWART_SMTP_PROBE_OK' "$out"; then
+        print_success "Stalwart SMTP submission connect+AUTH OK (cold-start gate #19 passed)"
+        return 0
+    fi
+
+    print_error "Stalwart SMTP submission connect/AUTH never succeeded (gate #19, rc=$rc)"
+    print_error "  Keycloak invitation / magic-link emails would fail — failing the deploy loudly"
+    return 1
+}
+
 # Wait for admin-portal's /version endpoint to return 200.
 # Lightest sanity check that the full ingress + portal + version-injection
 # chain is up. Use as a final "everything's up" assertion.
