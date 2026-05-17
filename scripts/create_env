@@ -598,6 +598,25 @@ if [ "$MAIL_ENABLED" = "true" ]; then
       print_warning "ensure-keycloak-smtp.sh failed (non-fatal, can re-run manually)"
     fi
   fi
+
+  # Cold-start gap #19: prove the Keycloak→Stalwart SMTP *submission* path is
+  # actually deliverable before anything downstream (e2e onboarding/magic-link
+  # tests) depends on it. mt_wait_for_stalwart above only probes REST and is
+  # warning-only; the submission listener can be bound while SASL still 5xxs on
+  # a fresh/just-restarted Stalwart. FATAL — turns a silent shard-6 flake (that
+  # also blocks deploy-prod on main) into a loud, correctly-attributed failure,
+  # and because the probe polls it usually self-heals by waiting.
+  source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
+  mt_export_smtp_relay_env "$NS_ADMIN"
+  if [ -z "${SMTP_RELAY_HOST:-}" ] || [ -z "${SMTP_RELAY_USERNAME:-}" ] || [ -z "${SMTP_RELAY_PASSWORD:-}" ]; then
+    print_error "Cold-start gate #19: smtp-credentials Secret in $NS_ADMIN is missing or incomplete"
+    print_error "  (provision-smtp-service-accounts ran above — this should not happen on a full deploy)"
+    exit 1
+  fi
+  if ! mt_wait_for_stalwart_submission; then
+    print_error "Cold-start gate #19 failed: Stalwart SMTP submission connect/AUTH not usable"
+    exit 1
+  fi
 fi
 
 # Deploy Collabora CODE (per-tenant office suite for in-browser document editing)
