@@ -250,6 +250,27 @@ case "$MODE" in
       echo "=== Drift-correcting Keycloak realm SMTP ==="
       "$REPO_ROOT/apps/scripts/ensure-keycloak-smtp.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0 || \
         echo "WARNING: ensure-keycloak-smtp failed (non-fatal)"
+
+      # Cold-start gap #19: FATAL gate — prove the Keycloak→Stalwart SMTP
+      # submission path (connect+STARTTLS+AUTH) actually works before e2e
+      # (shard-6 onboarding/magic-link) depends on it. This is the on-demand-dev
+      # split-pipeline hook; create_env carries an identical gate but only its
+      # --prep-only/--finalize-only phases run here, so the monolithic mail
+      # block (and its gate) is skipped on this path. Deliberately a SEPARATE
+      # explicitly-fatal call, NOT folded into ensure-keycloak-smtp above —
+      # that call is swallowed by `|| echo WARNING` (cold-start gap #17 lesson:
+      # ci-deploy-app.sh's `|| echo WARNING` must never mask a hard gate).
+      echo "=== Cold-start gate #19: Stalwart SMTP submission readiness ==="
+      source "$REPO_ROOT/scripts/lib/smtp-credentials.sh"
+      mt_export_smtp_relay_env "$NS_ADMIN"
+      export NS_AUTH="${NS_AUTH:-infra-auth}"
+      if [ -z "${SMTP_RELAY_HOST:-}" ] || [ -z "${SMTP_RELAY_USERNAME:-}" ] || [ -z "${SMTP_RELAY_PASSWORD:-}" ]; then
+        echo "FATAL: smtp-credentials in $NS_ADMIN missing/incomplete after provisioning"; exit 1
+      fi
+      if ! mt_wait_for_stalwart_submission; then
+        echo "FATAL: cold-start gate #19 — Stalwart SMTP submission connect/AUTH not usable"
+        exit 1
+      fi
     else
       echo "Stalwart: skipping (mail_enabled is not true)"
     fi
