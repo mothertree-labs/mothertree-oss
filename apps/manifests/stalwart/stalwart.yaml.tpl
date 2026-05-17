@@ -411,20 +411,50 @@ spec:
             cpu: "${STALWART_CPU_REQUEST}"
           limits:
             memory: "${STALWART_MEMORY_LIMIT}"
+        # startupProbe gates liveness/readiness until cold-start finishes.
+        # 30 × 10s = 300s budget covers PG connect + OIDC warm + spam-filter
+        # load on a fresh node. Without it, liveness (below) begins at 30s and
+        # a slow-but-healthy boot gets liveness-killed — the spontaneous
+        # RESTARTS:1 seen on cold-start pipelines.
+        startupProbe:
+          httpGet:
+            path: /healthz/live
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 30
         livenessProbe:
           httpGet:
             path: /healthz/live
             port: 8080
             scheme: HTTP
-          initialDelaySeconds: 30
           periodSeconds: 30
+          # Explicit 5s (K8s default is 1s — far too tight; a transient slow
+          # /healthz/live under cold-start/GC load × failureThreshold 3 was
+          # liveness-killing a healthy pod).
+          timeoutSeconds: 5
+          failureThreshold: 3
+        # Honest readiness: Stalwart's /healthz/ready is only a config-presence
+        # check (returns 200 the instant :8080 binds, long before the SMTP
+        # submission path is usable) — that dishonesty is the root cause of the
+        # "healthy pod, mail still broken" shard-6/shard-4 flakes. Gate on the
+        # submission listener (588) actually accepting TCP instead, so the pod
+        # leaves Service when the path Keycloak/e2e depend on is down.
+        # Port 588 is the `submission-app` listener — the exact port Keycloak's
+        # realm SMTP + gate #19 authenticate against as mailer@ (app password).
+        # All listeners bind from the same Stalwart process at startup, so
+        # 588-accepting-TCP reliably implies the submission path is up.
+        # Scope is TCP-bind only (NOT SASL/RCPT): the shared mailer@ principal
+        # is provisioned AFTER the pod is Ready, so a SASL-auth readiness check
+        # would deadlock provisioning permanently. gate #19 remains the fatal
+        # SASL/OIDC backstop.
         readinessProbe:
-          httpGet:
-            path: /healthz/ready
-            port: 8080
-            scheme: HTTP
+          tcpSocket:
+            port: 588
           initialDelaySeconds: 10
           periodSeconds: 10
+          failureThreshold: 3
       volumes:
       - name: config
         configMap:
