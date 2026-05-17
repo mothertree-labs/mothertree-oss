@@ -128,7 +128,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
         emailTestPage,
         recipientNcId,
         summary,
-        150_000,
+        210_000,
       );
 
       expect(ical).toBeTruthy();
@@ -228,7 +228,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
         summary,
         externalAttendee,
         'ACCEPTED',
-        150_000,
+        210_000,
       );
 
       expect(updatedIcal).toBeTruthy();
@@ -304,7 +304,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
       emailTestPage,
       recipientNcId,
       summary,
-      180_000,
+      210_000,
     );
 
     // Verify event is really gone
@@ -401,7 +401,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
         summary,
         externalAttendee,
         'ACCEPTED',
-        150_000,
+        210_000,
       );
 
       expect(updatedIcal).toBeTruthy();

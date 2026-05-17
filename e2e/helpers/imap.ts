@@ -73,7 +73,7 @@ async function connectAsMaster(
 ): Promise<typeof ImapFlow> {
   const username = userEmail.split('@')[0];
   const candidates = [userEmail, username];
-  const maxAttempts = 3;
+  const maxAttempts = 5;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     for (const name of candidates) {
@@ -85,19 +85,28 @@ async function connectAsMaster(
         // Auth/connection failures manifest differently depending on the path:
         // - Direct/cluster-internal: "Authentication failed" or "Command failed"
         // - Via ingress/TLS proxy: "Unexpected close" or "Connection not available"
+        // - Cold-start TLS/socket flaps: "socket disconnected",
+        //   "before secure TLS", "ECONNRESET", "ETIMEDOUT", "Socket timeout"
         const isRetryable =
           err instanceof Error &&
           (err.message.includes('Authentication failed') ||
             err.message.includes('Command failed') ||
             err.message.includes('Unexpected close') ||
-            err.message.includes('Connection not available'));
+            err.message.includes('Connection not available') ||
+            err.message.includes('socket disconnected') ||
+            err.message.includes('before secure TLS') ||
+            err.message.includes('ECONNRESET') ||
+            err.message.includes('ETIMEDOUT') ||
+            err.message.includes('Socket timeout'));
         if (!isRetryable) throw err;
         await client.logout().catch(() => {});
       }
     }
 
     if (attempt < maxAttempts) {
-      await new Promise((r) => setTimeout(r, 2_000));
+      // Exponential backoff: 2s, 4s, 8s, 16s (bounded — final descriptive
+      // throw still fires on exhaustion so a real outage fails loudly).
+      await new Promise((r) => setTimeout(r, 2_000 * 2 ** (attempt - 1)));
     }
   }
 
@@ -373,6 +382,12 @@ export async function waitForEmailBody(opts: {
           } finally {
             try { srcClient.close(); } catch {}
           }
+          // Short backoff between attempts so a socket flap doesn't burn
+          // all 3 within ~1s. Skip after the final attempt (outer poll
+          // loop + overall timeoutMs remain the hard bound).
+          if (attempt < 3) {
+            await new Promise((r) => setTimeout(r, attempt * 2_000));
+          }
         }
         // All download attempts failed for this UID — continue polling
       } else {
@@ -405,6 +420,12 @@ export async function waitForEmailBody(opts: {
             console.log(`  [imap] Source download attempt ${attempt} error: ${(err as Error).message}`);
           } finally {
             try { srcClient.close(); } catch {}
+          }
+          // Short backoff between attempts so a socket flap doesn't burn
+          // all 3 within ~1s. Skip after the final attempt (outer poll
+          // loop + overall timeoutMs remain the hard bound).
+          if (attempt < 3) {
+            await new Promise((r) => setTimeout(r, attempt * 2_000));
           }
         }
         // If downloaded but skipped, continue polling for a new email.
