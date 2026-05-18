@@ -122,3 +122,60 @@ steps:
         from_secret: e2e_pool2_base_domain
     commands:
       - ci/scripts/ci-deploy-app.sh dev remint-caldav-tokens
+
+  # Cold-start gap #20: FATAL gate for the EXTERNAL IMAPS path the e2e tests
+  # use. Pinned root cause (controlled experiment): a cold Stalwart delivers
+  # mail in ~48ms — there is NO data-path latency. The e2e symptom
+  # `[imap] Delivery SLOW: ~110s after 1 poll(s)` is 100% the e2e IMAP client
+  # (CI box → external IMAPS endpoint) being unable to ESTABLISH a session for
+  # ~110s on cold-start (NodeBalancer/:993/cert convergence); once connected
+  # the message is instantly present.
+  #
+  # Gate #19 guards the in-cluster Keycloak→Stalwart :588 SMTP path; nothing
+  # guarded the external :993 IMAPS path the e2e shards connect to, and on a
+  # main-push it was unguarded entirely. This step polls that external path
+  # from the CI box (the literal path e2e/helpers/imap.ts takes) and converts
+  # the silent in-shard 110s stall into an explicit, loud pre-e2e wait that
+  # self-heals once the edge converges.
+  #
+  # Wired AFTER remint-caldav-tokens so the e2e-mailrt user already exists;
+  # the gate authenticates as that exact user (the calendar-external-invite
+  # shards use it). Like create-test-users/remint-caldav-tokens this has NO
+  # step-level `when:` override — it inherits the workflow-level
+  # `pull_request | push:main` so it runs for EVERY pipeline (gap-#18 lesson:
+  # the deploy steps are PR-only no-ops but these provisioning/gate steps are
+  # not; e2e shards run on the main-push pipeline too and gate deploy-prod).
+  - name: imaps-readiness
+    image: bash
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      DEPLOY_VAULT_PASSWORD:
+        from_secret: deploy_vault_password
+      GITHUB_PAT:
+        from_secret: github_pat
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+      E2E_POOL1_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool1_stalwart_admin_password
+      E2E_POOL1_STALWART_IMAP_HOST:
+        from_secret: e2e_pool1_stalwart_imap_host
+      E2E_POOL1_STALWART_IMAP_PORT:
+        from_secret: e2e_pool1_stalwart_imap_port
+      E2E_POOL2_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool2_stalwart_admin_password
+      E2E_POOL2_STALWART_IMAP_HOST:
+        from_secret: e2e_pool2_stalwart_imap_host
+      E2E_POOL2_STALWART_IMAP_PORT:
+        from_secret: e2e_pool2_stalwart_imap_port
+    commands:
+      - ci/scripts/ci-deploy-app.sh dev imaps-readiness

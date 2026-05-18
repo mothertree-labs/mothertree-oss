@@ -25,6 +25,9 @@ set -euo pipefail
 #                          (cold-start gap #17: run AFTER create-test-users so
 #                           late-created e2e users get tokens; calendar-automation
 #                           only reads the Secret at startup)
+#   imaps-readiness — FATAL gate: prove an authenticated IMAPS session to the
+#                          EXTERNAL Stalwart endpoint the e2e tests use is
+#                          establishable before e2e runs (cold-start gap #20)
 #
 # Required environment variables:
 #   DEPLOY_VAULT_PASSWORD — Ansible Vault password
@@ -432,9 +435,145 @@ case "$MODE" in
     fi
     ;;
 
+  imaps-readiness)
+    # Cold-start gap #20 — FATAL gate for the EXTERNAL IMAPS path the e2e
+    # tests use.
+    #
+    # Pinned root cause (controlled experiment): a cold Stalwart delivers
+    # mail in ~48ms — there is NO data-path latency. The e2e symptom
+    # `[imap] Delivery SLOW: ~110s after 1 poll(s)` is 100% the e2e IMAP
+    # client (CI box → external IMAPS endpoint) being unable to ESTABLISH a
+    # session for ~110s on cold-start (NodeBalancer / :993 / cert
+    # convergence); once connected the message is instantly present
+    # (`1 matched` on poll #1).
+    #
+    # Cold-start gate #19 (mt_wait_for_stalwart_submission) guards the
+    # in-cluster Keycloak→Stalwart :588 SMTP-submission path, but NOTHING
+    # guards the external IMAPS :993 path the e2e shards actually connect to,
+    # and on a main-push that path is unguarded entirely. This step converts
+    # the silent in-shard 110s stall into an explicit, loud, attributed
+    # pre-e2e wait that self-heals (the connect just needs the external edge
+    # to converge).
+    #
+    # Mirrors gate #19's bounded-poll + fail-closed + clear-logging style,
+    # but runs FROM THE CI BOX against the external IMAPS endpoint
+    # (E2E_STALWART_IMAP_HOST:E2E_STALWART_IMAP_PORT) — exactly the path the
+    # e2e/helpers/imap.ts client takes — NOT from an in-cluster pod (that
+    # would take the internal ClusterIP path and false-green).
+    #
+    # Lives here (a finalize-sibling that runs on BOTH pull_request and
+    # push:main, like create-test-users/remint-caldav-tokens — gap-#18
+    # lesson) and is wired AFTER remint-caldav-tokens so the e2e-mailrt user
+    # already exists; we authenticate as that exact user (the one the
+    # calendar-external-invite shards use) so the gate exercises the literal
+    # path under test.
+    echo "=== Cold-start gate #20: external IMAPS session readiness ==="
+    source "$REPO_ROOT/scripts/lib/config.sh"
+    mt_load_tenant_config
+
+    if [ "${MAIL_ENABLED:-false}" != "true" ]; then
+      echo "Mail not enabled for tenant $E2E_TENANT — no external IMAPS path to gate"
+      echo "=== CI Deploy App complete: env=$MT_ENV mode=$MODE ==="
+      exit 0
+    fi
+
+    # ci-resolve-tenant.sh (sourced above) already mapped the leased pool's
+    # E2E_STALWART_IMAP_HOST / E2E_STALWART_IMAP_PORT / E2E_STALWART_ADMIN_PASSWORD
+    # to their standard names — the same vars e2e/helpers/imap.ts reads.
+    : "${E2E_STALWART_IMAP_HOST:?FATAL: E2E_STALWART_IMAP_HOST required (pool secret e2e_poolN_stalwart_imap_host)}"
+    : "${E2E_STALWART_IMAP_PORT:?FATAL: E2E_STALWART_IMAP_PORT required (pool secret e2e_poolN_stalwart_imap_port)}"
+    : "${E2E_STALWART_ADMIN_PASSWORD:?FATAL: E2E_STALWART_ADMIN_PASSWORD required (pool secret e2e_poolN_stalwart_admin_password)}"
+    : "${E2E_BASE_DOMAIN:?FATAL: E2E_BASE_DOMAIN required to build the e2e-mailrt master username}"
+
+    # Master-user auth username form, copied EXACTLY from
+    # e2e/helpers/imap.ts :: connectAsMaster: it tries "<localpart>%master"
+    # first (and "<email>%master" as a fallback). e2e-mailrt is the fixed
+    # mail-roundtrip user created by ci-create-test-users.sh as
+    # e2e-mailrt@${E2E_BASE_DOMAIN}; the calendar-external-invite shards
+    # authenticate as exactly this principal.
+    MASTER_USER="e2e-mailrt"
+    MASTER_USER_EMAIL="e2e-mailrt@${E2E_BASE_DOMAIN}"
+
+    GATE_DEADLINE="${MT_IMAPS_GATE_DEADLINE:-240}"
+    echo "Cold-start gate #20: verifying authenticated IMAPS session"
+    echo "  from CI box → ${E2E_STALWART_IMAP_HOST}:${E2E_STALWART_IMAP_PORT}"
+    echo "  (TLS connect + LOGIN as ${MASTER_USER}%master + SELECT INBOX + LOGOUT), deadline ${GATE_DEADLINE}s"
+
+    # Dependency-light: python3 stdlib imaplib (no npm ci needed here — this
+    # workflow may not have run it; sibling CI scripts already shell out to
+    # python3 the same way). Password is fed via STDIN, never argv/env, so it
+    # is not visible in the process list or /proc/<pid>/environ (mirrors
+    # gate #19 in scripts/lib/common.sh). Host/port/user are non-secret env.
+    _imaps_py='
+import os, sys, ssl, time, imaplib
+host = os.environ["IHOST"]
+port = int(os.environ["IPORT"])
+ulocal = os.environ["IUSER_LOCAL"]
+uemail = os.environ["IUSER_EMAIL"]
+deadline = time.time() + float(os.environ["IDEADLINE"])
+pw = sys.stdin.readline().rstrip("\n")
+# Dev/CI uses self-signed certs; mirror imap.ts rejectUnauthorized:false.
+# Cert validity is a separate gap with its own gate — do not couple this
+# connect-readiness probe to cert-manager convergence.
+ctx = ssl._create_unverified_context()
+# Same candidate order as e2e/helpers/imap.ts connectAsMaster
+# (candidates = [userEmail, username]): full email first, then localpart,
+# each as "<name>%master".
+candidates = [uemail + "%master", ulocal + "%master"]
+attempt = 0
+last = "(no attempt)"
+while time.time() < deadline:
+    attempt += 1
+    for cand in candidates:
+        M = None
+        try:
+            M = imaplib.IMAP4_SSL(host, port, ssl_context=ctx, timeout=15)
+            M.login(cand, pw)
+            typ, _ = M.select("INBOX")
+            if typ != "OK":
+                raise RuntimeError("SELECT INBOX returned %s" % typ)
+            M.logout()
+            print("STALWART_IMAPS_PROBE_OK attempt=%d %s:%d LOGIN=%s"
+                  % (attempt, host, port, cand))
+            sys.exit(0)
+        except Exception as e:
+            last = "%s as %s: %s" % (type(e).__name__, cand, e)
+            try:
+                if M is not None:
+                    M.logout()
+            except Exception:
+                pass
+    print("  attempt %d IMAPS session not ready yet: %s" % (attempt, last),
+          flush=True)
+    time.sleep(10)
+print("STALWART_IMAPS_PROBE_FAIL last_error: %s" % last)
+sys.exit(1)
+'
+    _gate_rc=0
+    printf '%s' "$E2E_STALWART_ADMIN_PASSWORD" | \
+      IHOST="$E2E_STALWART_IMAP_HOST" \
+      IPORT="$E2E_STALWART_IMAP_PORT" \
+      IUSER_LOCAL="$MASTER_USER" \
+      IUSER_EMAIL="$MASTER_USER_EMAIL" \
+      IDEADLINE="$GATE_DEADLINE" \
+      python3 -c "$_imaps_py" || _gate_rc=$?
+
+    if [ "$_gate_rc" -ne 0 ]; then
+      echo "FATAL: cold-start gate #20 — external IMAPS session to" \
+           "${E2E_STALWART_IMAP_HOST}:${E2E_STALWART_IMAP_PORT} not establishable" \
+           "within ${GATE_DEADLINE}s as ${MASTER_USER}%master."
+      echo "       This is the external edge (NodeBalancer/:993/cert) NOT having"
+      echo "       converged — it is the exact ~110s cold-connect stall the e2e"
+      echo "       calendar-external-invite shards would otherwise hit silently."
+      echo "       Failing the build loudly (hard gate; never silently skipped)."
+      exit 1
+    fi
+    echo "OK: external IMAPS session to ${E2E_STALWART_IMAP_HOST}:${E2E_STALWART_IMAP_PORT} is usable"
+    ;;
+
   *)
     echo "ERROR: Unknown mode: $MODE"
-    echo "Valid modes: prep, finalize, matrix, nextcloud, jitsi, stalwart, roundcube, calendar, email-probe, portals, remint-caldav-tokens"
+    echo "Valid modes: prep, finalize, matrix, nextcloud, jitsi, stalwart, roundcube, calendar, email-probe, portals, remint-caldav-tokens, imaps-readiness"
     exit 1
     ;;
 esac

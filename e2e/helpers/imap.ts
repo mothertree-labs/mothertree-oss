@@ -64,8 +64,10 @@ function createClient(authUser: string, config: ImapConfig): typeof ImapFlow {
  * Some principals use "user@domain" as name, others use just "user".
  * We try email first, then fall back to short username.
  *
- * Retries the full candidate list up to 3 times with a delay to handle
- * transient connection issues (common when connecting via external ingress).
+ * Retries the full candidate list with capped-exponential backoff (~180s
+ * sleep-only budget) to ride out the cold-start external IMAPS connect
+ * window. The FATAL pre-e2e cold-start gate #20 is the primary guard; this
+ * is the fallback (see connectAsMaster body for the pinned root cause).
  */
 async function connectAsMaster(
   userEmail: string,
@@ -73,7 +75,17 @@ async function connectAsMaster(
 ): Promise<typeof ImapFlow> {
   const username = userEmail.split('@')[0];
   const candidates = [userEmail, username];
-  const maxAttempts = 5;
+  // Belt-and-suspenders FALLBACK for the pinned root cause: on cold-start the
+  // external IMAPS edge (CI box → NodeBalancer/:993/cert) can take ~110s to
+  // accept a session, even though a cold Stalwart delivers mail in ~48ms (no
+  // data-path latency). The PRIMARY guard is the FATAL pre-e2e cold-start
+  // gate #20 (ci/scripts/ci-deploy-app.sh imaps-readiness); this connect-retry
+  // budget is the fallback so a cold window can't fail a shard if the gate is
+  // bypassed. Sleep-only budget = 2+4+8+16+30*5 = 180s (comfortably exceeds
+  // the observed ~110s cold-connect window); the per-attempt connect/greet
+  // timeouts add further wall-clock on top. Still bounded — the final
+  // descriptive throw fires on exhaustion so a real outage fails loudly.
+  const maxAttempts = 10;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     for (const name of candidates) {
@@ -104,9 +116,13 @@ async function connectAsMaster(
     }
 
     if (attempt < maxAttempts) {
-      // Exponential backoff: 2s, 4s, 8s, 16s (bounded — final descriptive
-      // throw still fires on exhaustion so a real outage fails loudly).
-      await new Promise((r) => setTimeout(r, 2_000 * 2 ** (attempt - 1)));
+      // Exponential backoff capped at 30s: 2s, 4s, 8s, 16s, then 30s each
+      // (9 sleeps total = 180s sleep-only budget — exceeds the observed
+      // ~110s external IMAPS cold-connect window). Bounded: the final
+      // descriptive throw still fires on exhaustion so a real outage fails
+      // loudly rather than hanging.
+      const backoffMs = Math.min(2_000 * 2 ** (attempt - 1), 30_000);
+      await new Promise((r) => setTimeout(r, backoffMs));
     }
   }
 
