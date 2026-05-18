@@ -17,8 +17,8 @@
     - "{{ vars_file | default('ansible-vars.yml') }}"
 
   vars:
-    woodpecker_version: "{{ woodpecker_version_override | default('3.13.0') }}"
-    plugin_git_version: "{{ plugin_git_version_override | default('2.8.1') }}"
+    woodpecker_version: "{{ woodpecker_version_override | default('3.14.1') }}"
+    plugin_git_version: "{{ plugin_git_version_override | default('2.9.1') }}"
     # Path to tenant config submodule (relative to playbook)
     _tenants_dir: "{{ playbook_dir }}/../../config/tenants"
 
@@ -101,6 +101,56 @@
         - woodpecker-server
         - woodpecker-agent
         - woodpecker-cli
+
+    # Installing the .deb only swaps the binary on disk — it does NOT restart
+    # the running services. A pure version bump changes no config file, so the
+    # restart handlers never fire, leaving the old process running. The agent
+    # then crash-loops on a GRPC version mismatch against the stale server.
+    # This block detects that drift and cycles the services in the correct
+    # order (server first, wait until it reports the new version, then agent).
+    # It is idempotent: on a no-op re-run the running version already matches
+    # the desired version, so nothing is restarted and pipelines are undisturbed.
+    - name: Query the running Woodpecker server version
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8000/version
+        return_content: true
+      register: _wp_running_version
+      changed_when: false
+      failed_when: false
+
+    # Only act when we positively read a running version that differs from the
+    # desired one. If the probe failed (server unreachable), do NOT assume drift
+    # and restart — that would cycle services on every provision and kill any
+    # running pipeline. A genuine upgrade is still covered: after the .deb swap
+    # the OLD server process keeps serving /version and reports the OLD version,
+    # so the mismatch is detected correctly.
+    - name: Restart Woodpecker (server then agent) when the running version is stale
+      when: >-
+        (_wp_running_version.status | default(0)) == 200
+        and (_wp_running_version.json.version | default('') | string) != ''
+        and (_wp_running_version.json.version | default('') | string)
+            != (woodpecker_version | string)
+      block:
+        - name: Restart woodpecker-server to load the upgraded binary
+          ansible.builtin.systemd:
+            name: woodpecker-server
+            state: restarted
+
+        - name: Wait until woodpecker-server reports the desired version
+          ansible.builtin.uri:
+            url: http://127.0.0.1:8000/version
+            return_content: true
+          register: _wp_post_restart_version
+          until: >-
+            (_wp_post_restart_version.json.version | default('') | string)
+            == (woodpecker_version | string)
+          retries: 24
+          delay: 5
+
+        - name: Restart woodpecker-agent so its GRPC version matches the server
+          ansible.builtin.systemd:
+            name: woodpecker-agent
+            state: restarted
 
     # ── Install Tailscale (mesh networking for SSH access) ─────────
     - name: Install Tailscale
