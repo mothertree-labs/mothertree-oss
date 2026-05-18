@@ -10,12 +10,12 @@ depends_on:
   - e2e-shard-9
   - e2e-shard-10
 
-runs_on: [ success, failure ]
-
 when:
   - event: pull_request
+    status: [ success, failure ]
   - event: push
     branch: main
+    status: [ success, failure ]
 
 clone:
   - name: clone
