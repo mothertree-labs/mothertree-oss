@@ -87,9 +87,13 @@ primary:
         END
         $$;
 
-        -- Revoke default PUBLIC connect privilege for cross-tenant isolation
+        -- Revoke default PUBLIC connect privilege for cross-tenant isolation.
+        -- Grant CONNECT to pgbouncer so it can run auth_query against this DB
+        -- (auth_query looks up client password hash from pg_shadow on the
+        -- client's requested database).
         REVOKE CONNECT ON DATABASE keycloak FROM PUBLIC;
         GRANT CONNECT ON DATABASE keycloak TO keycloak;
+        GRANT CONNECT ON DATABASE keycloak TO pgbouncer;
 
 # PostgreSQL metrics exporter (postgres_exporter sidecar)
 metrics:

@@ -1,7 +1,8 @@
-# Postfix main configuration for multi-tenant mail routing
-# This Postfix instance serves two roles:
-# 1. Outbound relay: accepts mail from tenant Stalwarts, signs with DKIM, forwards to VPN relay
-# 2. Inbound routing: receives mail from internet, routes to correct tenant Stalwart by domain
+# Postfix main configuration for multi-tenant inbound mail routing
+# This Postfix instance receives mail from the internet (via NodeBalancer:25)
+# and routes it to the correct tenant Stalwart by recipient domain.
+# Outbound submission + DKIM signing are delegated to tenant Stalwart → AWS SES
+# (SES Easy DKIM), so this pod no longer signs or relays outbound since PR-4.
 #
 # See /usr/share/postfix/main.cf.dist for a commented, more complete version
 
@@ -17,11 +18,6 @@ mydomain = ${SMTP_DOMAIN}
 myorigin = ${SMTP_DOMAIN}
 mydestination = $myhostname, localhost, localhost.localdomain
 mynetworks = ${POSTFIX_MYNETWORKS}
-
-# Relay host — forward all outbound mail through the Postfix relay VM
-# This ensures a consistent source IP for SPF compliance
-# The relay VM is on the Tailscale mesh (reached via Tailscale sidecar)
-relayhost = [${POSTFIX_RELAY_IP}]:25
 
 # =============================================================================
 # Inbound Mail Routing (Multi-Tenant)
@@ -63,7 +59,9 @@ maximal_queue_lifetime = 1d
 bounce_queue_lifetime = 1d
 default_process_limit = 100
 
-# SMTP client settings - for outbound mail
+# SMTP client settings — only used for relaying accepted inbound mail onward
+# to the per-tenant Stalwart via transport_maps (plaintext over the K8s pod
+# network). Tenant-outbound traffic no longer transits this pod.
 smtp_helo_timeout = 60s
 smtp_connect_timeout = 30s
 
@@ -81,19 +79,13 @@ smtpd_relay_restrictions = permit_mynetworks, reject_unauth_destination
 smtpd_client_restrictions = permit
 smtpd_helo_restrictions = permit
 smtpd_sender_restrictions = permit
-# Recipient restrictions for port 25 (inbound mail)
-# Port 587 (submission) has separate restrictions configured via master.cf
+# Recipient restrictions for port 25 (inbound mail).
+# master.cf overrides this to add reject_unverified_recipient (backscatter
+# prevention) on the port-25 smtpd service.
 smtpd_recipient_restrictions = permit_mynetworks, reject_unauth_destination
 
-# Disable SASL authentication (not needed for send-only)
+# Disable SASL authentication (inbound MX dispatch is unauthenticated)
 smtpd_sasl_auth_enable = no
-
-# DKIM integration with OpenDKIM
-# OpenDKIM is configured to listen on port 8891
-smtpd_milters = inet:127.0.0.1:8891
-non_smtpd_milters = inet:127.0.0.1:8891
-milter_default_action = accept
-milter_protocol = 6
 
 # Logging
 maillog_file = /dev/stdout

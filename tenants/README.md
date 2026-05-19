@@ -186,7 +186,7 @@ jitsi:
 
 ### Infrastructure Management
 
-Infrastructure (cluster, Headscale, PostgreSQL VM, Postfix relay VM, TURN) is managed separately and shared across tenants:
+Infrastructure (cluster, Headscale, PostgreSQL VM, TURN) is managed separately and shared across tenants:
 
 ```bash
 # Create/update shared infrastructure

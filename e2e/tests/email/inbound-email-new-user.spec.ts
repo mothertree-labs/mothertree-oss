@@ -61,6 +61,7 @@ test.describe('Email — Inbound Delivery to New User (#189)', () => {
 
       const responsePromise = adminPage.waitForResponse(
         (r) => r.url().includes('/api/invite') && r.request().method() === 'POST',
+        { timeout: 60_000 }, // cold-start: see #389
       );
       await adminPage.click(ap.inviteSubmitBtn);
       const apiResponse = await responsePromise;
@@ -104,8 +105,8 @@ test.describe('Email — Inbound Delivery to New User (#189)', () => {
       const rawMime = await waitForEmailBody({
         userEmail: newUserEmail,
         subjectContains: subject,
-        timeoutMs: 90_000,
-        pollIntervalMs: 5_000,
+        timeoutMs: 150_000,
+        pollIntervalMs: 3_000,
       });
 
       expect(rawMime).toContain(subject);

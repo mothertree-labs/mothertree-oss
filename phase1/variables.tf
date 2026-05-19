@@ -306,27 +306,3 @@ variable "tailscale_auth_key" {
   default     = ""
 }
 
-# Postfix Relay Server Configuration
-variable "postfix_relay_enabled" {
-  description = "Whether to deploy a Postfix relay VM on the Tailscale mesh (replaces VPN server mail relay)"
-  type        = bool
-  default     = false
-}
-
-variable "postfix_relay_label" {
-  description = "Label for the Postfix relay server"
-  type        = string
-  default     = "postfix-relay"
-}
-
-variable "postfix_relay_type" {
-  description = "Linode instance type for Postfix relay server"
-  type        = string
-  default     = "g6-nanode-1" # 1GB RAM, 1 vCPU ($5/mo) — sufficient for mail relay
-}
-
-variable "postfix_relay_image" {
-  description = "OS image for Postfix relay server"
-  type        = string
-  default     = "linode/ubuntu24.04"
-}

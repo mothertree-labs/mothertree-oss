@@ -38,10 +38,15 @@ mt_require_tenant
 source "${REPO_ROOT}/scripts/lib/config.sh"
 mt_load_tenant_config
 
+# Load infrastructure credentials — provides SES_SMTP_* env vars when SES is
+# configured for this env. Absent on dev → Stalwart falls back to direct MX delivery.
+source "${REPO_ROOT}/scripts/lib/infra-config.sh"
+mt_load_infra_config
+
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy-stalwart"
 
-mt_require_commands kubectl envsubst
+mt_require_commands kubectl envsubst jq
 
 # Override NS_MAIL for envsubst templates that use ${NS_MAIL} to mean
 # the tenant mail namespace (stalwart templates expect this)
@@ -118,16 +123,112 @@ export STALWART_MASTER_SECRET
 STALWART_MASTER_SECRET=$(openssl passwd -6 -salt "$(openssl rand -hex 8)" "$STALWART_ADMIN_PASSWORD")
 print_status "Master-user secret hash generated"
 
-# Generate config checksum for pod annotations
-# Include both secrets AND the rendered config template to trigger restarts on any config change
+# =============================================================================
+# Outbound mail path: SES relay (prod) or direct MX (dev)
+# =============================================================================
+# Outbound DKIM signing is delegated to AWS SES Easy DKIM — Stalwart doesn't
+# sign. SES rewrites Message-ID and Date during relay, which invalidates any
+# Stalwart-side signature by the time it reaches the receiver. SES signs
+# post-mutation with its own rotated keys, and DMARC carries via that
+# signature's d=<tenant-domain> alignment.
+#
+# Route choice is environment-dependent:
+#   - SES configured (prod): relay via AWS SES on 587 with SASL auth. The
+#     ses-credentials Secret carries endpoint/username/password, mounted as
+#     env vars referenced by %{env:...}% in the relay route block.
+#   - SES unset (dev): direct MX delivery from the cluster's egress IP. No
+#     smart host. Cluster egress IP has no PTR/SPF so receivers may tempfail,
+#     but that matches the existing dev behavior (see project_mail_paths_per_env).
+#
+# `.dkim.private_key` in tenant secrets is now unused by any cluster component
+# (the OpenDKIM sidecar and infra-mail dkim-key-<tenant> Secrets were removed
+# in step 2 PR-4). The field is kept in the secrets YAML for rollback safety.
+
+if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
+    # Reject endpoints containing characters that could inject TOML directives
+    # via newlines. Operator-controlled input; defense-in-depth.
+    if ! [[ "$SES_SMTP_ENDPOINT" =~ ^[A-Za-z0-9.-]+$ ]]; then
+        print_error "SES_SMTP_ENDPOINT '$SES_SMTP_ENDPOINT' contains invalid characters (allowed: A-Za-z0-9.-)"
+        exit 1
+    fi
+    STALWART_SES_ENABLED=true
+    export STALWART_OUTBOUND_ROUTE_NAME="relay"
+    export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - AWS SES via SASL-authenticated SMTP submission.
+    [queue.route.\"relay\"]
+    type = \"relay\"
+    address = \"%{env:SES_SMTP_ENDPOINT}%\"
+    port = 587
+    protocol = \"smtp\"
+
+    [queue.route.\"relay\".tls]
+    implicit = false
+    allow-invalid-certs = false
+
+    [queue.route.\"relay\".auth]
+    username = \"%{env:SES_SMTP_USER}%\"
+    secret = \"%{env:SES_SMTP_PASSWORD}%\""
+    print_status "Outbound relay: AWS SES ($SES_SMTP_ENDPOINT)"
+else
+    STALWART_SES_ENABLED=false
+    export STALWART_OUTBOUND_ROUTE_NAME="mx"
+    export STALWART_OUTBOUND_ROUTE_TOML="    # Direct MX delivery - no smart host configured for this env.
+    [queue.route.\"mx\"]
+    type = \"mx\"
+    ip-lookup = \"ipv4_then_ipv6\""
+    print_status "Outbound relay: direct MX (no SES configured for this env)"
+fi
+
+# Generate config checksum for pod annotations. Include every value the pod
+# reads from a Secret/ConfigMap so rotating any of them forces a rollout.
+# STALWART_OUTBOUND_ROUTE_TOML is baked into RENDERED_CONFIG below, but we hash
+# SES creds separately because they are mounted as env vars and would
+# otherwise roll silently on Secret-only changes.
 RENDERED_CONFIG=$(envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" 2>/dev/null || echo "")
-export CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$S3_MAIL_ACCESS_KEY$RENDERED_CONFIG" | sha256sum | cut -d' ' -f1 | head -c 12)
+export CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$S3_MAIL_ACCESS_KEY${SES_SMTP_ENDPOINT:-}${SES_SMTP_USERNAME:-}${SES_SMTP_PASSWORD:-}$RENDERED_CONFIG" | sha256sum | cut -d' ' -f1 | head -c 12)
 print_status "Config checksum: $CONFIG_CHECKSUM"
 
 # Ensure namespace exists
 print_status "Ensuring $NS_MAIL namespace exists..."
 kubectl create namespace "$NS_MAIL" --dry-run=client -o yaml | kubectl apply -f -
 print_success "Namespace ready: $NS_MAIL"
+
+# =============================================================================
+# Clean up stale dkim-key Secret
+# =============================================================================
+# PR #353 created a dkim-key Secret here for Stalwart-side DKIM signing. That
+# approach was abandoned — SES Easy DKIM handles outbound signing now (see the
+# comment above, and the [auth.dkim] block in stalwart.yaml.tpl). The Secret
+# in the tenant namespace is no longer mounted by Stalwart. Delete any stale
+# copy left over from a prior deploy. --ignore-not-found handles the benign
+# "already gone" case; real failures (auth, connectivity) still surface.
+kubectl delete secret dkim-key -n "$NS_MAIL" --ignore-not-found=true >/dev/null
+
+# =============================================================================
+# SES credentials Secret (tenant namespace, only when SES is configured)
+# =============================================================================
+# Write each value to a temp file and use --from-file so the username/password
+# never appear in kubectl's argv (visible via ps on a shared CI host).
+# No EXIT trap here — mt_deploy_start owns it for the deploy-end notification;
+# `trap - EXIT` would clobber that. A leak on early failure is acceptable.
+if [ "$STALWART_SES_ENABLED" = "true" ]; then
+    print_status "Applying SES credentials Secret in $NS_MAIL..."
+    SES_TMP_DIR=$(mktemp -d)
+    printf '%s' "$SES_SMTP_ENDPOINT" > "$SES_TMP_DIR/endpoint"
+    printf '%s' "$SES_SMTP_USERNAME" > "$SES_TMP_DIR/username"
+    printf '%s' "$SES_SMTP_PASSWORD" > "$SES_TMP_DIR/password"
+    kubectl create secret generic ses-credentials -n "$NS_MAIL" \
+        --from-file=endpoint="$SES_TMP_DIR/endpoint" \
+        --from-file=username="$SES_TMP_DIR/username" \
+        --from-file=password="$SES_TMP_DIR/password" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    rm -rf "$SES_TMP_DIR"
+    print_success "SES credentials Secret applied"
+else
+    # Clear any stale Secret from a prior SES-enabled deploy. --ignore-not-found
+    # handles the benign "already gone" case; stderr stays visible so real
+    # failures (auth, connectivity) surface per the project's fail-fast rule.
+    kubectl delete secret ses-credentials -n "$NS_MAIL" --ignore-not-found=true >/dev/null
+fi
 
 # =============================================================================
 # Database Initialization
@@ -303,6 +404,168 @@ for port_info in "smtps-${TENANT}:${STALWART_SMTPS_PORT}" "submission-${TENANT}:
     fi
 done
 print_success "Tenant mail ports configured on LB and nginx TCP proxy"
+
+# =============================================================================
+# CoreDNS rewrite: make mail.<tenant-domain> resolve to the in-cluster Stalwart
+# service so authenticated submission from callers (Keycloak, Synapse, Impress,
+# Nextcloud, portals) can connect with strict TLS verification. The external
+# hostname is covered by the existing wildcard cert; the svc.cluster.local name
+# is not. Without this rewrite, callers that verify TLS hostnames fail with a
+# null-message exception (JavaMail, Twisted, Python smtplib) or fall back to
+# skip-verify workarounds. See CHANGELOG / PR-2b for context.
+#
+# LKE exposes CoreDNS extension via the optional coredns-custom ConfigMap in
+# kube-system, imported by the base Corefile via `import custom/*.include`.
+# Each tenant owns its own key so concurrent deploys don't clash.
+# =============================================================================
+print_status "Ensuring CoreDNS rewrite for $MAIL_HOST → stalwart.$NS_MAIL.svc.cluster.local"
+if ! kubectl -n kube-system get configmap coredns-custom >/dev/null 2>&1; then
+    kubectl -n kube-system create configmap coredns-custom
+fi
+_coredns_key="mail-${TENANT}.include"
+_coredns_body="rewrite name ${MAIL_HOST} stalwart.${NS_MAIL}.svc.cluster.local"$'\n'
+
+# Detect whether the desired rewrite is already in place. If so, the patch is
+# a no-op and we can skip the (expensive) CoreDNS rollout below — the
+# rewrite has been live and converged for some time already.
+_coredns_existing=$(kubectl -n kube-system get configmap coredns-custom \
+    -o "jsonpath={.data.${_coredns_key}}" 2>/dev/null || true)
+if [ "$_coredns_existing" = "$_coredns_body" ]; then
+    print_status "CoreDNS rewrite already in place — skipping patch + rollout"
+    _coredns_changed=false
+else
+    # jq builds the JSON merge-patch so we don't hand-escape keys/values.
+    _coredns_patch=$(jq -cn \
+        --arg key "$_coredns_key" \
+        --arg body "$_coredns_body" \
+        '{data: {($key): $body}}')
+    kubectl -n kube-system patch configmap coredns-custom --type=merge -p "$_coredns_patch"
+    print_success "CoreDNS rewrite applied"
+    _coredns_changed=true
+fi
+
+# -----------------------------------------------------------------------------
+# When the rewrite changed, force a CoreDNS rollout instead of relying on the
+# `reload` plugin. Background:
+#
+# CoreDNS's `reload` plugin watches the Corefile for changes (~30s poll), but
+# the custom rewrites live in a separate `coredns-custom` ConfigMap that
+# CoreDNS imports via `import custom/*.include`. Two compounding issues make
+# the natural reload path racy:
+#
+#   1. Per-replica kubelet ConfigMap mount sync timing differs by node, so
+#      one replica can serve the new rewrite while another still serves stale
+#      — and the kube-dns service IP load-balances across both. The previous
+#      probe (nslookup loop via the service IP, exit-on-first-success) masked
+#      this completely: it'd pass on whichever replica converged first while
+#      the other kept returning the public LB IP.
+#   2. If NodeLocal DNS Cache is in the resolver path, it caches resolutions
+#      per-node with its own positive TTL. CoreDNS being right doesn't help
+#      until NodeLocal's cached entry expires.
+#
+# Cold-start audit (2026-05-14, gap #14) traced a deploy-stalwart success
+# followed by an immediate provision-smtp SMTP smoke-test failure to exactly
+# this race — the smoke-test pod resolved mail.<domain> to the LB IP (port
+# 588 not exposed there) and hung past its 60s budget.
+#
+# Rollout-restart guarantees every replica has the new ConfigMap mounted and
+# Corefile loaded before we proceed; bouncing node-local-dns (when present)
+# flushes per-node caches. ~30-60s overhead per tenant; only paid when the
+# rewrite actually changed.
+# -----------------------------------------------------------------------------
+if [ "$_coredns_changed" = "true" ]; then
+    # Discover the CoreDNS deployment name via the standard k8s-app=kube-dns
+    # label rather than hardcoding "coredns" — the deployment is named
+    # "coredns" on most distros but some (e.g. legacy) use "kube-dns".
+    _coredns_deploy=$(kubectl -n kube-system get deploy -l k8s-app=kube-dns -o name | head -n1)
+    if [ -z "$_coredns_deploy" ]; then
+        print_error "No CoreDNS deployment found in kube-system (label k8s-app=kube-dns)"
+        exit 1
+    fi
+    print_status "Restarting $_coredns_deploy to propagate rewrite to all replicas"
+    kubectl -n kube-system rollout restart "$_coredns_deploy"
+    kubectl -n kube-system rollout status "$_coredns_deploy" --timeout=180s
+
+    if kubectl -n kube-system get ds node-local-dns >/dev/null 2>&1; then
+        print_status "Restarting node-local-dns DaemonSet to flush per-node caches"
+        kubectl -n kube-system rollout restart ds/node-local-dns
+        kubectl -n kube-system rollout status ds/node-local-dns --timeout=180s
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# Sanity check: after the rollout (or immediately, on a no-op), verify that
+# the rewrite is actually live. We query EACH CoreDNS pod's ClusterIP
+# directly (not via the kube-dns service IP) so a single laggy replica is
+# detected rather than masked by load-balancing. busybox `nslookup` accepts
+# a server as its second positional arg.
+#
+# The MAIL_HOST → ClusterIP mapping is the contract that downstream callers
+# (provision-smtp's SMTP smoke test, Synapse, Docs, Files, portals) depend
+# on. If even one CoreDNS replica is wrong, those callers can race against
+# the wrong answer and hit the public LB IP (which does not expose 588).
+# -----------------------------------------------------------------------------
+print_status "Verifying CoreDNS rewrite propagated to ALL replicas"
+_stalwart_cluster_ip=$(kubectl -n "$NS_MAIL" get svc stalwart -o jsonpath='{.spec.clusterIP}')
+if [ -z "$_stalwart_cluster_ip" ]; then
+    print_error "Could not read Stalwart ClusterIP from svc/stalwart in $NS_MAIL"
+    exit 1
+fi
+# Filter out pods with deletionTimestamp set: rollout-status returns once the
+# new ReplicaSet is fully ready, but old pods can linger in `Running` phase
+# for a few seconds while their containers terminate. Probing those IPs
+# would burn the entire 90s budget on dead addresses. (kubectl jsonpath
+# doesn't support negation, so use jq.)
+_coredns_pod_ips=$(kubectl -n kube-system get pods -l k8s-app=kube-dns -o json \
+    | jq -r '.items[]
+        | select(.status.phase == "Running")
+        | select(.metadata.deletionTimestamp == null)
+        | .status.podIP' \
+    | tr '\n' ' ')
+if [ -z "${_coredns_pod_ips// /}" ]; then
+    print_error "No running CoreDNS pods found (label k8s-app=kube-dns in kube-system)"
+    exit 1
+fi
+print_status "Expecting $MAIL_HOST → $_stalwart_cluster_ip from CoreDNS pods: $_coredns_pod_ips"
+
+# Note: busybox `nslookup` prints the DNS server's own address line first
+# ("Address: <server>#53") and only then the answer addresses after "Name:"
+# — the awk filter below skips lines until "Name:" appears.
+_dns_probe_pod="smtp-dns-probe-$$"
+if kubectl run "$_dns_probe_pod" -n "$NS_MAIL" \
+    --rm -i --restart=Never --image=busybox:1.36 --quiet \
+    --command -- sh -c "
+        pod_ips='${_coredns_pod_ips}'
+        want='${_stalwart_cluster_ip}'
+        host='${MAIL_HOST}'
+        for i in \$(seq 1 18); do
+            all_ok=1
+            last_state=
+            for ip in \$pod_ips; do
+                got=\$(nslookup \"\$host\" \"\$ip\" 2>/dev/null | awk '/^Name:/{f=1; next} f && /^Address/{print \$2; exit}')
+                if [ \"\$got\" != \"\$want\" ]; then
+                    all_ok=0
+                    last_state=\"replica \$ip returned '\$got'\"
+                fi
+            done
+            if [ \"\$all_ok\" = '1' ]; then
+                echo \"OK: all CoreDNS replicas return \$want for \$host\"
+                exit 0
+            fi
+            echo \"  attempt \$i: \$last_state (want \$want), retrying in 5s\"
+            sleep 5
+        done
+        echo \"FAIL: not all CoreDNS replicas converged on \$want for \$host within 90s (\$last_state)\"
+        exit 1
+    "; then
+    print_success "CoreDNS rewrite verified across all replicas: $MAIL_HOST → $_stalwart_cluster_ip"
+else
+    print_error "CoreDNS rewrite for $MAIL_HOST did not propagate to all replicas within 90s"
+    print_error "Check kube-system/coredns-custom ConfigMap and CoreDNS pod logs:"
+    print_error "  kubectl -n kube-system get configmap coredns-custom -o yaml"
+    print_error "  kubectl -n kube-system logs -l k8s-app=kube-dns --tail=100"
+    exit 1
+fi
 
 # Wait for Deployment to be ready
 print_status "Waiting for Stalwart Deployment to be ready..."

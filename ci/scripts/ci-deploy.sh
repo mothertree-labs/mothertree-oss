@@ -24,13 +24,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # shellcheck source=ci-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"
-MT_ENV="${1:?Usage: ci-deploy.sh <env> [--all-tenants] [--prep-only]}"
+MT_ENV="${1:?Usage: ci-deploy.sh <env> [--all-tenants] [--prep-only] [--bringup-only]}"
 ALL_TENANTS=false
 PREP_ONLY=false
+BRINGUP_ONLY=false
 for arg in "${@:2}"; do
   case "$arg" in
-    --all-tenants) ALL_TENANTS=true ;;
-    --prep-only)   PREP_ONLY=true ;;
+    --all-tenants)  ALL_TENANTS=true ;;
+    --prep-only)    PREP_ONLY=true ;;
+    --bringup-only) BRINGUP_ONLY=true ;;
   esac
 done
 
@@ -52,6 +54,13 @@ chmod 0700 "$WORK_DIR"
 _cleanup() {
   # Stop lease renewal background process
   [[ -n "${_LEASE_RENEWAL_PID:-}" ]] && kill "$_LEASE_RENEWAL_PID" 2>/dev/null || true
+  # On-demand-dev heartbeat — touch the bucket so the idle reaper sees this
+  # CI step as recent activity. Runs on every exit (success or failure) for
+  # dev only; never for prod. Tolerant of heartbeat failure: the alternative
+  # is killing the build over a no-op cosmetic action.
+  if [[ "$MT_ENV" == "dev" ]] && [[ -n "${DEV_STATE_BUCKET:-}" ]]; then
+    "$REPO_ROOT/scripts/dev-heartbeat.sh" || true
+  fi
   # Remove decrypted vault contents
   rm -rf "$WORK_DIR"
   # Remove secrets copied into worktree
@@ -70,10 +79,27 @@ rm -f "$WORK_DIR/secrets.tar.gz"
 echo "Vault decrypted successfully"
 
 # ── Set up environment ───────────────────────────────────────────
+# For dev, refetch the kubeconfig directly from the Linode API so each
+# workflow gets the live cluster's API endpoint — every Woodpecker
+# workflow has its own workspace, so the kubeconfig written by
+# ensure-dev-cluster's dev-bringup is NOT visible here. Vault copies
+# lag the real cluster id by a reaper cycle (operator rebuilds vault out
+# of band). Pipelines #1262/#1263 surfaced this. Falls through to the
+# vault's copy on prod or if the fetch fails.
+if [[ "$MT_ENV" == "dev" ]] && [[ -n "${LINODE_CLI_TOKEN:-}" ]]; then
+  if ci_fetch_dev_kubeconfig "$WORK_DIR/kubeconfig.yaml"; then
+    echo "Fetched fresh kubeconfig from Linode API for env=dev"
+  else
+    echo "WARNING: Linode kubeconfig fetch failed; falling back to vault copy"
+  fi
+fi
 export KUBECONFIG="$WORK_DIR/kubeconfig.yaml"
 export MT_TERRAFORM_OUTPUTS_FILE="$WORK_DIR/terraform-outputs.env"
 
-if [[ ! -f "$KUBECONFIG" ]]; then
+# On --bringup-only, the kubeconfig in the vault might be from a long-destroyed
+# cluster (or absent on first-ever cold start). The bring-up step generates a
+# fresh kubeconfig itself, so don't fail here — skip the check.
+if [[ "$BRINGUP_ONLY" != "true" ]] && [[ ! -f "$KUBECONFIG" ]]; then
   echo "ERROR: kubeconfig.yaml not found in vault archive"
   ls -la "$WORK_DIR/"
   exit 1
@@ -83,6 +109,25 @@ if [[ ! -f "$MT_TERRAFORM_OUTPUTS_FILE" ]]; then
   echo "ERROR: terraform-outputs.env not found in vault archive"
   ls -la "$WORK_DIR/"
   exit 1
+fi
+
+# Source the terraform outputs so child scripts (dev-bringup.sh,
+# dev-heartbeat.sh, deploy_infra) see DEV_STATE_BUCKET / DEV_STATE_S3_*.
+# `set -a` exports every assignment in the file. For prod / prod-eu the
+# DEV_STATE_* keys are empty strings, harmless.
+set -a
+# shellcheck disable=SC1090
+source "$MT_TERRAFORM_OUTPUTS_FILE"
+set +a
+
+# Source the phase1-dev TF-state-bucket creds (dev only). Only present in the
+# dev vault — see scripts/build-deploy-vaults.sh.
+if [[ -f "$WORK_DIR/tf-state-creds.env" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$WORK_DIR/tf-state-creds.env"
+  set +a
+  echo "Loaded phase1-dev tf-state credentials"
 fi
 
 # ── Clone private config submodules ───────────────────────────────
@@ -103,6 +148,9 @@ git submodule update --init config/platform config/tenants || {
 
 # ── Copy secrets from vault into workspace ────────────────────────
 # Config files come from submodules; secrets come from the encrypted vault.
+# Done BEFORE the --bringup-only shortcut so dev-bringup.sh can resolve the
+# infra-tenant secrets file (for Cloudflare creds used by manage_infra
+# --dns) via infra-config.sh. Pipeline #1255 surfaced this.
 if [[ -d "$WORK_DIR/tenants" ]]; then
   for tenant_secrets_dir in "$WORK_DIR/tenants"/*/; do
     [[ -d "$tenant_secrets_dir" ]] || continue
@@ -118,6 +166,24 @@ if [[ -d "$WORK_DIR/tenants" ]]; then
 else
   echo "ERROR: No tenants/ directory in vault archive"
   exit 1
+fi
+
+# ── On-demand-dev bring-up shortcut ───────────────────────────────
+# dev-bringup.sh ensures the LKE cluster exists and runs deploy_infra. It does
+# NOT do tenant-level deploys — those happen in subsequent pipeline steps that
+# call `ci-deploy.sh dev --prep-only`. The heartbeat-on-cleanup trap will fire
+# on exit (success or failure), keeping the reaper at bay during this step.
+if [[ "$BRINGUP_ONLY" == "true" ]]; then
+  if [[ "$MT_ENV" != "dev" ]]; then
+    echo "ERROR: --bringup-only only supported for env=dev (got $MT_ENV)"
+    exit 1
+  fi
+  echo "=== Bring-up only: ensuring dev cluster exists ==="
+  # Don't exec — let the cleanup trap fire on the way out so $WORK_DIR is
+  # scrubbed and the heartbeat is touched. dev-bringup.sh ALSO touches the
+  # heartbeat on success; the double-touch is harmless (last writer wins).
+  "$REPO_ROOT/scripts/dev-bringup.sh"
+  exit 0
 fi
 
 # ── Resolve tenant(s) to deploy ──────────────────────────────────

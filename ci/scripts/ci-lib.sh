@@ -19,6 +19,40 @@ vcli() {
   $_CI_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"
 }
 
+# Fetch a fresh kubeconfig for the live dev LKE cluster and write it to
+# $1 (path). Each Woodpecker workflow gets its own workspace, so the
+# fresh kubeconfig written by dev-bringup in ensure-dev-cluster doesn't
+# propagate to deploy-dev-prep, deploy-dev-matrix, etc. — they would
+# otherwise inherit whatever stale copy lives in the deploy vault.
+# Returns 0 on success, non-zero on failure. Caller is expected to fall
+# back to the vault's copy on failure (e.g. for prod where this isn't
+# applicable).
+ci_fetch_dev_kubeconfig() {
+  local target="${1:?ci_fetch_dev_kubeconfig: target path required}"
+  : "${LINODE_CLI_TOKEN:?LINODE_CLI_TOKEN required for kubeconfig fetch}"
+  local cluster_label="${CLUSTER_LABEL:-matrix-cluster-dev}"
+  local cluster_id
+  cluster_id=$(curl -sf --connect-timeout 10 --max-time 30 \
+    -H "Authorization: Bearer $LINODE_CLI_TOKEN" \
+    https://api.linode.com/v4/lke/clusters 2>/dev/null \
+    | jq -r --arg label "$cluster_label" '.data[] | select(.label==$label) | .id' \
+    | head -n1 || true)
+  if [ -z "$cluster_id" ] || [ "$cluster_id" = "null" ]; then
+    return 1
+  fi
+  local kcfg_b64
+  kcfg_b64=$(curl -sf --connect-timeout 10 --max-time 30 \
+    -H "Authorization: Bearer $LINODE_CLI_TOKEN" \
+    "https://api.linode.com/v4/lke/clusters/${cluster_id}/kubeconfig" 2>/dev/null \
+    | jq -r '.kubeconfig // empty' || true)
+  if [ -z "$kcfg_b64" ]; then
+    return 1
+  fi
+  umask 077
+  echo "$kcfg_b64" | base64 -d > "$target"
+  umask 022
+}
+
 # ── Woodpecker API helpers ──────────────────────────────────────
 # Token is deployed to the CI host by Ansible (ci/ansible/playbook.yml).
 _WP_API_TOKEN_FILE="/home/woodpecker/.woodpecker-api-token"

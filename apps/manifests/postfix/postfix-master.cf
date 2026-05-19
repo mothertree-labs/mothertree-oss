@@ -1,9 +1,10 @@
-# Postfix master process configuration file for multi-role SMTP server
+# Postfix master process configuration file
 # See master(5) for details
 #
-# This Postfix instance serves multiple roles with port-based separation:
-# - Port 25 (smtp): Inbound mail from VPN relay with recipient verification (backscatter prevention)
-# - Port 587 (submission): Outbound mail from internal apps (Keycloak, Alertmanager, Stalwart)
+# This Postfix instance serves one role: inbound MX dispatch on port 25.
+# Outbound submission has moved to per-tenant Stalwart on port 588 (SASL +
+# SES Easy DKIM signing). The legacy submission listener on port 587 was
+# removed in step 2 PR-4.
 #
 # service type  private unpriv  chroot  wakeup  maxproc command + args
 #               (yes)   (yes)   (no)    (never) (100)
@@ -12,12 +13,6 @@
 smtp      inet  n       -       n       -       -       smtpd
   -o smtpd_recipient_restrictions=reject_unverified_recipient,reject_unauth_destination
   -o smtpd_relay_restrictions=reject_unauth_destination
-
-# Port 587: Internal submission - trusted apps only, no verification
-submission inet n       -       n       -       -       smtpd
-  -o smtpd_recipient_restrictions=permit_mynetworks,reject
-  -o smtpd_relay_restrictions=permit_mynetworks,reject
-  -o syslog_name=postfix/submission
 
 pickup    unix  n       -       n       60      1       pickup
 cleanup   unix  n       -       n       -       0       cleanup

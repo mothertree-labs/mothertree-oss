@@ -260,18 +260,45 @@ async function sendInvitationEmail(userId) {
   const accountClientId = process.env.ACCOUNT_PORTAL_CLIENT_ID || 'account-portal';
   const executeActionsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/execute-actions-email`;
 
-  const emailResponse = await fetch(`${executeActionsUrl}?lifespan=604800&redirect_uri=${encodeURIComponent(redirectUri)}&client_id=${accountClientId}`, {
-    method: 'PUT',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(['webauthn-register-passwordless']),
-  });
+  // Bounded retry of the execute-actions-email PUT. On a cold-started
+  // environment Keycloak's SMTP path (Postfix→Stalwart) is often not ready
+  // yet, so the first send can transiently fail. This PUT is idempotent:
+  // re-issuing re-mints the action token and resends the same email, so it
+  // is safe to retry. Bounded at 3 attempts (5s, 10s, 20s backoff, ≤35s
+  // added worst case); after the final attempt we throw the EXISTING error
+  // unchanged so a genuine persistent SMTP outage still 500s loudly.
+  const emailUrl = `${executeActionsUrl}?lifespan=604800&redirect_uri=${encodeURIComponent(redirectUri)}&client_id=${accountClientId}`;
+  const retryDelays = [5_000, 10_000, 20_000];
+  let emailResponse;
+  let lastError = null;
+  for (let attempt = 0; attempt < retryDelays.length; attempt++) {
+    try {
+      emailResponse = await fetch(emailUrl, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(['webauthn-register-passwordless']),
+      });
+      if (emailResponse.ok) {
+        lastError = null;
+        break;
+      }
+      const error = await emailResponse.text();
+      lastError = new Error(`Failed to send invitation email: ${error}`);
+    } catch (err) {
+      // Network-level failure (DNS, connection reset, timeout). Retry.
+      emailResponse = null;
+      lastError = err;
+    }
+    if (attempt < retryDelays.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelays[attempt]));
+    }
+  }
 
-  if (!emailResponse.ok) {
-    const error = await emailResponse.text();
-    throw new Error(`Failed to send invitation email: ${error}`);
+  if (lastError) {
+    throw lastError;
   }
 
   console.log('Invitation email sent successfully');
@@ -518,9 +545,10 @@ async function swapToTenantEmailIfNeeded(userId) {
 async function sendNotificationEmail(toEmail, subject, message) {
   const nodemailer = require('nodemailer');
 
-  const smtpHost = process.env.SMTP_HOST || 'postfix-internal.infra-mail.svc.cluster.local';
-  const smtpPort = process.env.SMTP_PORT || 587;
-  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.TENANT_DOMAIN || 'example.com'}`;
+  // SMTP_RELAY_* from the smtp-credentials Secret (authenticated submission to tenant Stalwart).
+  const smtpHost = process.env.SMTP_RELAY_HOST;
+  const smtpPort = parseInt(process.env.SMTP_RELAY_PORT || '588', 10);
+  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.EMAIL_DOMAIN || process.env.TENANT_DOMAIN || 'example.com'}`;
   const smtpFromName = process.env.SMTP_FROM_NAME || 'MotherTree';
 
   try {
@@ -528,7 +556,15 @@ async function sendNotificationEmail(toEmail, subject, message) {
       host: smtpHost,
       port: smtpPort,
       secure: false,
+      requireTLS: true,
+      auth: {
+        user: process.env.SMTP_RELAY_USERNAME,
+        pass: process.env.SMTP_RELAY_PASSWORD,
+      },
       tls: { rejectUnauthorized: false },
+      connectionTimeout: 5000,
+      greetingTimeout: 5000,
+      socketTimeout: 10000,
     });
 
     await transporter.sendMail({

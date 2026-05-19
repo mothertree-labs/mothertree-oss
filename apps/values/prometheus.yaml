@@ -398,6 +398,34 @@ additionalPrometheusRulesMap:
             for: 30m
             labels:
               severity: warning
+          # Catches stuck renewals ~30 days before expiry. `renewal_timestamp_seconds`
+          # is when cert-manager scheduled the next renewal; if that time has passed
+          # by more than 24 hours, the renewal hasn't completed. This would have caught
+          # the wildcard-tls deadlock on day 1 instead of day 30 (see fix(tls) Certificate
+          # split, CHANGELOG 2026-05-15).
+          - alert: CertificateRenewalStuck
+            annotations:
+              summary: 'Certificate {{ $labels.namespace }}/{{ $labels.name }} renewal is stuck'
+              description: 'Certificate {{ $labels.name }} in namespace {{ $labels.namespace }} was scheduled to renew at {{ $labels.renewal_time }} but has not — cert-manager renewal has been pending for >24h.'
+            expr: |-
+              (time() - certmanager_certificate_renewal_timestamp_seconds) > 86400
+            for: 1h
+            labels:
+              severity: warning
+          # Per-host cert expiry sourced directly from the cert the ingress controller
+          # is actually serving — independent of cert-manager metrics being scraped.
+          # Defense-in-depth against the failure mode where the cert-manager
+          # ServiceMonitor isn't labeled correctly and metrics go silently missing.
+          # Excludes the `_` default-server entry (nginx-ingress's built-in fake cert).
+          - alert: IngressCertExpiringSoon
+            annotations:
+              summary: 'Ingress cert for {{ $labels.host }} expiring soon'
+              description: 'TLS certificate served by ingress-nginx for host {{ $labels.host }} (secret {{ $labels.secret_name }}) expires in less than 14 days.'
+            expr: |-
+              nginx_ingress_controller_ssl_expire_time_seconds{host!="_"} - time() < 14 * 24 * 3600
+            for: 1h
+            labels:
+              severity: warning
   tenant-app-alerts:
     groups:
       - name: tenant-apps.rules

@@ -1,0 +1,48 @@
+# Workflow-level `when` MUST match `deploy-dev-prep.yaml` — that workflow lists
+# ensure-dev-cluster in its depends_on, and Woodpecker blocks a workflow if any
+# dependency is filtered out for the current event. On `push` to main the dev
+# bring-up is a no-op (the step-level `when` below gates the actual command),
+# but the workflow must still exist in the DAG so deploy-dev-prep can resolve.
+# Without this, the merge-to-main pipeline short-circuits BEFORE deploy-prod —
+# see pipelines #1216 / #1219 for the bug behaviour.
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+
+depends_on:
+  - validate
+  - build-images
+  - ci-lease
+
+clone:
+  - name: clone
+    image: woodpeckerci/plugin-git
+    settings:
+      recursive: false
+
+steps:
+  - name: ensure-dev-cluster
+    image: bash
+    when:
+      - event: pull_request
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      DEPLOY_VAULT_PASSWORD:
+        from_secret: deploy_vault_password
+      GITHUB_PAT:
+        from_secret: github_pat
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+    commands:
+      - ci/scripts/ci-deploy.sh dev --bringup-only

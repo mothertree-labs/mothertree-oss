@@ -196,3 +196,88 @@ describe('Retry and dead-letter handling', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Health probes — liveness decoupled from poll-cycle success
+// ---------------------------------------------------------------------------
+
+describe('Health probes (liveness / readiness separation)', () => {
+  const healthBody = extractFunctionBody(source, 'startHealthServer');
+
+  it('startHealthServer should be defined', () => {
+    assert.ok(healthBody, 'startHealthServer function not found');
+  });
+
+  it('/livez must not depend on metrics.healthy', () => {
+    // Split the handler into per-endpoint blocks and verify the /livez branch
+    // responds unconditionally. A regression that re-tied liveness to poll
+    // success would cause pod restarts on transient Stalwart hiccups.
+    const livezIdx = healthBody.indexOf("req.url === '/livez'");
+    assert.ok(livezIdx !== -1, "No '/livez' branch in startHealthServer");
+    const elseIfIdx = healthBody.indexOf('else if', livezIdx);
+    const livezBranch = healthBody.slice(livezIdx, elseIfIdx);
+    assert.ok(
+      livezBranch.includes('200'),
+      '/livez branch must write a 200 status',
+    );
+    assert.ok(
+      !livezBranch.includes('metrics.healthy'),
+      '/livez branch must not reference metrics.healthy (that would re-introduce the probe-kill bug)',
+    );
+  });
+
+  it('/readyz should flip on readyForProbe, not metrics.healthy', () => {
+    const readyzIdx = healthBody.indexOf("req.url === '/readyz'");
+    assert.ok(readyzIdx !== -1, "No '/readyz' branch in startHealthServer");
+    const readyzTail = healthBody.slice(readyzIdx);
+    assert.ok(
+      readyzTail.includes('readyForProbe'),
+      '/readyz branch must check the readyForProbe flag',
+    );
+  });
+
+  it('readyForProbe should flip to true in pollCycle finally block', () => {
+    const body = extractFunctionBody(source, 'pollCycle');
+    assert.ok(body, 'pollCycle function not found');
+    const finallyIdx = body.lastIndexOf('} finally {');
+    assert.ok(finallyIdx !== -1, 'pollCycle missing a finally block');
+    const finallyBlock = body.slice(finallyIdx);
+    assert.ok(
+      finallyBlock.includes('readyForProbe = true'),
+      'pollCycle finally block must set readyForProbe = true so a failed first poll still marks the pod Ready',
+    );
+  });
+
+  it('readyForProbe should start as false', () => {
+    assert.ok(
+      source.includes('let readyForProbe = false'),
+      'readyForProbe must initialize to false — the pod is not Ready until the first poll completes',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parallel user scanning — keeps cycle time under the e2e test timeout
+// ---------------------------------------------------------------------------
+
+describe('Polling concurrency', () => {
+  it('POLL_CONCURRENCY env var defaults to 5', () => {
+    assert.ok(
+      source.includes("process.env.POLL_CONCURRENCY || '5'"),
+      "Expected POLL_CONCURRENCY default of '5' in config",
+    );
+  });
+
+  it('pollCycle should use bounded parallelism via Promise.all', () => {
+    const body = extractFunctionBody(source, 'pollCycle');
+    assert.ok(body, 'pollCycle function not found');
+    assert.ok(
+      body.includes('Promise.all(workers)'),
+      'pollCycle must fan out scans via Promise.all(workers) for parallelism',
+    );
+    assert.ok(
+      body.includes('config.pollConcurrency'),
+      'pollCycle must cap concurrency at config.pollConcurrency',
+    );
+  });
+});

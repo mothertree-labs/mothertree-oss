@@ -293,7 +293,7 @@ releases:
       tier: apps
       name: nextcloud
     values:
-      - values/nextcloud.yaml
+      - values/nextcloud.yaml.gotmpl
       - environments/{{ .Environment.Name }}/nextcloud.yaml.gotmpl
     createNamespace: false  # Created by create_env
     jsonPatches:

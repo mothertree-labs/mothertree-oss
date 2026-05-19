@@ -61,7 +61,10 @@ async function loginToCalendar(
 }
 
 test.describe('Calendar — External Invite via Calendar Automation', () => {
-  test.setTimeout(180_000); // 3 minutes
+  // Cold-start dev provisioning + accumulated e2e users occasionally pushes
+  // a single calendar-automation poll past 90s. Bump per-test budget to 4min
+  // so the 150s polls below still fit with login/navigation overhead. (#386)
+  test.setTimeout(240_000);
 
   test('prerequisites: calendar and IMAP must be configured', () => {
     expect(
@@ -125,7 +128,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
         emailTestPage,
         recipientNcId,
         summary,
-        90_000,
+        210_000,
       );
 
       expect(ical).toBeTruthy();
@@ -225,7 +228,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
         summary,
         externalAttendee,
         'ACCEPTED',
-        90_000,
+        210_000,
       );
 
       expect(updatedIcal).toBeTruthy();
@@ -301,7 +304,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
       emailTestPage,
       recipientNcId,
       summary,
-      180_000,
+      210_000,
     );
 
     // Verify event is really gone
@@ -398,7 +401,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
         summary,
         externalAttendee,
         'ACCEPTED',
-        90_000,
+        210_000,
       );
 
       expect(updatedIcal).toBeTruthy();

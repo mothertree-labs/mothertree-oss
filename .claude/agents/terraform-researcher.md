@@ -22,7 +22,6 @@ Research Terraform infrastructure code to answer the user's question. Understand
 - LKE Kubernetes cluster (via `modules/lke-cluster/`)
 - Headscale VM (via `modules/headscale/`) — self-hosted Tailscale control plane
 - PostgreSQL VM (via `modules/postgres-server/`) — dedicated external DB per env
-- Postfix relay VM (via `modules/postfix-relay/`) — inbound MX + outbound relay
 - TURN server (for Matrix/Jitsi video calls)
 - Jitsi tester VM (optional, `--jitsi_tester=yes`)
 - Base DNS records (via `modules/dns/`)
@@ -39,7 +38,7 @@ Research Terraform infrastructure code to answer the user's question. Understand
 - `domain`, `env`, `cluster_label`
 - `ssh_public_key`
 
-**Key outputs**: `kubeconfig`, `turn_server_ip`, `headscale_ip`, `postgres_server_ip`, `postfix_relay_ip`
+**Key outputs**: `kubeconfig`, `turn_server_ip`, `headscale_ip`, `postgres_server_ip`
 
 ### Phase 2: Kubernetes Infrastructure (`infra/`)
 
@@ -73,7 +72,6 @@ data "terraform_remote_state" "phase1" {
 | dns | `modules/dns/` | Cloudflare DNS records (A, CNAME, SRV, MX) |
 | headscale | `modules/headscale/` | Headscale VM (self-hosted Tailscale control plane) |
 | postgres-server | `modules/postgres-server/` | Dedicated PostgreSQL VM per environment |
-| postfix-relay | `modules/postfix-relay/` | Postfix relay VM (inbound MX, outbound relay) |
 | helm-bootstrap | `modules/helm-bootstrap/` | Helm provider initialization |
 
 ## Variable Flow

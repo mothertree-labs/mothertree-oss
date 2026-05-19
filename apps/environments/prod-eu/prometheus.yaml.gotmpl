@@ -25,14 +25,13 @@ alertmanager:
       - secretName: alertmanager-tls
         hosts:
           - 'alertmanager.prod-eu.{{ env "INFRA_DOMAIN" }}'
-  # AlertManager configuration for production alerting
+  # AlertManager configuration for prod-eu: Matrix + Healthchecks.io only.
+  # No SMTP configured — prod-eu has no SES credentials and no K8s Postfix
+  # (no tenant has features.mail_enabled=true), so email notifications are not
+  # available here. Alerts flow to Matrix; the Watchdog pings Healthchecks.io.
   config:
-    global:
-      smtp_smarthost: 'postfix-internal.infra-mail.svc.cluster.local:587'
-      smtp_from: 'alertmanager@{{ env "INFRA_DOMAIN" }}'
-      smtp_require_tls: false
     route:
-      receiver: 'default'
+      receiver: 'matrix-alerts'
       group_by: ['alertname', 'severity', 'namespace']
       group_wait: 30s
       group_interval: 5m
@@ -48,30 +47,18 @@ alertmanager:
           receiver: 'deadman'
           group_interval: 1m
           repeat_interval: 1m
-        # Critical alerts: email + Matrix, notify immediately and more frequently
+        # Critical alerts: notify Matrix immediately and more frequently
         - match:
             severity: critical
           receiver: 'critical-alerts'
           repeat_interval: 1h
-        # Non-critical alerts go to Matrix only (criticals already sent above)
+        # Non-critical alerts: Matrix at default cadence
         - match_re:
             severity: warning|info
           receiver: 'matrix-alerts'
     receivers:
       - name: 'null'
-      - name: 'default'
-        email_configs:
-          - to: '{{ requiredEnv "ALERTMANAGER_EMAIL_TO" }}'
-            send_resolved: true
-            headers:
-              # Note: These are AlertManager Go templates, escaped with raw string blocks
-              Subject: '{{ "{{" }} printf "[%s] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
       - name: 'critical-alerts'
-        email_configs:
-          - to: '{{ requiredEnv "ALERTMANAGER_EMAIL_TO" }}'
-            send_resolved: true
-            headers:
-              Subject: '{{ "{{" }} printf "[%s CRITICAL] %s: %s" "{{ env "INFRA_NAME" | default "MotherTree" }}" (.Status | toUpper) .CommonLabels.alertname {{ "}}" }}'
         webhook_configs:
           # TODO: Matrix room ID should come from tenant config
           # Room ID: #alerts on Matrix server

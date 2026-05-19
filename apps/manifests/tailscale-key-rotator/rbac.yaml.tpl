@@ -51,45 +51,6 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: tailscale-key-rotator
-  namespace: ${NS_MAIL}
-  labels:
-    app: tailscale-key-rotator
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "create", "update", "patch"]
-    resourceNames: ["postfix-tailscale-auth"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create"]
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get"]
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "patch"]
-    resourceNames: ["postfix"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: tailscale-key-rotator
-  namespace: ${NS_MAIL}
-  labels:
-    app: tailscale-key-rotator
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: tailscale-key-rotator
-subjects:
-  - kind: ServiceAccount
-    name: tailscale-key-rotator
-    namespace: ${NS_DB}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: tailscale-key-rotator
   namespace: ${NS_INGRESS_INTERNAL}
   labels:
     app: tailscale-key-rotator

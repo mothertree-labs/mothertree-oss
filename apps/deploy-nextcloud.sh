@@ -256,6 +256,92 @@ if ! poll_job_complete "$NS_FILES" "nextcloud-db-init" 180 5; then
 fi
 print_success "Nextcloud database initialized"
 
+# Step 5a.1: Ensure nextcloud-credentials Secret exists (chart `existingSecret`)
+# This is the single source of truth for admin creds + SMTP creds. The install
+# Job reads the same Secret so the password ends up matching the DB-stored
+# hash. We:
+#   - Preserve the admin password across redeploys (rotating it would break
+#     login against the DB).
+#   - Refresh the SMTP keys on every deploy from the tenant's smtp-credentials
+#     Secret (provisioned by create_env), so SMTP relay rotations are picked
+#     up automatically.
+#
+# Why all five keys in one Secret: the upstream Nextcloud chart's
+# `existingSecret` block unconditionally wires NEXTCLOUD_ADMIN_USER/PASSWORD
+# and (when mail.enabled=true) SMTP_HOST/SMTP_NAME/SMTP_PASSWORD from the
+# same Secret name. There is no per-field guard in the chart's _helpers.tpl
+# — if any *Key is non-empty (the chart defaults are non-empty), the chart
+# emits a secretKeyRef for it. Omitting smtp-* keys causes pod
+# CreateContainerConfigError ("couldn't find key smtp-host in Secret ...").
+
+# Load SMTP relay creds from the tenant's smtp-credentials Secret first —
+# we need them inside nextcloud-credentials below. Was previously called
+# right before helmfile sync; moved up so the Secret has the values.
+source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
+mt_export_smtp_relay_env "$NS_FILES"
+
+EXISTING_ADMIN_PASSWORD=$(kubectl get secret nextcloud-credentials -n "$NS_FILES" \
+    -o jsonpath='{.data.nextcloud-password}' 2>/dev/null | base64 -d 2>/dev/null || true)
+if [ -z "$EXISTING_ADMIN_PASSWORD" ]; then
+    print_status "Generating new admin password for nextcloud-credentials..."
+    # URL-safe + shell-safe character set: A-Z, a-z, 0-9, _, -. The install
+    # Job is argv-safe regardless, but a clean charset future-proofs callers.
+    ADMIN_PASSWORD=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 32)
+    if [ "${#ADMIN_PASSWORD}" -lt 32 ]; then
+        print_error "Failed to generate 32-char admin password (got ${#ADMIN_PASSWORD} chars)"
+        exit 1
+    fi
+else
+    print_status "Preserving existing nextcloud-credentials admin password"
+    ADMIN_PASSWORD="$EXISTING_ADMIN_PASSWORD"
+fi
+
+# Apply (not create) so the Secret is updated in place when SMTP creds rotate.
+kubectl create secret generic nextcloud-credentials \
+    --namespace "$NS_FILES" \
+    --from-literal=nextcloud-username=admin \
+    --from-literal=nextcloud-password="$ADMIN_PASSWORD" \
+    --from-literal=smtp-host="${SMTP_RELAY_HOST:-}" \
+    --from-literal=smtp-username="${SMTP_RELAY_USERNAME:-}" \
+    --from-literal=smtp-password="${SMTP_RELAY_PASSWORD:-}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+print_success "Applied nextcloud-credentials Secret (admin + smtp keys)"
+
+# Step 5a.2: Run install Job on cold start (when nextcloud-identity is missing).
+# The Job runs `occ maintenance:install` against the fresh DB with argv quoting
+# so passwords containing `$<digit>` never get shell-expanded. It then POSTs the
+# nextcloud-identity Secret to the K8s API (via the pod SA), never echoing
+# identity values to pod logs.
+#
+# When nextcloud-identity already exists (warm cluster, redeploy, prod), skip
+# the Job entirely — the chart's seed-identity init container will reseed
+# config.php from the existing Secret on every pod boot.
+IDENTITY_SECRET_EXISTS_PRE=$(kubectl get secret nextcloud-identity -n "$NS_FILES" --ignore-not-found -o name 2>/dev/null || true)
+if [ -z "$IDENTITY_SECRET_EXISTS_PRE" ]; then
+    print_status "Cold start detected (no nextcloud-identity Secret); running install Job"
+
+    # Apply the install Job's RBAC (ServiceAccount + Role + RoleBinding).
+    NS_FILES="$NS_FILES" envsubst '${NS_FILES}' \
+        < "$REPO_ROOT/apps/manifests/nextcloud/install-job-rbac.yaml.tpl" \
+        | kubectl apply -f -
+
+    # Apply the Job (delete prior in case of retry).
+    kubectl -n "$NS_FILES" delete job/nextcloud-install --ignore-not-found=true || true
+    NS_FILES="$NS_FILES" envsubst '${NS_FILES}' \
+        < "$REPO_ROOT/apps/manifests/nextcloud/install-job.yaml.tpl" \
+        | kubectl apply -f -
+
+    if ! poll_job_complete "$NS_FILES" "nextcloud-install" 300 5; then
+        print_error "Nextcloud install Job failed; dumping pod logs..."
+        kubectl -n "$NS_FILES" logs -l app.kubernetes.io/component=install --tail=200 --all-containers=true 2>/dev/null || true
+        kubectl -n "$NS_FILES" describe job/nextcloud-install 2>/dev/null || true
+        exit 1
+    fi
+    print_success "Nextcloud install Job complete; nextcloud-identity Secret created"
+else
+    print_status "nextcloud-identity Secret exists; skipping install Job (warm path)"
+fi
+
 # Step 5b: Update PostgreSQL table statistics (ANALYZE)
 # Autoanalyze only triggers after enough row modifications (50 + 10% of rows).
 # Tables like oc_preferences and oc_mimetypes are bulk-loaded once and barely
@@ -327,14 +413,14 @@ if kubectl get secret nextcloud-identity -n "$NS_FILES" &>/dev/null; then
     if [ -z "$EXISTING_TD" ]; then
         print_status "Patching identity secret with trusted-domains (was missing)..."
         kubectl patch secret nextcloud-identity -n "$NS_FILES" \
-            -p "{\"data\":{\"trusted-domains\":\"$(echo -n "$DESIRED_TD" | base64)\"}}"
+            -p "{\"data\":{\"trusted-domains\":\"$(echo -n "$DESIRED_TD" | base64 -w 0)\"}}"
         print_success "trusted-domains added to identity secret"
     else
         DECODED_TD=$(echo "$EXISTING_TD" | base64 -d 2>/dev/null || true)
         if [ "$DECODED_TD" != "$DESIRED_TD" ]; then
             print_status "Updating trusted-domains in identity secret..."
             kubectl patch secret nextcloud-identity -n "$NS_FILES" \
-                -p "{\"data\":{\"trusted-domains\":\"$(echo -n "$DESIRED_TD" | base64)\"}}"
+                -p "{\"data\":{\"trusted-domains\":\"$(echo -n "$DESIRED_TD" | base64 -w 0)\"}}"
             print_success "trusted-domains updated in identity secret"
         else
             print_success "trusted-domains already correct in identity secret"
@@ -542,6 +628,13 @@ if kubectl get hpa nextcloud -n "$NS_FILES" --show-managed-fields \
     kubectl delete hpa nextcloud -n "$NS_FILES"
 fi
 
+# SMTP relay creds were sourced earlier (Step 5a.1) so the nextcloud-credentials
+# Secret could include smtp-host/smtp-username/smtp-password keys for the
+# chart's `existingSecret` wiring. Re-source as a no-op safety net in case the
+# block above was bypassed.
+source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
+mt_export_smtp_relay_env "$NS_FILES"
+
 print_status "Deploying Nextcloud via helmfile..."
 pushd "$REPO_ROOT/apps" >/dev/null
   # Use sync instead of apply to skip slow diff operation
@@ -720,6 +813,15 @@ print_status "Waiting for Nextcloud pod to be ready (this may take a few minutes
 if ! poll_pod_ready "$NS_FILES" "app.kubernetes.io/instance=nextcloud" 600 5; then
     print_error "Nextcloud pod did not become ready."
     print_error "Refusing to continue (OIDC job / kubectl exec / kubectl cp require a scheduled, running pod)."
+    exit 1
+fi
+
+# Step 7.0: Readiness Gate 4 — Nextcloud occ status reports installed=true.
+# Pod-Ready is necessary but not sufficient: seed-identity may finish writing
+# config.php while occ status still reports installed=false for a short window.
+# This is the canonical "Nextcloud will actually serve" signal.
+if ! mt_wait_for_nextcloud_installed "$NS_FILES"; then
+    print_error "Nextcloud occ status never reported installed=true; aborting"
     exit 1
 fi
 

@@ -353,3 +353,268 @@ mt_psql() {
         --env="PGPASSWORD=$pg_pass" \
         --command -- psql -h pgbouncer -U postgres -v ON_ERROR_STOP=1 "$@" 2>/dev/null
 }
+
+# ---------------------------------------------------------------------------
+# Cold-start readiness gates (on-demand-dev Phase 3)
+# ---------------------------------------------------------------------------
+# Helmfile `wait: true` and `kubectl rollout status` only confirm pods are
+# Ready — they don't confirm the application's external endpoints are actually
+# serving. On a fresh cold-cycle these helpers protect the rest of the deploy
+# (and downstream CI steps) from racing the application's warm-up window.
+# See on-demand-dev/03-phase3-ci-orchestration.md §B for the empirical
+# evidence (CI pipelines #1163, #1164) that motivates each gate.
+# ---------------------------------------------------------------------------
+
+# Wait for Keycloak's OIDC discovery endpoint to actually serve.
+# Use this from any path that depends on Keycloak being usable (not just up).
+#
+# Usage: mt_wait_for_keycloak_oidc [realm]   (default realm: "master")
+# Required env: AUTH_HOST
+#
+# The master realm is always present and exercises the full HTTP stack
+# (ingress + Keycloak + realm machinery). Pass a tenant realm explicitly when
+# you need to gate on that specific realm being registered and serving.
+mt_wait_for_keycloak_oidc() {
+    local realm="${1:-master}"
+    # Probe Keycloak via the kubectl API-server proxy rather than the public
+    # ingress hostname. The Keycloak Helm chart has `ingress.enabled: false`
+    # (Mothertree creates per-tenant auth ingresses later, in
+    # apps/deploy-matrix.sh), so there is no ingress for `auth.${AUTH_HOST}`
+    # at deploy_infra time on a cold-started cluster — the warm-cluster
+    # case only worked because per-tenant ingresses persisted from prior
+    # deploys. Pipelines #1252/#1253/#1254/#1257 surfaced this.
+    #
+    # The kubectl proxy reads through the kubeconfig already in scope; no
+    # DNS, no TLS, no ingress dependency. Works for both master and tenant
+    # realms (the realm name is just part of the path).
+    if [ -z "${KUBECONFIG:-}" ]; then
+        print_error "mt_wait_for_keycloak_oidc: KUBECONFIG is not set"
+        return 1
+    fi
+    local proxy_path="/api/v1/namespaces/infra-auth/services/keycloak-keycloakx-http:http/proxy/realms/${realm}/.well-known/openid-configuration"
+    # 180 iterations × 5s = 900s (15 min). Cold-start Keycloak — image
+    # pull on a brand-new node pool + JGroups cluster init + Quarkus boot
+    # + master realm import — has been observed at ~6-8 min in pipeline
+    # #1252/#1253. Warm-restart still responds in 30-90s.
+    print_status "Waiting for Keycloak OIDC discovery (in-cluster, realm=$realm)"
+    local i
+    for i in $(seq 1 180); do
+        if kubectl --kubeconfig="$KUBECONFIG" --request-timeout=5s \
+               get --raw="$proxy_path" >/dev/null 2>&1; then
+            print_success "Keycloak OIDC discovery responsive after $((i*5))s (realm=$realm)"
+            return 0
+        fi
+        sleep 5
+    done
+    print_error "Keycloak OIDC discovery never became responsive via kubectl proxy (900s, realm=$realm)"
+    return 1
+}
+
+# Wait for Stalwart's REST API to respond without 5xx.
+# Use this before any script triggers /api/principal/* calls (admin-portal,
+# account-portal, provision-smtp-service-accounts). Pod-Ready isn't enough —
+# the REST API can return 5xx for ~30-60s after pod-Ready on first deploy
+# (negative-RCPT cache warm-up + OIDC directory lookups).
+#
+# Usage: mt_wait_for_stalwart [mail_host]
+# Required env: MAIL_HOST (or pass mail_host as $1)
+#
+# This is intentionally a *warning*, not an error: admin-portal retries on
+# 5xx, and a slow Stalwart shouldn't block the entire deploy. The warning
+# surfaces the issue in CI logs for diagnosis if downstream calls flake.
+mt_wait_for_stalwart() {
+    local mail_host="${1:-${MAIL_HOST:-}}"
+    if [ -z "$mail_host" ]; then
+        print_warning "mt_wait_for_stalwart: MAIL_HOST not set, skipping"
+        return 0
+    fi
+    local url="https://${mail_host}/api/principal"
+    print_status "Waiting for Stalwart REST API: $url"
+    local code="000" i
+    for i in $(seq 1 30); do
+        code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$url" 2>/dev/null || echo "000")
+        # 200 / 401 / 403 all mean the REST layer is responding (auth-required
+        # responses count). 5xx or "000" (timeout/refused) mean keep waiting.
+        if [[ "$code" =~ ^(200|401|403)$ ]]; then
+            print_success "Stalwart REST API responsive after $((i*5))s (HTTP $code)"
+            return 0
+        fi
+        sleep 5
+    done
+    print_warning "Stalwart REST API never became responsive (last code: $code) — proceeding"
+    return 0
+}
+
+# Wait until the Stalwart SMTP *submission* path is genuinely usable —
+# i.e. a client can connect, STARTTLS, and SASL-auth as the shared `mailer@`
+# principal on port 588 (then NOOP/QUIT — no MAIL/RCPT/DATA).
+#
+# Scope is deliberately connect+STARTTLS+AUTH, NOT recipient acceptance. Every
+# failure we have evidence for (1307/1308: `MailConnectException: Connection
+# refused`, `Password based SMTP connect failed`) is connect/AUTH stage — that
+# is the deterministic cold-start blocker and exactly what Keycloak does before
+# it can send. RCPT acceptance is intentionally excluded: `mailer@` is a SASL
+# sender service account, not a verified-deliverable mailbox, and Stalwart has
+# a documented negative-RCPT cache — probing RCPT risks a gate that fail-closes
+# forever and blocks every deploy, strictly worse than the flake it guards.
+#
+# This is the cold-start gap #19 gate. mt_wait_for_stalwart (above) only probes
+# the REST API and is warning-only; it does NOT prove the path Keycloak uses to
+# send invitation / magic-link / "execute actions" emails. On every on-demand-dev
+# cold-start (and around any Stalwart restart) the submission listener can be
+# bound while SASL still 5xxs (OIDC directory not warmed) or the connect is
+# refused/timed-out — which deterministically fails the shard-6 onboarding
+# e2e tests and, on a main-merge, silently blocks deploy-prod.
+#
+# Fidelity: the probe runs from an ephemeral pod in NS_AUTH (Keycloak's own
+# namespace) and connects to the *same* external FQDN Keycloak uses
+# (SMTP_RELAY_HOST). In-cluster, CoreDNS rewrites that FQDN to the Stalwart
+# ClusterIP and the `allow-mail-ingress` NetworkPolicy gates :588 from
+# infra-auth — so this exercises the identical DNS-rewrite + NetworkPolicy +
+# listener + SASL path as a real Keycloak invitation send. A probe from the CI
+# box would take the internet→NodeBalancer path and false-green.
+#
+# FATAL on timeout (unlike mt_wait_for_stalwart) — per the project's
+# "Fail Fast — Never Silently Skip" rule. Fails closed: anything other than an
+# explicit success sentinel + exit 0 is treated as failure.
+#
+# Required env: SMTP_RELAY_HOST, SMTP_RELAY_USERNAME, SMTP_RELAY_PASSWORD
+#               (export via scripts/lib/smtp-credentials.sh :: mt_export_smtp_relay_env),
+#               KUBECONFIG, NS_AUTH.
+# Optional env: SMTP_RELAY_PORT (default 588), MT_SMTP_GATE_DEADLINE (default 420s).
+mt_wait_for_stalwart_submission() {
+    : "${KUBECONFIG:?mt_wait_for_stalwart_submission: KUBECONFIG must be set}"
+    : "${NS_AUTH:?mt_wait_for_stalwart_submission: NS_AUTH must be set}"
+    : "${SMTP_RELAY_HOST:?mt_wait_for_stalwart_submission: SMTP_RELAY_HOST must be set (run mt_export_smtp_relay_env first)}"
+    : "${SMTP_RELAY_USERNAME:?mt_wait_for_stalwart_submission: SMTP_RELAY_USERNAME must be set}"
+    : "${SMTP_RELAY_PASSWORD:?mt_wait_for_stalwart_submission: SMTP_RELAY_PASSWORD must be set}"
+    local port="${SMTP_RELAY_PORT:-588}"
+    local deadline="${MT_SMTP_GATE_DEADLINE:-420}"
+
+    print_status "Cold-start gate #19: verifying Stalwart SMTP submission connect+STARTTLS+AUTH"
+    print_status "  from NS_AUTH=${NS_AUTH} → ${SMTP_RELAY_HOST}:${port} (SASL as ${SMTP_RELAY_USERNAME}), deadline ${deadline}s"
+
+    # Single long-lived probe pod; the Python script retries internally until
+    # it succeeds or its own deadline expires. Password is fed via stdin so it
+    # never lands in the Pod spec, argv, or CI logs. Host/port/user are
+    # non-secret and passed as env.
+    local py
+    py='
+import os,sys,ssl,time,smtplib
+host=os.environ["PHOST"]; port=int(os.environ["PPORT"])
+user=os.environ["PUSER"]
+deadline=time.time()+float(os.environ["PDEADLINE"])
+pw=sys.stdin.readline().rstrip("\n")
+# Unverified TLS context: mirror Keycloak'\''s lenient STARTTLS (it does not
+# enforce server-cert identity by default). Cert validity is a separate gap
+# with its own gate — do not couple this probe to cert-manager readiness.
+ctx=ssl._create_unverified_context()
+attempt=0; last="(no attempt)"
+while time.time()<deadline:
+    attempt+=1
+    try:
+        s=smtplib.SMTP(host,port,timeout=15)
+        s.ehlo(); s.starttls(context=ctx); s.ehlo()
+        s.login(user,pw)
+        c,m=s.noop()
+        s.quit()
+        if c!=250:
+            raise RuntimeError("NOOP after AUTH returned %s %r"%(c,m))
+        print("STALWART_SMTP_PROBE_OK attempt=%d %s:%d AUTH=%s"%(attempt,host,port,user))
+        sys.exit(0)
+    except Exception as e:
+        last=type(e).__name__+": "+str(e)
+        print("  attempt %d connect/auth not ready yet: %s"%(attempt,last),flush=True)
+        time.sleep(10)
+print("STALWART_SMTP_PROBE_FAIL last_error: %s"%last)
+sys.exit(1)
+'
+    local pod="smtp-submission-probe-$$-${RANDOM}"
+    local out
+    out=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "kubectl --kubeconfig='$KUBECONFIG' -n '$NS_AUTH' delete pod '$pod' --ignore-not-found --force --grace-period=0 >/dev/null 2>&1; rm -f '$out'" RETURN
+
+    local rc=0
+    printf '%s' "$SMTP_RELAY_PASSWORD" | kubectl --kubeconfig="$KUBECONFIG" \
+        run "$pod" -i --rm --restart=Never \
+        --image=python:3.13-alpine \
+        -n "$NS_AUTH" \
+        --env "PHOST=${SMTP_RELAY_HOST}" \
+        --env "PPORT=${port}" \
+        --env "PUSER=${SMTP_RELAY_USERNAME}" \
+        --env "PDEADLINE=${deadline}" \
+        --command -- python3 -c "$py" >"$out" 2>&1 || rc=$?
+
+    # Surface the probe's progress in CI logs (contains no secrets).
+    sed 's/^/    [smtp-probe] /' "$out" || true
+
+    # Fail closed: require BOTH a clean exit AND the explicit success sentinel.
+    if [ "$rc" -eq 0 ] && grep -q 'STALWART_SMTP_PROBE_OK' "$out"; then
+        print_success "Stalwart SMTP submission connect+AUTH OK (cold-start gate #19 passed)"
+        return 0
+    fi
+
+    print_error "Stalwart SMTP submission connect/AUTH never succeeded (gate #19, rc=$rc)"
+    print_error "  Keycloak invitation / magic-link emails would fail — failing the deploy loudly"
+    return 1
+}
+
+# Wait for admin-portal's /version endpoint to return 200.
+# Lightest sanity check that the full ingress + portal + version-injection
+# chain is up. Use as a final "everything's up" assertion.
+#
+# Usage: mt_wait_for_admin_portal [admin_host]
+# Required env: ADMIN_HOST (or pass admin_host as $1)
+mt_wait_for_admin_portal() {
+    local admin_host="${1:-${ADMIN_HOST:-}}"
+    if [ -z "$admin_host" ]; then
+        print_warning "mt_wait_for_admin_portal: ADMIN_HOST not set, skipping"
+        return 0
+    fi
+    local url="https://${admin_host}/version"
+    print_status "Waiting for admin-portal /version: $url"
+    if curl -sf -m 5 --retry 30 --retry-delay 5 --retry-all-errors \
+        "$url" >/dev/null 2>&1; then
+        print_success "admin-portal /version returned 200"
+        return 0
+    fi
+    print_error "admin-portal /version never returned 200 at $url"
+    return 1
+}
+
+# Wait for Nextcloud's occ status to report installed=true.
+# This is the "Gate 4" readiness check after the install Job + helmfile sync:
+# pod-Ready is necessary but not sufficient (the seed-identity init container
+# may finish while config.php is still being seeded, and `occ status` is the
+# canonical signal that Nextcloud will actually serve requests).
+#
+# Usage: mt_wait_for_nextcloud_installed <namespace>
+mt_wait_for_nextcloud_installed() {
+    local namespace="$1"
+    if [ -z "$namespace" ]; then
+        print_error "mt_wait_for_nextcloud_installed: namespace required"
+        return 1
+    fi
+    print_status "Waiting for Nextcloud occ status installed=true in $namespace"
+    for i in $(seq 1 30); do
+        local pod
+        pod=$(kubectl -n "$namespace" get pod \
+                -l app.kubernetes.io/instance=nextcloud \
+                -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null \
+              | awk '{print $1}')
+        if [ -n "$pod" ]; then
+            local installed
+            installed=$(kubectl -n "$namespace" exec "$pod" -c nextcloud -- \
+                bash -c "php /var/www/html/occ status --output=json 2>/dev/null | grep -o '\"installed\":true'" \
+                2>/dev/null || true)
+            if [ -n "$installed" ]; then
+                print_success "Nextcloud installed=true after $((i*10))s"
+                return 0
+            fi
+        fi
+        sleep 10
+    done
+    print_error "Nextcloud never reported installed=true in $namespace"
+    return 1
+}

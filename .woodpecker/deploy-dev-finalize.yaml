@@ -32,6 +32,8 @@ steps:
         from_secret: deploy_vault_password
       GITHUB_PAT:
         from_secret: github_pat
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
       E2E_POOL1_TENANT:
         from_secret: e2e_pool1_tenant
       E2E_POOL2_TENANT:
@@ -42,3 +44,138 @@ steps:
         from_secret: e2e_pool2_base_domain
     commands:
       - ci/scripts/ci-deploy-app.sh dev finalize
+
+  # Pipeline-scoped test users for E2E. Lives here so it runs AFTER the
+  # tenant auth ingress is up (created in apps/deploy-matrix.sh, which
+  # this workflow depends on). The step itself runs on both PR and push
+  # so users are provisioned for every pipeline; on main push the
+  # deploy-dev-finalize step above is a no-op but this one still runs.
+  - name: create-test-users
+    image: bash
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      # Required by the in-cluster Keycloak OIDC pre-check (cold-start gap #15).
+      # Used to fetch a live dev kubeconfig from the Linode API so we can probe
+      # Keycloak via the kubectl API-server proxy independently of public ingress.
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL1_KC_REALM:
+        from_secret: e2e_pool1_kc_realm
+      E2E_POOL1_KC_CLIENT_SECRET:
+        from_secret: e2e_pool1_kc_client_secret
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+      E2E_POOL2_KC_REALM:
+        from_secret: e2e_pool2_kc_realm
+      E2E_POOL2_KC_CLIENT_SECRET:
+        from_secret: e2e_pool2_kc_client_secret
+    commands:
+      - ci/scripts/ci-create-test-users.sh
+
+  # Cold-start gap #17: re-mint CalDAV tokens AFTER create-test-users.
+  #
+  # apps/deploy-calendar-automation.sh mints per-user CalDAV app-passwords at
+  # calendar-automation deploy time (deploy-dev-calendar workflow), enumerating
+  # only the users that exist then. The fixed mail user `e2e-mailrt` is created
+  # later, by the create-test-users step above (it lives here, not in
+  # deploy-dev-prep, to fix pipeline #1258's OIDC-404). calendar-automation
+  # reads the token Secret only once at startup, so without a re-mint + restart
+  # the 3 calendar-external-invite e2e tests (shard-4) time out waiting for
+  # CalDAV events. This step re-mints now that e2e-mailrt exists, rollout-
+  # restarts calendar-automation so it reloads the Secret, and hard-asserts the
+  # e2e-mailrt token is present (fail loudly, never silently skip).
+  #
+  # Must run wherever e2e runs — both pull_request AND push:main — because
+  # create-test-users (above) also runs on both and e2e-shard-4 executes on
+  # the main-push pipeline too (it gates deploy-prod). No `when:` override:
+  # inherit the workflow-level `pull_request | push:main`, exactly like
+  # create-test-users. (A prior PR-only gate here left every main-merge red
+  # on shard-4 and blocked prod deploys — pipeline #1301.)
+  # Deferred prod ordering gap tracked in GitHub issue #412.
+  - name: remint-caldav-tokens
+    image: bash
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      DEPLOY_VAULT_PASSWORD:
+        from_secret: deploy_vault_password
+      GITHUB_PAT:
+        from_secret: github_pat
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+    commands:
+      - ci/scripts/ci-deploy-app.sh dev remint-caldav-tokens
+
+  # Cold-start gap #20: FATAL gate for the EXTERNAL IMAPS path the e2e tests
+  # use. Pinned root cause (controlled experiment): a cold Stalwart delivers
+  # mail in ~48ms — there is NO data-path latency. The e2e symptom
+  # `[imap] Delivery SLOW: ~110s after 1 poll(s)` is 100% the e2e IMAP client
+  # (CI box → external IMAPS endpoint) being unable to ESTABLISH a session for
+  # ~110s on cold-start (NodeBalancer/:993/cert convergence); once connected
+  # the message is instantly present.
+  #
+  # Gate #19 guards the in-cluster Keycloak→Stalwart :588 SMTP path; nothing
+  # guarded the external :993 IMAPS path the e2e shards connect to, and on a
+  # main-push it was unguarded entirely. This step polls that external path
+  # from the CI box (the literal path e2e/helpers/imap.ts takes) and converts
+  # the silent in-shard 110s stall into an explicit, loud pre-e2e wait that
+  # self-heals once the edge converges.
+  #
+  # Wired AFTER remint-caldav-tokens so the e2e-mailrt user already exists;
+  # the gate authenticates as that exact user (the calendar-external-invite
+  # shards use it). Like create-test-users/remint-caldav-tokens this has NO
+  # step-level `when:` override — it inherits the workflow-level
+  # `pull_request | push:main` so it runs for EVERY pipeline (gap-#18 lesson:
+  # the deploy steps are PR-only no-ops but these provisioning/gate steps are
+  # not; e2e shards run on the main-push pipeline too and gate deploy-prod).
+  - name: imaps-readiness
+    image: bash
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      DEPLOY_VAULT_PASSWORD:
+        from_secret: deploy_vault_password
+      GITHUB_PAT:
+        from_secret: github_pat
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+      E2E_POOL1_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool1_stalwart_admin_password
+      E2E_POOL1_STALWART_IMAP_HOST:
+        from_secret: e2e_pool1_stalwart_imap_host
+      E2E_POOL1_STALWART_IMAP_PORT:
+        from_secret: e2e_pool1_stalwart_imap_port
+      E2E_POOL2_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool2_stalwart_admin_password
+      E2E_POOL2_STALWART_IMAP_HOST:
+        from_secret: e2e_pool2_stalwart_imap_host
+      E2E_POOL2_STALWART_IMAP_PORT:
+        from_secret: e2e_pool2_stalwart_imap_port
+    commands:
+      - ci/scripts/ci-deploy-app.sh dev imaps-readiness
