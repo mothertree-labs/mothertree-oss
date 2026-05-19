@@ -24,6 +24,13 @@ spec:
           ports:
             - containerPort: 3000
               protocol: TCP
+          envFrom:
+            # SMTP relay creds (SMTP_RELAY_HOST/PORT/USERNAME/PASSWORD) from the
+            # shared smtp-credentials Secret written by provision-smtp-service-accounts.
+            # optional:true — pod starts cleanly on fresh tenants before provisioning.
+            - secretRef:
+                name: smtp-credentials
+                optional: true
           env:
             - name: NODE_ENV
               value: "production"

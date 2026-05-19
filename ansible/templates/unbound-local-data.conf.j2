@@ -11,6 +11,6 @@ server:
     local-data: "alertmanager.{{ internal_dns_domain }}. IN A {{ cluster_node_ip }}"
 
     # Web services (NodeBalancer access via cluster LB IP)
-{% for subdomain in ['matrix', 'synapse', 'docs', 'files', 'auth', 'home', 'admin', 'account', 'element', 'webmail', 'calendar', 'jitsi', 'lb1'] %}
+{% for subdomain in ['matrix', 'synapse', 'docs', 'files', 'auth', 'home', 'admin', 'account', 'element', 'webmail', 'calendar', 'jitsi', 'lb1', 'lb2'] %}
     local-data: "{{ subdomain }}.{{ internal_dns_domain }}. IN A {{ cluster_lb_ip }}"
 {% endfor %}

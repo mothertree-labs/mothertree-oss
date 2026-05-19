@@ -133,85 +133,6 @@ data:
               "color": {
                 "mode": "thresholds"
               },
-              "mappings": [
-                {
-                  "options": {
-                    "0": {
-                      "color": "red",
-                      "index": 1,
-                      "text": "Down"
-                    },
-                    "1": {
-                      "color": "green",
-                      "index": 0,
-                      "text": "Ready"
-                    }
-                  },
-                  "type": "value"
-                }
-              ],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "green",
-                    "value": 1
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 6,
-            "y": 1
-          },
-          "id": 2,
-          "options": {
-            "colorMode": "background",
-            "graphMode": "none",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": "",
-              "values": false
-            },
-            "textMode": "auto"
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "kube_pod_container_status_ready{namespace=\"mail\", pod=~\"postfix-.*\", container=\"opendkim\"}",
-              "legendFormat": "OpenDKIM",
-              "refId": "A"
-            }
-          ],
-          "title": "OpenDKIM",
-          "type": "stat"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
               "mappings": [],
               "thresholds": {
                 "mode": "absolute",
@@ -237,7 +158,7 @@ data:
           "gridPos": {
             "h": 4,
             "w": 6,
-            "x": 12,
+            "x": 6,
             "y": 1
           },
           "id": 3,
@@ -268,74 +189,6 @@ data:
             }
           ],
           "title": "Postfix Restarts",
-          "type": "stat"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 1
-                  },
-                  {
-                    "color": "red",
-                    "value": 3
-                  }
-                ]
-              },
-              "unit": "short"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 18,
-            "y": 1
-          },
-          "id": 4,
-          "options": {
-            "colorMode": "background",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": "",
-              "values": false
-            },
-            "textMode": "auto"
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "kube_pod_container_status_restarts_total{namespace=\"mail\", pod=~\"postfix-.*\", container=\"opendkim\"}",
-              "legendFormat": "Restarts",
-              "refId": "A"
-            }
-          ],
-          "title": "OpenDKIM Restarts",
           "type": "stat"
         },
         {
@@ -436,15 +289,6 @@ data:
               "expr": "rate(container_cpu_usage_seconds_total{namespace=\"mail\", pod=~\"postfix-.*\", container=\"postfix\"}[5m]) * 100",
               "legendFormat": "Postfix",
               "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"mail\", pod=~\"postfix-.*\", container=\"opendkim\"}[5m]) * 100",
-              "legendFormat": "OpenDKIM",
-              "refId": "B"
             }
           ],
           "title": "CPU Usage",
@@ -535,15 +379,6 @@ data:
               "expr": "container_memory_usage_bytes{namespace=\"mail\", pod=~\"postfix-.*\", container=\"postfix\"}",
               "legendFormat": "Postfix",
               "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "container_memory_usage_bytes{namespace=\"mail\", pod=~\"postfix-.*\", container=\"opendkim\"}",
-              "legendFormat": "OpenDKIM",
-              "refId": "B"
             }
           ],
           "title": "Memory Usage",

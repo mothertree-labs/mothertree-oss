@@ -35,7 +35,7 @@ const baseDomain = urls.baseDomain;
  * - IMAP access configured (E2E_STALWART_ADMIN_PASSWORD)
  */
 test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () => {
-  test.setTimeout(180_000); // 5 minutes
+  test.setTimeout(240_000);
 
   test('user without platform auth completes onboarding via magic link email', async ({ adminPage }) => {
     test.skip(!isImapConfigured(), 'IMAP not configured (E2E_STALWART_ADMIN_PASSWORD not set)');
@@ -63,6 +63,7 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
 
       const responsePromise = adminPage.waitForResponse(
         (r) => r.url().includes('/api/invite') && r.request().method() === 'POST',
+        { timeout: 90_000 }, // cold-start: see #389 (accommodates server-side execute-actions-email retry, ≤35s)
       );
       await adminPage.click(ap.inviteSubmitBtn);
       const apiResponse = await responsePromise;
@@ -83,7 +84,7 @@ test.describe('Onboarding — Magic Link Flow (No Platform Authenticator)', () =
       const rawEmail = await waitForEmailBody({
         userEmail: TEST_USERS.emailTest.email,
         bodyContains: uniqueId,
-        timeoutMs: 90_000,
+        timeoutMs: 180_000,
         pollIntervalMs: 3_000,
         // Don't use skipContaining here — we want the invitation email
       });

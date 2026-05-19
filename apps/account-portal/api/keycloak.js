@@ -211,10 +211,11 @@ async function findUserByEmail(email) {
 async function sendNotificationEmail(toEmail, subject, message) {
   const nodemailer = require('nodemailer');
 
-  // SMTP relay for sending emails (not SMTP_HOST, which is the external hostname for UI display)
-  const smtpHost = process.env.SMTP_RELAY_HOST || 'postfix-internal.infra-mail.svc.cluster.local';
-  const smtpPort = process.env.SMTP_PORT || 587;
-  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.TENANT_DOMAIN || 'example.com'}`;
+  // SMTP relay for sending emails. SMTP_RELAY_* from the smtp-credentials Secret;
+  // SMTP_HOST (no RELAY prefix) is the external hostname for UI display.
+  const smtpHost = process.env.SMTP_RELAY_HOST;
+  const smtpPort = parseInt(process.env.SMTP_RELAY_PORT || '588', 10);
+  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.EMAIL_DOMAIN || process.env.TENANT_DOMAIN || 'example.com'}`;
   const smtpFromName = process.env.SMTP_FROM_NAME || 'MotherTree';
 
   console.log(`[NOTIFICATION EMAIL] Sending to: ${toEmail}`);
@@ -233,10 +234,16 @@ async function sendNotificationEmail(toEmail, subject, message) {
     const transporter = nodemailer.createTransport({
       host: smtpHost,
       port: smtpPort,
-      secure: false,  // Internal cluster communication
-      tls: {
-        rejectUnauthorized: false,  // Internal service
+      secure: false,
+      requireTLS: true,
+      auth: {
+        user: process.env.SMTP_RELAY_USERNAME,
+        pass: process.env.SMTP_RELAY_PASSWORD,
       },
+      tls: { rejectUnauthorized: false },
+      connectionTimeout: 5000,
+      greetingTimeout: 5000,
+      socketTimeout: 10000,
     });
 
     await transporter.sendMail({
@@ -897,16 +904,35 @@ async function sendMagicLinkUrlToEmail(userId, redirectUri, targetEmail, emailSu
   const subject = emailSubject || 'Sign in to MotherTree';
 
   const nodemailer = require('nodemailer');
-  const smtpHost = process.env.SMTP_RELAY_HOST || 'postfix-internal.infra-mail.svc.cluster.local';
-  const smtpPort = process.env.SMTP_PORT || 587;
-  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.TENANT_DOMAIN || 'example.com'}`;
+  // Same SMTP relay wiring as sendNotificationEmail — SMTP_RELAY_* come from
+  // the smtp-credentials Secret (envFrom). The earlier hardcoded fallbacks
+  // (SMTP_PORT=587, no auth) pointed at the retired unauthenticated Postfix
+  // relay; post-PR-2b Stalwart:588 requires STARTTLS + SASL PLAIN so the
+  // old transporter just hung, blocking /switch-to-magic-link for 30s+ and
+  // tripping Playwright's 15s click timeout in shard-6 magic-link tests.
+  // Explicit connection/greeting/socket timeouts are required: nodemailer
+  // defaults are effectively unbounded (no socketTimeout), so a cold or
+  // dead SMTP path (fresh provision, Stalwart restart, CoreDNS reload race)
+  // would still hang ~30s and trip Playwright's 15s waitForResponse even
+  // with the correct port. Fail fast and let the caller render check-email.
+  const smtpHost = process.env.SMTP_RELAY_HOST;
+  const smtpPort = parseInt(process.env.SMTP_RELAY_PORT || '588', 10);
+  const smtpFrom = process.env.SMTP_FROM || `noreply@${process.env.EMAIL_DOMAIN || process.env.TENANT_DOMAIN || 'example.com'}`;
   const smtpFromName = process.env.SMTP_FROM_NAME || 'MotherTree';
 
   const transporter = nodemailer.createTransport({
     host: smtpHost,
     port: smtpPort,
     secure: false,
+    requireTLS: true,
+    auth: {
+      user: process.env.SMTP_RELAY_USERNAME,
+      pass: process.env.SMTP_RELAY_PASSWORD,
+    },
     tls: { rejectUnauthorized: false },
+    connectionTimeout: 5000,
+    greetingTimeout: 5000,
+    socketTimeout: 10000,
   });
 
   await transporter.sendMail({

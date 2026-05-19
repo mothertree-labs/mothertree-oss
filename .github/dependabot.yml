@@ -100,8 +100,10 @@ updates:
       base-images:
         patterns: ["*"]
     ignore:
+      # Pinned to node 22 LTS. Remove when ready to upgrade — tracking issue
+      # gates the next major; the prior 20→25 jump broke CJS/ESM interop.
       - dependency-name: "node"
-        versions: [">=23, <24", ">=24, <25", ">=25, <26"]
+        update-types: ["version-update:semver-major"]
 
   # Docker: Account Portal
   - package-ecosystem: "docker"
@@ -116,8 +118,10 @@ updates:
       base-images:
         patterns: ["*"]
     ignore:
+      # Pinned to node 22 LTS. Remove when ready to upgrade — tracking issue
+      # gates the next major; the prior 20→25 jump broke CJS/ESM interop.
       - dependency-name: "node"
-        versions: [">=23, <24", ">=24, <25", ">=25, <26"]
+        update-types: ["version-update:semver-major"]
 
   # Docker: Roundcube
   - package-ecosystem: "docker"

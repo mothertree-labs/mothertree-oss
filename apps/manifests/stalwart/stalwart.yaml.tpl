@@ -194,24 +194,17 @@ data:
     
     # Message routing strategy (v0.15+ format)
     # - Local domain recipients: deliver to local mailbox
-    # - External recipients: relay through Postfix for DKIM signing
+    # - External recipients: outbound route chosen by deploy-stalwart.sh.
+    #   Prod (SES configured): relay through AWS SES with SASL auth.
+    #   Dev (no SES): direct MX delivery to the destination's mail servers.
     [queue.strategy]
-    route = [{if = "is_local_domain('', rcpt_domain)", then = "'local'"}, {else = "'relay'"}]
-    
+    route = [{if = "is_local_domain('', rcpt_domain)", then = "'local'"}, {else = "'${STALWART_OUTBOUND_ROUTE_NAME}'"}]
+
     # Local delivery route - deliver to internal mailbox
     [queue.route."local"]
     type = "local"
-    
-    # Relay route - send through Postfix for DKIM signing
-    [queue.route."relay"]
-    type = "relay"
-    address = "postfix-internal.infra-mail.svc.cluster.local"
-    port = 587
-    protocol = "smtp"
-    
-    [queue.route."relay".tls]
-    implicit = false
-    allow-invalid-certs = true
+
+${STALWART_OUTBOUND_ROUTE_TOML}
     
     # Authentication
     [authentication]
@@ -264,9 +257,17 @@ data:
     ehlo = "disable"
     mail-from = "disable"
     
+    # DKIM: verify inbound signatures only. Outbound DKIM signing is delegated
+    # to AWS SES Easy DKIM — SES signs with its own rotated keys after its
+    # relay-time header mutations (Message-ID, Date), so Stalwart-side signing
+    # is always invalidated by the time the message reaches the receiver.
+    # Confirmed via dkimpy against prod-delivered messages on 2026-04-19:
+    # Stalwart's s=default signature failed because SES rewrites Message-ID
+    # and Date (1s drift); SES's own signature passes end-to-end.
+    # DMARC for outbound mail carries via SES's d=<tenant-domain> signature.
     [auth.dkim]
     verify = true
-    
+
     [auth.dmarc]
     verify = true
     
@@ -375,6 +376,27 @@ spec:
             secretKeyRef:
               name: stalwart-secrets
               key: S3_SECRET_KEY
+        # SES SMTP credentials for outbound relay (prod only; absent on dev → direct MX).
+        # Stalwart reads these via %{env:...}% in [queue.route."relay"].
+        # optional:true so dev (no ses-credentials Secret) starts cleanly.
+        - name: SES_SMTP_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: ses-credentials
+              key: endpoint
+              optional: true
+        - name: SES_SMTP_USER
+          valueFrom:
+            secretKeyRef:
+              name: ses-credentials
+              key: username
+              optional: true
+        - name: SES_SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ses-credentials
+              key: password
+              optional: true
         volumeMounts:
         - name: config
           mountPath: /opt/stalwart/etc
@@ -389,20 +411,50 @@ spec:
             cpu: "${STALWART_CPU_REQUEST}"
           limits:
             memory: "${STALWART_MEMORY_LIMIT}"
+        # startupProbe gates liveness/readiness until cold-start finishes.
+        # 30 × 10s = 300s budget covers PG connect + OIDC warm + spam-filter
+        # load on a fresh node. Without it, liveness (below) begins at 30s and
+        # a slow-but-healthy boot gets liveness-killed — the spontaneous
+        # RESTARTS:1 seen on cold-start pipelines.
+        startupProbe:
+          httpGet:
+            path: /healthz/live
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 30
         livenessProbe:
           httpGet:
             path: /healthz/live
             port: 8080
             scheme: HTTP
-          initialDelaySeconds: 30
           periodSeconds: 30
+          # Explicit 5s (K8s default is 1s — far too tight; a transient slow
+          # /healthz/live under cold-start/GC load × failureThreshold 3 was
+          # liveness-killing a healthy pod).
+          timeoutSeconds: 5
+          failureThreshold: 3
+        # Honest readiness: Stalwart's /healthz/ready is only a config-presence
+        # check (returns 200 the instant :8080 binds, long before the SMTP
+        # submission path is usable) — that dishonesty is the root cause of the
+        # "healthy pod, mail still broken" shard-6/shard-4 flakes. Gate on the
+        # submission listener (588) actually accepting TCP instead, so the pod
+        # leaves Service when the path Keycloak/e2e depend on is down.
+        # Port 588 is the `submission-app` listener — the exact port Keycloak's
+        # realm SMTP + gate #19 authenticate against as mailer@ (app password).
+        # All listeners bind from the same Stalwart process at startup, so
+        # 588-accepting-TCP reliably implies the submission path is up.
+        # Scope is TCP-bind only (NOT SASL/RCPT): the shared mailer@ principal
+        # is provisioned AFTER the pod is Ready, so a SASL-auth readiness check
+        # would deadlock provisioning permanently. gate #19 remains the fatal
+        # SASL/OIDC backstop.
         readinessProbe:
-          httpGet:
-            path: /healthz/ready
-            port: 8080
-            scheme: HTTP
+          tcpSocket:
+            port: 588
           initialDelaySeconds: 10
           periodSeconds: 10
+          failureThreshold: 3
       volumes:
       - name: config
         configMap:

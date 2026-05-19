@@ -7,6 +7,7 @@ depends_on:
   - validate
   - build-images
   - ci-lease
+  - ensure-dev-cluster
 
 clone:
   - name: clone
@@ -27,6 +28,8 @@ steps:
         from_secret: deploy_vault_password
       GITHUB_PAT:
         from_secret: github_pat
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
       E2E_POOL1_TENANT:
         from_secret: e2e_pool1_tenant
       E2E_POOL2_TENANT:
@@ -37,3 +40,12 @@ steps:
         from_secret: e2e_pool2_base_domain
     commands:
       - ci/scripts/ci-deploy.sh dev --prep-only
+
+# Test-user creation lives in deploy-dev-finalize, not here. The previous
+# placement (in this workflow, after prep) hit pipeline #1258: the
+# tenant auth ingress at `auth.<tenant-domain>` is only created later,
+# by apps/deploy-matrix.sh (in the deploy-dev-matrix workflow). Until
+# then, the OIDC discovery URL the user creation script hits returns
+# 404 — there's no Keycloak ingress for the tenant realm yet. Moving
+# the step to deploy-dev-finalize (which depends_on deploy-dev-matrix)
+# ensures the ingress exists by the time we create users.

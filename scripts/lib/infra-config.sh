@@ -108,6 +108,20 @@ _mt_infra_load_env_config() {
     PGBACKREST_S3_REGION=$(yq '.pgbackrest.s3_region // ""' "$infra_config")
     export PGBACKREST_S3_ENDPOINT PGBACKREST_S3_BUCKET PGBACKREST_S3_REGION
 
+    # Optional auth_host override.
+    # `_mt_infra_derive_hostnames` normally computes
+    # AUTH_HOST = `auth.${env_label}.${INFRA_DOMAIN}`. In envs where that
+    # subdomain isn't actually deployed — e.g. single-tenant environments
+    # whose Keycloak ingress lives under the tenant's own subdomain rather
+    # than the infra-level one — the computed value will not resolve in DNS
+    # and downstream callers fail. When `auth_host` is set in the env
+    # config, the derived value is overridden so AUTH_HOST points at the
+    # actual reachable ingress. Used by Keycloak's --hostname arg, Synapse's
+    # OIDC issuer URL, and the mt_wait_for_keycloak_oidc readiness gate.
+    AUTH_HOST_OVERRIDE=$(yq '.auth_host // ""' "$infra_config")
+    if [ "$AUTH_HOST_OVERRIDE" = "null" ]; then AUTH_HOST_OVERRIDE=""; fi
+    export AUTH_HOST_OVERRIDE
+
     # PgBouncer + Tailscale sidecar (external PG VM connectivity)
     PGBOUNCER_ENABLED=$(yq '.pgbouncer.enabled // false' "$infra_config")
     PG_VM_TAILSCALE_IP=$(yq '.pgbouncer.pg_vm_tailscale_ip // ""' "$infra_config")
@@ -128,10 +142,6 @@ _mt_infra_load_env_config() {
     # TURN server Tailscale IP (for Ansible inventory mesh fallback)
     TURN_TAILSCALE_IP=$(yq '.turn.tailscale_ip // ""' "$infra_config")
     export TURN_TAILSCALE_IP
-
-    # Postfix relay VM on Tailscale mesh (replaces VPN server mail relay)
-    POSTFIX_RELAY_IP=$(yq '.postfix_relay.tailscale_ip // ""' "$infra_config")
-    export POSTFIX_RELAY_IP
   else
     echo "[WARNING] Infrastructure config not found: $infra_config"
     echo "[WARNING] Using defaults: PG_READ_REPLICAS=1, KEYCLOAK_REPLICAS=2"
@@ -420,7 +430,11 @@ _mt_infra_derive_hostnames() {
     infra_subdomain="${MT_ENV}."
   fi
 
-  export AUTH_HOST="auth.${infra_subdomain}${INFRA_DOMAIN}"
+  if [ -n "${AUTH_HOST_OVERRIDE:-}" ]; then
+    export AUTH_HOST="$AUTH_HOST_OVERRIDE"
+  else
+    export AUTH_HOST="auth.${infra_subdomain}${INFRA_DOMAIN}"
+  fi
   export PROMETHEUS_HOST="prometheus.internal.${infra_subdomain}${INFRA_DOMAIN}"
   export GRAFANA_HOST="grafana.internal.${infra_subdomain}${INFRA_DOMAIN}"
   export ALERTMANAGER_HOST="alertmanager.internal.${infra_subdomain}${INFRA_DOMAIN}"
@@ -480,11 +494,9 @@ _mt_infra_load_terraform_outputs() {
   echo "[INFO] Loading Terraform outputs from $_tf_outputs_file"
   # shellcheck disable=SC1090
   source "$_tf_outputs_file"
-  export TURN_SERVER_IP LKE_CLUSTER_ID HEADSCALE_SERVER_IP POSTGRES_SERVER_IP POSTFIX_RELAY_SERVER_IP
+  export TURN_SERVER_IP LKE_CLUSTER_ID HEADSCALE_SERVER_IP POSTGRES_SERVER_IP
 
   echo "[INFO] TURN server IP: ${TURN_SERVER_IP:-<not set>}"
   echo "[INFO] Headscale server IP: ${HEADSCALE_SERVER_IP:-<not set>}"
   echo "[INFO] PostgreSQL server IP: ${POSTGRES_SERVER_IP:-<not set>}"
-  echo "[INFO] Postfix relay server IP: ${POSTFIX_RELAY_SERVER_IP:-<not set>}"
-  echo "[INFO] Postfix relay Tailscale IP: ${POSTFIX_RELAY_IP:-<not set>}"
 }

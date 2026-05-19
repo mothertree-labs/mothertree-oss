@@ -1,12 +1,19 @@
 const nodemailer = require('nodemailer');
 
-// In-cluster SMTP relay for sending emails. Uses SMTP_RELAY_HOST (not SMTP_HOST,
-// which is the external hostname for user-facing display like mail client config).
-// Defaults to the in-cluster Postfix service. Postfix uses self-signed certs.
+// In-cluster SMTP relay. SMTP_RELAY_* come from the `smtp-credentials` Secret
+// written by scripts/provision-smtp-service-accounts. Points at the tenant's
+// own Stalwart submission-app listener on :588 with SASL PLAIN auth and
+// STARTTLS. SMTP_HOST (no RELAY prefix) is the external hostname used for
+// user-facing mail client config — intentionally different.
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_RELAY_HOST || 'postfix-internal.infra-mail.svc.cluster.local',
-  port: parseInt(process.env.SMTP_PORT || '587', 10),
+  host: process.env.SMTP_RELAY_HOST,
+  port: parseInt(process.env.SMTP_RELAY_PORT || '588', 10),
   secure: false,
+  requireTLS: true,
+  auth: {
+    user: process.env.SMTP_RELAY_USERNAME,
+    pass: process.env.SMTP_RELAY_PASSWORD,
+  },
   tls: { rejectUnauthorized: process.env.SMTP_TLS_REJECT_UNAUTHORIZED === 'true' },
 });
 

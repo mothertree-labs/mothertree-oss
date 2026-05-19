@@ -14,6 +14,7 @@
 #   CALENDAR_AUTOMATION_MEMORY_REQUEST, CALENDAR_AUTOMATION_MEMORY_LIMIT
 #   CALENDAR_AUTOMATION_CPU_REQUEST
 #   POLL_INTERVAL_SECONDS - How often to scan inboxes (default: 60)
+#   POLL_CONCURRENCY - Users scanned in parallel per cycle (default: 5)
 #   CONFIG_CHECKSUM - Checksum of config for pod restart on change
 
 ---
@@ -55,6 +56,30 @@ spec:
         runAsUser: 1001
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+      - name: npm-install
+        image: node:22-alpine
+        command: ["sh", "/install/install.sh"]
+        env:
+        - name: HOME
+          value: "/app"
+        - name: npm_config_cache
+          value: "/app/.npm-cache"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          runAsNonRoot: true
+          runAsUser: 1001
+        volumeMounts:
+        - name: app-src
+          mountPath: /app-src
+          readOnly: true
+        - name: app
+          mountPath: /app
+        - name: install-script
+          mountPath: /install
+          readOnly: true
       containers:
       - name: calendar-automation
         image: node:22-alpine
@@ -94,6 +119,8 @@ spec:
           value: "/config/caldav-tokens.json"
         - name: POLL_INTERVAL_SECONDS
           value: "${POLL_INTERVAL_SECONDS}"
+        - name: POLL_CONCURRENCY
+          value: "${POLL_CONCURRENCY}"
         - name: HEALTH_PORT
           value: "8080"
         - name: LOG_LEVEL
@@ -101,6 +128,9 @@ spec:
         volumeMounts:
         - name: app
           mountPath: /app
+          readOnly: false
+        - name: caldav-tokens
+          mountPath: /config
           readOnly: true
         resources:
           requests:
@@ -110,20 +140,32 @@ spec:
             memory: "${CALENDAR_AUTOMATION_MEMORY_LIMIT}"
         livenessProbe:
           httpGet:
-            path: /healthz
+            path: /livez
             port: 8080
           initialDelaySeconds: 20
           periodSeconds: 30
+          failureThreshold: 6
         readinessProbe:
           httpGet:
-            path: /healthz
+            path: /readyz
             port: 8080
           initialDelaySeconds: 15
           periodSeconds: 10
+          failureThreshold: 12
       volumes:
-      - name: app
+      - name: app-src
         configMap:
           name: calendar-automation-app
+      - name: app
+        emptyDir: {}
+      - name: install-script
+        configMap:
+          name: calendar-automation-install
+          defaultMode: 493
+      - name: caldav-tokens
+        secret:
+          secretName: calendar-automation-caldav-tokens
+          optional: true
 
 ---
 apiVersion: v1

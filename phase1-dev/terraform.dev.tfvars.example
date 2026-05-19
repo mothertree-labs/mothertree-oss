@@ -1,0 +1,30 @@
+# phase1-dev tfvars template.
+#
+# The real values live at repo root in terraform.tfvars (shared defaults) and
+# terraform.dev.tfvars (dev overrides). manage_infra passes both to phase1-dev
+# the same way it passes them to phase1, so you usually do NOT need to maintain
+# a dev-specific tfvars file inside this directory.
+#
+# This template exists for documentation: it shows the subset of variables
+# phase1-dev consumes. Copy to phase1-dev/terraform.dev.tfvars (gitignored) only
+# if you want phase1-dev to take different values than phase1 does for dev.
+
+# LKE cluster sizing — must match what was applied via phase1 dev workspace
+# prior to migration, or the post-migration `terraform plan` will not be clean.
+linode_node_pools = [
+  {
+    type  = "g6-standard-4"
+    count = 3
+    tags  = ["matrix", "dev", "primary"]
+  }
+]
+
+# Cluster identity — leave at defaults unless you've also changed them at repo
+# root. The "-dev" suffix is added by main.tf.
+# cluster_label      = "matrix-cluster"
+# linode_region      = "us-lax"
+# linode_k8s_version = "1.34"
+
+# Heartbeat bucket — defaults are correct for the documented setup.
+# dev_state_bucket_label = "mothertree-dev-state"
+# dev_state_region       = "us-lax"

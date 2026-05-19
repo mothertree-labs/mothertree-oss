@@ -1,7 +1,9 @@
-# Allow Admin Portal → Stalwart Mail API Egress
+# Allow Admin Portal → Stalwart Mail Egress
 # Applied to tn-<tenant>-admin namespace only.
-# Permits admin portal and account portal pods to reach Stalwart's HTTP API
-# for user provisioning (ensureUserExists) and quota management.
+# Permits admin portal and account portal pods to reach Stalwart:
+#   - HTTP API (:8080) for user provisioning and quota management
+#   - SMTP submission-app (:588) for authenticated mail relay (Keycloak
+#     notifications, share invites, account portal magic links)
 #
 # Required environment variables:
 #   NAMESPACE   - Source namespace (e.g., tn-example-admin)
@@ -22,7 +24,7 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # Stalwart HTTP API (tn-<tenant>-mail)
+    # Stalwart HTTP API (tn-<tenant>-mail:8080) + SMTP submission-app (:588)
     - to:
         - namespaceSelector:
             matchLabels:
@@ -30,3 +32,5 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+        - protocol: TCP
+          port: 588

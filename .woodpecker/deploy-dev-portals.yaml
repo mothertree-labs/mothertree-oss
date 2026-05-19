@@ -5,6 +5,10 @@ when:
 
 depends_on:
   - deploy-dev-prep
+  # Portals mount smtp-credentials via envFrom (optional:true) so they can
+  # start without the Secret, but mail would be broken in that window. Wait
+  # for stalwart+provision so the first-deploy pod already has creds.
+  - deploy-dev-stalwart
 
 clone:
   - name: clone
@@ -25,6 +29,8 @@ steps:
         from_secret: deploy_vault_password
       GITHUB_PAT:
         from_secret: github_pat
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
       E2E_POOL1_TENANT:
         from_secret: e2e_pool1_tenant
       E2E_POOL2_TENANT:

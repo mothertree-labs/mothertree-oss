@@ -77,7 +77,6 @@ components = set()
 # Map ACL tags to component names
 tag_to_component = {
     'tag:pgbouncer': 'pgbouncer',
-    'tag:postfix-k8s': 'postfix',
     'tag:monitoring': 'metrics',
 }
 

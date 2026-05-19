@@ -168,6 +168,15 @@ kubectl -n "$NS_MATRIX" create configmap element-branding \
 print_status "Element branding ConfigMap created in namespace $NS_MATRIX"
 
 # =============================================================================
+# Load SMTP submission creds from smtp-credentials Secret (provisioned by
+# scripts/provision-smtp-service-accounts) so helmfile can render them into
+# extraSecrets.email.{smtp_user,smtp_pass,…}. Missing Secret → empty fields
+# (mail disabled until a subsequent deploy after provision).
+# =============================================================================
+source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
+mt_export_smtp_relay_env "$NS_MATRIX"
+
+# =============================================================================
 # Deploy Synapse and Element via helmfile
 # =============================================================================
 print_status "Apps: helmfile sync (Synapse, Element)"

@@ -5,7 +5,9 @@
 #          for shared infrastructure (not per-tenant records).
 #
 # Records managed:
-#   - lb1.{prod|dev|prod-eu}.<domain> A  → Ingress LB IP (proxied in prod)
+#   - lb2.prod.<domain> A     → Ingress LB IP (US prod, proxied)
+#   - lb1.prod.<domain> CNAME → lb1.prod-eu.<domain> (EU alias, proxied, prod only)
+#   - lb1.{dev|prod-eu}.<domain> A  → Ingress LB IP (dev/prod-eu, not proxied)
 #   - turn[.dev].<domain> A              → TURN server IP
 #   - hs-{prod|dev|prod-eu}.<domain> A   → Headscale server IP
 #   - @ CNAME → www.<domain>             (prod only)
@@ -18,9 +20,9 @@
 # Usage:
 #   ./scripts/manage-dns.sh -e <env> [--lb-ip=X.X.X.X]
 #
-# The lb1 A record requires the ingress LB IP. By default this is queried
+# The LB A record requires the ingress LB IP. By default this is queried
 # from K8s (requires the ingress controller to be deployed). Use --lb-ip
-# to override, or the script will skip the lb1 record if unavailable.
+# to override, or the script will skip the LB record if unavailable.
 
 set -euo pipefail
 
@@ -87,9 +89,9 @@ fi
 # Subdomain defaults (match previous Terraform defaults)
 SYNAPSE_CNAME="${SYNAPSE_CNAME:-synapse}"
 
-# LB1 subdomain: lb1.prod for prod, lb1.dev for dev
+# LB subdomain: lb2.prod for prod, lb1.<label> for dev/prod-eu
 if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
-  LB1_SUBDOMAIN="lb1.prod"
+  LB1_SUBDOMAIN="lb2.prod"
   CF_PROXIED="true"
 else
   LB1_SUBDOMAIN="lb1.${INFRA_ENV_DNS_LABEL}"
@@ -115,11 +117,16 @@ print_status "  Ingress LB IP: ${INGRESS_LB_IP:-<not available>}"
 # Create/update DNS records
 # =============================================================================
 
-# 1. lb1 A record — ingress load balancer
+# 1. LB A record — ingress load balancer (lb2.prod for prod, lb1.<label> for dev/prod-eu)
 if [ -n "$INGRESS_LB_IP" ]; then
   create_dns_record "${LB1_SUBDOMAIN}.${DOMAIN}" "A" "$INGRESS_LB_IP" "$CF_PROXIED"
 else
-  print_warning "Skipping lb1 A record — ingress LB IP not available (run deploy_infra first, then re-run with --dns)"
+  print_warning "Skipping LB A record — ingress LB IP not available (run deploy_infra first, then re-run with --dns)"
+fi
+
+# 1b. lb1.prod CNAME → lb1.prod-eu (prod only: EU alias pointing to prod-eu cluster)
+if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
+  create_dns_record "lb1.prod.${DOMAIN}" "CNAME" "lb1.prod-eu.${DOMAIN}" "true"
 fi
 
 # 2. TURN server A record

@@ -27,11 +27,18 @@ controller:
     type: LoadBalancer
     annotations:
       service.beta.kubernetes.io/linode-loadbalancer-default-proxy-protocol: "v2"
+      # Port 25 (inbound MX) does NOT use PROXY protocol: Linode's PROXY v2 to
+      # ingress-nginx hangs on port 25 (connections silently never reach the
+      # Postfix SMTP greeting). Disabling PROXY here means Postfix sees the
+      # nginx pod IP instead of the real client IP — acceptable since the
+      # previous 30025→25:PROXY: path had the same limitation (nginx terminated
+      # PROXY but forwarded plain TCP to Postfix).
+      service.beta.kubernetes.io/linode-loadbalancer-port-25: '{"proxy-protocol":"none"}'
   extraArgs:
     # TCP proxy for mail ports: nginx watches this ConfigMap and dynamically proxies
     # TCP connections to per-tenant Stalwart ClusterIP services.
     # The ConfigMap is managed by deploy-stalwart.sh (adds ports per tenant).
-    # Port 30025 is used for Postfix inbound SMTP via TCP proxy (VPN Postfix -> K8s Postfix).
+    # Port 25 is inbound MX (internet → NodeBalancer → nginx → Postfix).
     # Per-tenant Stalwart mail ports are added by deploy-stalwart.sh.
     tcp-services-configmap: "infra-ingress/tcp-services"
   resources:

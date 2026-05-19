@@ -17,41 +17,21 @@ spec:
       annotations:
         # Trigger redeployment when config changes
         checksum/postfix-config: "${CHECKSUM_POSTFIX_CONFIG}"
-        checksum/opendkim-config: "${CHECKSUM_OPENDKIM_CONFIG}"
         checksum/postfix-init-scripts: "${CHECKSUM_INIT_SCRIPTS}"
     spec:
       serviceAccountName: postfix
-      # OpenDKIM sidecar container
       containers:
-        - name: opendkim
-          # instrumentisto/opendkim:2.10 - verified Alpine-based OpenDKIM image
-          image: instrumentisto/opendkim:2.10
-          ports:
-            - containerPort: 8891
-              name: milter
-          volumeMounts:
-            - name: opendkim-config
-              mountPath: /etc/opendkim
-              readOnly: true
-          # NOTE: Tenant DKIM keys are mounted at /etc/dkim-keys/<tenant>/ by create_env
-          # No base mount needed here - each tenant gets their own volume mount
-          resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              memory: 64Mi
-        # Postfix main container
+        # Postfix main container — inbound MX dispatch on port 25 only.
+        # Outbound DKIM signing is delegated to AWS SES Easy DKIM at tenant
+        # Stalwarts; this pod no longer signs or accepts submission.
         - name: postfix
-          # boky/postfix:v5.1.0 - SMTP relay image with DKIM support
+          # boky/postfix:v5.1.0 - SMTP relay image
           # Source: https://github.com/bokysan/docker-postfix
           # v5.1.0 released Jan 2025, supports /docker-init.d/ scripts
           image: boky/postfix:v5.1.0
           ports:
             - containerPort: 25
               name: smtp
-            - containerPort: 587
-              name: submission
           # Mount init script for port-specific master.cf configuration
           # Scripts in /docker-init.d/ run after config generation but before Postfix starts
           volumeMounts:
@@ -65,7 +45,6 @@ spec:
               value: "${SMTP_ALLOWED_SENDER_DOMAINS}"
             - name: HOSTNAME
               value: "${SMTP_HOSTNAME}"
-            # Use external OpenDKIM milter (sidecar)
             - name: DKIM_AUTOGENERATE
               value: "false"
             - name: POSTFIX_myhostname
@@ -76,21 +55,8 @@ spec:
               value: "${SMTP_DOMAIN}"
             - name: POSTFIX_mynetworks
               value: "${POSTFIX_MYNETWORKS}"
-            # Connect to OpenDKIM sidecar for DKIM signing
-            - name: POSTFIX_smtpd_milters
-              value: "inet:127.0.0.1:8891"
-            - name: POSTFIX_non_smtpd_milters
-              value: "inet:127.0.0.1:8891"
-            - name: POSTFIX_milter_default_action
-              value: accept
-            - name: POSTFIX_milter_protocol
-              value: "6"
-            # SMTP relay — forward outbound mail through relay VM for consistent source IP (SPF)
-            # The relay VM is on the Tailscale mesh; the Tailscale sidecar provides connectivity
-            - name: RELAYHOST
-              value: "[${POSTFIX_RELAY_IP}]:25"
             # Inbound mail routing - transport_maps and relay_domains
-            # These files are managed by deploy-stalwart.sh for each tenant
+            # These files are managed by configure-mail-routing for each tenant
             # Init container copies them to /etc/postfix/tables/ and runs postmap
             - name: POSTFIX_relay_domains
               value: "hash:/etc/postfix/tables/relay_domains"
@@ -104,10 +70,8 @@ spec:
             # Relay restrictions: allow mynetworks, reject unauthorized destinations
             - name: POSTFIX_smtpd_relay_restrictions
               value: "permit_mynetworks, reject_unauth_destination"
-            # Recipient restrictions: use defaults, port-specific overrides are in master.cf
-            # Port 25 (smtp): reject_unverified_recipient, reject_unauth_destination (in master.cf)
-            # Port 587 (submission): permit_mynetworks, reject (in master.cf)
-            # Note: main.cf restrictions serve as fallback if master.cf doesn't override
+            # Port-25 recipient restrictions (overridden in master.cf to add
+            # reject_unverified_recipient for backscatter prevention).
             - name: POSTFIX_smtpd_recipient_restrictions
               value: "reject_non_fqdn_recipient, reject_unknown_recipient_domain, reject_unauth_destination"
             # Address verification settings - probe downstream to verify recipients exist
@@ -152,48 +116,10 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
 
-      # Init containers:
-      # - tailscale: native sidecar (restartPolicy: Always) — starts before main
-      #   containers, terminated AFTER them. Keeps the WireGuard tunnel alive while
-      #   Postfix drains queued mail on shutdown.
-      # - prepare-routing: one-shot init that copies routing files and runs postmap
-      # Copies routing files from read-only ConfigMap to writable emptyDir,
-      # then runs postmap to generate .db files
+      # Init container: copy routing files from the read-only postfix-routing
+      # ConfigMap into a writable emptyDir, then postmap to generate hash .db
+      # files Postfix reads at runtime.
       initContainers:
-        - name: tailscale
-          # tailscale/tailscale:v1.94.2 — stable release, multi-arch
-          # https://hub.docker.com/r/tailscale/tailscale
-          image: tailscale/tailscale:v1.94.2
-          restartPolicy: Always
-          env:
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: TS_AUTHKEY
-              valueFrom:
-                secretKeyRef:
-                  name: postfix-tailscale-auth
-                  key: TS_AUTHKEY
-            - name: TS_EXTRA_ARGS
-              value: "--login-server=${HEADSCALE_URL}"
-            - name: TS_KUBE_SECRET
-              value: "postfix-tailscale-state-$(POD_NAME)"
-            - name: TS_ACCEPT_DNS
-              value: "false"
-            - name: TS_USERSPACE
-              value: "false"
-          securityContext:
-            capabilities:
-              add:
-                - NET_ADMIN
-                - NET_RAW
-          resources:
-            requests:
-              cpu: 10m
-              memory: 64Mi
-            limits:
-              memory: 128Mi
         - name: prepare-routing
           image: boky/postfix:v5.1.0
           command:
@@ -235,12 +161,9 @@ spec:
         - name: postfix-config
           configMap:
             name: postfix-config
-        - name: opendkim-config
-          configMap:
-            name: opendkim-config
         # Routing ConfigMap for multi-tenant inbound mail
-        # This ConfigMap is created/managed by configure-mail-routing (not this script)
-        # Contains transport and relay_domains files that map domains to tenant Stalwarts
+        # Managed by configure-mail-routing (not this script).
+        # Contains transport and relay_domains files mapping domains to tenant Stalwarts.
         - name: postfix-routing
           configMap:
             name: postfix-routing
@@ -255,8 +178,5 @@ spec:
           configMap:
             name: postfix-init-scripts
             defaultMode: 0755
-        # NOTE: DKIM keys are mounted per-tenant by create_env at /etc/dkim-keys/<tenant>/
-        # Each tenant's volume is added via kubectl patch when running create_env
-      # Budget: Postfix preStop (5s) + graceful shutdown (up to 40s).
-      # Tailscale (native sidecar) is terminated after main containers exit.
+      # Budget: preStop (5s) + graceful shutdown (up to 40s).
       terminationGracePeriodSeconds: 45

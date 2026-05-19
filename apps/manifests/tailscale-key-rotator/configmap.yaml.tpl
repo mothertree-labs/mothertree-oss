@@ -9,7 +9,6 @@ data:
   # Component config: name|acl_tag|k8s_secret|namespace|deployment
   components.conf: |
     pgbouncer|tag:pgbouncer|pgbouncer-tailscale-auth|${NS_DB}|deployment/pgbouncer
-    postfix|tag:postfix-k8s|postfix-tailscale-auth|${NS_MAIL}|deployment/postfix
     metrics|tag:monitoring|pg-metrics-bridge-tailscale-auth|${NS_DB}|deployment/pg-metrics-bridge
     router|tag:router|tailscale-router-auth|${NS_INGRESS_INTERNAL}|deployment/tailscale-router
 

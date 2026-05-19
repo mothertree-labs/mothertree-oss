@@ -7,14 +7,40 @@
 const STALWART_API_URL = process.env.STALWART_API_URL;
 const STALWART_ADMIN_PASSWORD = process.env.STALWART_ADMIN_PASSWORD;
 
-// Timeout for Stalwart API requests. Under concurrent CI load, Stalwart can
-// take 100+ seconds per request, so the default is generous. The invite
-// endpoint runs provisioning in the background (non-blocking), so this
-// timeout only guards against indefinitely hung connections.
-const FETCH_TIMEOUT_MS = parseInt(process.env.STALWART_FETCH_TIMEOUT_MS, 10) || 120_000;
+// Timeout for a single Stalwart API request. ensureUserExists() now runs in
+// the invite request's critical path (principal must exist before Keycloak's
+// RCPT TO validates), so a hung request blocks the HTTP response and trips
+// e2e's 15s waitForResponse. 8s per attempt + 500ms backoff + retry caps
+// the worst case at ~16.5s while keeping the typical case unchanged (<1s).
+// Reproduced: 30 concurrent invites saturated Stalwart during a pipeline's
+// e2e run; 17/30 /api/principal/deploy calls never returned within 120s.
+const FETCH_TIMEOUT_MS = parseInt(process.env.STALWART_FETCH_TIMEOUT_MS, 10) || 8_000;
 
 function fetchWithTimeout(url, options = {}) {
   return fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+}
+
+// Detect the error thrown by AbortSignal.timeout(N) — either AbortError/
+// TimeoutError (name) or a string we can match.
+function isTimeoutError(err) {
+  if (!err) return false;
+  const name = err.name || '';
+  const msg = err.message || '';
+  return name === 'TimeoutError' || name === 'AbortError' || /aborted due to timeout/i.test(msg);
+}
+
+// Run fn(), and if it rejects with an AbortSignal.timeout, wait `delayMs` and
+// retry once. On the second failure, throw. Keeps the retry local to the
+// call sites that need it so most callers stay simple.
+async function withTimeoutRetry(label, fn, delayMs = 500) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!isTimeoutError(err)) throw err;
+    console.warn(`Stalwart: ${label} timed out after ${FETCH_TIMEOUT_MS}ms, retrying once`);
+    await new Promise((r) => setTimeout(r, delayMs));
+    return fn();
+  }
 }
 
 function getAdminAuth() {
@@ -27,15 +53,27 @@ function getAdminAuth() {
 /**
  * Reload Stalwart configuration and clear directory caches.
  * Called after principal changes to ensure RCPT TO reflects current state.
+ *
+ * Fire-and-forget: returns a promise but callers do NOT await it in the
+ * request's critical path. Under concurrent invite load the reload endpoint
+ * is a serialization point — awaiting it per-invite was compounding the
+ * Stalwart contention that caused e2e's "aborted due to timeout" failures.
+ * The negative RCPT cache has a short TTL, and e2e's IMAP polling already
+ * buffers past that.
  */
-async function reloadConfig() {
+function reloadConfig() {
   const adminAuth = getAdminAuth();
-  const response = await fetchWithTimeout(`${STALWART_API_URL}/api/reload`, {
+  return fetchWithTimeout(`${STALWART_API_URL}/api/reload`, {
     headers: { 'Authorization': adminAuth },
-  });
-  if (!response.ok) {
-    console.warn(`Stalwart: config reload returned ${response.status}`);
-  }
+  })
+    .then((response) => {
+      if (!response.ok) {
+        console.warn(`Stalwart: config reload returned ${response.status}`);
+      }
+    })
+    .catch((err) => {
+      console.warn(`Stalwart: config reload failed (non-fatal): ${err.message}`);
+    });
 }
 
 /**
@@ -46,9 +84,12 @@ async function reloadConfig() {
 async function ensureUserExists(email, name, quotaBytes) {
   const adminAuth = getAdminAuth();
 
-  const checkResponse = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
-    headers: { 'Authorization': adminAuth },
-  });
+  const checkResponse = await withTimeoutRetry(
+    `GET /api/principal/${email}`,
+    () => fetchWithTimeout(`${STALWART_API_URL}/api/principal/${encodeURIComponent(email)}`, {
+      headers: { 'Authorization': adminAuth },
+    }),
+  );
 
   // Stalwart returns HTTP 200 for all responses, including errors.
   // Must parse the body to check for {"error":"notFound"}.
@@ -71,14 +112,17 @@ async function ensureUserExists(email, name, quotaBytes) {
   if (quotaBytes) {
     body.quota = quotaBytes;
   }
-  const createResponse = await fetchWithTimeout(`${STALWART_API_URL}/api/principal/deploy`, {
-    method: 'POST',
-    headers: {
-      'Authorization': adminAuth,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
+  const createResponse = await withTimeoutRetry(
+    `POST /api/principal/deploy (${email})`,
+    () => fetchWithTimeout(`${STALWART_API_URL}/api/principal/deploy`, {
+      method: 'POST',
+      headers: {
+        'Authorization': adminAuth,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    }),
+  );
 
   if (createResponse.status === 409) {
     return { created: false };
