@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# dev-bringup.sh — Ensure the dev LKE cluster exists. Called from the
-# Woodpecker `ensure-dev-cluster` step on every PR. Idempotent:
-#   - If the cluster already exists: noop apart from a heartbeat touch.
+# dev-bringup.sh — Ensure the dev LKE cluster exists and is healthy.
+# Called from the Woodpecker `ensure-dev-cluster` step on every PR and
+# every push to main (#422). Idempotent:
+#   - If the cluster already exists and is healthy (ingress LB IP
+#     present): refresh kubeconfig, reconcile DNS, touch the heartbeat.
 #   - If missing: run `manage_infra -e dev --phase1-dev-only` (skips the
 #     local-state phase1 root — operator-managed always-up VMs are not
 #     touched from CI) and `deploy_infra -e dev`, then touch the heartbeat.
+#   - If the cluster exists but is degraded (no LB IP — pipeline #1333):
+#     fall through to the cold path to repair, rather than failing loudly.
 #
 # Required env (set by ci/scripts/ci-deploy.sh after vault decrypt):
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY — for phase1-dev's S3 backend
@@ -33,6 +37,7 @@ EXISTING_ID=$(linode-cli lke clusters-list --json 2>/dev/null \
     | head -n1 || true)
 
 DID_PROVISION=false
+CLUSTER_DEGRADED=false
 if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
     print_success "dev-bringup: cluster exists (id=$EXISTING_ID); reusing"
 
@@ -43,21 +48,78 @@ if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
     # endpoint and the bringup aborted before DNS reconcile. Fetch a fresh
     # kubeconfig from Linode for the current cluster id and write it to
     # $REPO_ROOT — mirrors dev-reaper.sh's pattern for the destroy side.
+    #
+    # Retry on transient API errors (pipeline #1330: `linode-cli` exited
+    # nonzero with stderr swallowed by `2>/dev/null`, killing the script
+    # under `set -euo pipefail` BEFORE the explicit error block ran). Now
+    # we capture stderr to a tempfile and surface it on final failure.
     print_status "dev-bringup: fetching fresh kubeconfig for cluster id=$EXISTING_ID"
-    KCFG_B64=$(linode-cli lke kubeconfig-view --json "$EXISTING_ID" 2>/dev/null \
-        | jq -r '.[0].kubeconfig // empty')
+    KCFG_STDERR=$(mktemp)
+    trap 'rm -f "$KCFG_STDERR"' EXIT
+    KCFG_B64=""
+    KCFG_RC=1
+    for _attempt in 1 2 3; do
+        # `|| true` shields `set -e` so we can inspect the rc and stderr.
+        # Pipe rc comes from `jq` here (last cmd in pipeline) so we
+        # capture linode-cli's status via PIPESTATUS.
+        KCFG_OUT=$(linode-cli lke kubeconfig-view --json "$EXISTING_ID" 2>"$KCFG_STDERR" \
+            | jq -r '.[0].kubeconfig // empty') || true
+        KCFG_RC=${PIPESTATUS[0]}
+        if [ "$KCFG_RC" -eq 0 ] && [ -n "$KCFG_OUT" ]; then
+            KCFG_B64="$KCFG_OUT"
+            break
+        fi
+        if [ "$_attempt" -lt 3 ]; then
+            _backoff=$((_attempt * 5))
+            print_warning "dev-bringup: linode-cli kubeconfig-view attempt $_attempt failed (rc=$KCFG_RC); retrying in ${_backoff}s"
+            sleep "$_backoff"
+        fi
+    done
     if [ -z "$KCFG_B64" ]; then
-        print_error "dev-bringup: could not fetch kubeconfig from Linode API; aborting"
+        print_error "dev-bringup: could not fetch kubeconfig from Linode API after 3 attempts (rc=$KCFG_RC); aborting"
+        print_error "dev-bringup: linode-cli stderr was:"
+        sed 's/^/  /' "$KCFG_STDERR" >&2 || true
         exit 1
     fi
+    rm -f "$KCFG_STDERR"
+    trap - EXIT
     umask 077
     echo "$KCFG_B64" | base64 -d > "$REPO_ROOT/kubeconfig.${MT_ENV:-dev}.yaml"
     umask 022
     export KUBECONFIG="$REPO_ROOT/kubeconfig.${MT_ENV:-dev}.yaml"
     print_status "dev-bringup: KUBECONFIG repointed to $KUBECONFIG (fresh from Linode)"
-else
+
+    # Stale-warm-cluster recovery (pipeline #1333): a cluster id exists and
+    # the kubeconfig is fresh, but the cluster itself may be degraded — e.g.
+    # ingress-nginx has no LB IP because deploy_infra never finished. Probe
+    # the exact symptom that aborted #1333 (no LB IP on the ingress Service)
+    # and if it's missing, treat the cluster as cold by falling through to
+    # the provisioning branch below. Repair > fail-loud here: the issue
+    # explicitly recommends falling through, and the operator's only
+    # alternative (manual recovery) would just trigger this exact path.
+    print_status "dev-bringup: probing ingress-nginx LB IP for warm-cluster health..."
+    WARM_LB_IP=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress \
+        get svc ingress-nginx-controller \
+        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+    if [ -z "$WARM_LB_IP" ]; then
+        print_warning "dev-bringup: cluster id=$EXISTING_ID exists but ingress-nginx has no LB IP"
+        print_warning "dev-bringup: treating as cold; running phase1-dev + deploy_infra to repair"
+        CLUSTER_DEGRADED=true
+    else
+        print_success "dev-bringup: warm cluster healthy (ingress LB IP=$WARM_LB_IP)"
+    fi
+fi
+
+# Cold or degraded path: provision phase1-dev + deploy_infra. Reached either
+# (a) when no cluster exists at all (post-reaper or first-run), or (b) when
+# the warm-cluster health check above detected a degraded cluster (#1333).
+if [ -z "$EXISTING_ID" ] || [ "$EXISTING_ID" = "null" ] || [ "$CLUSTER_DEGRADED" = "true" ]; then
     DID_PROVISION=true
-    print_status "dev-bringup: no cluster found; provisioning..."
+    if [ "$CLUSTER_DEGRADED" = "true" ]; then
+        print_status "dev-bringup: degraded warm cluster — re-running phase1-dev + deploy_infra to repair"
+    else
+        print_status "dev-bringup: no cluster found; provisioning..."
+    fi
 
     # phase1-dev's S3 backend needs these env vars. Fail fast if missing —
     # the alternative (silent local backend fallback) would diverge from
@@ -86,6 +148,9 @@ EOF
     # operator-managed always-up VMs (postgres-dev / headscale-dev /
     # turn-server-dev); CI doesn't have phase1's state and running
     # terraform there would try to recreate those VMs.
+    # On the degraded path the cluster itself already exists, so terraform
+    # finds it in state and no-ops; the value comes from deploy_infra
+    # re-reconciling infra-* namespaces (ingress, certs, Keycloak, ...).
     print_status "dev-bringup: running manage_infra --phase1-dev-only..."
     "$REPO_ROOT/scripts/manage_infra" -e dev --phase1-dev-only
 
