@@ -55,19 +55,26 @@ if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
     # we capture stderr to a tempfile and surface it on final failure.
     print_status "dev-bringup: fetching fresh kubeconfig for cluster id=$EXISTING_ID"
     KCFG_STDERR=$(mktemp)
-    trap 'rm -f "$KCFG_STDERR"' EXIT
+    KCFG_RAW=$(mktemp)
+    trap 'rm -f "$KCFG_STDERR" "$KCFG_RAW"' EXIT
     KCFG_B64=""
     KCFG_RC=1
     for _attempt in 1 2 3; do
-        # `|| true` shields `set -e` so we can inspect the rc and stderr.
-        # Pipe rc comes from `jq` here (last cmd in pipeline) so we
-        # capture linode-cli's status via PIPESTATUS.
-        KCFG_OUT=$(linode-cli lke kubeconfig-view --json "$EXISTING_ID" 2>"$KCFG_STDERR" \
-            | jq -r '.[0].kubeconfig // empty') || true
-        KCFG_RC=${PIPESTATUS[0]}
-        if [ "$KCFG_RC" -eq 0 ] && [ -n "$KCFG_OUT" ]; then
-            KCFG_B64="$KCFG_OUT"
-            break
+        # Run linode-cli first and capture its rc directly. Don't pipe into jq
+        # here — command substitution would put the pipe in a subshell, after
+        # which PIPESTATUS in the parent shell reflects only the outer assign-
+        # ment (always 0) and the diagnostic "rc=$KCFG_RC" would lie. Using
+        # `&& KCFG_RC=0 || KCFG_RC=$?` keeps the test in a context where
+        # `set -e` does not fire, so KCFG_RC accurately reflects linode-cli's
+        # exit status.
+        linode-cli lke kubeconfig-view --json "$EXISTING_ID" \
+            >"$KCFG_RAW" 2>"$KCFG_STDERR" && KCFG_RC=0 || KCFG_RC=$?
+        if [ "$KCFG_RC" -eq 0 ]; then
+            KCFG_OUT=$(jq -r '.[0].kubeconfig // empty' "$KCFG_RAW" 2>/dev/null || true)
+            if [ -n "$KCFG_OUT" ]; then
+                KCFG_B64="$KCFG_OUT"
+                break
+            fi
         fi
         if [ "$_attempt" -lt 3 ]; then
             _backoff=$((_attempt * 5))
@@ -81,7 +88,7 @@ if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
         sed 's/^/  /' "$KCFG_STDERR" >&2 || true
         exit 1
     fi
-    rm -f "$KCFG_STDERR"
+    rm -f "$KCFG_STDERR" "$KCFG_RAW"
     trap - EXIT
     umask 077
     echo "$KCFG_B64" | base64 -d > "$REPO_ROOT/kubeconfig.${MT_ENV:-dev}.yaml"

@@ -22,11 +22,12 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"
 
 # ── Lease configuration ───────────────────────────────────────
-# Main merges use a longer TTL because deploy-dev is a no-op (no renewal
-# loop running). PR pipelines use a shorter TTL renewed by ci-deploy.sh,
-# ci-deploy-app.sh, and e2e shards.
+# Both PR and main-push pipelines now run deploy-dev-* (since #422), and
+# ci-deploy.sh's renewal loop is event-agnostic. The longer main-merge TTL
+# below is a safety net for the case where ci-release doesn't run (killed
+# pipeline, network blip), not a substitute for the renewal loop.
 if [[ "${CI_PIPELINE_EVENT:-}" != "pull_request" ]]; then
-  LEASE_TTL=7200  # 2 hours — no renewal loop on main merges, ci-release cleans up
+  LEASE_TTL=7200  # 2 hours — safety net for main merges; renewal loop also runs
 else
   LEASE_TTL=1000  # ~17 minutes (renewed by ci-deploy.sh, ci-deploy-app.sh, and e2e shards)
 fi
