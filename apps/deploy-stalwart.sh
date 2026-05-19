@@ -609,8 +609,11 @@ else
     # ContainerCreating stall — a known hypothesis for the gh#423 cold-start
     # failure (deploy-dev-prep on #1329 logged "wildcard-tls not ready
     # after 120s" before continuing).
-    kubectl get secret -n "$NS_MAIL" "wildcard-tls-${TENANT_NAME}" -o jsonpath='{.metadata.name} (type={.type}, dataKeys={.data})' 2>&1 | head -c 400 || true
-    echo ""
+    # NEVER include `{.data}` here — this is a kubernetes.io/tls Secret whose
+    # .data contains base64-encoded tls.key (the WILDCARD PRIVATE KEY). CI logs
+    # on this public repo are not safe to leak even partial key material into.
+    # The default tabular `get secret` output shows name/type/data-count only.
+    kubectl get secret -n "$NS_MAIL" "wildcard-tls-${TENANT_NAME}" 2>&1 | head -3 || true
     kubectl get certificate -n "$NS_MATRIX" wildcard-tls -o wide 2>/dev/null || true
 
     set -e
