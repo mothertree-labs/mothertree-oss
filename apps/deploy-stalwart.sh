@@ -572,8 +572,52 @@ print_status "Waiting for Stalwart Deployment to be ready..."
 if kubectl rollout status deployment/stalwart -n "$NS_MAIL" --timeout=300s; then
     print_success "Stalwart Deployment is ready"
 else
-    print_warning "Stalwart StatefulSet may not be fully ready"
-    print_status "Check logs with: kubectl logs -n $NS_MAIL -l app=stalwart"
+    # Fail loudly with a diagnostic dump so the next person sees the actual
+    # reason instead of the downstream "Port-forward to Stalwart failed".
+    # See gh#423 — pipeline #1329 timed out here, then exited 1 at the
+    # port-forward block below with no pod-level evidence captured.
+    print_error "Stalwart Deployment did not become Ready within 300s"
+    echo ""
+    print_error "=== Diagnostic dump (gh#423) ==="
+
+    # dump_pod_diagnostics handles describe-pod + recent events; all kubectl
+    # calls are guarded with `|| true` so a missing pod/secret doesn't short-
+    # circuit later dumps. Reset error mode briefly for the same reason —
+    # `set -euo pipefail` is active and we want every dump to fire.
+    set +e
+
+    dump_pod_diagnostics "$NS_MAIL" "app=stalwart"
+
+    echo ""
+    print_error "Diagnostics: deployment rollout state"
+    kubectl get deployment stalwart -n "$NS_MAIL" -o wide || true
+    kubectl describe deployment stalwart -n "$NS_MAIL" || true
+
+    echo ""
+    print_error "Diagnostics: stalwart pod logs (current, last 200 lines)"
+    kubectl logs -n "$NS_MAIL" -l app=stalwart --tail=200 --all-containers=true || true
+
+    echo ""
+    print_error "Diagnostics: stalwart pod logs (previous, last 200 lines — if CrashLoop)"
+    kubectl logs -n "$NS_MAIL" -l app=stalwart --previous --tail=200 --all-containers=true 2>/dev/null || \
+        echo "  (no previous container — pod did not restart)"
+
+    echo ""
+    print_error "Diagnostics: TLS secret presence in mail namespace"
+    # wildcard-tls-<tenant> is reflected from NS_MATRIX by emberstack/reflector
+    # and is a mount-time dependency of the Stalwart pod. Missing/late =
+    # ContainerCreating stall — a known hypothesis for the gh#423 cold-start
+    # failure (deploy-dev-prep on #1329 logged "wildcard-tls not ready
+    # after 120s" before continuing).
+    # NEVER include `{.data}` here — this is a kubernetes.io/tls Secret whose
+    # .data contains base64-encoded tls.key (the WILDCARD PRIVATE KEY). CI logs
+    # on this public repo are not safe to leak even partial key material into.
+    # The default tabular `get secret` output shows name/type/data-count only.
+    kubectl get secret -n "$NS_MAIL" "wildcard-tls-${TENANT_NAME}" 2>&1 | head -3 || true
+    kubectl get certificate -n "$NS_MATRIX" wildcard-tls -o wide 2>/dev/null || true
+
+    set -e
+    exit 1
 fi
 
 # =============================================================================
