@@ -1,10 +1,11 @@
 # Workflow-level `when` MUST match `deploy-dev-prep.yaml` — that workflow lists
 # ensure-dev-cluster in its depends_on, and Woodpecker blocks a workflow if any
-# dependency is filtered out for the current event. On `push` to main the dev
-# bring-up is a no-op (the step-level `when` below gates the actual command),
-# but the workflow must still exist in the DAG so deploy-dev-prep can resolve.
-# Without this, the merge-to-main pipeline short-circuits BEFORE deploy-prod —
-# see pipelines #1216 / #1219 for the bug behaviour.
+# dependency is filtered out for the current event. The workflow must exist in
+# the DAG on both events so deploy-dev-prep can resolve — without this, the
+# merge-to-main pipeline short-circuits BEFORE deploy-prod (pipelines #1216 /
+# #1219). Per issue #422, the deploy step itself also runs on both events so
+# main-push can re-provision the cluster when the idle reaper has destroyed it
+# in the gap between PR pipeline completion and the merge.
 when:
   - event: pull_request
   - event: push
@@ -24,8 +25,7 @@ clone:
 steps:
   - name: ensure-dev-cluster
     image: bash
-    when:
-      - event: pull_request
+    # Runs on both pull_request and push:main — see workflow header (issue #422).
     environment:
       CI: "true"
       CI_VALKEY_PASSWORD:
