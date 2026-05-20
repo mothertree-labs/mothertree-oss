@@ -43,14 +43,7 @@ test.describe('Email — Round-Trip via Echo Group', () => {
     emailTestPage: senderPage,
     emailRecvPage: receiverPage,
   }) => {
-    // Postgrey on the echo server (Mail-in-a-Box) defers the first attempt
-    // from a never-before-seen (client_ip, sender, recipient) triplet for
-    // ~300s, and Stalwart's outbound retry schedule is [2m, 5m, 10m, ...],
-    // so a fresh triplet takes ~7 min to be accepted (T+0 → 450; T+2m → 450;
-    // T+7m → 250 OK). After that the triplet is whitelisted for ~35 days
-    // and subsequent runs deliver in seconds. setTimeout/maxWait sized to
-    // cover the first-from-fresh-triplet case plus cleanup IMAP retries.
-    test.setTimeout(540_000);
+    test.setTimeout(180_000); // Email round-trip through external echo group can take 2+ minutes
 
     // Fail fast with a clear message if echoGroupAddress is not configured
     expect(echoGroupAddress, 'Set E2E_ECHO_GROUP_ADDRESS env var or echoGroupAddress in e2e.config.json').toBeTruthy();
@@ -95,7 +88,7 @@ test.describe('Email — Round-Trip via Echo Group', () => {
       // ── Step 2: Receiver logs into Roundcube and polls for the forwarded email ──
       await roundcubeLogin(receiverPage, receiver.username, receiver.password);
 
-      const maxWait = 420_000;
+      const maxWait = 120_000;
       const pollInterval = 5_000;
       let found = false;
       const start = Date.now();
