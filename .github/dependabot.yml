@@ -135,3 +135,11 @@ updates:
     groups:
       base-images:
         patterns: ["*"]
+    ignore:
+      # Pinned to 1.6.x. 1.7.0 crash-loops in our custom image (entrypoint
+      # re-copies the stock app over our `mothertree` skin → health probe
+      # 404s) and its updatedb.sh forward-migrates the shared dev DB
+      # (session.changed→expires_at), breaking all 1.6.x branches. Remove
+      # when the deliberate 1.7 cutover lands — tracking issue #430.
+      - dependency-name: "roundcube/roundcubemail"
+        versions: [">= 1.7.0"]
