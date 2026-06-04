@@ -73,13 +73,17 @@ spec:
             - name: storage-backends
               mountPath: /app/storage_backends.py
               subPath: storage_backends.py
-          # Memory tuned - migrations are short-lived jobs
+          # Short-lived job, but it runs the full Django app-import (boto3 +
+          # malware_detection). On a cold/contended dev cluster a 100m CPU request
+          # got starved during concurrent tenant deploys, stretching the import
+          # from ~3s to ~3.5min and blowing the deploy poll. Give it real CPU so it
+          # boots fast under contention; memory floor raised off the anomalous 64Mi.
           resources:
             requests:
-              cpu: 100m
-              memory: 64Mi
-            limits:
+              cpu: 500m
               memory: 256Mi
+            limits:
+              memory: 512Mi
           securityContext:
             runAsUser: 0
       volumes:
