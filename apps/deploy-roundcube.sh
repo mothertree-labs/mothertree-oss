@@ -222,8 +222,28 @@ if mt_has_changes; then
     if kubectl rollout status deployment/roundcube -n "$NS_WEBMAIL" --timeout=180s; then
         print_success "Roundcube Deployment is ready"
     else
-        print_warning "Roundcube Deployment may not be fully ready"
-        print_status "Check logs with: kubectl logs -n $NS_WEBMAIL -l app=roundcube"
+        # Fail loudly. A rollout timeout means the new pods never became Ready
+        # (e.g. CrashLoopBackOff on a failing health probe). This was previously
+        # only a warning + exit 0, so a broken image — e.g. the Roundcube 1.7
+        # docroot change that 404'd the old skin-asset probe and crashlooped the
+        # pod — deployed "successfully" and was only caught later by e2e, and
+        # only when no healthy old replica happened to keep serving. Fail fast
+        # per CLAUDE.md so a broken deploy can never report success.
+        print_error "Roundcube Deployment did not become Ready within 180s"
+        echo ""
+        print_error "=== Diagnostic dump ==="
+        # Guard every kubectl call so one missing object doesn't skip later dumps
+        # (set -euo pipefail is active).
+        set +e
+        dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
+        echo ""
+        print_error "Diagnostics: roundcube pod logs (current, last 200 lines)"
+        kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --tail=200 --all-containers=true || true
+        echo ""
+        print_error "Diagnostics: roundcube pod logs (previous, last 200 lines — if CrashLoop)"
+        kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --previous --tail=200 --all-containers=true 2>/dev/null || \
+            echo "  (no previous container — pod did not restart)"
+        exit 1
     fi
 fi
 

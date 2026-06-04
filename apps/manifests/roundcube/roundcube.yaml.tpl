@@ -237,15 +237,23 @@ spec:
             cpu: "${ROUNDCUBE_CPU_REQUEST}"
           limits:
             memory: "${ROUNDCUBE_MEMORY_LIMIT}"
+        # Probe the app root, NOT a raw skin asset path. Roundcube 1.7 moved the
+        # web docroot to public_html/ and serves all skin/program/plugin assets
+        # through public_html/static.php (e.g. "static.php/skins/mothertree/...").
+        # A raw GET /skins/mothertree/images/logo.svg therefore 404s on 1.7
+        # (it 404s for the built-in elastic skin too) → probe fails → CrashLoop.
+        # GET / returns 200 (the login page) on both 1.6.x and 1.7.x, so it is a
+        # version-stable liveness/readiness signal. The skin still renders via
+        # static.php; e2e covers that the UI actually works.
         livenessProbe:
           httpGet:
-            path: /skins/mothertree/images/logo.svg
+            path: /
             port: 80
           initialDelaySeconds: 30
           periodSeconds: 30
         readinessProbe:
           httpGet:
-            path: /skins/mothertree/images/logo.svg
+            path: /
             port: 80
           initialDelaySeconds: 10
           periodSeconds: 10
