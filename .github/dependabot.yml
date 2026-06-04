@@ -135,11 +135,11 @@ updates:
     groups:
       base-images:
         patterns: ["*"]
-    ignore:
-      # Pinned to 1.6.x. 1.7.0 crash-loops in our custom image (entrypoint
-      # re-copies the stock app over our `mothertree` skin → health probe
-      # 404s) and its updatedb.sh forward-migrates the shared dev DB
-      # (session.changed→expires_at), breaking all 1.6.x branches. Remove
-      # when the deliberate 1.7 cutover lands — tracking issue #430.
-      - dependency-name: "roundcube/roundcubemail"
-        versions: [">= 1.7.0"]
+    # Roundcube is intentionally NOT pinned — upgrades (including majors) flow
+    # freely as Dependabot PRs. (Do not re-add an ignore here.) CI catches the
+    # common breakage: deploy-roundcube.sh fails fast if a new image's rollout
+    # doesn't go Ready (e.g. the 1.7 probe crash-loop fixed in #441) and e2e
+    # covers login. Residual risk a per-branch gate can NOT catch: a major bump's
+    # forward-only updatedb.sh migrating the SHARED dev Postgres and breaking
+    # other concurrent old-version branches (the session.changed→expires_at
+    # poison) — review major Roundcube bumps with issue #430 in mind.
