@@ -724,7 +724,8 @@ fi
 # =============================================================================
 if [ -x "$REPO_ROOT/apps/deploy-llm.sh" ]; then
   print_status "Deploying LLM stack to $NS_LLM namespace..."
-  "$REPO_ROOT/apps/deploy-llm.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+  "$REPO_ROOT/apps/deploy-llm.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /' || \
+    print_warning "LLM deploy incomplete — model may still be pulling on a cold-start node"
 else
   print_warning "deploy-llm.sh not found, skipping LLM stack deployment"
 fi

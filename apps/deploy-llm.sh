@@ -60,8 +60,11 @@ kubectl apply -f "${MANIFESTS_DIR}/ollama-pvc.yaml"
 print_status "Applying Ollama deployment + service..."
 kubectl apply -f "${MANIFESTS_DIR}/ollama.yaml"
 
-print_status "Waiting for Ollama to be ready (model pull may take a few minutes on first run)..."
-kubectl rollout status deployment/ollama -n infra-llm --timeout=600s
+print_status "Waiting for Ollama to be ready (model pull may take 15+ minutes on cold-start cluster)..."
+kubectl rollout status deployment/ollama -n infra-llm --timeout=1200s || {
+  print_warning "Ollama rollout not ready within timeout — dumping pod diagnostics"
+  dump_pod_diagnostics infra-llm "app=ollama"
+}
 
 print_status "Applying Open WebUI deployment + service + ingress..."
 export LLM_DOMAIN
