@@ -336,6 +336,19 @@ pushd "$REPO_ROOT/apps" >/dev/null
     retry_count=$((retry_count + 1))
     if [ $retry_count -lt $max_retries ]; then
       print_warning "helmfile sync failed (attempt $retry_count/$max_retries), retrying in 10 seconds..."
+
+      # Clean up stuck Helm releases left by the failed attempt.
+      # A partial ingress-nginx install can leave the release in a
+      # pending-install state with a held lock, causing subsequent
+      # attempts to fail with "another operation is in progress".
+      for _ns in "$NS_INGRESS" "$NS_INGRESS_INTERNAL"; do
+        helm ls -n "$_ns" --pending -q 2>/dev/null | while read -r _rel; do
+          [ -z "$_rel" ] && continue
+          print_warning "Cleaning up stuck Helm release: $_rel in $_ns"
+          helm uninstall "$_rel" -n "$_ns" 2>/dev/null || true
+        done || true
+      done
+
       sleep 10
     else
       print_error "helmfile sync failed after $max_retries attempts"
