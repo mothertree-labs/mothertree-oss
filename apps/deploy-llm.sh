@@ -117,6 +117,24 @@ envsubst < "${MANIFESTS_DIR}/open-webui.yaml" | kubectl apply -f -
 print_status "Waiting for Open WebUI to be ready..."
 kubectl rollout status deployment/open-webui -n infra-llm --timeout=120s
 
+# =============================================================================
+# Create DNS A record for the LLM domain (points to the cluster ingress LB)
+# =============================================================================
+print_status "Creating DNS record for ${LLM_DOMAIN}..."
+INGRESS_LB_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+if [ -n "$INGRESS_LB_IP" ] && [ -n "${TF_VAR_cloudflare_api_token:-}" ] && [ -n "${TF_VAR_cloudflare_zone_id:-}" ]; then
+  source "${REPO_ROOT}/scripts/lib/dns.sh"
+  create_dns_record "$LLM_DOMAIN" "A" "$INGRESS_LB_IP"
+  print_status "DNS record created: ${LLM_DOMAIN} -> ${INGRESS_LB_IP}"
+elif [ -z "$INGRESS_LB_IP" ]; then
+  print_warning "Could not get ingress LB IP — DNS record not created"
+  print_warning "Create manually: $LLM_DOMAIN A <ingress-lb-ip>"
+else
+  print_warning "Cloudflare credentials not available — DNS record not created"
+  print_warning "Create manually: $LLM_DOMAIN A <ingress-lb-ip>"
+fi
+
 print_status "Verifying pods..."
 kubectl get pods -n infra-llm
 

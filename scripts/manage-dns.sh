@@ -129,6 +129,14 @@ if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
   create_dns_record "lb1.prod.${DOMAIN}" "CNAME" "lb1.prod-eu.${DOMAIN}" "true"
 fi
 
+# 1c. LLM A record — Ollama / Open WebUI (shared infra service)
+if [ -n "$INGRESS_LB_IP" ] && [ -n "$MT_INFRA_CONFIG" ] && [ -f "$MT_INFRA_CONFIG" ]; then
+  LLM_DOMAIN=$(yq '.llm.domain // ""' "$MT_INFRA_CONFIG")
+  if [ -n "$LLM_DOMAIN" ] && [ "$LLM_DOMAIN" != "null" ]; then
+    create_dns_record "$LLM_DOMAIN" "A" "$INGRESS_LB_IP"
+  fi
+fi
+
 # 2. TURN server A record
 if [ -n "${TURN_SERVER_IP:-}" ]; then
   create_dns_record "turn.${ENV_DOT}${DOMAIN}" "A" "$TURN_SERVER_IP"
