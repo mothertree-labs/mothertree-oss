@@ -79,6 +79,7 @@ _mt_infra_set_namespaces() {
   export NS_INGRESS_INTERNAL="infra-ingress-internal"
   export NS_CERTMANAGER="infra-cert-manager"
   export NS_MAIL="infra-mail"
+  export NS_LLM="infra-llm"
 }
 
 # ---------------------------------------------------------------------------

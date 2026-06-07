@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: infra-llm
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/managed-by: mothertree
+    mothertree/component: llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: ollama
+        mothertree/component: llm
+    spec:
+      initContainers:
+        - name: pull-model
+          image: ollama/ollama:latest
+          command:
+            - sh
+            - -c
+            - |
+              ollama serve &
+              OLLAMA_PID=$!
+              echo "Waiting for ollama to be ready..."
+              until curl -sf http://localhost:11434/api/tags > /dev/null; do sleep 1; done
+              echo "Pulling model llama3.2:1b..."
+              ollama pull llama3.2:1b
+              echo "Model ready. Shutting down init server."
+              kill $OLLAMA_PID
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0"
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /root/.ollama
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "3500Mi"
+
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          ports:
+            - name: http
+              containerPort: 11434
+              protocol: TCP
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0"
+            - name: OLLAMA_KEEP_ALIVE
+              value: "30m"
+            - name: OLLAMA_NUM_PARALLEL
+              value: "1"
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /root/.ollama
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2Gi"
+            limits:
+              cpu: "2000m"
+              memory: "3500Mi"
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+
+      volumes:
+        - name: ollama-models
+          persistentVolumeClaim:
+            claimName: ollama-models
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: infra-llm
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/managed-by: mothertree
+    mothertree/component: llm
+spec:
+  selector:
+    app: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: 11434
+      protocol: TCP
+  type: ClusterIP
