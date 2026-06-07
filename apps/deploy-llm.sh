@@ -46,7 +46,9 @@ if [ -z "$LLM_DOMAIN" ] || [ "$LLM_DOMAIN" = "null" ]; then
   exit 1
 fi
 
-print_status "Deploying LLM stack to env=${MT_ENV}, domain=${LLM_DOMAIN}"
+LLM_MODEL=$(yq '.llm.model // "llama3.2:1b"' "$MT_INFRA_CONFIG")
+
+print_status "Deploying LLM stack to env=${MT_ENV}, domain=${LLM_DOMAIN}, model=${LLM_MODEL}"
 
 MANIFESTS_DIR="$REPO_ROOT/apps/manifests/llm"
 mt_require_commands kubectl yq envsubst
@@ -57,11 +59,53 @@ kubectl apply -f "${MANIFESTS_DIR}/namespace.yaml"
 print_status "Applying PVC (model weights storage)..."
 kubectl apply -f "${MANIFESTS_DIR}/ollama-pvc.yaml"
 
-print_status "Applying Ollama deployment + service..."
+# Pre-pull model into PVC before deploying Ollama, so the pod starts instantly.
+# If the pull fails or times out, Ollama will pull the model lazily on first request.
+print_status "Pre-pulling model ${LLM_MODEL} into PVC (this may take 5-15 minutes on first run)..."
+kubectl delete pod ollama-model-pull -n infra-llm --ignore-not-found --grace-period=0 2>/dev/null || true
+cat <<PODEOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ollama-model-pull
+  namespace: infra-llm
+spec:
+  restartPolicy: Never
+  volumes:
+    - name: ollama-models
+      persistentVolumeClaim:
+        claimName: ollama-models
+  containers:
+    - name: pull-model
+      image: ollama/ollama:latest
+      command:
+        - sh
+        - -c
+        - |
+          ollama serve &
+          OLLAMA_PID=\$!
+          until curl -sf http://localhost:11434/api/tags > /dev/null; do sleep 1; done
+          echo "Pulling model ${LLM_MODEL}..."
+          ollama pull ${LLM_MODEL}
+          kill \$OLLAMA_PID
+          echo "Model pulled successfully"
+      env:
+        - name: OLLAMA_HOST
+          value: "0.0.0.0"
+      volumeMounts:
+        - name: ollama-models
+          mountPath: /root/.ollama
+PODEOF
+
+kubectl wait --for=condition=phase=Succeeded pod/ollama-model-pull -n infra-llm --timeout=900s 2>/dev/null || \
+  print_warning "Model pull not complete within timeout — Ollama will pull on first request"
+kubectl delete pod ollama-model-pull -n infra-llm --ignore-not-found --grace-period=0 2>/dev/null || true
+
+print_status "Deploying Ollama..."
 kubectl apply -f "${MANIFESTS_DIR}/ollama.yaml"
 
-print_status "Waiting for Ollama to be ready (model pull may take 15+ minutes on cold-start cluster)..."
-kubectl rollout status deployment/ollama -n infra-llm --timeout=1200s || {
+print_status "Waiting for Ollama to be ready..."
+kubectl rollout status deployment/ollama -n infra-llm --timeout=300s || {
   print_warning "Ollama rollout not ready within timeout — dumping pod diagnostics"
   dump_pod_diagnostics infra-llm "app=ollama"
 }

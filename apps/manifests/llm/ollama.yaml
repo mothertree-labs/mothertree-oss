@@ -20,35 +20,6 @@ spec:
         app: ollama
         mothertree/component: llm
     spec:
-      initContainers:
-        - name: pull-model
-          image: ollama/ollama:latest
-          command:
-            - sh
-            - -c
-            - |
-              ollama serve &
-              OLLAMA_PID=$!
-              echo "Waiting for ollama to be ready..."
-              until curl -sf http://localhost:11434/api/tags > /dev/null; do sleep 1; done
-              echo "Pulling model llama3.2:1b..."
-              ollama pull llama3.2:1b
-              echo "Model ready. Shutting down init server."
-              kill $OLLAMA_PID
-          env:
-            - name: OLLAMA_HOST
-              value: "0.0.0.0"
-          volumeMounts:
-            - name: ollama-models
-              mountPath: /root/.ollama
-          resources:
-            requests:
-              cpu: "500m"
-              memory: "1Gi"
-            limits:
-              cpu: "2000m"
-              memory: "3500Mi"
-
       containers:
         - name: ollama
           image: ollama/ollama:latest
