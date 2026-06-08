@@ -78,7 +78,14 @@ metadata:
     app.kubernetes.io/managed-by: mothertree
     mothertree/component: llm
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # DNS-01 issuer (Cloudflare): the cert is validated via a TXT record that
+    # cert-manager manages itself, so issuance does NOT depend on the public
+    # llm.<domain> record resolving (or on port 80 being reachable) at the
+    # moment of the ACME challenge. This is the same issuer the monitoring
+    # stack uses, and it works behind the proxied Cloudflare CNAME (HTTP-01
+    # would be fragile here because the DNS record is created in a separate
+    # step — see manage-dns.sh §1c).
+    cert-manager.io/cluster-issuer: letsencrypt-prod-dns01
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
