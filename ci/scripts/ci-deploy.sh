@@ -70,6 +70,42 @@ _cleanup() {
 }
 trap _cleanup EXIT
 
+# ── Lease renewal ─────────────────────────────────────────────────
+# Start a background loop that renews the Valkey pool lease (and its
+# reverse-lookup key) every 120s. The PR lease TTL is 1000s (~17 min), but a
+# cold on-demand-dev bring-up (cluster create + system tier + LLM stack) can
+# exceed that — so the lease must be renewed during bring-up too, not only
+# during the tenant deploy. Sets the global _LEASE_RENEWAL_PID so the EXIT
+# trap (_cleanup) can stop it. Idempotent: a second call is a no-op.
+_start_lease_renewal() {
+  [[ -n "${_LEASE_RENEWAL_PID:-}" ]] && return 0          # already running
+  [[ "$ALL_TENANTS" == "true" ]] && return 0             # prod resolves all tenants, no pool lease
+  [[ -z "${CI_VALKEY_PASSWORD:-}" || -z "${CI_PIPELINE_NUMBER:-}" ]] && return 0
+  local _VCLI _POOL
+  _VCLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
+  _POOL=$($_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+    GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || echo "")
+  (
+    # Interruptible 120s wait with no child process: read from a FIFO that has
+    # no writer, so it never delivers data or EOF and `read -t` times out after
+    # the full 120s. `read` is a builtin that EINTRs on SIGTERM, so the EXIT
+    # trap's kill stops this loop promptly and leaves no orphan — unlike `sleep`,
+    # which would outlive the killed subshell and make Woodpecker hang up to
+    # 120s. (Reading from /dev/null hits EOF instantly and busy-spins.)
+    _wait_fifo=$(mktemp -u); mkfifo "$_wait_fifo"; exec 9<>"$_wait_fifo"; rm -f "$_wait_fifo"
+    while true; do
+      read -t 120 -u 9 _ || true
+      $_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+        EXPIRE "ci-lease-${_POOL}" 1000 >/dev/null 2>&1 || true
+      $_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
+        EXPIRE "ci-build-${CI_PIPELINE_NUMBER}" 1000 >/dev/null 2>&1 || true
+      echo "Renewed tenant lease (pool=${_POOL}, pipeline=#${CI_PIPELINE_NUMBER})"
+    done
+  ) &
+  _LEASE_RENEWAL_PID=$!
+  echo "Started lease renewal background process (PID: $_LEASE_RENEWAL_PID)"
+}
+
 echo "Decrypting deploy vault ($MT_ENV) → $WORK_DIR"
 ansible-vault decrypt "$VAULT_FILE" \
   --vault-password-file <(echo "$DEPLOY_VAULT_PASSWORD") \
@@ -179,6 +215,11 @@ if [[ "$BRINGUP_ONLY" == "true" ]]; then
     exit 1
   fi
   echo "=== Bring-up only: ensuring dev cluster exists ==="
+  # Keep the pool lease alive for the whole bring-up: a cold cluster create +
+  # system-tier + LLM stack can run well past the 1000s lease TTL, and without
+  # this the lease expires before the downstream deploy-dev-prep step resolves
+  # the leased tenant ("No pool lease found"). The EXIT trap stops it.
+  _start_lease_renewal
   # Don't exec — let the cleanup trap fire on the way out so $WORK_DIR is
   # scrubbed and the heartbeat is touched. dev-bringup.sh ALSO touches the
   # heartbeat on success; the double-touch is harmless (last writer wins).
@@ -224,30 +265,9 @@ if [[ ${#TENANTS[@]} -eq 0 ]]; then
 fi
 
 # ── Keep tenant lease alive during deploy ─────────────────────────
-# The deploy can take 10+ minutes but the Valkey lease TTL is 600s.
-# Renew both the lease key and reverse-lookup key every 120s in the background.
-_LEASE_RENEWAL_PID=""
-if [[ "$ALL_TENANTS" != "true" ]] && [[ -n "${CI_VALKEY_PASSWORD:-}" ]] && [[ -n "${CI_PIPELINE_NUMBER:-}" ]]; then
-  _VCLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
-  _POOL=$($_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-    GET "ci-build-${CI_PIPELINE_NUMBER}" 2>/dev/null || echo "")
-  (
-    while true; do
-      # Use `read -t` instead of `sleep` — read is a bash builtin that's
-      # interruptible by SIGTERM, so the trap can cleanly kill this subshell.
-      # `sleep` spawns a separate process that ignores the parent's SIGTERM,
-      # causing Woodpecker to hang for up to 120s waiting for it to exit.
-      read -t 120 < /dev/null || true
-      $_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-        EXPIRE "ci-lease-${_POOL}" 1000 >/dev/null 2>&1 || true
-      $_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-        EXPIRE "ci-build-${CI_PIPELINE_NUMBER}" 1000 >/dev/null 2>&1 || true
-      echo "Renewed tenant lease (pool=${_POOL}, pipeline=#${CI_PIPELINE_NUMBER})"
-    done
-  ) &
-  _LEASE_RENEWAL_PID=$!
-  echo "Started lease renewal background process (PID: $_LEASE_RENEWAL_PID)"
-fi
+# Renew the pool lease every 120s so it survives a 10+ min deploy. If the
+# --bringup-only step already started the renewal loop, this is a no-op.
+_start_lease_renewal
 
 # ── Acquire deploy lock (prod only) ──────────────────────────────
 # Valkey-based locking to prevent concurrent deploys to the same env.
