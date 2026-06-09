@@ -59,47 +59,12 @@ kubectl apply -f "${MANIFESTS_DIR}/namespace.yaml"
 print_status "Applying PVC (model weights storage)..."
 kubectl apply -f "${MANIFESTS_DIR}/ollama-pvc.yaml"
 
-# Pre-pull model into PVC before deploying Ollama, so the pod starts instantly.
-# If the pull fails or times out, Ollama will pull the model lazily on first request.
-print_status "Pre-pulling model ${LLM_MODEL} into PVC (this may take 5-15 minutes on first run)..."
-kubectl delete pod ollama-model-pull -n infra-llm --ignore-not-found --grace-period=0 2>/dev/null || true
-cat <<PODEOF | kubectl apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ollama-model-pull
-  namespace: infra-llm
-spec:
-  restartPolicy: Never
-  volumes:
-    - name: ollama-models
-      persistentVolumeClaim:
-        claimName: ollama-models
-  containers:
-    - name: pull-model
-      image: ollama/ollama:latest
-      command:
-        - sh
-        - -c
-        - |
-          ollama serve &
-          OLLAMA_PID=\$!
-          until curl -sf http://localhost:11434/api/tags > /dev/null; do sleep 1; done
-          echo "Pulling model ${LLM_MODEL}..."
-          ollama pull ${LLM_MODEL}
-          kill \$OLLAMA_PID
-          echo "Model pulled successfully"
-      env:
-        - name: OLLAMA_HOST
-          value: "0.0.0.0"
-      volumeMounts:
-        - name: ollama-models
-          mountPath: /root/.ollama
-PODEOF
-
-kubectl wait --for=condition=phase=Succeeded pod/ollama-model-pull -n infra-llm --timeout=900s 2>/dev/null || \
-  print_warning "Model pull not complete within timeout — Ollama will pull on first request"
-kubectl delete pod ollama-model-pull -n infra-llm --ignore-not-found --grace-period=0 2>/dev/null || true
+# The model is NOT pre-pulled with a blocking wait here. Doing so previously
+# ran a separate ollama-model-pull pod gated by `kubectl wait --timeout=900s`,
+# which on a cold cluster blocked deploy_infra for the full 15 min — and during
+# on-demand-dev bring-up that pushed the run past the CI tenant lease TTL. The
+# model is instead warmed in the background AFTER Ollama is up (see below), and
+# Ollama pulls it lazily on first request regardless.
 
 print_status "Deploying Ollama..."
 kubectl apply -f "${MANIFESTS_DIR}/ollama.yaml"
@@ -109,6 +74,26 @@ kubectl rollout status deployment/ollama -n infra-llm --timeout=300s || {
   print_warning "Ollama rollout not ready within timeout — dumping pod diagnostics"
   dump_pod_diagnostics infra-llm "app=ollama"
 }
+
+# Warm the model into the PVC in the background — non-blocking and best-effort.
+# Runs `ollama pull` inside the already-running Ollama pod via nohup so it
+# survives this exec returning; the pull proceeds server-side and lands in the
+# shared ollama-models PVC. The deploy does NOT wait for it, so a cold-cluster
+# pull no longer blocks bring-up. Ollama also pulls lazily on first request, so
+# a slow or failed warm-up is harmless.
+_ollama_pod=$(kubectl get pod -n infra-llm -l app=ollama \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "${_ollama_pod}" ]; then
+  print_status "Warming model ${LLM_MODEL} in the background (non-blocking)..."
+  # Pass the model as a positional arg ("$1") rather than interpolating it into
+  # the remote shell string, so a model name with spaces/metacharacters can't be
+  # re-parsed inside the pod's `sh -c`.
+  kubectl exec -n infra-llm "${_ollama_pod}" -- \
+    sh -c 'nohup ollama pull "$1" >/tmp/model-pull.log 2>&1 &' _ "${LLM_MODEL}" 2>/dev/null || \
+    print_warning "Could not start background model warm-up — Ollama will pull on first request"
+else
+  print_warning "Ollama pod not found — skipping warm-up (Ollama will pull on first request)"
+fi
 
 print_status "Applying Open WebUI deployment + service + ingress..."
 export LLM_DOMAIN
