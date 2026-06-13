@@ -16,6 +16,7 @@
   "ssoSessionMaxLifespanRememberMe": 2592000,
   "offlineSessionIdleTimeout": 2592000,
   "offlineSessionMaxLifespan": 2592000,
+  "offlineSessionMaxLifespanEnabled": true,
   "webAuthnPolicyPasswordlessRpEntityName": "${TENANT_DISPLAY_NAME}",
   "webAuthnPolicyPasswordlessSignatureAlgorithms": ["ES256", "RS256"],
   "webAuthnPolicyPasswordlessRpId": "${EMAIL_DOMAIN}",

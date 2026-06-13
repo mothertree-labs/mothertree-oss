@@ -194,6 +194,13 @@ export TLS_EMAIL="$TF_VAR_tls_email"
 print_status "Wildcard domains: external=$WILDCARD_DOMAIN_EXTERNAL, internal=$WILDCARD_DOMAIN_INTERNAL"
 print_status "Reflector target namespaces: $TENANT_NAMESPACES"
 
+# Restore cached dev wildcard/apex TLS secrets (if any) BEFORE applying the
+# Certificate, so cert-manager adopts the valid existing secret instead of
+# re-issuing — sidesteps LE's 5-certs/week per-identifier-set limit that the
+# reaper's cluster churn keeps tripping. No-op on prod / when no cache exists.
+"$REPO_ROOT/scripts/dev-cert-cache.sh" restore "$NS_MATRIX" "$TENANT_NAME" \
+  || print_warning "dev-cert-cache restore skipped (non-fatal — cert-manager will issue)"
+
 envsubst < "$REPO_ROOT/apps/manifests/wildcard/certificate.yaml.tpl" | kubectl apply -f -
 print_status "Wildcard certificate resources applied"
 
@@ -262,6 +269,12 @@ if [ "$CERT_OK" != "true" ]; then
     print_warning "Continuing deployment — ingresses will use certs once they're issued"
   fi
 fi
+
+# Cache the issued wildcard/apex secrets so the next freshly-reaped dev cluster
+# restores them (above) instead of re-issuing from Let's Encrypt. Only backs up
+# certs with comfortable life left; no-op on prod / when the cert isn't ready.
+"$REPO_ROOT/scripts/dev-cert-cache.sh" backup "$NS_MATRIX" "$TENANT_NAME" \
+  || print_warning "dev-cert-cache backup skipped (non-fatal)"
 
 # =============================================================================
 # Deploy NetworkPolicies for tenant isolation

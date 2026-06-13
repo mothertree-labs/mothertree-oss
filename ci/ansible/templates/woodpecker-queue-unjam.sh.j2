@@ -1,0 +1,128 @@
+#!/bin/bash
+# Woodpecker queue-zombie auto-unjam.
+#
+# Mitigates the recurring Woodpecker queue-backup desync bug (seen on 3.14.x and
+# 3.15.x): when a pipeline is superseded/cancelled (Dependabot bursts, force-
+# pushes), rows linger in the `tasks` queue table whose backing `workflows` row
+# has already reached a terminal state. The server then tight-loops
+#   "queue: resubmitting expired task <id>"
+#   "pull queue item: <id>: failed to remove from backup: sql: no rows in result set"
+#   "caught agent performing illegal instruction: workflow was already marked as finished"
+# saturating every agent worker slot with phantom tasks, so NEW pipelines never
+# get scheduled. User-visible symptom: "CI not starting pipelines" (it is — the
+# slots are just starved). Clearing the in-memory queue requires a server
+# restart, not just a DB delete, which is why this does delete + restart.
+#
+# This script detects that exact fingerprint and applies the validated recovery
+# (stop services -> backup DB -> delete ONLY the zombie task rows -> restart),
+# then exits. It is a SAFE no-op in healthy operation: it acts ONLY when BOTH
+# the error-loop journal signature AND live zombie task rows are present, so it
+# never touches a healthy queue with legitimately running work. The delete is
+# surgical and fails SAFE: it removes only tasks whose backing workflow is in a
+# known TERMINAL state (or is missing). Any non-terminal or unrecognised state
+# is preserved — validated against a live running pipeline.
+#
+# Deployed by Ansible, run every 5 minutes via cron under flock.
+# Managed by Ansible — do not edit manually on the CI server.
+# See memory: woodpecker-queue-zombies.
+
+set -euo pipefail
+umask 077   # DB backups are full copies of woodpecker.sqlite (holds CI secrets)
+
+LOG_PREFIX="[wp-unjam]"
+DB="{{ woodpecker_db_path | default('/var/lib/woodpecker/woodpecker.sqlite') }}"
+SERVER_UNIT="woodpecker-server"
+AGENT_UNIT="woodpecker-agent"
+
+# Detection thresholds. The bug produces a relentless loop (~24 resubmits / 2min
+# observed); healthy operation produces zero. Require BOTH signals so we never
+# act on the millisecond race where a task row briefly outlives its just-
+# finished workflow, nor on stale journal lines lingering after a prior unjam.
+LOOP_WINDOW_MIN={{ wp_unjam_loop_window_min | default(10) }}   # journal lookback (min)
+LOOP_THRESHOLD={{ wp_unjam_loop_threshold | default(20) }}     # min "resubmitting expired" lines in window
+ZOMBIE_THRESHOLD={{ wp_unjam_zombie_threshold | default(5) }}  # min zombie task rows to act on
+KEEP_BACKUPS={{ wp_unjam_keep_backups | default(5) }}          # auto-unjam DB backups to retain
+
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Self-heal a prior botched recovery: if a unit is `failed` (crashed / failed to
+# start), bring it back before doing anything else. `is-failed` is true only for
+# failed units, NOT for a deliberate `systemctl stop` (which leaves `inactive`),
+# so this won't fight an operator doing maintenance.
+for _unit in "$SERVER_UNIT" "$AGENT_UNIT"; do
+  if systemctl is-failed --quiet "$_unit"; then
+    echo "$(ts) $LOG_PREFIX $_unit is failed — restarting"
+    systemctl restart "$_unit" || echo "$(ts) $LOG_PREFIX WARNING: could not restart $_unit"
+  fi
+done
+
+# A task is a ZOMBIE when no backing workflow is in a non-terminal state — i.e.
+# the workflow is missing, or has reached a TERMINAL state. Terminal states are
+# enumerated explicitly (DELETE allowlist) so any unknown/future or non-terminal
+# state (pending, running, created, blocked, ...) fails SAFE and is preserved.
+# Woodpecker terminal workflow states: success/failure/killed/canceled/error/
+# declined/skipped. tasks.id (TEXT) == workflows.id (INTEGER).
+ZOMBIE_PREDICATE="NOT EXISTS (
+  SELECT 1 FROM workflows w
+  WHERE CAST(w.id AS TEXT) = tasks.id
+    AND w.state NOT IN ('success','failure','killed','canceled','error','declined','skipped'))"
+
+# --- Signal 1: error-loop fingerprint in the server journal ---
+loop_count=$(journalctl -u "$SERVER_UNIT" --since "${LOOP_WINDOW_MIN} min ago" --no-pager 2>/dev/null \
+  | grep -c "resubmitting expired task" || true)
+loop_count=${loop_count:-0}
+
+# --- Signal 2: live zombie task rows ---
+# `.timeout` dot-command (not `PRAGMA busy_timeout`) so it sets the busy timeout
+# silently — a PRAGMA would emit its own result row and corrupt the count.
+zombie_count=$(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT count(*) FROM tasks WHERE ${ZOMBIE_PREDICATE};" 2>/dev/null || echo 0)
+zombie_count=${zombie_count:-0}
+
+# Healthy: stay silent to keep the log clean.
+if [ "$loop_count" -lt "$LOOP_THRESHOLD" ] && [ "$zombie_count" -lt "$ZOMBIE_THRESHOLD" ]; then
+  exit 0
+fi
+
+# Exactly one signal — note it but do NOT act (transient race / stale journal).
+if [ "$loop_count" -lt "$LOOP_THRESHOLD" ] || [ "$zombie_count" -lt "$ZOMBIE_THRESHOLD" ]; then
+  echo "$(ts) $LOG_PREFIX partial signal only (loop=$loop_count/$LOOP_THRESHOLD zombies=$zombie_count/$ZOMBIE_THRESHOLD) — not acting"
+  exit 0
+fi
+
+# --- Both signals present: confirmed queue-zombie jam. Apply recovery. ---
+echo "$(ts) $LOG_PREFIX JAM DETECTED (loop=$loop_count in ${LOOP_WINDOW_MIN}m, zombies=$zombie_count) — applying recovery"
+
+echo "$(ts) $LOG_PREFIX stopping $AGENT_UNIT $SERVER_UNIT"
+systemctl stop "$AGENT_UNIT" "$SERVER_UNIT"
+
+backup="${DB}.bak-autounjam-$(date -u +%Y%m%dT%H%M%SZ)"
+echo "$(ts) $LOG_PREFIX backing up DB -> $backup"
+sqlite3 "$DB" ".backup '$backup'"
+chmod 600 "$backup"
+
+tasks_before=$(sqlite3 "$DB" "SELECT count(*) FROM tasks;" 2>/dev/null || echo '?')
+deleted=$(sqlite3 "$DB" "DELETE FROM tasks WHERE ${ZOMBIE_PREDICATE}; SELECT changes();" 2>/dev/null | tail -1)
+tasks_after=$(sqlite3 "$DB" "SELECT count(*) FROM tasks;" 2>/dev/null || echo '?')
+echo "$(ts) $LOG_PREFIX deleted ${deleted:-?} zombie task row(s) (tasks: $tasks_before -> $tasks_after)"
+
+# Resilient restart: attempt BOTH starts even if one fails, so the single-VM CI
+# host is never left half-down. A failed unit is re-attempted by the self-heal
+# block at the top of the next tick.
+echo "$(ts) $LOG_PREFIX restarting $SERVER_UNIT then $AGENT_UNIT"
+set +e
+systemctl start "$SERVER_UNIT"; srv_rc=$?
+sleep 4
+systemctl start "$AGENT_UNIT"; agt_rc=$?
+set -e
+if [ "$srv_rc" -ne 0 ] || [ "$agt_rc" -ne 0 ]; then
+  echo "$(ts) $LOG_PREFIX WARNING: start rc server=$srv_rc agent=$agt_rc — will self-heal next tick"
+fi
+
+# Prune old auto-unjam backups (keep newest $KEEP_BACKUPS).
+mapfile -t _old < <(ls -1t "${DB}".bak-autounjam-* 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) || true)
+if [ "${#_old[@]}" -gt 0 ]; then
+  rm -f "${_old[@]}"
+  echo "$(ts) $LOG_PREFIX pruned ${#_old[@]} old backup(s)"
+fi
+
+echo "$(ts) $LOG_PREFIX recovery complete"

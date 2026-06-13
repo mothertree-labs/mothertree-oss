@@ -260,7 +260,7 @@ fi
 
 kubectl -n "$NS_DOCS" delete job/docs-db-init --ignore-not-found=true || true
 envsubst '${DOCS_DB_NAME} ${TENANT_DB_USER} ${PG_HOST} ${KEYCLOAK_DB_PASSWORD}' < "$REPO_ROOT/docs/db-init-job.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
-if ! poll_job_complete "$NS_DOCS" "docs-db-init" 180 5; then
+if ! poll_job_complete "$NS_DOCS" "docs-db-init" 300 5; then
     print_error "Database initialization failed"
     exit 1
 fi
@@ -276,7 +276,11 @@ cat "$REPO_ROOT/docs/migrations-job.yaml" | \
   sed "s/namespace: docs/namespace: $NS_DOCS/g" | \
   sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g" | \
   kubectl apply -f -
-if ! poll_job_complete "$NS_DOCS" "docs-migrations" 300 5; then
+# Widened 300s→900s: a cold/contended dev cluster has stretched the Django
+# app-import in this job to ~3.5min (CPU starvation during concurrent tenant
+# deploys), and the job completed at ~520s — past the old 300s poll, which then
+# failed the deploy while the migration was still running. 900s tolerates that.
+if ! poll_job_complete "$NS_DOCS" "docs-migrations" 900 5; then
     print_error "Database migrations failed"
     exit 1
 fi
