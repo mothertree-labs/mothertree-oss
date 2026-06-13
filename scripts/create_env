@@ -187,6 +187,51 @@ if [ "$OFFICE_ENABLED" = "true" ]; then
   export TENANT_NAMESPACES="${TENANT_NAMESPACES},${NS_OFFICE}"
 fi
 
+if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
+  # =========================================================================
+  # External-DNS tenant: multi-SAN HTTP-01 certificate (no Cloudflare access)
+  # =========================================================================
+  # We can't DNS-01 a zone we don't control (no wildcard possible). Issue ONE
+  # multi-SAN cert via the shared letsencrypt-prod HTTP-01 issuer over the
+  # enabled public service hosts, into the SAME secret the ingresses already
+  # reference (wildcard-tls-${TENANT_NAME}, reflected) -> no ingress changes.
+  # Internal/operator hosts and the bare apex are excluded by design (they are
+  # not publicly reachable for HTTP-01 / the apex is the tenant's own website).
+  print_status "Deploying HTTP-01 multi-SAN TLS certificate for $TENANT_NAME (dns_external=true)..."
+
+  # Build the SAN list from enabled, publicly-reachable services. HTTP-01 is
+  # all-or-nothing across SANs, so every included host's CNAME must resolve to us.
+  CERT_SAN_LINES=""
+  [ "$MATRIX_ENABLED" = "true" ]         && CERT_SAN_LINES+="    - \"${MATRIX_HOST}\""$'\n'
+  CERT_SAN_LINES+="    - \"${AUTH_HOST}\""$'\n'
+  [ "$JITSI_ENABLED" = "true" ]          && CERT_SAN_LINES+="    - \"${JITSI_HOST}\""$'\n'
+  [ "$DOCS_ENABLED" = "true" ]           && CERT_SAN_LINES+="    - \"${DOCS_HOST}\""$'\n'
+  [ "$FILES_ENABLED" = "true" ]          && CERT_SAN_LINES+="    - \"${FILES_HOST}\""$'\n'
+  [ "$CALENDAR_ENABLED" = "true" ]       && CERT_SAN_LINES+="    - \"${CALENDAR_HOST}\""$'\n'
+  [ "$OFFICE_ENABLED" = "true" ]         && CERT_SAN_LINES+="    - \"${OFFICE_HOST}\""$'\n'
+  [ "$ADMIN_PORTAL_ENABLED" = "true" ]   && CERT_SAN_LINES+="    - \"${ADMIN_HOST}\""$'\n'
+  [ "$ACCOUNT_PORTAL_ENABLED" = "true" ] && CERT_SAN_LINES+="    - \"${ACCOUNT_HOST}\""$'\n'
+  export CERT_SAN_LINES
+  print_status "HTTP-01 certificate SANs:"
+  printf '%s' "$CERT_SAN_LINES"
+
+  # Remove any pre-existing DNS-01 wildcard/apex Certificates so they don't fight
+  # over the shared wildcard-tls-${TENANT_NAME} secret (e.g. a tenant that moved
+  # from in-zone to external DNS). Safe no-op when absent.
+  kubectl delete certificate wildcard-tls apex-tls -n "$NS_MATRIX" --ignore-not-found 2>/dev/null || true
+
+  envsubst < "$REPO_ROOT/apps/manifests/wildcard/certificate-http01.yaml.tpl" | kubectl apply -f -
+  print_status "HTTP-01 certificate applied; waiting for issuance (up to 300s)..."
+  if kubectl wait --for=condition=Ready certificate/wildcard-tls -n "$NS_MATRIX" --timeout=300s 2>/dev/null; then
+    print_success "wildcard-tls (HTTP-01 multi-SAN) is ready"
+  else
+    print_warning "wildcard-tls (HTTP-01) not ready after 300s"
+    print_warning "  HTTP-01 is all-or-nothing: confirm every SAN host's CNAME resolves to our ingress."
+    print_warning "  Debug: kubectl describe certificate wildcard-tls -n $NS_MATRIX ; kubectl get challenge -n $NS_MATRIX"
+    print_warning "Continuing — ingresses will serve the cert once issued."
+  fi
+else
+
 # Export Cloudflare token and TLS email for the certificate template
 export CLOUDFLARE_API_TOKEN="$TF_VAR_cloudflare_api_token"
 export TLS_EMAIL="$TF_VAR_tls_email"
@@ -296,6 +341,7 @@ fi
 # certs with comfortable life left; no-op on prod / when the cert isn't ready.
 "$REPO_ROOT/scripts/dev-cert-cache.sh" backup "$NS_MATRIX" "$TENANT_NAME" \
   || print_warning "dev-cert-cache backup skipped (non-fatal)"
+fi  # end DNS_EXTERNAL cert branch (HTTP-01 multi-SAN vs DNS-01 wildcard+apex)
 
 # =============================================================================
 # Deploy NetworkPolicies for tenant isolation
@@ -317,6 +363,14 @@ fi
 # Validate Cloudflare IP ranges before creating DNS records (firewall depends on these)
 print_status "Validating Cloudflare IP ranges..."
 "$REPO_ROOT/scripts/check-cloudflare-ips" || { print_error "Cloudflare IPs changed. Run: ./scripts/check-cloudflare-ips --update"; exit 1; }
+
+if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
+  # Tenant manages its own DNS zone — we have no Cloudflare API access to it, so
+  # skip all tenant DNS record creation (per-service CNAMEs, MX/SPF/DKIM/DMARC).
+  # The tenant points their service CNAMEs at our LB alias themselves.
+  # (dns_external is rejected with mail_enabled at config load — see config.sh.)
+  print_status "DNS managed externally by tenant (dns_external=true) — skipping Cloudflare tenant DNS record creation"
+else
 
 # Each tenant needs DNS records for their subdomains pointing to the ingress
 print_status "Creating tenant DNS records..."
@@ -478,6 +532,8 @@ else
     fi
   fi
 fi
+
+fi  # end DNS_EXTERNAL DNS-record guard
 
 # Apply PriorityClass for critical services (must exist before JVB/y-provider deploy)
 print_status "Applying PriorityClass for critical services..."
