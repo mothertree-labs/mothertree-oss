@@ -129,22 +129,6 @@ if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
   create_dns_record "lb1.prod.${DOMAIN}" "CNAME" "lb1.prod-eu.${DOMAIN}" "true"
 fi
 
-# 1c. LLM CNAME — Ollama / Open WebUI (shared infra service).
-# Points at the same proxied LB record as every other public service
-# (lb2.prod for prod, lb1.<label> for dev/prod-eu) instead of a direct
-# origin A record, so it inherits Cloudflare proxy/WAF/DDoS protection and
-# does not leak the origin ingress IP. No dependency on $INGRESS_LB_IP: the
-# CNAME target is a name, and TLS is issued via DNS-01, which does not need
-# this record to resolve at issuance time.
-# This is the single source of truth for the LLM record (deploy-llm.sh no
-# longer creates it) — keeps infra DNS ownership in one place per CLAUDE.md.
-if [ -n "$MT_INFRA_CONFIG" ] && [ -f "$MT_INFRA_CONFIG" ]; then
-  LLM_DOMAIN=$(yq '.llm.domain // ""' "$MT_INFRA_CONFIG")
-  if [ -n "$LLM_DOMAIN" ] && [ "$LLM_DOMAIN" != "null" ]; then
-    create_dns_record "$LLM_DOMAIN" "CNAME" "${LB1_SUBDOMAIN}.${DOMAIN}" "$CF_PROXIED"
-  fi
-fi
-
 # 2. TURN server A record
 if [ -n "${TURN_SERVER_IP:-}" ]; then
   create_dns_record "turn.${ENV_DOT}${DOMAIN}" "A" "$TURN_SERVER_IP"

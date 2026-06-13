@@ -733,14 +733,14 @@ else
 fi
 
 # =============================================================================
-# Deploy LLM stack (Ollama + Open WebUI)
+# Deploy Ollama inference engine (shared LLM backend)
 # =============================================================================
 if [ -x "$REPO_ROOT/apps/deploy-llm.sh" ]; then
-  print_status "Deploying LLM stack to $NS_LLM namespace..."
+  print_status "Deploying Ollama inference engine..."
   "$REPO_ROOT/apps/deploy-llm.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /' || \
-    print_warning "LLM deploy incomplete — model may still be pulling on a cold-start node"
+    print_warning "Ollama deploy incomplete — model may still be pulling on a cold-start node"
 else
-  print_warning "deploy-llm.sh not found, skipping LLM stack deployment"
+  print_warning "deploy-llm.sh not found, skipping Ollama deployment"
 fi
 
 # Deploy Tailscale subnet router for operator access to internal services.
@@ -768,7 +768,7 @@ echo "  - $NS_INGRESS (Public ingress)"
 echo "  - $NS_INGRESS_INTERNAL (Internal ingress)"
 echo "  - $NS_CERTMANAGER (Cert-manager)"
 echo "  - $NS_MAIL (Postfix SMTP)"
-echo "  - $NS_LLM (Ollama + Open WebUI)"
+echo "  - $NS_LLM (Ollama)"
 echo ""
 echo "Next steps:"
 echo "  Deploy tenants with: ./scripts/create_env -e $MT_ENV -t <tenant>"

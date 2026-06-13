@@ -151,7 +151,9 @@ _mt_load_tenant_yaml() {
     "DEFAULT_EMAIL_QUOTA_MB=" + (.email.default_quota_mb // 5120 | tostring | @sh) + "\n" +
     "PRIVACY_POLICY_URL=" + (.policies.privacy_policy_url // "" | @sh) + "\n" +
     "TERMS_OF_USE_URL=" + (.policies.terms_of_use_url // "" | @sh) + "\n" +
-    "ACCEPTABLE_USE_POLICY_URL=" + (.policies.acceptable_use_policy_url // "" | @sh)
+    "ACCEPTABLE_USE_POLICY_URL=" + (.policies.acceptable_use_policy_url // "" | @sh) + "\n" +
+    "LLM_ENABLED=" + (.features.llm_enabled // false | tostring | @sh) + "\n" +
+    "LLM_SUBDOMAIN=" + (.dns.llm_subdomain // "llm" | @sh)
   ' "$TENANT_CONFIG")"
 
   # Validate required fields
@@ -237,6 +239,7 @@ _mt_derive_hostnames() {
     export OFFICE_HOST="office.${label}.${TENANT_DOMAIN}"
     export MATRIX_SERVER_NAME="${label}.${TENANT_DOMAIN}"
     export WEBADMIN_HOST="webadmin.internal.${label}.${TENANT_DOMAIN}"
+    export LLM_HOST="${LLM_SUBDOMAIN}.${label}.${TENANT_DOMAIN}"
   else
     export MATRIX_HOST="matrix.${TENANT_DOMAIN}"
     export SYNAPSE_HOST="synapse.${TENANT_DOMAIN}"
@@ -256,6 +259,7 @@ _mt_derive_hostnames() {
     export OFFICE_HOST="office.${TENANT_DOMAIN}"
     export MATRIX_SERVER_NAME="${TENANT_DOMAIN}"
     export WEBADMIN_HOST="webadmin.prod.${TENANT_DOMAIN}"
+    export LLM_HOST="${LLM_SUBDOMAIN}.${TENANT_DOMAIN}"
   fi
 }
 
@@ -275,6 +279,7 @@ _mt_set_namespaces() {
   export NS_ADMIN="${TENANT_NS_PREFIX}-admin"
   export NS_OFFICE="${TENANT_NS_PREFIX}-office"
   export NS_HOME="${TENANT_NS_PREFIX}-home"
+  export NS_LLM="${TENANT_NS_PREFIX}-llm"
 
   # Shared infrastructure namespaces
   export NS_DB="infra-db"
@@ -478,7 +483,8 @@ _mt_load_tenant_secrets() {
     "_ALERTBOT_HOMESERVER=" + (.alertbot.homeserver // "" | @sh) + "\n" +
     "GOOGLE_CLIENT_ID=" + (.google.client_id // "" | @sh) + "\n" +
     "GOOGLE_CLIENT_SECRET=" + (.google.client_secret // "" | @sh) + "\n" +
-    "HEALTHCHECKS_DEADMAN_URL=" + (.healthchecks.deadman_url // "" | @sh)
+    "HEALTHCHECKS_DEADMAN_URL=" + (.healthchecks.deadman_url // "" | @sh) + "\n" +
+    "LLM_OIDC_CLIENT_SECRET=" + (.oidc.open_webui_client_secret // "" | @sh)
   ' "$TENANT_SECRETS")"
 
   # Derived secrets
@@ -594,6 +600,7 @@ _mt_export_all() {
   export WEBMAIL_ENABLED ADMIN_PORTAL_ENABLED ACCOUNT_PORTAL_ENABLED GOOGLE_IMPORT_ENABLED EMAIL_PROBE_ENABLED
   export LOGIN_PASSKEY_ENABLED LOGIN_MAGIC_LINK_ENABLED LOGIN_GOOGLE_SSO_ENABLED
   export EMAIL_PROBE_TARGET_EMAIL
+  export LLM_ENABLED LLM_SUBDOMAIN LLM_OIDC_CLIENT_SECRET
   export MATRIX_HOST SYNAPSE_HOST SYNAPSE_ADMIN_HOST ADMIN_HOST ACCOUNT_HOST
   export KEYCLOAK_INTERNAL_URL="http://keycloak-keycloakx-http.infra-auth.svc.cluster.local"
 
@@ -608,10 +615,10 @@ _mt_export_all() {
   export RATE_LIMIT_WINDOW_MS="${RATE_LIMIT_WINDOW_MS:-60000}"  # 1 minute
   export DOCS_HOST FILES_HOST JITSI_HOST HOME_HOST AUTH_HOST
   export MAIL_HOST IMAP_HOST SMTP_HOST WEBMAIL_HOST CALENDAR_HOST OFFICE_HOST
-  export MATRIX_SERVER_NAME WEBADMIN_HOST
+  export MATRIX_SERVER_NAME WEBADMIN_HOST LLM_HOST
   export TENANT_NS_PREFIX NS_MATRIX NS_DOCS NS_FILES NS_JITSI
   export NS_STALWART NS_WEBMAIL NS_ADMIN NS_OFFICE NS_HOME
-  export NS_DB NS_AUTH NS_MONITORING NS_INGRESS NS_INGRESS_INTERNAL NS_CERTMANAGER NS_MAIL
+  export NS_DB NS_AUTH NS_MONITORING NS_INGRESS NS_INGRESS_INTERNAL NS_CERTMANAGER NS_MAIL NS_LLM
 
   export HELM_DIFF_USE_HELM_TEMPLATE=true
 }

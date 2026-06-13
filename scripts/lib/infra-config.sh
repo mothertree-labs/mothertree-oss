@@ -143,6 +143,10 @@ _mt_infra_load_env_config() {
     # TURN server Tailscale IP (for Ansible inventory mesh fallback)
     TURN_TAILSCALE_IP=$(yq '.turn.tailscale_ip // ""' "$infra_config")
     export TURN_TAILSCALE_IP
+
+    # LLM inference model (shared Ollama)
+    LLM_MODEL=$(yq '.llm.model // "llama3.2:1b"' "$infra_config")
+    export LLM_MODEL
   else
     echo "[WARNING] Infrastructure config not found: $infra_config"
     echo "[WARNING] Using defaults: PG_READ_REPLICAS=1, KEYCLOAK_REPLICAS=2"

@@ -25,6 +25,7 @@ dns:
   account_subdomain: account    # account.dev.example.com (user self-service portal)
   calendar_subdomain: calendar  # calendar.dev.example.com
   office_subdomain: office      # office.dev.example.com
+  llm_subdomain: llm            # llm.dev.example.com
   # For dev, include env label in DNS (matrix.dev.example.com)
   env_dns_label: dev
   # Cookie domain for shared authentication
@@ -175,6 +176,15 @@ resources:
   redis:
     replicas: 1  # 0 = standalone, 1+ = sentinel mode
 
+  # LLM WebUI - stateless, scales with HPA
+  llm:
+    min_replicas: 1
+    max_replicas: 5
+    memory_request: 512Mi
+    memory_limit: 1Gi
+    cpu_request: 100m
+    storage_size: 500Mi  # Conversation history PVC
+
 # Legal / policy document URLs (displayed in portal footers, login page, emails)
 # Leave empty to hide policy links
 policies:
@@ -201,6 +211,7 @@ features:
   calendar_enabled: true
   office_enabled: true
   google_import_enabled: false
+  llm_enabled: true
   # Login methods enabled for this tenant. At least one must be true.
   # Defaults if omitted: passkey + magic_link enabled, google_sso disabled.
   login_methods:

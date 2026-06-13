@@ -1,8 +1,40 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-data
+  namespace: ${NS_LLM}
+  labels:
+    app.kubernetes.io/name: open-webui
+    app.kubernetes.io/managed-by: mothertree
+    mothertree/component: llm
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: linode-block-storage-retain
+  resources:
+    requests:
+      storage: ${LLM_STORAGE_SIZE:-500Mi}
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: open-webui-oidc
+  namespace: ${NS_LLM}
+  labels:
+    app.kubernetes.io/name: open-webui
+    app.kubernetes.io/managed-by: mothertree
+    mothertree/component: llm
+type: Opaque
+stringData:
+  client-secret: "${LLM_OIDC_CLIENT_SECRET}"
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: open-webui
-  namespace: infra-llm
+  namespace: ${NS_LLM}
   labels:
     app.kubernetes.io/name: open-webui
     app.kubernetes.io/managed-by: mothertree
@@ -29,7 +61,23 @@ spec:
             - name: OLLAMA_BASE_URL
               value: "http://ollama.infra-llm.svc.cluster.local:11434"
             - name: WEBUI_AUTH
-              value: "false"
+              value: "true"
+            - name: OLLAMA_DEFAULT_MODELS
+              value: "${LLM_MODEL}"
+            - name: OAUTH_CLIENT_ID
+              value: "open-webui"
+            - name: OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: open-webui-oidc
+                  key: client-secret
+            - name: OPENID_PROVIDER_URL
+              value: "https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/.well-known/openid-configuration"
+            - name: ENABLE_OAUTH_SIGNUP
+              value: "true"
+          volumeMounts:
+            - name: llm-data
+              mountPath: /app/backend/data
           resources:
             requests:
               cpu: "200m"
@@ -47,13 +95,17 @@ spec:
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 30
+      volumes:
+        - name: llm-data
+          persistentVolumeClaim:
+            claimName: llm-data
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: open-webui
-  namespace: infra-llm
+  namespace: ${NS_LLM}
   labels:
     app.kubernetes.io/name: open-webui
     app.kubernetes.io/managed-by: mothertree
@@ -72,19 +124,13 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: open-webui
-  namespace: infra-llm
+  namespace: ${NS_LLM}
   labels:
     app.kubernetes.io/name: open-webui
     app.kubernetes.io/managed-by: mothertree
     mothertree/component: llm
   annotations:
-    # DNS-01 issuer (Cloudflare): the cert is validated via a TXT record that
-    # cert-manager manages itself, so issuance does NOT depend on the public
-    # llm.<domain> record resolving (or on port 80 being reachable) at the
-    # moment of the ACME challenge. This is the same issuer the monitoring
-    # stack uses, and it works behind the proxied Cloudflare CNAME (HTTP-01
-    # would be fragile here because the DNS record is created in a separate
-    # step — see manage-dns.sh §1c).
+    kubernetes.io/ingress.class: nginx
     cert-manager.io/cluster-issuer: letsencrypt-prod-dns01
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
@@ -93,10 +139,10 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - "${LLM_DOMAIN}"
-      secretName: open-webui-tls
+        - ${LLM_HOST}
+      secretName: wildcard-tls-${TENANT_NAME}
   rules:
-    - host: "${LLM_DOMAIN}"
+    - host: ${LLM_HOST}
       http:
         paths:
           - path: /
