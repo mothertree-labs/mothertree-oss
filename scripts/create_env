@@ -191,6 +191,27 @@ fi
 export CLOUDFLARE_API_TOKEN="$TF_VAR_cloudflare_api_token"
 export TLS_EMAIL="$TF_VAR_tls_email"
 
+# Tenants whose DNS lives under the infra domain (i.e. TENANT_DOMAIN is a subdomain
+# of INFRA_DOMAIN) carry no Cloudflare credentials of their own — their records live
+# in the infra-owned parent zone. Without a token the per-tenant DNS-01 ClusterIssuer
+# is created
+# credential-less, so every ACME challenge fails with "no Cloudflare credential has
+# been given" and the cert silently deadlocks Ready=False until it expires. Fall back
+# to the infra zone token (deployed by deploy_infra into $NS_CERTMANAGER) for these
+# tenants. [ "$X" != "${X%suffix}" ] is true iff $X ends with suffix (POSIX-safe).
+if [ -z "${CLOUDFLARE_API_TOKEN}" ] && [ -n "${INFRA_DOMAIN:-}" ] && \
+   [ "${TENANT_DOMAIN}" != "${TENANT_DOMAIN%".${INFRA_DOMAIN}"}" ]; then
+  CLOUDFLARE_API_TOKEN="$(kubectl get secret cloudflare-api-token -n "$NS_CERTMANAGER" \
+    -o jsonpath='{.data.api-token}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+    print_status "Cloudflare token: tenant has none; using infra zone token for ${TENANT_DOMAIN} (under ${INFRA_DOMAIN})"
+  fi
+  export CLOUDFLARE_API_TOKEN
+fi
+
+# Fail fast rather than render an empty token Secret → credential-less DNS-01 issuer.
+: "${CLOUDFLARE_API_TOKEN:?No Cloudflare API token for DNS-01 (tenant '$TENANT_NAME' has none and infra secret cloudflare-api-token in '$NS_CERTMANAGER' is empty/missing). Refusing to deploy a credential-less issuer.}"
+
 print_status "Wildcard domains: external=$WILDCARD_DOMAIN_EXTERNAL, internal=$WILDCARD_DOMAIN_INTERNAL"
 print_status "Reflector target namespaces: $TENANT_NAMESPACES"
 
