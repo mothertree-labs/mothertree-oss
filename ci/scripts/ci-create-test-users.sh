@@ -51,6 +51,7 @@ resolve_var E2E_TENANT
 resolve_var E2E_BASE_DOMAIN
 resolve_var E2E_KC_REALM
 resolve_var E2E_KC_CLIENT_SECRET
+resolve_var E2E_STALWART_ADMIN_PASSWORD
 
 if [[ -z "${E2E_BASE_DOMAIN:-}" ]]; then
   echo "WARNING: E2E_BASE_DOMAIN not resolved — skipping user creation"
@@ -323,6 +324,108 @@ for user_spec in "${FIXED_USERS[@]}"; do
   IFS=: read -r username password is_admin <<< "$user_spec"
   create_user "$username" "$password" "$is_admin"
 done
+
+# ── Provision the fixed mail users' Stalwart mailbox principals ───────────────
+# Keycloak account != deliverable mailbox. Under Stalwart's OIDC directory the
+# mailbox principal is otherwise created ONLY on the user's first Roundcube
+# login, so inbound mail (e.g. the echoed reply in the email round-trip test)
+# bounces 550 "undeliverable" until then. The round-trip test sends *before* the
+# receiver has logged in, so on a freshly leased tenant it loses that race and
+# times out. Deploy-provisioning the mailbox here (the same /api/principal/deploy
+# call dev-test-users.sh / provision-smtp.js use) removes the race.
+# See memory: e2e-roundtrip-missing-principals. NOTE: this fixes the *delivery*
+# (550) cause of the shard-5 flake only — the bare networkidle login in
+# email-roundtrip.spec.ts is a separate, still-open cause.
+if [[ -z "${E2E_STALWART_ADMIN_PASSWORD:-}" ]]; then
+  echo ""
+  echo "WARNING: E2E_STALWART_ADMIN_PASSWORD not resolved for pool '${LEASED_POOL}' —"
+  echo "         skipping Stalwart mailbox provisioning. The email round-trip test"
+  echo "         (shard-5) will 550-bounce until first login. Wire the"
+  echo "         e2e_pool*_stalwart_admin_password secret into the create-test-users step."
+else
+  STALWART_NS="tn-${E2E_TENANT}-mail"
+  STALWART_URL="http://localhost:18090"
+  STALWART_AUTH="Basic $(printf 'admin:%s' "$E2E_STALWART_ADMIN_PASSWORD" | base64 | tr -d '\n')"
+  echo ""
+  echo "--- Provisioning Stalwart mailbox principals in ${STALWART_NS}"
+
+  # Port-forward to the tenant's Stalwart REST API (8080). KUBECONFIG is the live
+  # dev kubeconfig fetched above; tear the forward down on exit with the kubeconfig.
+  kubectl -n "$STALWART_NS" port-forward svc/stalwart 18090:8080 \
+    > /tmp/ci-stalwart-pf.log 2>&1 &
+  STALWART_PF_PID=$!
+  trap 'rm -f "$KCFG_PATH"; kill "${STALWART_PF_PID:-}" 2>/dev/null || true' EXIT
+
+  # Wait for the forward + REST API to actually answer before provisioning — a
+  # fixed sleep races the forward coming up, which would time out every call.
+  STALWART_READY=0
+  for _ in $(seq 1 20); do
+    if curl -s --max-time 3 -o /dev/null "${STALWART_URL}/api/principal/__probe__" \
+         -H "Authorization: ${STALWART_AUTH}" 2>/dev/null; then
+      STALWART_READY=1; break
+    fi
+    sleep 1
+  done
+
+  if [[ "$STALWART_READY" == 0 ]]; then
+    echo "  WARNING: Stalwart REST API not reachable via port-forward within 20s —"
+    echo "           skipping mailbox provisioning (round-trip may bounce until first login)."
+  else
+    for user_spec in "${FIXED_USERS[@]}"; do
+      IFS=: read -r username _password _is_admin <<< "$user_spec"
+      email="${username}@${EMAIL_DOMAIN}"
+      # Principal name = username (no domain), matching Stalwart's OIDC
+      # auto-provisioner (which names principals from the token preferred_username).
+      payload=$(CI_NAME="$username" CI_EMAIL="$email" python3 -c "
+import json, os
+print(json.dumps({
+  'type': 'individual',
+  'name': os.environ['CI_NAME'],
+  'emails': [os.environ['CI_EMAIL']],
+  'description': os.environ['CI_NAME'],
+  'roles': ['user'],
+  'secrets': []
+}))")
+
+      echo -n "  ${username}: "
+      provisioned=0
+      verdict=""
+      for attempt in 1 2 3; do
+        # /api/principal/deploy has been observed to hang (17/30 calls >120s in a
+        # prior run); cap each attempt and retry instead of blocking the pipeline.
+        resp=$(curl -s --max-time 30 -X POST "${STALWART_URL}/api/principal/deploy" \
+          -H "Authorization: ${STALWART_AUTH}" \
+          -H "Content-Type: application/json" \
+          -d "$payload" 2>/dev/null || true)
+        verdict=$(STALW_RESP="${resp}" python3 -c "
+import json, os
+raw = os.environ.get('STALW_RESP', '')
+try:
+    d = json.loads(raw)
+except Exception:
+    print('timeout'); raise SystemExit
+err = d.get('error') if isinstance(d, dict) else None
+print('ok' if err in (None, 'fieldAlreadyExists') else 'apierror:' + str(err))" 2>/dev/null || echo timeout)
+        case "$verdict" in
+          ok) echo "ok"; provisioned=1; break ;;
+          apierror:*) echo "Stalwart rejected (${verdict#apierror:})"; break ;;
+          *) echo -n "timeout(${attempt}) "; sleep 3 ;;
+        esac
+      done
+      if [[ "$provisioned" == 0 && "$verdict" == "timeout" ]]; then
+        echo "FAILED after retries — round-trip will bounce until first login"
+      fi
+    done
+
+    # Clear Stalwart's negative-RCPT cache so the new mailboxes accept mail now.
+    # (dev-test-users.sh uses GET /api/reload; the e2e shards also start minutes
+    # later, after any short negative-cache TTL would have lapsed anyway.)
+    curl -s --max-time 15 "${STALWART_URL}/api/reload" \
+      -H "Authorization: ${STALWART_AUTH}" > /dev/null 2>&1 || true
+  fi
+
+  kill "${STALWART_PF_PID:-}" 2>/dev/null || true
+fi
 
 echo ""
 echo "Test users created."
