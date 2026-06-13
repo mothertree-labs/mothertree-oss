@@ -79,6 +79,13 @@ steps:
         from_secret: e2e_pool2_kc_realm
       E2E_POOL2_KC_CLIENT_SECRET:
         from_secret: e2e_pool2_kc_client_secret
+      # Needed to deploy-provision the fixed mail users' Stalwart mailbox
+      # principals (e2e-mailrt/e2e-mailrcv) so inbound round-trip mail doesn't
+      # 550-bounce before the user's first login. See ci-create-test-users.sh.
+      E2E_POOL1_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool1_stalwart_admin_password
+      E2E_POOL2_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool2_stalwart_admin_password
     commands:
       - ci/scripts/ci-create-test-users.sh
 
