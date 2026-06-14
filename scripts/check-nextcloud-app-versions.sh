@@ -118,6 +118,10 @@ with open(manifest_path, 'w') as f:
 
 print('Manifest updated successfully')
 PYEOF
+    # The update we were asked to perform succeeded. Exit 2 means "updates
+    # pending" — that's the check-mode contract, not an error here. Reporting
+    # success keeps the CI step (which runs under `bash -e`) from failing.
+    exit 0
 elif [ "$RESULT_EXIT" -eq 2 ]; then
     echo ""
     echo "Run with --update to update the manifest file"
