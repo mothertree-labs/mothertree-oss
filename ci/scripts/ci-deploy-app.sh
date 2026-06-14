@@ -68,9 +68,7 @@ _cleanup() {
 }
 trap _cleanup EXIT
 
-ansible-vault decrypt "$VAULT_FILE" \
-  --vault-password-file <(echo "$DEPLOY_VAULT_PASSWORD") \
-  --output "$WORK_DIR/secrets.tar.gz"
+ci_decrypt_vault "$VAULT_FILE" "$MT_ENV" "$WORK_DIR/secrets.tar.gz"
 tar xzf "$WORK_DIR/secrets.tar.gz" -C "$WORK_DIR"
 rm -f "$WORK_DIR/secrets.tar.gz"
 
