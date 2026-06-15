@@ -85,8 +85,20 @@ LastPass, the dev kubeconfig, terraform outputs, or tf-state credentials.
 
 You deploy via CI only — never directly.
 
-1. **Edit the plaintext dev secret** for your tenant (gitignored, never
-   committed):
+1. **Get the current plaintext dev secrets for your tenant.** These files are
+   gitignored, so a fresh clone won't have them. To **update an existing**
+   tenant, extract the current copy from the vault first (the dev password
+   decrypts it):
+   ```bash
+   DEV_PW='<dev-vault-password>'
+   TMP=$(mktemp -d)
+   ansible-vault decrypt config/platform/ci/deploy-vault-dev.vault \
+     --vault-password-file <(printf '%s' "$DEV_PW") --output - | tar xz -C "$TMP"
+   cp "$TMP/tenants/<tenant>/dev.secrets.yaml" config/tenants/<tenant>/dev.secrets.yaml
+   rm -rf "$TMP"
+   ```
+   (For a brand-new tenant or a new key, just create the file directly.)
+   Then make your edit — it stays local and is never committed in plaintext:
    ```bash
    $EDITOR config/tenants/<tenant>/dev.secrets.yaml
    ```
