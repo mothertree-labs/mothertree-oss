@@ -253,7 +253,12 @@ print_status "Synapse Admin deployed to https://$SYNAPSE_ADMIN_HOST"
 # =============================================================================
 # Matrix federation .well-known (prod only)
 # =============================================================================
-if [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; then
+if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
+  # The tenant owns its apex (their own website lives there) and we have no cert
+  # for it; an internal-only homeserver needs no federation .well-known delegation.
+  # Clients reach the HS directly at $MATRIX_HOST via Element's server config.
+  print_status "Skipping Matrix .well-known apex ingress (dns_external=true — tenant owns the apex)"
+elif [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; then
   print_status "Deploying Matrix .well-known ingress for federation on $TENANT_DOMAIN..."
   envsubst < "$REPO_ROOT/apps/manifests/synapse-admin/matrix-wellknown.yaml.tpl" | kubectl apply -f -
   print_status "Matrix federation .well-known endpoints available at https://$TENANT_DOMAIN/.well-known/matrix/*"
