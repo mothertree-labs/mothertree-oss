@@ -33,6 +33,18 @@ Run once, from an operator machine with LastPass + the repo checked out.
    ```bash
    ./scripts/build-deploy-vaults.sh dev
    ```
+   Then **commit the re-keyed blob** in the `config/platform` submodule — CI
+   decrypts the vault from this committed copy, so the re-key isn't live until
+   it's merged:
+   ```bash
+   cd config/platform && git add ci/deploy-vault-dev.vault && git commit -m "dev: re-key vault" && git push
+   cd ../.. && git add config/platform && git commit -m "chore(config): bump platform — dev vault re-key"
+   ```
+   > The second commit is required: CI clones with `git submodule update --init`
+   > (no `--remote`), so it checks out the config/platform commit **pinned in the
+   > mothertree-oss tree**. Bumping that pointer in a mothertree-oss PR is what
+   > makes the new vault live — committing inside config/platform alone is not
+   > enough.
 
 3. **Acceptance test — prove the password is dev-only.** Both lines must behave
    as labelled, against the real committed blobs:
@@ -59,8 +71,11 @@ Run once, from an operator machine with LastPass + the repo checked out.
    > `ansible-vars.yml`. Ansible writes it to
    > `/home/woodpecker/deploy-vaults/dev-vault-pass` (0600) with `no_log`.
 
-5. **Re-provision the CI host** (pushes the re-keyed dev vault + the dev-pass
-   file together):
+5. **Re-provision the CI host** to push the **dev password file**
+   (`dev-vault-pass`). The vault *blob* is no longer pushed to the host — CI
+   reads it from the committed copy (step 2) — but the password that unlocks it
+   still comes from the host file written by Ansible, so reprovision whenever
+   the dev password changes:
    ```bash
    ./ci/scripts/provision-ci.sh --ansible-only
    ```
@@ -117,14 +132,25 @@ You deploy via CI only — never directly.
    > Prefer not to put the password in your shell history? Use a file:
    > `MT_VAULT_PASSWORD_FILE=~/.mt-dev-vault-pass ./scripts/build-deploy-vaults.sh dev --update-secrets --tenant <tenant>`
 
-3. **Commit the updated vault blob** in the `config/platform` submodule and open
-   a PR:
+3. **Commit the updated vault blob** in the `config/platform` submodule, then
+   **bump the submodule pointer** in the mothertree-oss superproject and open a
+   PR there:
    ```bash
    cd config/platform
    git add ci/deploy-vault-dev.vault
    git commit -m "dev: update <tenant> secrets"
+   git push                                   # push the config/platform commit
+   cd ../..
+   git add config/platform                    # record the new pointer
+   git commit -m "chore(config): update <tenant> dev secrets"
    ```
-   CI deploys the change to dev.
+   The second commit (the pointer bump) is the one that matters: CI clones with
+   `git submodule update --init` (no `--remote`), so it checks out the
+   config/platform commit **pinned in the mothertree-oss tree** — not the tip of
+   the submodule branch. Open the **mothertree-oss** PR with that pointer bump.
+   Once merged, the **next pipeline run decrypts this committed vault directly**
+   and deploys the change to dev — no operator reprovision of the CI host is
+   needed (GitHub issue #463).
 
 ### What the dev password actually grants
 The dev password decrypts the **entire** dev vault — the dev kubeconfig,

@@ -101,6 +101,60 @@ ci_decrypt_vault() {
     --output "$out_tar"
 }
 
+# ── Config submodule clone ──────────────────────────────────────
+# Clone the private config submodules (config/platform, config/tenants) into
+# the checkout. config/platform carries the committed, encrypted deploy vaults
+# (config/platform/ci/deploy-vault-<env>.vault) that ci_decrypt_committed_vault
+# reads, so this MUST run BEFORE vault decryption — not after, as it did when
+# the vault was sourced from the CI host (GitHub issue #463). Uses GITHUB_PAT
+# (a Woodpecker pipeline secret, not something stored in the vault, so there is
+# no chicken-and-egg) to rewrite the SSH submodule URLs to authenticated HTTPS;
+# --global so the child git processes spawned by `submodule update` inherit it.
+# Leaves the cwd at <repo_root>.
+#
+#   ci_clone_config_submodules <repo_root>
+ci_clone_config_submodules() {
+  local repo_root="${1:?ci_clone_config_submodules: repo_root required}"
+  cd "$repo_root" || return 1
+  if [[ -n "${GITHUB_PAT:-}" ]]; then
+    git config --global url."https://x-access-token:${GITHUB_PAT}@github.com/".insteadOf "git@github.com:"
+    echo "Configured git URL rewriting for private submodule access"
+  fi
+  echo "Initializing config submodules..."
+  git submodule update --init config/platform config/tenants || {
+    echo "ERROR: Failed to init config submodules." >&2
+    echo "Ensure GITHUB_PAT secret is set and has access to the private config repos." >&2
+    return 1
+  }
+}
+
+# ── Committed deploy-vault decryption ───────────────────────────
+# Decrypt the env's deploy vault from the COMMITTED copy inside the cloned
+# config/platform submodule (config/platform/ci/deploy-vault-<env>.vault) — the
+# single source of truth. A merged vault change is therefore picked up by the
+# next pipeline run with no operator reprovision (GitHub issue #463).
+#
+# There is deliberately NO fallback to the old host-provisioned copy under
+# /home/woodpecker/deploy-vaults: a missing committed vault is a hard error, not
+# a silent downgrade to a possibly-stale host copy (project rule: fail fast,
+# never silently skip). Password selection is unchanged — delegated to
+# ci_decrypt_vault (dev-only password for dev, shared operator password for
+# prod/prod-eu). Requires ci_clone_config_submodules to have run first.
+#
+#   ci_decrypt_committed_vault <repo_root> <env> <out_tar>
+ci_decrypt_committed_vault() {
+  local repo_root="${1:?ci_decrypt_committed_vault: repo_root required}"
+  local env="${2:?ci_decrypt_committed_vault: env required}"
+  local out_tar="${3:?ci_decrypt_committed_vault: out_tar required}"
+  local vault_file="$repo_root/config/platform/ci/deploy-vault-${env}.vault"
+  if [[ ! -f "$vault_file" ]]; then
+    echo "ERROR: Committed deploy vault not found: $vault_file" >&2
+    echo "       Expected it in the config/platform submodule — run ci_clone_config_submodules first." >&2
+    return 1
+  fi
+  ci_decrypt_vault "$vault_file" "$env" "$out_tar"
+}
+
 # ── Woodpecker API helpers ──────────────────────────────────────
 # Token is deployed to the CI host by Ansible (ci/ansible/playbook.yml).
 _WP_API_TOKEN_FILE="/home/woodpecker/.woodpecker-api-token"
