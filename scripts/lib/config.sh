@@ -118,6 +118,7 @@ _mt_load_tenant_yaml() {
     "TENANT_DOMAIN=" + (.dns.domain | @sh) + "\n" +
     "TENANT_ENV_DNS_LABEL=" + (.dns.env_dns_label // "" | @sh) + "\n" +
     "TENANT_COOKIE_DOMAIN=" + (.dns.cookie_domain // "" | @sh) + "\n" +
+    "DNS_EXTERNAL=" + (.dns.dns_external // false | tostring | @sh) + "\n" +
     "TENANT_KEYCLOAK_REALM=" + (.keycloak.realm | @sh) + "\n" +
     "S3_CLUSTER=" + (.s3.cluster | @sh) + "\n" +
     "S3_BUCKET_PREFIX=" + (.s3.bucket_prefix // "" | @sh) + "\n" +
@@ -581,7 +582,7 @@ _mt_export_all() {
   export MT_ENV MT_TENANT TENANT TENANT_NAME REPO_ROOT REPO
   export TENANT_CONFIG TENANT_SECRETS KUBECONFIG
   export TENANT_DISPLAY_NAME TENANT_DOMAIN TENANT_ENV_DNS_LABEL
-  export TENANT_COOKIE_DOMAIN TENANT_KEYCLOAK_REALM TENANT_DB_USER
+  export TENANT_COOKIE_DOMAIN TENANT_KEYCLOAK_REALM TENANT_DB_USER DNS_EXTERNAL
   export S3_CLUSTER S3_BUCKET_PREFIX S3_DOCS_BUCKET S3_MATRIX_BUCKET S3_FILES_BUCKET S3_MAIL_BUCKET
   export DOCS_DB_NAME NEXTCLOUD_DB_NAME SYNAPSE_DB_NAME SYNAPSE_DB_USER
   export STALWART_DB_NAME STALWART_DB_USER ROUNDCUBE_DB_NAME ROUNDCUBE_DB_USER

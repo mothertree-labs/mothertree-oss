@@ -297,6 +297,15 @@ fi
 print_status "Validating Cloudflare IP ranges..."
 "$REPO_ROOT/scripts/check-cloudflare-ips" || { print_error "Cloudflare IPs changed. Run: ./scripts/check-cloudflare-ips --update"; exit 1; }
 
+if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
+  if [ "$MAIL_ENABLED" = "true" ]; then
+    print_error "dns_external=true is incompatible with mail_enabled=true"
+    print_error "  Tenant mail requires auto-created MX/SPF/DKIM/DMARC records in our Cloudflare zone."
+    exit 1
+  fi
+  print_status "DNS managed externally by tenant (dns_external=true) — skipping Cloudflare tenant DNS record creation"
+else
+
 # Each tenant needs DNS records for their subdomains pointing to the ingress
 print_status "Creating tenant DNS records..."
 
@@ -457,6 +466,8 @@ else
     fi
   fi
 fi
+
+fi  # end DNS_EXTERNAL guard
 
 # Apply PriorityClass for critical services (must exist before JVB/y-provider deploy)
 print_status "Applying PriorityClass for critical services..."
