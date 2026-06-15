@@ -9,6 +9,10 @@
 #
 # Optional vars for CI deploy vaults:
 #   ci_deploy_vaults — list of local paths to encrypted vault files to provision
+#   deploy_vault_password_dev — dev-only ansible-vault password. When set, it is
+#       written to /home/woodpecker/deploy-vaults/dev-vault-pass (0600) so CI can
+#       decrypt the re-keyed dev vault. Keep this ONLY in the private (gitignored)
+#       ansible-vars.yml — never commit the real value. See DEV_VAULT_ACCESS.md.
 
 - name: Configure Woodpecker CI Server
   hosts: ci_servers
@@ -582,6 +586,23 @@
         mode: "0600"
         decrypt: false
       loop: "{{ ci_deploy_vaults | default([]) }}"
+
+    # ── Dev vault password (dev-only re-key) ──────────────────────
+    # The dev vault is encrypted with its OWN password, separate from the
+    # shared DEPLOY_VAULT_PASSWORD used for prod/prod-eu, so it can be handed
+    # to a contributor without exposing prod secrets. ci_decrypt_vault (in
+    # ci/scripts/ci-lib.sh) reads this file for env=dev and tries it before
+    # falling back to DEPLOY_VAULT_PASSWORD. Optional: if the var is not set,
+    # dev keeps using the shared password (pre-re-key behaviour).
+    - name: Deploy dev-only vault password
+      ansible.builtin.copy:
+        content: "{{ deploy_vault_password_dev }}"
+        dest: /home/woodpecker/deploy-vaults/dev-vault-pass
+        owner: woodpecker
+        group: woodpecker
+        mode: "0600"
+      no_log: true
+      when: deploy_vault_password_dev is defined and deploy_vault_password_dev | length > 0
 
     - name: Clean up orphaned deploy temp dirs (cron)
       ansible.builtin.cron:
