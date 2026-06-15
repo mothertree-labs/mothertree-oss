@@ -44,13 +44,6 @@ MODE="${2:?Usage: ci-deploy-app.sh <env> <mode>}"
 
 echo "=== CI Deploy App: env=$MT_ENV mode=$MODE pipeline=#${CI_PIPELINE_NUMBER:-unknown} ==="
 
-# ── Decrypt vault ────────────────────────────────────────────────
-VAULT_FILE="/home/woodpecker/deploy-vaults/deploy-vault-${MT_ENV}.vault"
-if [[ ! -f "$VAULT_FILE" ]]; then
-  echo "ERROR: Deploy vault not found: $VAULT_FILE"
-  exit 1
-fi
-
 WORK_DIR=$(mktemp -d /tmp/mt-deploy-XXXXXX)
 chmod 0700 "$WORK_DIR"
 
@@ -68,7 +61,14 @@ _cleanup() {
 }
 trap _cleanup EXIT
 
-ci_decrypt_vault "$VAULT_FILE" "$MT_ENV" "$WORK_DIR/secrets.tar.gz"
+# ── Clone private config submodules (provides the committed vault) ──
+# config/platform carries the committed deploy vaults, so the submodules MUST be
+# cloned before decryption (GitHub issue #463 — committed copy is the source of
+# truth, no operator reprovision needed for a vault change).
+ci_clone_config_submodules "$REPO_ROOT"
+
+# ── Decrypt vault (from the committed config/platform copy) ───────
+ci_decrypt_committed_vault "$REPO_ROOT" "$MT_ENV" "$WORK_DIR/secrets.tar.gz"
 tar xzf "$WORK_DIR/secrets.tar.gz" -C "$WORK_DIR"
 rm -f "$WORK_DIR/secrets.tar.gz"
 
@@ -97,16 +97,6 @@ set -a
 # shellcheck disable=SC1090
 source "$MT_TERRAFORM_OUTPUTS_FILE"
 set +a
-
-# ── Clone private config submodules ───────────────────────────────
-cd "$REPO_ROOT"
-if [[ -n "${GITHUB_PAT:-}" ]]; then
-  git config --global url."https://x-access-token:${GITHUB_PAT}@github.com/".insteadOf "git@github.com:"
-fi
-git submodule update --init config/platform config/tenants || {
-  echo "ERROR: Failed to init config submodules"
-  exit 1
-}
 
 # ── Copy secrets from vault ──────────────────────────────────────
 if [[ -d "$WORK_DIR/tenants" ]]; then
