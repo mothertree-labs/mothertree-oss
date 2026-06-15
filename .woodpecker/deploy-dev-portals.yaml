@@ -19,8 +19,8 @@ clone:
 steps:
   - name: deploy-dev-portals
     image: bash
-    when:
-      - event: pull_request
+    # Runs on both pull_request and push:main so main-push can re-deploy the
+    # tenant when the idle reaper destroyed dev between PR and merge (#422).
     environment:
       CI: "true"
       CI_VALKEY_PASSWORD:

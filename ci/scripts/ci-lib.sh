@@ -53,6 +53,54 @@ ci_fetch_dev_kubeconfig() {
   umask 022
 }
 
+# ── Deploy-vault decryption ─────────────────────────────────────
+# Path to the dev-only vault password, provisioned to the CI host by Ansible
+# (ci/ansible/playbook.yml, from the `deploy_vault_password_dev` var). Override
+# via CI_DEV_VAULT_PASS_FILE for testing.
+CI_DEV_VAULT_PASS_FILE="${CI_DEV_VAULT_PASS_FILE:-/home/woodpecker/deploy-vaults/dev-vault-pass}"
+
+# Decrypt a deploy vault into <out_tar>, choosing the right password per env.
+#
+#   ci_decrypt_vault <vault_file> <env> <out_tar>
+#
+# prod / prod-eu: use the shared DEPLOY_VAULT_PASSWORD (unchanged behaviour).
+# dev: the dev vault is re-keyed with its OWN password so it can be shared with
+#   a contributor without exposing prod/prod-eu. If the host has the dev
+#   password file, try the dev password FIRST and fall back to the shared one —
+#   ansible-vault tries each --vault-id until one decrypts, so this works whether
+#   or not the dev vault has been re-keyed yet (no migration flag-day). If the
+#   dev password file is absent (env not yet provisioned), dev falls through to
+#   the shared path unchanged.
+#
+# Requires DEPLOY_VAULT_PASSWORD in the environment (callers already enforce it).
+ci_decrypt_vault() {
+  local vault_file="${1:?ci_decrypt_vault: vault_file required}"
+  local env="${2:?ci_decrypt_vault: env required}"
+  local out_tar="${3:?ci_decrypt_vault: out_tar required}"
+  : "${DEPLOY_VAULT_PASSWORD:?DEPLOY_VAULT_PASSWORD is required}"
+
+  if [[ "$env" == "dev" && -s "$CI_DEV_VAULT_PASS_FILE" ]]; then
+    # Stage the shared password in a 0600 temp file so both passwords can be
+    # offered as labelled vault-ids. ansible-vault tries each until one opens.
+    # Write it inside the caller's output dir (its WORK_DIR), which the caller's
+    # EXIT trap scrubs — so a kill mid-decrypt can't orphan the password file.
+    local shared_pw_file rc=0
+    shared_pw_file=$(mktemp "$(dirname "$out_tar")/.vpw-XXXXXX")
+    chmod 600 "$shared_pw_file"
+    printf '%s\n' "$DEPLOY_VAULT_PASSWORD" > "$shared_pw_file"
+    ansible-vault decrypt "$vault_file" \
+      --vault-id "dev@${CI_DEV_VAULT_PASS_FILE}" \
+      --vault-id "shared@${shared_pw_file}" \
+      --output "$out_tar" || rc=$?
+    rm -f "$shared_pw_file"
+    return "$rc"
+  fi
+
+  ansible-vault decrypt "$vault_file" \
+    --vault-password-file <(echo "$DEPLOY_VAULT_PASSWORD") \
+    --output "$out_tar"
+}
+
 # ── Woodpecker API helpers ──────────────────────────────────────
 # Token is deployed to the CI host by Ansible (ci/ansible/playbook.yml).
 _WP_API_TOKEN_FILE="/home/woodpecker/.woodpecker-api-token"

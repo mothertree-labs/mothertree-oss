@@ -51,14 +51,19 @@ spec:
             - name: http
               containerPort: 4444
           # Liveness: is the y-provider process alive?
+          # Widened for cold-start: on a contended dev cluster the node server
+          # needed >40s to bind :4444, so the old 10s+3x10s/1s-timeout window
+          # killed it before "App listening on port : 4444" → crashloop. ~30s+6x10s
+          # grace and a 3s timeout tolerate a slow cold boot; steady-state detection
+          # is still well within ~90s.
           livenessProbe:
             httpGet:
               path: /ping
               port: 4444
-            initialDelaySeconds: 10
+            initialDelaySeconds: 30
             periodSeconds: 10
-            timeoutSeconds: 1
-            failureThreshold: 3
+            timeoutSeconds: 3
+            failureThreshold: 6
           # Readiness: can y-provider talk to backend? (checked by sidecar)
           readinessProbe:
             httpGet:
@@ -70,7 +75,9 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: 100m  # Minimum 100m to prevent HPA triggering on idle fluctuations
+              cpu: 250m  # Raised from 100m: gives CPU shares to bind :4444 quickly
+                         # under cold-start contention. Still well under the HPA 80%
+                         # target at idle, so no scaling on idle fluctuations.
               memory: 128Mi
             limits:
               memory: 256Mi

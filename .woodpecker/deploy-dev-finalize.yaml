@@ -22,8 +22,8 @@ clone:
 steps:
   - name: deploy-dev-finalize
     image: bash
-    when:
-      - event: pull_request
+    # Runs on both pull_request and push:main so main-push can re-deploy the
+    # tenant when the idle reaper destroyed dev between PR and merge (#422).
     environment:
       CI: "true"
       CI_VALKEY_PASSWORD:
@@ -48,8 +48,10 @@ steps:
   # Pipeline-scoped test users for E2E. Lives here so it runs AFTER the
   # tenant auth ingress is up (created in apps/deploy-matrix.sh, which
   # this workflow depends on). The step itself runs on both PR and push
-  # so users are provisioned for every pipeline; on main push the
-  # deploy-dev-finalize step above is a no-op but this one still runs.
+  # so users are provisioned for every pipeline. Since #422, the
+  # deploy-dev-finalize step above also runs on push:main (re-deploying
+  # tenant resources if the idle reaper destroyed the cluster); on a
+  # warm cluster it is a fast no-op via mt_apply / mt_restart_if_changed.
   - name: create-test-users
     image: bash
     environment:
@@ -77,6 +79,13 @@ steps:
         from_secret: e2e_pool2_kc_realm
       E2E_POOL2_KC_CLIENT_SECRET:
         from_secret: e2e_pool2_kc_client_secret
+      # Needed to deploy-provision the fixed mail users' Stalwart mailbox
+      # principals (e2e-mailrt/e2e-mailrcv) so inbound round-trip mail doesn't
+      # 550-bounce before the user's first login. See ci-create-test-users.sh.
+      E2E_POOL1_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool1_stalwart_admin_password
+      E2E_POOL2_STALWART_ADMIN_PASSWORD:
+        from_secret: e2e_pool2_stalwart_admin_password
     commands:
       - ci/scripts/ci-create-test-users.sh
 
@@ -142,9 +151,11 @@ steps:
   # the gate authenticates as that exact user (the calendar-external-invite
   # shards use it). Like create-test-users/remint-caldav-tokens this has NO
   # step-level `when:` override — it inherits the workflow-level
-  # `pull_request | push:main` so it runs for EVERY pipeline (gap-#18 lesson:
-  # the deploy steps are PR-only no-ops but these provisioning/gate steps are
-  # not; e2e shards run on the main-push pipeline too and gate deploy-prod).
+  # `pull_request | push:main` so it runs for EVERY pipeline. Historic
+  # gap-#18 lesson: e2e shards run on main-push too and gate deploy-prod,
+  # so any pre-e2e gate must also run on main-push. Since #422 the deploy
+  # steps themselves also run on push:main (warm-cluster fast-no-op or
+  # cold-cluster full redeploy after the idle reaper destroys the cluster).
   - name: imaps-readiness
     image: bash
     environment:

@@ -9,6 +9,10 @@
 #
 # Optional vars for CI deploy vaults:
 #   ci_deploy_vaults — list of local paths to encrypted vault files to provision
+#   deploy_vault_password_dev — dev-only ansible-vault password. When set, it is
+#       written to /home/woodpecker/deploy-vaults/dev-vault-pass (0600) so CI can
+#       decrypt the re-keyed dev vault. Keep this ONLY in the private (gitignored)
+#       ansible-vars.yml — never commit the real value. See DEV_VAULT_ACCESS.md.
 
 - name: Configure Woodpecker CI Server
   hosts: ci_servers
@@ -17,7 +21,7 @@
     - "{{ vars_file | default('ansible-vars.yml') }}"
 
   vars:
-    woodpecker_version: "{{ woodpecker_version_override | default('3.14.1') }}"
+    woodpecker_version: "{{ woodpecker_version_override | default('3.15.0') }}"
     plugin_git_version: "{{ plugin_git_version_override | default('2.9.1') }}"
     # Path to tenant config submodule (relative to playbook)
     _tenants_dir: "{{ playbook_dir }}/../../config/tenants"
@@ -583,6 +587,23 @@
         decrypt: false
       loop: "{{ ci_deploy_vaults | default([]) }}"
 
+    # ── Dev vault password (dev-only re-key) ──────────────────────
+    # The dev vault is encrypted with its OWN password, separate from the
+    # shared DEPLOY_VAULT_PASSWORD used for prod/prod-eu, so it can be handed
+    # to a contributor without exposing prod secrets. ci_decrypt_vault (in
+    # ci/scripts/ci-lib.sh) reads this file for env=dev and tries it before
+    # falling back to DEPLOY_VAULT_PASSWORD. Optional: if the var is not set,
+    # dev keeps using the shared password (pre-re-key behaviour).
+    - name: Deploy dev-only vault password
+      ansible.builtin.copy:
+        content: "{{ deploy_vault_password_dev }}"
+        dest: /home/woodpecker/deploy-vaults/dev-vault-pass
+        owner: woodpecker
+        group: woodpecker
+        mode: "0600"
+      no_log: true
+      when: deploy_vault_password_dev is defined and deploy_vault_password_dev | length > 0
+
     - name: Clean up orphaned deploy temp dirs (cron)
       ansible.builtin.cron:
         name: "Clean orphaned deploy secrets"
@@ -653,6 +674,30 @@
         user: root
         job: '/usr/local/bin/cleanup-stale-e2e-users.sh >> /var/log/e2e-cleanup.log 2>&1'
       when: e2e_cleanup_pools is defined
+
+    # ── Woodpecker queue-zombie auto-unjam ─────────────────────────
+    # Self-healing for the recurring queue-backup desync bug (3.14.x/3.15.x):
+    # superseded/cancelled pipelines leave phantom rows in the `tasks` queue
+    # table backed by already-finished workflows, starving all agent slots so
+    # "CI stops starting pipelines." The script acts ONLY on the bug's exact
+    # fingerprint (sustained "resubmitting expired task" loop AND live zombie
+    # task rows) and applies the validated stop->backup->surgical-delete->restart
+    # recovery; it is a silent no-op otherwise. See memory: woodpecker-queue-zombies.
+    - name: Deploy Woodpecker queue auto-unjam script
+      ansible.builtin.template:
+        src: woodpecker-queue-unjam.sh.j2
+        dest: /usr/local/bin/woodpecker-queue-unjam.sh
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Schedule Woodpecker queue auto-unjam (cron)
+      # flock -n so a slow recovery tick (stop/restart) never overlaps the next.
+      ansible.builtin.cron:
+        name: "woodpecker-queue-unjam"
+        minute: "*/5"
+        user: root
+        job: 'flock -n /var/lock/woodpecker-queue-unjam /usr/local/bin/woodpecker-queue-unjam.sh >> /var/log/woodpecker-queue-unjam.log 2>&1'
 
     # ── On-demand-dev idle reaper ──────────────────────────────────
     # The reaper destroys the dev LKE cluster after IDLE_HOURS of no CI
