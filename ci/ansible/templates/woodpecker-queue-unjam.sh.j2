@@ -120,9 +120,9 @@ fi
 
 # Prune old auto-unjam backups (keep newest $KEEP_BACKUPS).
 mapfile -t _old < <(ls -1t "${DB}".bak-autounjam-* 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) || true)
-if [ "${#_old[@]}" -gt 0 ]; then
+{% raw %}if [ "${#_old[@]}" -gt 0 ]; then
   rm -f "${_old[@]}"
   echo "$(ts) $LOG_PREFIX pruned ${#_old[@]} old backup(s)"
-fi
+fi{% endraw %}
 
 echo "$(ts) $LOG_PREFIX recovery complete"
