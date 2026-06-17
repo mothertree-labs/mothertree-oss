@@ -201,6 +201,70 @@ if [ -z "$NEW_LB_IP" ]; then
     print_error "DNS may be stale (pointing at a destroyed cluster's IP)."
     exit 1
 fi
+
+# Reset persistent Roundcube tenant DBs so their schema always matches the
+# deployed image. postgres-dev is an always-up VM, so roundcube_<tenant> DBs
+# survive every cluster rebuild; Roundcube's forward-only, version-stamp-gated
+# updatedb.sh means a schema migrated forward by one image version (or
+# hand-patched during an incident) can neither re-migrate nor roll back — the
+# mismatch (e.g. the 1.6<->1.7 session.changed/expires_at rename) breaks OIDC
+# login ("OIDC redirect timed out") on whichever pool tenant carries the stale
+# DB. Dropping here on every bringup makes the next deploy recreate an empty DB
+# (via the idempotent roundcube-db-init Job) whose schema the entrypoint rebuilds
+# fresh from the deployed image — clearing any existing poison AND closing the
+# warm-cluster cross-version drift case. Session/contact/cache data on dev is
+# disposable login state. This is the bringup-side companion to the destroy-time
+# drop in scripts/destroy-dev-cluster.sh (Step 2c) — keep the two in sync.
+#
+# Bounded to dev: $KUBECONFIG points at the dev cluster (kubeconfig.dev.yaml),
+# whose in-cluster PgBouncer fronts the dev postgres VM only. Unlike the
+# best-effort destroy-side drop, this fails fast if the DB query errors — a
+# silent skip would leave webmail login broken for the whole pipeline.
+if [ "${MT_ENV:-dev}" = "dev" ]; then
+    print_status "dev-bringup: resetting persistent Roundcube tenant DBs (schema-vs-image drift guard)"
+    RC_PG_PASSWORD=$(kubectl --kubeconfig="$KUBECONFIG" get secret postgres-credentials -n infra-db \
+        -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d || true)
+    if [ -z "$RC_PG_PASSWORD" ]; then
+        print_error "dev-bringup: could not load postgres-credentials secret in infra-db"
+        print_error "Cannot reset the Roundcube DBs; a stale schema would break webmail OIDC login. Aborting."
+        exit 1
+    fi
+    RC_LIST_OUT=$(kubectl --kubeconfig="$KUBECONFIG" run rc-db-list --rm -i --restart=Never \
+        --image=postgres:16 --quiet -n default \
+        --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
+        --env "PGUSER=postgres" \
+        --env "PGPASSWORD=$RC_PG_PASSWORD" \
+        -- psql -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'roundcube\\_%' ESCAPE '\\';" 2>&1) || {
+            print_error "dev-bringup: failed to query roundcube_* DBs via PgBouncer — cannot guarantee a clean schema"
+            sed 's/^/  /' <<< "$RC_LIST_OUT" >&2
+            exit 1
+        }
+    RC_DBS=$(echo "$RC_LIST_OUT" | grep -E '^[a-z0-9_-]+$' || true)
+    if [ -z "$RC_DBS" ]; then
+        echo "  No roundcube_* databases found, nothing to reset"
+    else
+        while IFS= read -r db; do
+            # Allowlist regex defends against SQL identifier injection; tenant DB
+            # names are operator-controlled and always match roundcube_<tenant>
+            # (lowercase + digits + underscore/hyphen). Anything else is suspicious.
+            if [[ ! "$db" =~ ^roundcube_[a-z0-9][a-z0-9_-]*$ ]]; then
+                print_error "dev-bringup: refusing to drop suspicious DB name: $db"
+                exit 1
+            fi
+            print_status "  Dropping $db (roundcube-db-init recreates it empty on next deploy)"
+            # DROP DATABASE cannot run in a transaction block, so one psql -c each.
+            kubectl --kubeconfig="$KUBECONFIG" run rc-db-drop --rm -i --restart=Never \
+                --image=postgres:16 --quiet -n default \
+                --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
+                --env "PGUSER=postgres" \
+                --env "PGPASSWORD=$RC_PG_PASSWORD" \
+                -- psql -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE);" 2>&1 \
+                | sed 's/^/    /' \
+                || { print_error "dev-bringup: failed to drop $db — aborting"; exit 1; }
+        done <<< "$RC_DBS"
+    fi
+fi
+
 # secrets.tfvars.env is required by manage_infra; write it if absent
 # (reuse path doesn't run the cold-start block above).
 if [ ! -f "$REPO_ROOT/secrets.tfvars.env" ]; then
