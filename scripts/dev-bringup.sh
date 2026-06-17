@@ -243,11 +243,17 @@ if [ "${MT_ENV:-dev}" = "dev" ]; then
     kubectl --kubeconfig="$KUBECONFIG" -n infra-db rollout status deploy/pgbouncer --timeout=180s 2>/dev/null \
         || print_warning "dev-bringup: pgbouncer rollout status not confirmed; proceeding (retries will guard)"
 
-    # postgres:15-alpine matches roundcube-db-init, so it is already cached on
-    # warm nodes and small to pull on cold ones. --pod-running-timeout absorbs a
-    # node autoscale event; the retry loop absorbs transient scheduling/API
-    # hiccups. Unique pod names per attempt avoid a leftover-pod name collision
-    # if a timed-out `--rm` pod hasn't been GC'd yet.
+    # postgres:15-alpine is ~80MB, so it pulls in seconds even UNcached; it also
+    # matches roundcube-db-init, so it's additionally warm-cached on the
+    # warm-reuse path. Cold-path safety does NOT rely on that cache (db-init runs
+    # later, in create_env's deploy-roundcube step, not here): deploy_infra has
+    # already brought a node Ready before this block runs, so the throwaway pod
+    # schedules immediately and an uncached alpine pull stays well within
+    # --pod-running-timeout (240s, vs kubectl's 60s default that timed out in
+    # #1519 pulling the heavier postgres:16). The timeout also absorbs a node
+    # autoscale event; the retry loop absorbs transient scheduling/API hiccups.
+    # Unique pod names per attempt avoid a leftover-pod name collision if a
+    # timed-out `--rm` pod hasn't been GC'd yet.
     RC_LIST_OUT=""
     RC_QUERY_OK=false
     for _rc_attempt in 1 2 3; do
