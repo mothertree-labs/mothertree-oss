@@ -219,7 +219,13 @@ fi
 # Bounded to dev: $KUBECONFIG points at the dev cluster (kubeconfig.dev.yaml),
 # whose in-cluster PgBouncer fronts the dev postgres VM only. Unlike the
 # best-effort destroy-side drop, this fails fast if the DB query errors — a
-# silent skip would leave webmail login broken for the whole pipeline.
+# silent skip would leave webmail login broken for the whole pipeline. But it
+# only fails after (a) waiting for PgBouncer to be ready and (b) retrying the
+# throwaway psql pod: pipeline #1519 hit `error: timed out waiting for the
+# condition` because the diagnostic pod couldn't reach Running within kubectl's
+# default 60s `--pod-running-timeout` (cold/autoscaling node). Mitigations:
+# reuse the small postgres:15-alpine image db-init already pulls (warm cache),
+# raise the pod-running-timeout, and retry with backoff.
 if [ "${MT_ENV:-dev}" = "dev" ]; then
     print_status "dev-bringup: resetting persistent Roundcube tenant DBs (schema-vs-image drift guard)"
     RC_PG_PASSWORD=$(kubectl --kubeconfig="$KUBECONFIG" get secret postgres-credentials -n infra-db \
@@ -229,21 +235,46 @@ if [ "${MT_ENV:-dev}" = "dev" ]; then
         print_error "Cannot reset the Roundcube DBs; a stale schema would break webmail OIDC login. Aborting."
         exit 1
     fi
-    RC_LIST_OUT=$(kubectl --kubeconfig="$KUBECONFIG" run rc-db-list --rm -i --restart=Never \
-        --image=postgres:16 --quiet -n default \
-        --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
-        --env "PGUSER=postgres" \
-        --env "PGPASSWORD=$RC_PG_PASSWORD" \
-        -- psql -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'roundcube\\_%' ESCAPE '\\';" 2>&1) || {
-            print_error "dev-bringup: failed to query roundcube_* DBs via PgBouncer — cannot guarantee a clean schema"
-            sed 's/^/  /' <<< "$RC_LIST_OUT" >&2
-            exit 1
-        }
-    RC_DBS=$(echo "$RC_LIST_OUT" | grep -E '^[a-z0-9_-]+$' || true)
+
+    # Wait for PgBouncer to be ready before querying. On the cold path
+    # deploy_infra just created it and its pods may still be rolling; on the
+    # warm path this returns immediately. Best-effort — the retry loop below is
+    # the real guard, so a flaky rollout-status read shouldn't abort the run.
+    kubectl --kubeconfig="$KUBECONFIG" -n infra-db rollout status deploy/pgbouncer --timeout=180s 2>/dev/null \
+        || print_warning "dev-bringup: pgbouncer rollout status not confirmed; proceeding (retries will guard)"
+
+    # postgres:15-alpine matches roundcube-db-init, so it is already cached on
+    # warm nodes and small to pull on cold ones. --pod-running-timeout absorbs a
+    # node autoscale event; the retry loop absorbs transient scheduling/API
+    # hiccups. Unique pod names per attempt avoid a leftover-pod name collision
+    # if a timed-out `--rm` pod hasn't been GC'd yet.
+    RC_LIST_OUT=""
+    RC_QUERY_OK=false
+    for _rc_attempt in 1 2 3; do
+        if RC_LIST_OUT=$(kubectl --kubeconfig="$KUBECONFIG" run "rc-db-list-${_rc_attempt}" --rm -i --restart=Never \
+            --image=postgres:15-alpine --quiet -n default --pod-running-timeout=240s \
+            --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
+            --env "PGUSER=postgres" \
+            --env "PGPASSWORD=$RC_PG_PASSWORD" \
+            -- psql -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'roundcube\\_%' ESCAPE '\\';" 2>&1); then
+            RC_QUERY_OK=true
+            break
+        fi
+        print_warning "dev-bringup: roundcube DB query attempt ${_rc_attempt}/3 failed; retrying in $((_rc_attempt * 15))s"
+        sleep "$((_rc_attempt * 15))"
+    done
+    if [ "$RC_QUERY_OK" != "true" ]; then
+        print_error "dev-bringup: failed to query roundcube_* DBs via PgBouncer after 3 attempts — cannot guarantee a clean schema"
+        printf '%s\n' "$RC_LIST_OUT" >&2
+        exit 1
+    fi
+    RC_DBS=$(grep -E '^[a-z0-9_-]+$' <<< "$RC_LIST_OUT" || true)
     if [ -z "$RC_DBS" ]; then
         echo "  No roundcube_* databases found, nothing to reset"
     else
+        _rc_i=0
         while IFS= read -r db; do
+            _rc_i=$((_rc_i + 1))
             # Allowlist regex defends against SQL identifier injection; tenant DB
             # names are operator-controlled and always match roundcube_<tenant>
             # (lowercase + digits + underscore/hyphen). Anything else is suspicious.
@@ -253,8 +284,10 @@ if [ "${MT_ENV:-dev}" = "dev" ]; then
             fi
             print_status "  Dropping $db (roundcube-db-init recreates it empty on next deploy)"
             # DROP DATABASE cannot run in a transaction block, so one psql -c each.
-            kubectl --kubeconfig="$KUBECONFIG" run rc-db-drop --rm -i --restart=Never \
-                --image=postgres:16 --quiet -n default \
+            # Node + image are warm now (the list query just ran here), so a single
+            # attempt with a generous timeout suffices; fail fast if it errors.
+            kubectl --kubeconfig="$KUBECONFIG" run "rc-db-drop-${_rc_i}" --rm -i --restart=Never \
+                --image=postgres:15-alpine --quiet -n default --pod-running-timeout=240s \
                 --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
                 --env "PGUSER=postgres" \
                 --env "PGPASSWORD=$RC_PG_PASSWORD" \
