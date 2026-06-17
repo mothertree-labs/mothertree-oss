@@ -279,45 +279,63 @@ if [ "$CLUSTER_EXISTS" = "true" ]; then
     sleep 2
   done
 
-  # 2c — Drop tenant Nextcloud databases via the in-cluster PgBouncer.
+  # 2c — Drop tenant Nextcloud + Roundcube databases via the in-cluster PgBouncer.
   # The postgres-dev VM is preserved across destroy/recreate cycles (always-up),
-  # which means the tenant DBs persist too. For Nextcloud specifically this
-  # breaks cold-start: the DB has tables + appconfig from the previous cycle,
-  # but the K8s `nextcloud-identity` Secret (which encodes config.php identity
-  # values) is destroyed with the cluster. The new pods can't replay the prior
-  # install state, the entrypoint sees the existing DB and skips install, and
-  # the deploy script then fails on `occ config:system:set` because Nextcloud
-  # reports installed=false. Dropping the DB lets the next deploy reinstall
-  # cleanly from an empty schema. (See PR notes for the full incident.)
+  # which means the tenant DBs persist too. Two services break when their schema
+  # is allowed to outlive the cluster that created it:
+  #
+  #   Nextcloud — the DB has tables + appconfig from the previous cycle, but the
+  #   K8s `nextcloud-identity` Secret (which encodes config.php identity values)
+  #   is destroyed with the cluster. The new pods can't replay the prior install
+  #   state, the entrypoint sees the existing DB and skips install, and the
+  #   deploy script then fails on `occ config:system:set` because Nextcloud
+  #   reports installed=false.
+  #
+  #   Roundcube — the image's entrypoint runs the forward-only `updatedb.sh`,
+  #   which is gated by a `system.roundcube-version` stamp. Once the persistent
+  #   DB has been migrated forward by one image version (or hand-patched during
+  #   an incident), a later image can neither re-migrate nor roll back: e.g. the
+  #   1.6↔1.7 `session.changed`/`session.expires_at` rename leaves the session
+  #   table mismatched against the deployed code, every session write errors, the
+  #   OAuth state is lost across the Keycloak redirect, and Roundcube login hangs
+  #   ("OIDC redirect timed out"). Because the lease randomly picks one of the
+  #   pool tenants, this manifested as a deterministic per-pool e2e failure that
+  #   survived every cluster rebuild (the cluster is ephemeral; this DB was not).
+  #
+  # Dropping both lets the next deploy recreate an empty DB (the idempotent
+  # roundcube-db-init / nextcloud install Jobs do this), so the schema is always
+  # rebuilt fresh from the deployed image — no cross-version drift can persist.
+  # Session/contact/cache data in the roundcube DB is disposable login state.
   #
   # We run this BEFORE terraform destroy because PgBouncer is in-cluster — once
   # the cluster is gone, the only path to postgres-dev is via direct Tailscale,
   # which the operator's local machine doesn't always have.
-  print_status "Dropping tenant Nextcloud databases via in-cluster PgBouncer..."
+  print_status "Dropping tenant Nextcloud + Roundcube databases via in-cluster PgBouncer..."
   PG_PASSWORD=$("${KUBECTL[@]}" get secret postgres-credentials -n infra-db \
     -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d || true)
   if [ -z "$PG_PASSWORD" ]; then
     print_error "Could not load postgres-credentials secret — refusing to continue."
-    print_error "Cold-start of Nextcloud on the next cycle would fail. Either drop the DBs"
-    print_error "manually before re-running this script, or fix the postgres-credentials Secret."
+    print_error "Cold-start of Nextcloud/Roundcube on the next cycle would fail. Either drop the"
+    print_error "DBs manually before re-running this script, or fix the postgres-credentials Secret."
     exit 4
   fi
-  # Discover nextcloud_<tenant> databases. Output one name per line.
+  # Discover nextcloud_<tenant> + roundcube_<tenant> databases. One name per line.
   TENANT_DBS=$("${KUBECTL[@]}" run psql-list-tenants --rm -i --restart=Never \
     --image=postgres:16 --quiet -n default \
     --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
     --env "PGUSER=postgres" \
     --env "PGPASSWORD=$PG_PASSWORD" \
-    -- psql -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'nextcloud\\_%' ESCAPE '\\';" \
+    -- psql -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'nextcloud\\_%' ESCAPE '\\' OR datname LIKE 'roundcube\\_%' ESCAPE '\\';" \
     2>/dev/null | grep -E '^[a-z0-9_-]+$' || true)
   if [ -z "$TENANT_DBS" ]; then
-    echo "  No nextcloud_* databases found, skipping drop"
+    echo "  No nextcloud_* / roundcube_* databases found, skipping drop"
   else
     while IFS= read -r db; do
       # Allowlist regex defends against SQL identifier injection. tenant DB names
-      # are operator-controlled via deploy scripts and always match `nextcloud_<tenant>`
-      # with lowercase + digits + underscore/hyphen; anything else is suspicious.
-      if [[ ! "$db" =~ ^nextcloud_[a-z0-9][a-z0-9_-]*$ ]]; then
+      # are operator-controlled via deploy scripts and always match
+      # `nextcloud_<tenant>` / `roundcube_<tenant>` with lowercase + digits +
+      # underscore/hyphen; anything else is suspicious.
+      if [[ ! "$db" =~ ^(nextcloud|roundcube)_[a-z0-9][a-z0-9_-]*$ ]]; then
         print_error "  Refusing to drop suspicious DB name: $db"
         exit 5
       fi
