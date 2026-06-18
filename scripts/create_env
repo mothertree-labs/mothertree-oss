@@ -880,7 +880,20 @@ fi
 # (ingress + wildcard TLS + portal pod). Final "everything's up" assertion
 # before the cleanup/probe phase. Skipped when admin-portal isn't enabled.
 if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
-  mt_wait_for_admin_portal
+  if [ "${DNS_EXTERNAL:-false}" = "true" ] && ! mt_host_resolves "$ADMIN_HOST"; then
+    # For dns_external tenants the admin host only resolves (and serves valid TLS)
+    # once the TENANT adds its service CNAMEs and the all-or-nothing HTTP-01 cert
+    # issues over them. While the host is still unresolved this end-to-end check
+    # legitimately cannot pass — it is gated on DNS we do not control — so failing
+    # the deploy on it would keep deploy-prod-eu red for the entire pre-cutover
+    # window (potentially weeks). Skip-with-warning ONLY while the host does not
+    # resolve; the moment it does (post-cutover) the normal fatal gate below runs,
+    # so a real admin-portal regression is still caught. NOT a silent skip — the
+    # warning states exactly what is pending and why.
+    print_warning "admin-portal /version check skipped: ${ADMIN_HOST} does not resolve yet — EXPECTED for dns_external until the tenant adds its remaining CNAMEs. Deploy is applied; this gate re-arms (fatal) automatically once the host resolves."
+  else
+    mt_wait_for_admin_portal
+  fi
 fi
 
 # ── END app deploys ──────────────────────────────────────────────────
