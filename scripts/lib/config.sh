@@ -132,6 +132,7 @@ _mt_load_tenant_yaml() {
     "ROUNDCUBE_DB_NAME=" + (.database.roundcube_db // "" | @sh) + "\n" +
     "INFRA_DOMAIN=" + (.infra.domain // .dns.domain | @sh) + "\n" +
     "MAIL_SUBDOMAIN=" + (.dns.mail_subdomain // "mail" | @sh) + "\n" +
+    "DNS_EXTERNAL=" + (.dns.dns_external // false | tostring | @sh) + "\n" +
     "CALENDAR_ENABLED=" + (.features.calendar_enabled // false | tostring | @sh) + "\n" +
     "OFFICE_ENABLED=" + (.features.office_enabled // false | tostring | @sh) + "\n" +
     "MAIL_ENABLED=" + (.features.mail_enabled // false | tostring | @sh) + "\n" +
@@ -183,6 +184,17 @@ _mt_load_tenant_yaml() {
   done
   if [ "$LOGIN_PASSKEY_ENABLED" = "false" ] && [ "$LOGIN_MAGIC_LINK_ENABLED" = "false" ] && [ "$LOGIN_GOOGLE_SSO_ENABLED" = "false" ]; then
     echo "[ERROR] At least one features.login_methods entry must be true in $TENANT_CONFIG" >&2
+    exit 1
+  fi
+
+  # External-DNS tenants cannot run mail: our mail flow depends on MX/SPF/DKIM/DMARC
+  # records auto-created in OUR Cloudflare zone, which we can't create in a zone we
+  # don't control. Enforce at config load so EVERY entry point fails fast — not just
+  # create_env, but independently-run sub-scripts (e.g. deploy-stalwart.sh) too —
+  # rather than deploying unsigned/unroutable mail.
+  if [ "$DNS_EXTERNAL" = "true" ] && [ "$MAIL_ENABLED" = "true" ]; then
+    echo "[ERROR] dns.dns_external=true is incompatible with features.mail_enabled=true in $TENANT_CONFIG" >&2
+    echo "[ERROR]   Tenant mail requires MX/SPF/DKIM/DMARC records auto-created in our Cloudflare zone." >&2
     exit 1
   fi
 
@@ -585,7 +597,7 @@ _mt_export_all() {
   export S3_CLUSTER S3_BUCKET_PREFIX S3_DOCS_BUCKET S3_MATRIX_BUCKET S3_FILES_BUCKET S3_MAIL_BUCKET
   export DOCS_DB_NAME NEXTCLOUD_DB_NAME SYNAPSE_DB_NAME SYNAPSE_DB_USER
   export STALWART_DB_NAME STALWART_DB_USER ROUNDCUBE_DB_NAME ROUNDCUBE_DB_USER
-  export INFRA_DOMAIN MAIL_SUBDOMAIN
+  export INFRA_DOMAIN MAIL_SUBDOMAIN DNS_EXTERNAL
   export BUCKET_NAME BASE_DOMAIN COOKIE_DOMAIN KEYCLOAK_REALM
   export EMAIL_DOMAIN SMTP_DOMAIN DEFAULT_EMAIL_QUOTA_MB
   export PRIVACY_POLICY_URL TERMS_OF_USE_URL ACCEPTABLE_USE_POLICY_URL

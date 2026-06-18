@@ -40,14 +40,6 @@ done
 
 echo "=== CI Deploy: env=$MT_ENV all_tenants=$ALL_TENANTS pipeline=#${CI_PIPELINE_NUMBER:-unknown} ==="
 
-# ── Decrypt vault ────────────────────────────────────────────────
-VAULT_FILE="/home/woodpecker/deploy-vaults/deploy-vault-${MT_ENV}.vault"
-if [[ ! -f "$VAULT_FILE" ]]; then
-  echo "ERROR: Deploy vault not found: $VAULT_FILE"
-  echo "Run Ansible to provision vault files to the CI host."
-  exit 1
-fi
-
 WORK_DIR=$(mktemp -d /tmp/mt-deploy-XXXXXX)
 chmod 0700 "$WORK_DIR"
 
@@ -106,8 +98,16 @@ _start_lease_renewal() {
   echo "Started lease renewal background process (PID: $_LEASE_RENEWAL_PID)"
 }
 
+# ── Clone private config submodules (provides the committed vault) ──
+# config/platform carries the committed deploy vaults, so the submodules MUST be
+# cloned before decryption. This used to happen AFTER the decrypt, when the vault
+# came from the CI host; GitHub issue #463 moved the source of truth to the
+# committed copy so a merged vault change deploys with no operator reprovision.
+ci_clone_config_submodules "$REPO_ROOT"
+
+# ── Decrypt vault (from the committed config/platform copy) ───────
 echo "Decrypting deploy vault ($MT_ENV) → $WORK_DIR"
-ci_decrypt_vault "$VAULT_FILE" "$MT_ENV" "$WORK_DIR/secrets.tar.gz"
+ci_decrypt_committed_vault "$REPO_ROOT" "$MT_ENV" "$WORK_DIR/secrets.tar.gz"
 tar xzf "$WORK_DIR/secrets.tar.gz" -C "$WORK_DIR"
 rm -f "$WORK_DIR/secrets.tar.gz"
 echo "Vault decrypted successfully"
@@ -163,22 +163,6 @@ if [[ -f "$WORK_DIR/tf-state-creds.env" ]]; then
   set +a
   echo "Loaded phase1-dev tf-state credentials"
 fi
-
-# ── Clone private config submodules ───────────────────────────────
-# Use GitHub PAT to authenticate SSH-based submodule URLs via URL rewriting.
-# Must be --global so child git processes (spawned by submodule update) inherit it.
-cd "$REPO_ROOT"
-if [[ -n "${GITHUB_PAT:-}" ]]; then
-  git config --global url."https://x-access-token:${GITHUB_PAT}@github.com/".insteadOf "git@github.com:"
-  echo "Configured git URL rewriting for private submodule access"
-fi
-
-echo "Initializing config submodules..."
-git submodule update --init config/platform config/tenants || {
-  echo "ERROR: Failed to init config submodules."
-  echo "Ensure GITHUB_PAT secret is set and has access to the private config repos."
-  exit 1
-}
 
 # ── Copy secrets from vault into workspace ────────────────────────
 # Config files come from submodules; secrets come from the encrypted vault.

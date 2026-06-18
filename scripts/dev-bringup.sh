@@ -201,6 +201,109 @@ if [ -z "$NEW_LB_IP" ]; then
     print_error "DNS may be stale (pointing at a destroyed cluster's IP)."
     exit 1
 fi
+
+# Reset persistent Roundcube tenant DBs so their schema always matches the
+# deployed image. postgres-dev is an always-up VM, so roundcube_<tenant> DBs
+# survive every cluster rebuild; Roundcube's forward-only, version-stamp-gated
+# updatedb.sh means a schema migrated forward by one image version (or
+# hand-patched during an incident) can neither re-migrate nor roll back — the
+# mismatch (e.g. the 1.6<->1.7 session.changed/expires_at rename) breaks OIDC
+# login ("OIDC redirect timed out") on whichever pool tenant carries the stale
+# DB. Dropping here on every bringup makes the next deploy recreate an empty DB
+# (via the idempotent roundcube-db-init Job) whose schema the entrypoint rebuilds
+# fresh from the deployed image — clearing any existing poison AND closing the
+# warm-cluster cross-version drift case. Session/contact/cache data on dev is
+# disposable login state. This is the bringup-side companion to the destroy-time
+# drop in scripts/destroy-dev-cluster.sh (Step 2c) — keep the two in sync.
+#
+# Bounded to dev: $KUBECONFIG points at the dev cluster (kubeconfig.dev.yaml),
+# whose in-cluster PgBouncer fronts the dev postgres VM only. Unlike the
+# best-effort destroy-side drop, this fails fast if the DB query errors — a
+# silent skip would leave webmail login broken for the whole pipeline. But it
+# only fails after (a) waiting for PgBouncer to be ready and (b) retrying the
+# throwaway psql pod: pipeline #1519 hit `error: timed out waiting for the
+# condition` because the diagnostic pod couldn't reach Running within kubectl's
+# default 60s `--pod-running-timeout` (cold/autoscaling node). Mitigations:
+# reuse the small postgres:15-alpine image db-init already pulls (warm cache),
+# raise the pod-running-timeout, and retry with backoff.
+if [ "${MT_ENV:-dev}" = "dev" ]; then
+    print_status "dev-bringup: resetting persistent Roundcube tenant DBs (schema-vs-image drift guard)"
+    RC_PG_PASSWORD=$(kubectl --kubeconfig="$KUBECONFIG" get secret postgres-credentials -n infra-db \
+        -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d || true)
+    if [ -z "$RC_PG_PASSWORD" ]; then
+        print_error "dev-bringup: could not load postgres-credentials secret in infra-db"
+        print_error "Cannot reset the Roundcube DBs; a stale schema would break webmail OIDC login. Aborting."
+        exit 1
+    fi
+
+    # Wait for PgBouncer to be ready before querying. On the cold path
+    # deploy_infra just created it and its pods may still be rolling; on the
+    # warm path this returns immediately. Best-effort — the retry loop below is
+    # the real guard, so a flaky rollout-status read shouldn't abort the run.
+    kubectl --kubeconfig="$KUBECONFIG" -n infra-db rollout status deploy/pgbouncer --timeout=180s 2>/dev/null \
+        || print_warning "dev-bringup: pgbouncer rollout status not confirmed; proceeding (retries will guard)"
+
+    # postgres:15-alpine is ~80MB, so it pulls in seconds even UNcached; it also
+    # matches roundcube-db-init, so it's additionally warm-cached on the
+    # warm-reuse path. Cold-path safety does NOT rely on that cache (db-init runs
+    # later, in create_env's deploy-roundcube step, not here): deploy_infra has
+    # already brought a node Ready before this block runs, so the throwaway pod
+    # schedules immediately and an uncached alpine pull stays well within
+    # --pod-running-timeout (240s, vs kubectl's 60s default that timed out in
+    # #1519 pulling the heavier postgres:16). The timeout also absorbs a node
+    # autoscale event; the retry loop absorbs transient scheduling/API hiccups.
+    # Unique pod names per attempt avoid a leftover-pod name collision if a
+    # timed-out `--rm` pod hasn't been GC'd yet.
+    RC_LIST_OUT=""
+    RC_QUERY_OK=false
+    for _rc_attempt in 1 2 3; do
+        if RC_LIST_OUT=$(kubectl --kubeconfig="$KUBECONFIG" run "rc-db-list-${_rc_attempt}" --rm -i --restart=Never \
+            --image=postgres:15-alpine --quiet -n default --pod-running-timeout=240s \
+            --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
+            --env "PGUSER=postgres" \
+            --env "PGPASSWORD=$RC_PG_PASSWORD" \
+            -- psql -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'roundcube\\_%' ESCAPE '\\';" 2>&1); then
+            RC_QUERY_OK=true
+            break
+        fi
+        print_warning "dev-bringup: roundcube DB query attempt ${_rc_attempt}/3 failed; retrying in $((_rc_attempt * 15))s"
+        sleep "$((_rc_attempt * 15))"
+    done
+    if [ "$RC_QUERY_OK" != "true" ]; then
+        print_error "dev-bringup: failed to query roundcube_* DBs via PgBouncer after 3 attempts — cannot guarantee a clean schema"
+        printf '%s\n' "$RC_LIST_OUT" >&2
+        exit 1
+    fi
+    RC_DBS=$(grep -E '^[a-z0-9_-]+$' <<< "$RC_LIST_OUT" || true)
+    if [ -z "$RC_DBS" ]; then
+        echo "  No roundcube_* databases found, nothing to reset"
+    else
+        _rc_i=0
+        while IFS= read -r db; do
+            _rc_i=$((_rc_i + 1))
+            # Allowlist regex defends against SQL identifier injection; tenant DB
+            # names are operator-controlled and always match roundcube_<tenant>
+            # (lowercase + digits + underscore/hyphen). Anything else is suspicious.
+            if [[ ! "$db" =~ ^roundcube_[a-z0-9][a-z0-9_-]*$ ]]; then
+                print_error "dev-bringup: refusing to drop suspicious DB name: $db"
+                exit 1
+            fi
+            print_status "  Dropping $db (roundcube-db-init recreates it empty on next deploy)"
+            # DROP DATABASE cannot run in a transaction block, so one psql -c each.
+            # Node + image are warm now (the list query just ran here), so a single
+            # attempt with a generous timeout suffices; fail fast if it errors.
+            kubectl --kubeconfig="$KUBECONFIG" run "rc-db-drop-${_rc_i}" --rm -i --restart=Never \
+                --image=postgres:15-alpine --quiet -n default --pod-running-timeout=240s \
+                --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
+                --env "PGUSER=postgres" \
+                --env "PGPASSWORD=$RC_PG_PASSWORD" \
+                -- psql -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE);" 2>&1 \
+                | sed 's/^/    /' \
+                || { print_error "dev-bringup: failed to drop $db — aborting"; exit 1; }
+        done <<< "$RC_DBS"
+    fi
+fi
+
 # secrets.tfvars.env is required by manage_infra; write it if absent
 # (reuse path doesn't run the cold-start block above).
 if [ ! -f "$REPO_ROOT/secrets.tfvars.env" ]; then
