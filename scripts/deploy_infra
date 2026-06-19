@@ -478,6 +478,19 @@ else
 fi
 
 # =============================================================================
+# Deploy Cross-Cluster Metrics Federation bridge
+# (grafana.prod <- prod-eu Prometheus over the Headscale mesh).
+# Feature-gated by metrics_federation.role in the infra config; no-op when unset.
+# =============================================================================
+print_status "Deploying cross-cluster metrics federation (if enabled)..."
+if [ -x "$REPO_ROOT/apps/deploy-metrics-federation.sh" ]; then
+  "$REPO_ROOT/apps/deploy-metrics-federation.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+else
+  print_error "deploy-metrics-federation.sh not found or not executable"
+  exit 1
+fi
+
+# =============================================================================
 # Deploy Tailscale Key Rotator CronJob
 # =============================================================================
 print_status "Deploying Tailscale key rotator CronJob..."

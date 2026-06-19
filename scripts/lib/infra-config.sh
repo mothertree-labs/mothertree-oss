@@ -142,6 +142,15 @@ _mt_infra_load_env_config() {
     # TURN server Tailscale IP (for Ansible inventory mesh fallback)
     TURN_TAILSCALE_IP=$(yq '.turn.tailscale_ip // ""' "$infra_config")
     export TURN_TAILSCALE_IP
+
+    # Cross-cluster metrics federation (grafana.prod queries prod-eu Prometheus
+    # over the Headscale mesh). role: exposer (prod-eu) | consumer (prod) | unset.
+    # source_mesh_ip is the prod-eu exposer's 100.64.x.x mesh IP (consumer only).
+    MT_METRICS_FED_ROLE=$(yq '.metrics_federation.role // ""' "$infra_config")
+    MT_METRICS_FED_SOURCE_IP=$(yq '.metrics_federation.source_mesh_ip // ""' "$infra_config")
+    [ "$MT_METRICS_FED_ROLE" = "null" ] && MT_METRICS_FED_ROLE=""
+    [ "$MT_METRICS_FED_SOURCE_IP" = "null" ] && MT_METRICS_FED_SOURCE_IP=""
+    export MT_METRICS_FED_ROLE MT_METRICS_FED_SOURCE_IP
   else
     echo "[WARNING] Infrastructure config not found: $infra_config"
     echo "[WARNING] Using defaults: PG_READ_REPLICAS=1, KEYCLOAK_REPLICAS=2"
