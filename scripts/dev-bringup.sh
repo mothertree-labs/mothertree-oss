@@ -304,6 +304,115 @@ if [ "${MT_ENV:-dev}" = "dev" ]; then
     fi
 fi
 
+# Reset ORPHANED persistent Nextcloud tenant DBs. Like roundcube_<tenant>, the
+# nextcloud_<tenant> DBs live on the always-up postgres-dev VM and survive every
+# on-demand cluster rebuild. But unlike Roundcube, Nextcloud is NOT forced-fresh
+# on every bringup: it migrates its own schema across image upgrades via
+# `occ upgrade`, so a LIVE install must be left intact. The failure we do have to
+# fix is the cold-start orphan: deploy-nextcloud.sh runs the `occ
+# maintenance:install` Job only when the in-cluster `nextcloud-identity` Secret
+# is absent (cold start). On a freshly rebuilt cluster that Secret is gone but
+# the DB persists, so maintenance:install runs against a populated DB and aborts
+# with "The Login is already being used" → the install Job hits
+# BackoffLimitExceeded and the whole deploy stalls (pipeline #1537). The
+# destroy-time drop in destroy-dev-cluster.sh (Step 2c) clears this on a clean
+# teardown, but a teardown that skips/fails that drop (reaper orphan leak,
+# crashed destroy) leaves the DB orphaned; this is the bringup-side backstop.
+#
+# Gate: a nextcloud_<tenant> DB is orphaned poison iff its paired
+# tn-<tenant>-files/nextcloud-identity Secret is ABSENT. We check PER TENANT, not
+# cluster-wide: a cluster-wide "any identity Secret exists" gate would (a) skip
+# the leased tenant's orphaned DB whenever some OTHER tenant is installed, and
+# (b) risk wiping every live tenant at once on a single misread. Per-tenant
+# bounds a wrong drop to one tenant and lets a re-run self-heal the leased one.
+# The nextcloud_<tenant> <-> tn-<tenant>-files mapping is the same convention the
+# allowlist regex and destroy-dev-cluster.sh (Step 2c) already assume.
+#
+# Destructive op → fail fast (project rule): a transient kube-API error must
+# NEVER be read as "Secret absent → drop". We drop only on a definitive NotFound
+# (missing namespace or Secret); any other non-zero exit aborts the run.
+if [ "${MT_ENV:-dev}" = "dev" ]; then
+    print_status "dev-bringup: checking for orphaned persistent Nextcloud tenant DBs (cold-start poison guard)"
+    NC_PG_PASSWORD=$(kubectl --kubeconfig="$KUBECONFIG" get secret postgres-credentials -n infra-db \
+        -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d || true)
+    if [ -z "$NC_PG_PASSWORD" ]; then
+        print_error "dev-bringup: could not load postgres-credentials secret in infra-db"
+        print_error "Cannot check the Nextcloud DBs; a persistent orphaned DB would stall the deploy. Aborting."
+        exit 1
+    fi
+
+    # List nextcloud_<tenant> DBs via the in-cluster PgBouncer. Same throwaway-pod
+    # pattern, image, and retry/backoff as the Roundcube block above (PgBouncer is
+    # already confirmed ready there; postgres:15-alpine stays warm-cached from it).
+    NC_LIST_OUT=""
+    NC_QUERY_OK=false
+    for _nc_attempt in 1 2 3; do
+        if NC_LIST_OUT=$(kubectl --kubeconfig="$KUBECONFIG" run "nextcloud-db-list-${_nc_attempt}" --rm -i --restart=Never \
+            --image=postgres:15-alpine --quiet -n default --pod-running-timeout=240s \
+            --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
+            --env "PGUSER=postgres" \
+            --env "PGPASSWORD=$NC_PG_PASSWORD" \
+            -- psql -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'nextcloud\\_%' ESCAPE '\\';" 2>&1); then
+            NC_QUERY_OK=true
+            break
+        fi
+        print_warning "dev-bringup: nextcloud DB query attempt ${_nc_attempt}/3 failed; retrying in $((_nc_attempt * 15))s"
+        sleep "$((_nc_attempt * 15))"
+    done
+    if [ "$NC_QUERY_OK" != "true" ]; then
+        print_error "dev-bringup: failed to query nextcloud_* DBs via PgBouncer after 3 attempts — cannot guarantee a clean cold start"
+        printf '%s\n' "$NC_LIST_OUT" >&2
+        exit 1
+    fi
+    NC_DBS=$(grep -E '^[a-z0-9_-]+$' <<< "$NC_LIST_OUT" || true)
+    if [ -z "$NC_DBS" ]; then
+        echo "  No nextcloud_* databases found, nothing to reset"
+    else
+        _nc_i=0
+        while IFS= read -r db; do
+            _nc_i=$((_nc_i + 1))
+            # Allowlist regex defends against SQL identifier injection AND pins the
+            # tenant slug we derive the namespace from. Tenant DB names are
+            # operator-controlled and always match nextcloud_<tenant> (lowercase +
+            # digits + underscore/hyphen). Anything else is suspicious.
+            if [[ ! "$db" =~ ^nextcloud_[a-z0-9][a-z0-9_-]*$ ]]; then
+                print_error "dev-bringup: refusing to act on suspicious DB name: $db"
+                exit 1
+            fi
+            _nc_tenant="${db#nextcloud_}"
+            _nc_ns="tn-${_nc_tenant}-files"
+
+            # Per-tenant orphan gate with fail-fast classification:
+            #   exit 0              -> Secret present -> live install, KEEP
+            #   NotFound (ns/sec)   -> Secret absent  -> orphaned poison, DROP
+            #   any other non-zero  -> transient/RBAC -> ABORT (never drop on a misread)
+            if _nc_idcheck=$(kubectl --kubeconfig="$KUBECONFIG" get secret nextcloud-identity \
+                                -n "$_nc_ns" -o name 2>&1); then
+                echo "  $db: nextcloud-identity present in $_nc_ns — live install, keeping"
+                continue
+            fi
+            if ! grep -qiE '\(notfound\)|not found' <<< "$_nc_idcheck"; then
+                print_error "dev-bringup: error checking nextcloud-identity in $_nc_ns (not a NotFound) — refusing to drop $db"
+                printf '%s\n' "$_nc_idcheck" >&2
+                exit 1
+            fi
+
+            print_status "  Dropping orphaned $db (no nextcloud-identity in $_nc_ns; nextcloud-db-init + install Job recreate it on next deploy)"
+            # DROP DATABASE cannot run in a transaction block, so one psql -c each.
+            # Node + image are warm now (the list query just ran here), so a single
+            # attempt with a generous timeout suffices; fail fast if it errors.
+            kubectl --kubeconfig="$KUBECONFIG" run "nextcloud-db-drop-${_nc_i}" --rm -i --restart=Never \
+                --image=postgres:15-alpine --quiet -n default --pod-running-timeout=240s \
+                --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
+                --env "PGUSER=postgres" \
+                --env "PGPASSWORD=$NC_PG_PASSWORD" \
+                -- psql -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE);" 2>&1 \
+                | sed 's/^/    /' \
+                || { print_error "dev-bringup: failed to drop $db — aborting"; exit 1; }
+        done <<< "$NC_DBS"
+    fi
+fi
+
 # secrets.tfvars.env is required by manage_infra; write it if absent
 # (reuse path doesn't run the cold-start block above).
 if [ ! -f "$REPO_ROOT/secrets.tfvars.env" ]; then
