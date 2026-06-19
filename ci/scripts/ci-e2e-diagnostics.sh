@@ -132,6 +132,40 @@ else
   printf '%s\n' "$_rc_markers" | sed 's/^/    /'
 fi
 
+# ── Roundcube OIDC login OUTCOMES (per-user) + the oauth-flow error behind a fail ─
+# The shard-5 "Echo Group" round-trip failure (pipeline #1580) was a REAL failed
+# login for the RECEIVER user — roundcube logged `userlogins: Failed login for
+# e2e-mailrcv` while the SENDER (e2e-mailrt) logged in fine, and NO Stalwart IMAP
+# auth was even attempted for the receiver. So the failure is in Roundcube's OIDC
+# leg (code->token exchange / userinfo), BEFORE IMAP. The 300-line tail + schema +
+# Stalwart greps above do not surface it. Capture, over the FULL current log:
+#   (1) every per-user login outcome, making the sender-OK / receiver-FAIL
+#       asymmetry explicit, and
+#   (2) the oauth-flow error detail (token/code/state/userinfo) that names WHY a
+#       given user's OIDC login failed.
+# Fetch the full current log ONCE, then grep it twice.
+_rc_full="$(kubectl logs -n "$NS_WEBMAIL" -l app=roundcube -c roundcube --tail=-1 --timestamps 2>/dev/null)"
+echo ""
+echo ">>> ROUNDCUBE per-user login outcomes (userlogins: Successful/Failed login for <user>):"
+_rc_logins="$(printf '%s\n' "$_rc_full" | grep -iE 'userlogins:|login for ' | tail -n 40)"
+if [[ -z "$_rc_logins" ]]; then
+  echo "    (no per-user login-outcome lines captured — check log_logins / window)"
+else
+  printf '%s\n' "$_rc_logins" | sed 's/^/    /'
+fi
+echo ""
+echo ">>> ROUNDCUBE oauth-flow errors (the WHY behind a Failed login — token/code/state/userinfo):"
+_rc_oauth="$(printf '%s\n' "$_rc_full" \
+  | grep -iE 'oauth|/login/oauth|_action=oauth|invalid_grant|invalid_token|token.*(error|fail|invalid|expired|reject)|userinfo|id_?token|oidc|state mismatch|csrf|curl|could not|unable to' \
+  | grep -ivE 'GET /static\.php|\.woff2|\.css|\.js"|blank\.webp|googiespell|tinymce' \
+  | sed -E 's/(code|session_state|state|id_token_hint)=[^&" ]*/\1=REDACTED/g' \
+  | tail -n 60)"
+if [[ -z "$_rc_oauth" ]]; then
+  echo "    (no oauth-flow error lines found)"
+else
+  printf '%s\n' "$_rc_oauth" | sed 's/^/    /'
+fi
+
 # Stalwart — the OAUTHBEARER token validator + IMAP backend. Token-decode /
 # unauthorized errors here mean the OIDC->IMAP auth leg failed.
 dump_component "$NS_MAIL" "app=stalwart" "STALWART"
@@ -153,10 +187,10 @@ if [[ -z "$_kc_pods" ]]; then
 else
   while IFS= read -r p; do
     [[ -z "$p" ]] && continue
-    echo ">>> ${p} error/warn/token highlights (last 1000 lines):"
+    echo ">>> ${p} error/warn/token + OIDC code->token exchange highlights (last 1000 lines):"
     kubectl logs -n "$NS_AUTH" "$p" --tail=1000 2>/dev/null \
-      | grep -iE 'error|warn|invalid|token|client|roundcube|reject|redirect_uri' \
-      | tail -n 40 | sed 's/^/    /' || echo "    (none)"
+      | grep -iE 'error|warn|invalid|token|client|roundcube|reject|redirect_uri|invalid_grant|code_to_token|login_error|session_state|expired|not active|grant_type' \
+      | tail -n 60 | sed 's/^/    /' || echo "    (none)"
   done <<< "$_kc_pods"
 fi
 
@@ -246,6 +280,12 @@ echo "   • DB introspection shows 'database \"...\" does not exist' -> DB MISS
 echo "     PgBouncer-cached (#1547 cause)."
 echo '   • pgbouncer SHOW DATABASES / SHOW SERVERS with a stale/absent roundcube'
 echo '     entry corroborates a drop/recreate cache window.'
+echo "   • ROUNDCUBE per-user login outcomes: one user 'Successful login' but"
+echo "     another 'Failed login' (e.g. sender e2e-mailrt OK, receiver e2e-mailrcv"
+echo "     FAIL) with NO Stalwart IMAP auth for the failed user -> the failure is in"
+echo "     Roundcube's OIDC leg (code->token / userinfo), NOT IMAP/schema/principal"
+echo "     (shard-5 Echo Group, pipeline #1580). Read the oauth-flow errors + the"
+echo "     keycloak code->token highlights for that user to name WHY."
 echo "   • browser-side [roundcube-stuck:*] lines in the e2e log show WHERE"
 echo "     the browser stopped (Keycloak vs webmail-no-inbox)."
 echo "=================================================================="
