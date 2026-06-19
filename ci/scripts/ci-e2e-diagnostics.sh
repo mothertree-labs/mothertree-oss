@@ -106,6 +106,32 @@ dump_component() {  # namespace selector friendly-name
 # Roundcube — the OIDC client. DB-schema / session / oauth-state errors land here.
 dump_component "$NS_WEBMAIL" "app=roundcube" "ROUNDCUBE"
 
+# The 300-line tail above MISSES the container entrypoint/startup, which is where
+# any schema-init attempt (or its absence) shows up. Capture the FIRST lines of
+# the CURRENT roundcube log so the NEXT failure tells us WHETHER the entrypoint
+# tried to build the schema at all (pipeline #1571: DB exists but is empty).
+echo ""
+echo ">>> ROUNDCUBE STARTUP (first 150 log lines — entrypoint / schema-init attempt):"
+_rc_startup="$(kubectl logs -n "$NS_WEBMAIL" -l app=roundcube -c roundcube --tail=-1 --timestamps 2>/dev/null | head -150)"
+if [[ -z "$_rc_startup" ]]; then
+  echo "    (no startup logs captured)"
+else
+  printf '%s\n' "$_rc_startup" | sed 's/^/    /'
+fi
+echo ""
+echo ">>> ROUNDCUBE schema/init markers (grep over full current log):"
+_rc_markers="$(kubectl logs -n "$NS_WEBMAIL" -l app=roundcube -c roundcube --tail=-1 2>/dev/null \
+  | grep -iE 'initdb|updatedb|installto|create table|creating|initializ|schema|waiting for|wait for db|database .*(does not exist|not exist)|relation .*does not exist|system' \
+  | head -80)"
+if [[ -z "$_rc_markers" ]]; then
+  # ABSENCE is itself the key signal: in this config the DB is wired via a mounted
+  # custom.config.php db_dsnw (NOT ROUNDCUBEMAIL_DB_* env), so the stock image's
+  # auto-init (gated on ROUNDCUBEMAIL_DB_TYPE) never fires -> trigger (b).
+  echo "    (no schema/init markers found)"
+else
+  printf '%s\n' "$_rc_markers" | sed 's/^/    /'
+fi
+
 # Stalwart — the OAUTHBEARER token validator + IMAP backend. Token-decode /
 # unauthorized errors here mean the OIDC->IMAP auth leg failed.
 dump_component "$NS_MAIL" "app=stalwart" "STALWART"
@@ -134,6 +160,75 @@ else
   done <<< "$_kc_pods"
 fi
 
+# ── Live DB + PgBouncer introspection ─────────────────────────────────────────
+# Both sections need the PG admin password and reach the DB through PgBouncer the
+# same way real pods do. We fetch the password ONCE and guard both sections on it.
+# Read-only throughout (no DROP) — so unlike dev-bringup's reset block, a bad
+# tenant name or missing secret just SKIPS (best-effort: never exit non-zero).
+# Sanitize the slash in E2E_SHARD ("5/10") so pod names stay valid DNS-1123 labels.
+_diag_suffix="${CI_PIPELINE_NUMBER:-x}-${E2E_SHARD//\//-}"
+_pg_pwd="$(kubectl get secret postgres-credentials -n infra-db -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d)"
+
+echo ""
+echo "------------------------------------------------------------------"
+echo "  ROUNDCUBE DATABASE (live introspection)   (db=roundcube_${E2E_TENANT})"
+echo "------------------------------------------------------------------"
+if [[ -z "$_pg_pwd" ]]; then
+  echo "    (postgres-credentials secret in infra-db unavailable — skipping DB introspection)"
+elif [[ ! "$E2E_TENANT" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+  # Allowlist-validate BEFORE interpolating the tenant into the DB name / SQL
+  # (defends against SQL/identifier injection — mirrors dev-bringup's guard).
+  echo "    (suspicious tenant name '$E2E_TENANT' — skipping DB introspection)"
+else
+  echo ">>> Introspecting roundcube_${E2E_TENANT} via PgBouncer (postgres:15-alpine throwaway pod):"
+  _rc_db_out="$(kubectl run "rc-diag-db-${_diag_suffix}" --rm -i --restart=Never \
+    --image=postgres:15-alpine --quiet -n default --pod-running-timeout=120s \
+    --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
+    --env "PGUSER=postgres" \
+    --env "PGPASSWORD=$_pg_pwd" \
+    --env "PGDATABASE=roundcube_${E2E_TENANT}" \
+    -- psql -v ON_ERROR_STOP=0 \
+       -c "\echo '--- public tables ---'" \
+       -c "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY 1;" \
+       -c "\echo '--- table count ---'" \
+       -c "SELECT count(*) AS public_table_count FROM information_schema.tables WHERE table_schema='public';" \
+       -c "\echo '--- roundcube schema version (errors if system table missing) ---'" \
+       -c "SELECT value FROM system WHERE name='roundcube-version';" 2>&1)"
+  printf '%s\n' "$_rc_db_out" | sed 's/^/    /'
+  echo ""
+  echo "    INTERPRETATION:"
+  echo "      • 'database \"roundcube_...\" does not exist' (maybe PgBouncer-cached as"
+  echo "        server_login_retry) -> DB MISSING (trigger-a / #1547 family)."
+  echo "      • connects but ZERO public tables           -> DB exists, schema NEVER"
+  echo "        built (#1571 cause); read ROUNDCUBE STARTUP above for whether the"
+  echo "        entrypoint even tried (no init markers -> trigger b)."
+fi
+
+echo ""
+echo "------------------------------------------------------------------"
+echo "  PGBOUNCER (admin console)   (host=pgbouncer.infra-db.svc.cluster.local)"
+echo "------------------------------------------------------------------"
+if [[ -z "$_pg_pwd" ]]; then
+  echo "    (postgres-credentials secret in infra-db unavailable — skipping pgbouncer dump)"
+else
+  echo ">>> SHOW DATABASES / POOLS / SERVERS (surfaces a stale/negative cached roundcube entry):"
+  _pgb_out="$(kubectl run "rc-diag-pgb-${_diag_suffix}" --rm -i --restart=Never \
+    --image=postgres:15-alpine --quiet -n default --pod-running-timeout=120s \
+    --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
+    --env "PGUSER=postgres" \
+    --env "PGPASSWORD=$_pg_pwd" \
+    --env "PGDATABASE=pgbouncer" \
+    -- psql -v ON_ERROR_STOP=0 \
+       -c "SHOW DATABASES;" \
+       -c "SHOW POOLS;" \
+       -c "SHOW SERVERS;" 2>&1)"
+  if [[ -z "$_pgb_out" ]]; then
+    echo "    (pgbouncer admin not accessible — no output)"
+  else
+    printf '%s\n' "$_pgb_out" | sed 's/^/    /'
+  fi
+fi
+
 echo ""
 echo "=================================================================="
 echo "  HOW TO READ THIS (see memory project_shard5_10_roundcube_login_root_cause):"
@@ -142,6 +237,15 @@ echo "   • stalwart  OAUTHBEARER / 'Failed to decode token' /"
 echo "               'unauthorized'                              -> Stalwart token validation"
 echo "   • roundcube session / oauth-state / redirect errors    -> Roundcube 1.7 / session store"
 echo "   • keycloak  invalid_client / redirect_uri              -> Keycloak client config"
+echo "   • roundcube 'relation \"session\" does not exist' + DB introspection shows"
+echo "     0 public tables -> DB created EMPTY, schema NEVER built (#1571 cause)."
+echo "     Then read ROUNDCUBE STARTUP / schema-init markers: NO init lines ->"
+echo "     entrypoint never auto-inits (trigger b); init attempted but errored /"
+echo "     'database does not exist' -> trigger a/c."
+echo "   • DB introspection shows 'database \"...\" does not exist' -> DB MISSING /"
+echo "     PgBouncer-cached (#1547 cause)."
+echo '   • pgbouncer SHOW DATABASES / SHOW SERVERS with a stale/absent roundcube'
+echo '     entry corroborates a drop/recreate cache window.'
 echo "   • browser-side [roundcube-stuck:*] lines in the e2e log show WHERE"
 echo "     the browser stopped (Keycloak vs webmail-no-inbox)."
 echo "=================================================================="
