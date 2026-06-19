@@ -2,6 +2,7 @@ import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
+import { captureRoundcubeStuckState } from '../../helpers/roundcube-failure';
 
 const ROUNDCUBE_INBOX = '#messagelist, #mailboxlist, .mailbox-list, button:has-text("Compose")';
 
@@ -14,6 +15,21 @@ const ROUNDCUBE_INBOX = '#messagelist, #mailboxlist, .mailbox-list, button:has-t
  * - If page ends up mid-redirect on Keycloak, retries the OAuth URL
  */
 async function navigateToRoundcube(
+  page: import('@playwright/test').Page,
+  username: string,
+  password: string,
+) {
+  try {
+    await navigateToRoundcubeInner(page, username, password);
+  } catch (err) {
+    // On failure, record WHERE the OIDC login got stuck (browser-side); the
+    // server-side pod logs are dumped by ci/scripts/ci-e2e-diagnostics.sh.
+    await captureRoundcubeStuckState(page, 'roundcube-basic');
+    throw err;
+  }
+}
+
+async function navigateToRoundcubeInner(
   page: import('@playwright/test').Page,
   username: string,
   password: string,
