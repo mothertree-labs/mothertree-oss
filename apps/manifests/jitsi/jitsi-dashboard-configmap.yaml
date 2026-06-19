@@ -242,16 +242,16 @@ data:
                   },
                   {
                     "color": "yellow",
-                    "value": 3.1
+                    "value": 1
                   },
                   {
                     "color": "red",
-                    "value": 80
+                    "value": 2
                   }
                 ]
               },
-              "unit": "percent",
-              "max": 100
+              "unit": "none",
+              "max": 4
             },
             "overrides": []
           },
@@ -280,11 +280,11 @@ data:
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum(rate(container_cpu_usage_seconds_total{container=\"jvb\", namespace=\"$namespace\"}[5m])) / sum(kube_pod_container_resource_limits{container=\"jvb\", namespace=\"$namespace\", resource=\"cpu\"}) * 100",
+              "expr": "sum(rate(container_cpu_usage_seconds_total{container=\"jvb\", namespace=\"$namespace\"}[5m]))",
               "refId": "A"
             }
           ],
-          "title": "JVB CPU (% of Limit)",
+          "title": "JVB CPU (cores)",
           "type": "gauge"
         },
         {
@@ -373,15 +373,6 @@ data:
               "expr": "sum(rate(container_cpu_usage_seconds_total{container=\"jvb\", namespace=\"$namespace\"}[5m])) / sum(kube_pod_container_resource_requests{container=\"jvb\", namespace=\"$namespace\", resource=\"cpu\"}) * 100",
               "legendFormat": "% of Request",
               "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "sum(rate(container_cpu_usage_seconds_total{container=\"jvb\", namespace=\"$namespace\"}[5m])) / sum(kube_pod_container_resource_limits{container=\"jvb\", namespace=\"$namespace\", resource=\"cpu\"}) * 100",
-              "legendFormat": "% of Limit",
-              "refId": "B"
             }
           ],
           "title": "JVB CPU Utilization Over Time",
