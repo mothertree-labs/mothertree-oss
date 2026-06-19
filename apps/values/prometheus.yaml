@@ -33,100 +33,40 @@ prometheus:
       cert-manager.io/cluster-issuer: letsencrypt-prod-dns01
       kubernetes.io/ingress.class: nginx-internal
     # hosts and tls are set in environment-specific files
-    # Additional ServiceMonitor configurations
-    additionalServiceMonitors:
-      - name: matrix-synapse
-        selector:
-          matchLabels:
-            app: matrix-synapse
-        endpoints:
-          - port: metrics
-            path: /_synapse/metrics
-            interval: 30s
-        namespaceSelector:
-          matchNames: [matrix]
-      - name: matrix-postgresql
-        selector:
-          matchLabels:
-            app: postgresql
-        endpoints:
-          - port: metrics
-            interval: 30s
-        namespaceSelector:
-          matchNames: [matrix]
-      - name: matrix-redis
-        selector:
-          matchLabels:
-            app: redis
-        endpoints:
-          - port: metrics
-            interval: 30s
-        namespaceSelector:
-          matchNames: [matrix]
-      - name: notify-push
-        selector:
-          matchLabels:
-            app: notify-push
-        endpoints:
-          - port: metrics
-            interval: 30s
-        namespaceSelector:
-          any: true
-      - name: pg-metrics-bridge
-        selector:
-          matchLabels:
-            app: pg-metrics-bridge
-        endpoints:
-          - port: metrics
-            interval: 30s
-        namespaceSelector:
-          matchNames: [infra-db]
-    # Additional PrometheusRule configurations
-    additionalPrometheusRules:
-      - name: matrix-alerts
-        groups:
-          - name: matrix.rules
-            rules:
-              - alert: MatrixSynapseDown
-                expr: up{job="matrix-synapse"} == 0
-                for: 1m
-                labels:
-                  severity: critical
-                annotations:
-                  summary: Matrix Synapse is down
-                  description: Matrix Synapse has been down for more than 1 minute
-              - alert: MatrixSynapseHighCPU
-                expr: rate(container_cpu_usage_seconds_total{container="matrix-synapse"}[5m]) > 0.8
-                for: 5m
-                labels:
-                  severity: warning
-                annotations:
-                  summary: Matrix Synapse high CPU usage
-                  description: Matrix Synapse CPU usage is above 80% for 5 minutes
-              - alert: MatrixSynapseHighMemory
-                expr: container_memory_usage_bytes{container="matrix-synapse"} / container_spec_memory_limit_bytes{container="matrix-synapse"} > 0.8
-                for: 5m
-                labels:
-                  severity: warning
-                annotations:
-                  summary: Matrix Synapse high memory usage
-                  description: Matrix Synapse memory usage is above 80% for 5 minutes
-              - alert: MatrixPostgreSQLDown
-                expr: up{job="matrix-postgresql"} == 0
-                for: 1m
-                labels:
-                  severity: critical
-                annotations:
-                  summary: Matrix PostgreSQL is down
-                  description: Matrix PostgreSQL has been down for more than 1 minute
-              - alert: MatrixRedisDown
-                expr: up{job="matrix-redis"} == 0
-                for: 1m
-                labels:
-                  severity: critical
-                annotations:
-                  summary: Matrix Redis is down
-                  description: Matrix Redis has been down for more than 1 minute
+
+  # ServiceMonitors for components the kube-prometheus-stack operator should scrape.
+  # IMPORTANT: this key MUST sit directly under `prometheus:` (sibling of `ingress:` and
+  # `prometheusSpec:`). It was previously nested under `prometheus.ingress:`, where the
+  # chart silently dropped it — so NONE of these monitors were ever created (e.g. the
+  # PostgreSQL dashboard was empty because pg-metrics-bridge was never scraped).
+  # Only include monitors whose target endpoints actually exist:
+  #   - notify-push       : Nextcloud push service, metrics port 9090 (tn-*-files)
+  #   - pg-metrics-bridge : socat proxy to the external PG VM's postgres_exporter (infra-db)
+  # Removed legacy monitors matrix-synapse / matrix-redis / matrix-postgresql: synapse
+  # exposes no metrics port, redis ships no exporter, and the in-cluster PG StatefulSet was
+  # replaced by the external VM + bridge (#293). Real outage detection for synapse/notify-push
+  # lives in the deployment-level SynapseDown / NotifyPushDown alerts under
+  # additionalPrometheusRulesMap below (the misindented matrix-alerts block was removed as
+  # redundant/dead — it referenced the now-nonexistent matrix-* scrape jobs).
+  additionalServiceMonitors:
+    - name: notify-push
+      selector:
+        matchLabels:
+          app: notify-push
+      endpoints:
+        - port: metrics
+          interval: 30s
+      namespaceSelector:
+        any: true
+    - name: pg-metrics-bridge
+      selector:
+        matchLabels:
+          app: pg-metrics-bridge
+      endpoints:
+        - port: metrics
+          interval: 30s
+      namespaceSelector:
+        matchNames: [infra-db]
 
 grafana:
   adminPassword: "changeme"  # This should be set via environment variable
