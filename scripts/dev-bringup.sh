@@ -202,32 +202,65 @@ if [ -z "$NEW_LB_IP" ]; then
     exit 1
 fi
 
-# Reset persistent Roundcube tenant DBs so their schema always matches the
+# Reset the LEASED tenant's Roundcube DB so its schema always matches the
 # deployed image. postgres-dev is an always-up VM, so roundcube_<tenant> DBs
 # survive every cluster rebuild; Roundcube's forward-only, version-stamp-gated
 # updatedb.sh means a schema migrated forward by one image version (or
 # hand-patched during an incident) can neither re-migrate nor roll back — the
 # mismatch (e.g. the 1.6<->1.7 session.changed/expires_at rename) breaks OIDC
-# login ("OIDC redirect timed out") on whichever pool tenant carries the stale
-# DB. Dropping here on every bringup makes the next deploy recreate an empty DB
-# (via the idempotent roundcube-db-init Job) whose schema the entrypoint rebuilds
-# fresh from the deployed image — clearing any existing poison AND closing the
-# warm-cluster cross-version drift case. Session/contact/cache data on dev is
-# disposable login state. This is the bringup-side companion to the destroy-time
-# drop in scripts/destroy-dev-cluster.sh (Step 2c) — keep the two in sync.
+# login on whichever tenant carries the stale DB. Dropping it makes the next
+# deploy recreate an empty DB (via the idempotent roundcube-db-init Job) whose
+# schema the entrypoint rebuilds fresh from the deployed image. Session/contact/
+# cache data on dev is disposable login state.
+#
+# SCOPED PER LEASED TENANT — do NOT drop all roundcube_*. The dev LKE cluster and
+# postgres-dev VM are shared across concurrently-running pipelines, each holding a
+# DIFFERENT pool/tenant lease. Dropping every roundcube_* on each bringup wiped a
+# *sibling* pipeline's DB out from under its running e2e: pipeline #1547 logged in
+# fine on shard 10 at 15:15, a sibling bringup (#1548/#1549/#1550, all created
+# 15:12-15:16) dropped the leased tenant's roundcube DB mid-run, PgBouncer then
+# cached `FATAL: ... database "roundcube_<tenant>" does not exist
+# (server_login_retry)`, and shard 5 failed at 15:19:57. The lease guarantees the
+# leased tenant is exclusively ours, so only ITS DB is ever safe to reset here.
+# This mirrors the per-tenant scoping the nextcloud_<tenant> block below already
+# has (which is why nextcloud was never hit). See memory
+# project_shard5_10_roundcube_login_root_cause.
 #
 # Bounded to dev: $KUBECONFIG points at the dev cluster (kubeconfig.dev.yaml),
-# whose in-cluster PgBouncer fronts the dev postgres VM only. Unlike the
-# best-effort destroy-side drop, this fails fast if the DB query errors — a
-# silent skip would leave webmail login broken for the whole pipeline. But it
-# only fails after (a) waiting for PgBouncer to be ready and (b) retrying the
-# throwaway psql pod: pipeline #1519 hit `error: timed out waiting for the
-# condition` because the diagnostic pod couldn't reach Running within kubectl's
-# default 60s `--pod-running-timeout` (cold/autoscaling node). Mitigations:
-# reuse the small postgres:15-alpine image db-init already pulls (warm cache),
-# raise the pod-running-timeout, and retry with backoff.
+# whose in-cluster PgBouncer fronts the dev postgres VM only. Fails fast if the
+# drop errors — a silent skip would leave webmail login broken for the whole
+# pipeline. But it only fails after (a) waiting for PgBouncer to be ready and
+# (b) retrying the throwaway psql pod: pipeline #1519 hit `error: timed out
+# waiting for the condition` because the diagnostic pod couldn't reach Running
+# within kubectl's default 60s `--pod-running-timeout` (cold/autoscaling node).
+# Mitigations: reuse the small postgres:15-alpine image db-init already pulls
+# (warm cache), raise the pod-running-timeout, and retry with backoff.
+#
+# NOTE: the destroy-side companion in scripts/destroy-dev-cluster.sh (Step 2c)
+# still drops all roundcube_* — safe there because teardown runs when the cluster
+# is idle (no concurrent e2e) and the reaper holds no lease to scope to.
+RC_TENANT=""
 if [ "${MT_ENV:-dev}" = "dev" ]; then
-    print_status "dev-bringup: resetting persistent Roundcube tenant DBs (schema-vs-image drift guard)"
+    # Resolve the leased tenant from the Valkey lease. Run the canonical resolver
+    # in a subshell so its no-lease `exit 1` (and its `${VAR:?}` guards on a
+    # non-CI/operator run) can't abort this script — we only want E2E_TENANT.
+    RC_TENANT=$( (source "$REPO_ROOT/ci/scripts/ci-resolve-tenant.sh" >/dev/null 2>&1; printf '%s' "${E2E_TENANT:-}") 2>/dev/null || true )
+fi
+if [ "${MT_ENV:-dev}" = "dev" ] && [ -z "$RC_TENANT" ]; then
+    # No lease (operator run, or lease lookup failed) → nothing to scope to.
+    # Skip rather than fall back to a global drop, which is the exact action that
+    # wiped a sibling pipeline's DB (#1547). There is no concurrent e2e in the
+    # no-lease case, and the schema-drift this guards was disproven as the live
+    # failure cause, so skipping is strictly safer.
+    print_warning "dev-bringup: no leased tenant resolved — skipping Roundcube DB reset (avoids wiping a concurrent pipeline's DB)"
+fi
+if [ "${MT_ENV:-dev}" = "dev" ] && [ -n "$RC_TENANT" ]; then
+    # Allowlist-validate before using the name in a SQL string / identifier.
+    if [[ ! "$RC_TENANT" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+        print_error "dev-bringup: refusing to reset Roundcube DB — suspicious leased tenant name: $RC_TENANT"
+        exit 1
+    fi
+    print_status "dev-bringup: resetting leased tenant's Roundcube DB (roundcube_${RC_TENANT}) only — scoped per-tenant (schema-vs-image drift guard, #1547)"
     RC_PG_PASSWORD=$(kubectl --kubeconfig="$KUBECONFIG" get secret postgres-credentials -n infra-db \
         -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d || true)
     if [ -z "$RC_PG_PASSWORD" ]; then
@@ -262,7 +295,7 @@ if [ "${MT_ENV:-dev}" = "dev" ]; then
             --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
             --env "PGUSER=postgres" \
             --env "PGPASSWORD=$RC_PG_PASSWORD" \
-            -- psql -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'roundcube\\_%' ESCAPE '\\';" 2>&1); then
+            -- psql -tAc "SELECT datname FROM pg_database WHERE datname = 'roundcube_${RC_TENANT}';" 2>&1); then
             RC_QUERY_OK=true
             break
         fi
@@ -276,7 +309,7 @@ if [ "${MT_ENV:-dev}" = "dev" ]; then
     fi
     RC_DBS=$(grep -E '^[a-z0-9_-]+$' <<< "$RC_LIST_OUT" || true)
     if [ -z "$RC_DBS" ]; then
-        echo "  No roundcube_* databases found, nothing to reset"
+        echo "  roundcube_${RC_TENANT} does not exist yet — nothing to reset (roundcube-db-init will create it on deploy)"
     else
         _rc_i=0
         while IFS= read -r db; do
