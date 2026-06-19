@@ -50,3 +50,28 @@ steps:
     commands:
       - ci/scripts/e2e-playwright.sh
       - ci/scripts/ci-renew-lease.sh
+
+  # On-failure ONLY: dump roundcube + stalwart + keycloak pod logs/state while
+  # the failing pods are still live, so a Roundcube-login failure (the chronic
+  # shard-5/10 flake) names the broken layer instead of leaving an opaque
+  # "inbox never appeared" timeout. Adds zero latency to green runs and no new
+  # DAG edges. LINODE_CLI_TOKEN lives here (not the test step) so the powerful
+  # token stays out of the Playwright-execution env. See ci-e2e-diagnostics.sh
+  # and memory project_shard5_10_roundcube_login_root_cause.
+  - name: roundcube-diagnostics
+    image: bash
+    when:
+      - status: [ failure ]
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_SHARD: "5/10"
+    commands:
+      - ci/scripts/ci-e2e-diagnostics.sh
