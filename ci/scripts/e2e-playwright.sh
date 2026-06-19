@@ -6,6 +6,14 @@ echo "--- :playwright: E2E Browser Tests"
 # Resolve tenant from Valkey lease (sets E2E_BASE_DOMAIN, E2E_TENANT, etc.)
 if [[ "${CI:-}" == "true" ]]; then
   source ci/scripts/ci-resolve-tenant.sh
+  # Persist the resolved tenant so the on-failure diagnostics step
+  # (ci/scripts/ci-e2e-diagnostics.sh, a `when: status: [failure]` sibling step
+  # in e2e-shard-5/10) can locate the tenant namespaces even if the Valkey lease
+  # has since expired during a long shard. Workspace is shared across a
+  # workflow's steps, so the file is readable there. Best-effort.
+  if [[ -n "${E2E_TENANT:-}" ]]; then
+    printf '%s\n' "$E2E_TENANT" > .e2e-tenant 2>/dev/null || true
+  fi
   # Acquire e2e protection lock — blocks deploy_infra on other pipelines
   # from running while our tests are active.
   ci/scripts/ci-e2e-lock.sh acquire

@@ -3,6 +3,7 @@ import { urls } from '../../helpers/urls';
 import { selectors } from '../../helpers/selectors';
 import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
+import { captureRoundcubeStuckState } from '../../helpers/roundcube-failure';
 
 test.describe('SSO — Cross-App Single Sign-On', () => {
   test('login to account portal enables SSO to admin portal', async ({ context }) => {
@@ -61,9 +62,16 @@ test.describe('SSO — Cross-App Single Sign-On', () => {
     }
 
     // Final assertion — will fail with a clear error message
-    await expect(
-      page.locator(ROUNDCUBE_INBOX).first(),
-    ).toBeVisible({ timeout: 15_000 });
+    try {
+      await expect(
+        page.locator(ROUNDCUBE_INBOX).first(),
+      ).toBeVisible({ timeout: 15_000 });
+    } catch (err) {
+      // On failure, record WHERE the OIDC login got stuck (browser-side); the
+      // server-side pod logs are dumped by ci/scripts/ci-e2e-diagnostics.sh.
+      await captureRoundcubeStuckState(page, 'cross-app-sso');
+      throw err;
+    }
   });
 
   test('login to account portal enables SSO to Files', async ({ memberPage: page }) => {
