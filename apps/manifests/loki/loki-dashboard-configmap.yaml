@@ -284,7 +284,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -318,7 +318,7 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum(rate(loki_distributor_bytes_received_total{namespace=\"infra-monitoring\"}[5m]))",
               "legendFormat": "Bytes Ingested/sec",
               "refId": "A"
@@ -330,7 +330,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -364,13 +364,13 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.99, sum(rate(loki_request_duration_seconds_bucket{namespace=\"infra-monitoring\", route=~\"loki_api_v1_push|/loki/api/v1/push\"}[5m])) by (le))",
               "legendFormat": "p99 Push",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "histogram_quantile(0.99, sum(rate(loki_request_duration_seconds_bucket{namespace=\"infra-monitoring\", route=~\"loki_api_v1_query_range|/loki/api/v1/query_range\"}[5m])) by (le))",
               "legendFormat": "p99 Query",
               "refId": "B"
@@ -389,7 +389,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -423,13 +423,13 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum(rate(vector_component_received_events_total{component_type=\"kubernetes_logs\"}[5m]))",
               "legendFormat": "Events Received",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum(rate(vector_component_sent_events_total{component_type=\"loki\"}[5m]))",
               "legendFormat": "Events Sent to Loki",
               "refId": "B"
@@ -441,7 +441,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -475,7 +475,7 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "sum by (component_type) (increase(vector_component_errors_total[5m]))",
               "legendFormat": "{{component_type}}",
               "refId": "A"
@@ -489,7 +489,7 @@ data:
       "schemaVersion": 38,
       "style": "dark",
       "tags": ["logging", "loki", "vector", "monitoring"],
-      "templating": { "list": [] },
+      "templating": { "list": [ { "current": { "selected": false, "text": "Prometheus", "value": "prometheus" }, "hide": 0, "includeAll": false, "label": "Data source", "multi": false, "name": "datasource", "options": [], "query": "prometheus", "refresh": 1, "regex": "", "skipUrlSync": false, "type": "datasource" } ] },
       "time": {
         "from": "now-1h",
         "to": "now"
