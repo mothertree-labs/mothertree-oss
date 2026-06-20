@@ -202,140 +202,24 @@ if [ -z "$NEW_LB_IP" ]; then
     exit 1
 fi
 
-# Reset the LEASED tenant's Roundcube DB so its schema always matches the
-# deployed image. postgres-dev is an always-up VM, so roundcube_<tenant> DBs
-# survive every cluster rebuild; Roundcube's forward-only, version-stamp-gated
-# updatedb.sh means a schema migrated forward by one image version (or
-# hand-patched during an incident) can neither re-migrate nor roll back — the
-# mismatch (e.g. the 1.6<->1.7 session.changed/expires_at rename) breaks OIDC
-# login on whichever tenant carries the stale DB. Dropping it makes the next
-# deploy recreate an empty DB (via the idempotent roundcube-db-init Job) whose
-# schema the entrypoint rebuilds fresh from the deployed image. Session/contact/
-# cache data on dev is disposable login state.
-#
-# SCOPED PER LEASED TENANT — do NOT drop all roundcube_*. The dev LKE cluster and
-# postgres-dev VM are shared across concurrently-running pipelines, each holding a
-# DIFFERENT pool/tenant lease. Dropping every roundcube_* on each bringup wiped a
-# *sibling* pipeline's DB out from under its running e2e: pipeline #1547 logged in
-# fine on shard 10 at 15:15, a sibling bringup (#1548/#1549/#1550, all created
-# 15:12-15:16) dropped the leased tenant's roundcube DB mid-run, PgBouncer then
-# cached `FATAL: ... database "roundcube_<tenant>" does not exist
-# (server_login_retry)`, and shard 5 failed at 15:19:57. The lease guarantees the
-# leased tenant is exclusively ours, so only ITS DB is ever safe to reset here.
-# This mirrors the per-tenant scoping the nextcloud_<tenant> block below already
-# has (which is why nextcloud was never hit). See memory
-# project_shard5_10_roundcube_login_root_cause.
-#
-# Bounded to dev: $KUBECONFIG points at the dev cluster (kubeconfig.dev.yaml),
-# whose in-cluster PgBouncer fronts the dev postgres VM only. Fails fast if the
-# drop errors — a silent skip would leave webmail login broken for the whole
-# pipeline. But it only fails after (a) waiting for PgBouncer to be ready and
-# (b) retrying the throwaway psql pod: pipeline #1519 hit `error: timed out
-# waiting for the condition` because the diagnostic pod couldn't reach Running
-# within kubectl's default 60s `--pod-running-timeout` (cold/autoscaling node).
-# Mitigations: reuse the small postgres:15-alpine image db-init already pulls
-# (warm cache), raise the pod-running-timeout, and retry with backoff.
-#
-# NOTE: the destroy-side companion in scripts/destroy-dev-cluster.sh (Step 2c)
-# still drops all roundcube_* — safe there because teardown runs when the cluster
-# is idle (no concurrent e2e) and the reaper holds no lease to scope to.
-RC_TENANT=""
-if [ "${MT_ENV:-dev}" = "dev" ]; then
-    # Resolve the leased tenant from the Valkey lease. Run the canonical resolver
-    # in a subshell so its no-lease `exit 1` (and its `${VAR:?}` guards on a
-    # non-CI/operator run) can't abort this script — we only want E2E_TENANT.
-    RC_TENANT=$( (source "$REPO_ROOT/ci/scripts/ci-resolve-tenant.sh" >/dev/null 2>&1; printf '%s' "${E2E_TENANT:-}") 2>/dev/null || true )
-fi
-if [ "${MT_ENV:-dev}" = "dev" ] && [ -z "$RC_TENANT" ]; then
-    # No lease (operator run, or lease lookup failed) → nothing to scope to.
-    # Skip rather than fall back to a global drop, which is the exact action that
-    # wiped a sibling pipeline's DB (#1547). There is no concurrent e2e in the
-    # no-lease case, and the schema-drift this guards was disproven as the live
-    # failure cause, so skipping is strictly safer.
-    print_warning "dev-bringup: no leased tenant resolved — skipping Roundcube DB reset (avoids wiping a concurrent pipeline's DB)"
-fi
-if [ "${MT_ENV:-dev}" = "dev" ] && [ -n "$RC_TENANT" ]; then
-    # Allowlist-validate before using the name in a SQL string / identifier.
-    if [[ ! "$RC_TENANT" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
-        print_error "dev-bringup: refusing to reset Roundcube DB — suspicious leased tenant name: $RC_TENANT"
-        exit 1
-    fi
-    print_status "dev-bringup: resetting leased tenant's Roundcube DB (roundcube_${RC_TENANT}) only — scoped per-tenant (schema-vs-image drift guard, #1547)"
-    RC_PG_PASSWORD=$(kubectl --kubeconfig="$KUBECONFIG" get secret postgres-credentials -n infra-db \
-        -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d || true)
-    if [ -z "$RC_PG_PASSWORD" ]; then
-        print_error "dev-bringup: could not load postgres-credentials secret in infra-db"
-        print_error "Cannot reset the Roundcube DBs; a stale schema would break webmail OIDC login. Aborting."
-        exit 1
-    fi
-
-    # Wait for PgBouncer to be ready before querying. On the cold path
-    # deploy_infra just created it and its pods may still be rolling; on the
-    # warm path this returns immediately. Best-effort — the retry loop below is
-    # the real guard, so a flaky rollout-status read shouldn't abort the run.
-    kubectl --kubeconfig="$KUBECONFIG" -n infra-db rollout status deploy/pgbouncer --timeout=180s 2>/dev/null \
-        || print_warning "dev-bringup: pgbouncer rollout status not confirmed; proceeding (retries will guard)"
-
-    # postgres:15-alpine is ~80MB, so it pulls in seconds even UNcached; it also
-    # matches roundcube-db-init, so it's additionally warm-cached on the
-    # warm-reuse path. Cold-path safety does NOT rely on that cache (db-init runs
-    # later, in create_env's deploy-roundcube step, not here): deploy_infra has
-    # already brought a node Ready before this block runs, so the throwaway pod
-    # schedules immediately and an uncached alpine pull stays well within
-    # --pod-running-timeout (240s, vs kubectl's 60s default that timed out in
-    # #1519 pulling the heavier postgres:16). The timeout also absorbs a node
-    # autoscale event; the retry loop absorbs transient scheduling/API hiccups.
-    # Unique pod names per attempt avoid a leftover-pod name collision if a
-    # timed-out `--rm` pod hasn't been GC'd yet.
-    RC_LIST_OUT=""
-    RC_QUERY_OK=false
-    for _rc_attempt in 1 2 3; do
-        if RC_LIST_OUT=$(kubectl --kubeconfig="$KUBECONFIG" run "rc-db-list-${_rc_attempt}" --rm -i --restart=Never \
-            --image=postgres:15-alpine --quiet -n default --pod-running-timeout=240s \
-            --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
-            --env "PGUSER=postgres" \
-            --env "PGPASSWORD=$RC_PG_PASSWORD" \
-            -- psql -tAc "SELECT datname FROM pg_database WHERE datname = 'roundcube_${RC_TENANT}';" 2>&1); then
-            RC_QUERY_OK=true
-            break
-        fi
-        print_warning "dev-bringup: roundcube DB query attempt ${_rc_attempt}/3 failed; retrying in $((_rc_attempt * 15))s"
-        sleep "$((_rc_attempt * 15))"
-    done
-    if [ "$RC_QUERY_OK" != "true" ]; then
-        print_error "dev-bringup: failed to query roundcube_* DBs via PgBouncer after 3 attempts — cannot guarantee a clean schema"
-        printf '%s\n' "$RC_LIST_OUT" >&2
-        exit 1
-    fi
-    RC_DBS=$(grep -E '^[a-z0-9_-]+$' <<< "$RC_LIST_OUT" || true)
-    if [ -z "$RC_DBS" ]; then
-        echo "  roundcube_${RC_TENANT} does not exist yet — nothing to reset (roundcube-db-init will create it on deploy)"
-    else
-        _rc_i=0
-        while IFS= read -r db; do
-            _rc_i=$((_rc_i + 1))
-            # Allowlist regex defends against SQL identifier injection; tenant DB
-            # names are operator-controlled and always match roundcube_<tenant>
-            # (lowercase + digits + underscore/hyphen). Anything else is suspicious.
-            if [[ ! "$db" =~ ^roundcube_[a-z0-9][a-z0-9_-]*$ ]]; then
-                print_error "dev-bringup: refusing to drop suspicious DB name: $db"
-                exit 1
-            fi
-            print_status "  Dropping $db (roundcube-db-init recreates it empty on next deploy)"
-            # DROP DATABASE cannot run in a transaction block, so one psql -c each.
-            # Node + image are warm now (the list query just ran here), so a single
-            # attempt with a generous timeout suffices; fail fast if it errors.
-            kubectl --kubeconfig="$KUBECONFIG" run "rc-db-drop-${_rc_i}" --rm -i --restart=Never \
-                --image=postgres:15-alpine --quiet -n default --pod-running-timeout=240s \
-                --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
-                --env "PGUSER=postgres" \
-                --env "PGPASSWORD=$RC_PG_PASSWORD" \
-                -- psql -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE);" 2>&1 \
-                | sed 's/^/    /' \
-                || { print_error "dev-bringup: failed to drop $db — aborting"; exit 1; }
-        done <<< "$RC_DBS"
-    fi
-fi
+# NOTE (removed 2026-06-20): the per-tenant Roundcube DB reset that used to live
+# here was REMOVED. It dropped roundcube_<leased-tenant> on every bringup so the
+# next deploy would recreate an empty DB and let the pod entrypoint rebuild the
+# schema. That guard's premise -- schema-vs-image drift breaking OIDC login -- was
+# disproven, and the drop was itself the ROOT CAUSE of the chronic shard-5/10
+# `relation "session" does not exist` failures: dropping the DB left PgBouncer
+# serving a cached `server login has been failing` / `database ... does not exist`
+# error for it, into which the roundcube pod's ONE-SHOT, failure-swallowed
+# `bin/initdb.sh --update` then ran -- so the schema was never (re)built and every
+# request 500'd on the missing `session` table (pipelines #1547/#1571/#1586; the
+# #476/#479 diagnostics captured the entrypoint's swallowed initdb error verbatim).
+# Without the drop, roundcube_<tenant> simply PERSISTS with its schema on the
+# always-up postgres-dev VM across cluster rebuilds; image-version drift is handled
+# by the entrypoint's forward-only `initdb --update` AND the post-deploy schema
+# verify/repair gate in apps/deploy-roundcube.sh (#477). See memory
+# project_shard5_10_roundcube_login_root_cause. (The destroy-side drop in
+# destroy-dev-cluster.sh Step 2c is unaffected -- teardown is idle, no PgBouncer
+# to poison and no concurrent e2e.)
 
 # Reset ORPHANED persistent Nextcloud tenant DBs. Like roundcube_<tenant>, the
 # nextcloud_<tenant> DBs live on the always-up postgres-dev VM and survive every
@@ -374,9 +258,12 @@ if [ "${MT_ENV:-dev}" = "dev" ]; then
         exit 1
     fi
 
-    # List nextcloud_<tenant> DBs via the in-cluster PgBouncer. Same throwaway-pod
-    # pattern, image, and retry/backoff as the Roundcube block above (PgBouncer is
-    # already confirmed ready there; postgres:15-alpine stays warm-cached from it).
+    # List nextcloud_<tenant> DBs via the in-cluster PgBouncer using a throwaway
+    # postgres:15-alpine pod. The 3x retry/backoff loop below is the readiness
+    # guard: on the cold path PgBouncer may still be rolling, and the alpine image
+    # may need pulling, so each attempt tolerates a transient scheduling/connection
+    # hiccup (the formerly-preceding Roundcube reset block that pre-warmed both was
+    # removed on 2026-06-20 — see the note above the LB-IP check).
     NC_LIST_OUT=""
     NC_QUERY_OK=false
     for _nc_attempt in 1 2 3; do
