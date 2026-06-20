@@ -965,12 +965,18 @@
       changed_when: false
       failed_when: false
 
+    # --hostname pins the node name on the mesh; without it the box registers
+    # under its OS hostname ("localhost"), which is opaque in `headscale nodes
+    # list` and yields no usable MagicDNS name. Derive it from the Headscale
+    # FQDN (e.g. hs-prod-eu.example.com -> "hs-prod-eu"), matching the
+    # --hostname the PostgreSQL VM already sets in its cloud-init join.
     - name: Join own tailnet if not connected
       command: >
         tailscale up
         --reset
         --login-server=https://{{ headscale_domain }}:8080
         --authkey={{ tailscale_auth_key }}
+        --hostname={{ headscale_domain.split('.')[0] }}
         --accept-routes=true
       when: >
         tailscale_auth_key is defined and tailscale_auth_key | length > 0 and
