@@ -583,6 +583,24 @@ mt_wait_for_admin_portal() {
     return 1
 }
 
+# Returns 0 if $1 currently resolves in DNS, 1 if it does not (e.g. NXDOMAIN).
+# If no resolver tool is available, returns 0 (assume resolvable) so callers
+# never skip a real check merely because resolution could not be tested.
+# Usage: mt_host_resolves <hostname>
+mt_host_resolves() {
+    local host="$1"
+    [ -z "$host" ] && return 1
+    if command -v getent >/dev/null 2>&1; then
+        getent hosts "$host" >/dev/null 2>&1
+    elif command -v nslookup >/dev/null 2>&1; then
+        nslookup "$host" >/dev/null 2>&1
+    elif command -v host >/dev/null 2>&1; then
+        host "$host" >/dev/null 2>&1
+    else
+        return 0
+    fi
+}
+
 # Wait for Nextcloud's occ status to report installed=true.
 # This is the "Gate 4" readiness check after the install Job + helmfile sync:
 # pod-Ready is necessary but not sufficient (the seed-identity init container

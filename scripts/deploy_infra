@@ -491,6 +491,19 @@ else
 fi
 
 # =============================================================================
+# Deploy Cross-Cluster Metrics Federation bridge
+# (grafana.prod <- prod-eu Prometheus over the Headscale mesh).
+# Feature-gated by metrics_federation.role in the infra config; no-op when unset.
+# =============================================================================
+print_status "Deploying cross-cluster metrics federation (if enabled)..."
+if [ -x "$REPO_ROOT/apps/deploy-metrics-federation.sh" ]; then
+  "$REPO_ROOT/apps/deploy-metrics-federation.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+else
+  print_error "deploy-metrics-federation.sh not found or not executable"
+  exit 1
+fi
+
+# =============================================================================
 # Deploy Tailscale Key Rotator CronJob
 # =============================================================================
 print_status "Deploying Tailscale key rotator CronJob..."
@@ -616,6 +629,48 @@ fi
 
 # NOTE: DNS records are now managed by manage_infra --dns (via scripts/manage-dns.sh)
 # NOTE: LKE firewall rules are now managed by manage_infra --firewall. See issue #244.
+
+# =============================================================================
+# External-DNS alias record — the ONE infra DNS record CI must own
+# =============================================================================
+# #244 moved infra DNS to the operator-run `manage_infra --dns` phase, but the
+# external-DNS CNAME alias is a special case that must be reconciled by code on
+# every deploy (no manual step): tenants whose DNS zone we do NOT control
+# (dns_external=true) point their service CNAMEs at
+# `lb1.prod.<infra-domain>`, which MUST be a DNS-only CNAME to the prod-eu
+# ingress alias `lb1.prod-eu.<infra-domain>`. If it is Cloudflare-proxied, the
+# foreign-zone TLS handshake fails (proxy serves the wrong cert) and ACME
+# HTTP-01 cannot reach our origin — so the un-proxy here is what makes a
+# dns_external tenant's traffic + cert issuance work. Reconciling it in CI means
+# the tenant's remaining CNAMEs are the only thing left for them to do.
+# Idempotent: create_dns_record PUTs the record and normalises a stale
+# proxied/A record into the DNS-only CNAME. Scoped to prod-eu (where
+# external-DNS tenants are hosted); manage-dns.sh still defines the same record
+# for the operator path, and both write the identical value.
+if [ "$MT_ENV" = "prod-eu" ]; then
+  print_status "Reconciling external-DNS alias: lb1.prod.${INFRA_DOMAIN} -> lb1.prod-eu.${INFRA_DOMAIN} (DNS-only)"
+
+  # Infra-zone Cloudflare creds. Prefer infra-config's exported values; fall
+  # back to the cluster cert-manager token (deployed earlier in this script) and
+  # a zone-id lookup, so this works even when the infra secrets carry no CF creds.
+  if [ -z "${TF_VAR_cloudflare_api_token:-}" ]; then
+    TF_VAR_cloudflare_api_token="$(kubectl get secret cloudflare-api-token -n "$NS_CERTMANAGER" \
+      -o jsonpath='{.data.api-token}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  fi
+  : "${TF_VAR_cloudflare_api_token:?No Cloudflare API token for the infra zone (TF_VAR_cloudflare_api_token unset and cloudflare-api-token secret in $NS_CERTMANAGER empty/missing). Cannot reconcile the external-DNS alias.}"
+
+  if [ -z "${TF_VAR_cloudflare_zone_id:-}" ]; then
+    TF_VAR_cloudflare_zone_id="$(curl -s -X GET \
+      "https://api.cloudflare.com/client/v4/zones?name=${INFRA_DOMAIN}" \
+      -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
+      -H "Content-Type: application/json" | jq -r '.result[0].id // empty')"
+  fi
+  : "${TF_VAR_cloudflare_zone_id:?Could not resolve the Cloudflare zone id for ${INFRA_DOMAIN}. Cannot reconcile the external-DNS alias.}"
+
+  export TF_VAR_cloudflare_api_token TF_VAR_cloudflare_zone_id
+  source "${REPO_ROOT}/scripts/lib/dns.sh"
+  create_dns_record "lb1.prod.${INFRA_DOMAIN}" "CNAME" "lb1.prod-eu.${INFRA_DOMAIN}" "false"
+fi
 
 # =============================================================================
 # Deploy K8s Postfix (ConfigMaps, Deployment, Services, NetworkPolicy)

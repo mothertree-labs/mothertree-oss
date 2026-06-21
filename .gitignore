@@ -103,3 +103,6 @@ e2e/test-results/
 e2e/playwright-report/
 e2e/blob-report/
 e2e/.env
+# Ephemeral tenant handoff written by e2e-playwright.sh for the on-failure
+# diagnostics step (ci-e2e-diagnostics.sh); never committed.
+.e2e-tenant

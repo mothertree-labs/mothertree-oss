@@ -47,7 +47,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -113,9 +113,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_ready{namespace=\"files\", pod=~\"nextcloud-.*\", container=~\"nextcloud|php-fpm\"}",
+              "expr": "kube_pod_container_status_ready{namespace=~\"tn-.*-files\", pod=~\"nextcloud-.*\", container=~\"nextcloud|php-fpm\"}",
               "legendFormat": "Nextcloud",
               "refId": "A"
             }
@@ -126,86 +126,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
-              "mappings": [
-                {
-                  "options": {
-                    "0": {
-                      "color": "red",
-                      "index": 1,
-                      "text": "Down"
-                    },
-                    "1": {
-                      "color": "green",
-                      "index": 0,
-                      "text": "Ready"
-                    }
-                  },
-                  "type": "value"
-                }
-              ],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "green",
-                    "value": 1
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 6,
-            "y": 1
-          },
-          "id": 2,
-          "options": {
-            "colorMode": "background",
-            "graphMode": "none",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": "",
-              "values": false
-            },
-            "textMode": "auto"
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "kube_pod_container_status_ready{namespace=\"docs\", pod=~\"docs-postgresql-.*\", container=\"postgresql\"}",
-              "legendFormat": "PostgreSQL",
-              "refId": "A"
-            }
-          ],
-          "title": "PostgreSQL (Shared)",
-          "type": "stat"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -271,9 +192,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_deployment_status_replicas_available{namespace=\"files\", deployment=\"nextcloud\"}",
+              "expr": "kube_deployment_status_replicas_available{namespace=~\"tn-.*-files\", deployment=\"nextcloud\"}",
               "legendFormat": "Available",
               "refId": "A"
             }
@@ -284,7 +205,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -339,9 +260,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_restarts_total{namespace=\"files\", pod=~\"nextcloud-.*\"}",
+              "expr": "kube_pod_container_status_restarts_total{namespace=~\"tn-.*-files\", pod=~\"nextcloud-.*\"}",
               "legendFormat": "Restarts",
               "refId": "A"
             }
@@ -365,7 +286,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -442,104 +363,14 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"files\", pod=~\"nextcloud-.*\", container=~\"nextcloud|php-fpm\"}[5m]) * 100",
+              "expr": "rate(container_cpu_usage_seconds_total{namespace=~\"tn-.*-files\", pod=~\"nextcloud-.*\", container=~\"nextcloud|php-fpm\"}[5m]) * 100",
               "legendFormat": "Nextcloud CPU",
               "refId": "A"
             }
           ],
           "title": "Nextcloud CPU Usage",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "percent"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 6
-          },
-          "id": 11,
-          "options": {
-            "legend": {
-              "calcs": [
-                "mean",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"docs\", pod=~\"docs-postgresql-.*\", container=\"postgresql\"}[5m]) * 100",
-              "legendFormat": "PostgreSQL CPU",
-              "refId": "A"
-            }
-          ],
-          "title": "PostgreSQL CPU Usage (Shared)",
           "type": "timeseries"
         },
         {
@@ -558,7 +389,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -635,104 +466,14 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "container_memory_usage_bytes{namespace=\"files\", pod=~\"nextcloud-.*\", container=~\"nextcloud|php-fpm\"}",
+              "expr": "container_memory_usage_bytes{namespace=~\"tn-.*-files\", pod=~\"nextcloud-.*\", container=~\"nextcloud|php-fpm\"}",
               "legendFormat": "Nextcloud Memory",
               "refId": "A"
             }
           ],
           "title": "Nextcloud Memory Usage",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "bytes"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 15
-          },
-          "id": 21,
-          "options": {
-            "legend": {
-              "calcs": [
-                "mean",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "container_memory_usage_bytes{namespace=\"docs\", pod=~\"docs-postgresql-.*\", container=\"postgresql\"}",
-              "legendFormat": "PostgreSQL Memory",
-              "refId": "A"
-            }
-          ],
-          "title": "PostgreSQL Memory Usage (Shared)",
           "type": "timeseries"
         },
         {
@@ -751,7 +492,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -828,18 +569,18 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_receive_bytes_total{namespace=\"files\", pod=~\"nextcloud-.*\"}[5m])",
+              "expr": "rate(container_network_receive_bytes_total{namespace=~\"tn-.*-files\", pod=~\"nextcloud-.*\"}[5m])",
               "legendFormat": "Nextcloud RX",
               "refId": "A"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_transmit_bytes_total{namespace=\"files\", pod=~\"nextcloud-.*\"}[5m])",
+              "expr": "rate(container_network_transmit_bytes_total{namespace=~\"tn-.*-files\", pod=~\"nextcloud-.*\"}[5m])",
               "legendFormat": "Nextcloud TX",
               "refId": "B"
             }
@@ -863,7 +604,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -948,7 +689,7 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
               "expr": "sum(rate(nginx_ingress_controller_requests{ingress=\"nextcloud\", status=~\"5..\"}[5m])) by (status)",
               "legendFormat": "Nextcloud {{status}}",
@@ -961,7 +702,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1038,7 +779,7 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
               "expr": "sum(rate(nginx_ingress_controller_requests{ingress=\"nextcloud\", status=~\"4..\"}[5m])) by (status)",
               "legendFormat": "Nextcloud {{status}}",
@@ -1058,7 +799,26 @@ data:
         "file-management"
       ],
       "templating": {
-        "list": []
+        "list": [
+          {
+            "current": {
+              "selected": false,
+              "text": "Prometheus",
+              "value": "prometheus"
+            },
+            "hide": 0,
+            "includeAll": false,
+            "label": "Data source",
+            "multi": false,
+            "name": "datasource",
+            "options": [],
+            "query": "prometheus",
+            "refresh": 1,
+            "regex": "",
+            "skipUrlSync": false,
+            "type": "datasource"
+          }
+        ]
       },
       "time": {
         "from": "now-1h",
@@ -1071,4 +831,3 @@ data:
       "version": 1,
       "weekStart": ""
     }
-

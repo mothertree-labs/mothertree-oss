@@ -147,6 +147,13 @@ _mt_infra_load_env_config() {
     # LLM inference model (shared Ollama)
     LLM_MODEL=$(yq '.llm.model // "llama3.2:1b"' "$infra_config")
     export LLM_MODEL
+
+    # Cross-cluster metrics federation
+    MT_METRICS_FED_ROLE=$(yq '.metrics_federation.role // ""' "$infra_config")
+    MT_METRICS_FED_SOURCE_IP=$(yq '.metrics_federation.source_mesh_ip // ""' "$infra_config")
+    [ "$MT_METRICS_FED_ROLE" = "null" ] && MT_METRICS_FED_ROLE=""
+    [ "$MT_METRICS_FED_SOURCE_IP" = "null" ] && MT_METRICS_FED_SOURCE_IP=""
+    export MT_METRICS_FED_ROLE MT_METRICS_FED_SOURCE_IP
   else
     echo "[WARNING] Infrastructure config not found: $infra_config"
     echo "[WARNING] Using defaults: PG_READ_REPLICAS=1, KEYCLOAK_REPLICAS=2"

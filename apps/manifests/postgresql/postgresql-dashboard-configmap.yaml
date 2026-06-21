@@ -37,7 +37,7 @@ data:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "thresholds": {
@@ -66,7 +66,7 @@ data:
           ]
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "unit": "short",
@@ -86,7 +86,7 @@ data:
           ]
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "unit": "short",
@@ -106,7 +106,7 @@ data:
           ]
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "unit": "percentunit",
@@ -127,7 +127,7 @@ data:
           ]
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "unit": "bytes",
@@ -147,26 +147,6 @@ data:
           ]
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "bytes",
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 671088640 }, { "color": "red", "value": 939524096 }] }
-            }
-          },
-          "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
-          "id": 6,
-          "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"] } },
-          "title": "Memory Usage",
-          "type": "stat",
-          "targets": [
-            {
-              "expr": "container_memory_working_set_bytes{namespace=\"infra-db\", container=\"postgresql\"}",
-              "legendFormat": "{{pod}}"
-            }
-          ]
-        },
-        {
           "collapsed": false,
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
           "id": 101,
@@ -174,7 +154,7 @@ data:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 1, "fillOpacity": 20, "stacking": { "mode": "normal" } } } },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
           "id": 10,
@@ -189,7 +169,7 @@ data:
           ]
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": { "defaults": { "unit": "ops", "custom": { "lineWidth": 1, "fillOpacity": 10 } } },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
           "id": 11,
@@ -215,7 +195,7 @@ data:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "lineWidth": 1, "fillOpacity": 10 } } },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
           "id": 20,
@@ -230,7 +210,7 @@ data:
           ]
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 1, "fillOpacity": 10 } } },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
           "id": 21,
@@ -256,7 +236,7 @@ data:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": { "defaults": { "unit": "ops", "custom": { "lineWidth": 1, "fillOpacity": 10, "stacking": { "mode": "normal" } } } },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
           "id": 30,
@@ -279,7 +259,7 @@ data:
           ]
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 1, "fillOpacity": 10 } } },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
           "id": 31,
@@ -301,51 +281,13 @@ data:
           "collapsed": false,
           "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
           "id": 104,
-          "title": "Resources",
+          "title": "Storage",
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "lineWidth": 1, "fillOpacity": 20 } } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
-          "id": 40,
-          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "calcs": ["lastNotNull"] } },
-          "title": "Memory Usage",
-          "type": "timeseries",
-          "targets": [
-            {
-              "expr": "container_memory_working_set_bytes{namespace=\"infra-db\", container=\"postgresql\"}",
-              "legendFormat": "{{pod}} working set"
-            },
-            {
-              "expr": "kube_pod_container_resource_limits{namespace=\"infra-db\", container=\"postgresql\", resource=\"memory\"}",
-              "legendFormat": "{{pod}} limit"
-            },
-            {
-              "expr": "kube_pod_container_resource_requests{namespace=\"infra-db\", container=\"postgresql\", resource=\"memory\"}",
-              "legendFormat": "{{pod}} request"
-            }
-          ]
-        },
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 1, "fillOpacity": 20 } } },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
-          "id": 41,
-          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "calcs": ["mean", "max"] } },
-          "title": "CPU Usage (millicores)",
-          "type": "timeseries",
-          "targets": [
-            {
-              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"infra-db\", container=\"postgresql\"}[5m]) * 1000",
-              "legendFormat": "{{pod}}"
-            }
-          ]
-        },
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "lineWidth": 1, "fillOpacity": 20 } } },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 41 },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 33 },
           "id": 42,
           "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "calcs": ["lastNotNull"] } },
           "title": "Database Sizes",
@@ -356,30 +298,11 @@ data:
               "legendFormat": "{{datname}}"
             }
           ]
-        },
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "fieldConfig": { "defaults": { "unit": "ops", "custom": { "lineWidth": 1, "fillOpacity": 10 } } },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 41 },
-          "id": 43,
-          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "calcs": ["mean", "max"] } },
-          "title": "Disk IOPS",
-          "type": "timeseries",
-          "targets": [
-            {
-              "expr": "rate(container_fs_reads_total{namespace=\"infra-db\", container=\"postgresql\"}[5m])",
-              "legendFormat": "{{pod}} reads"
-            },
-            {
-              "expr": "rate(container_fs_writes_total{namespace=\"infra-db\", container=\"postgresql\"}[5m])",
-              "legendFormat": "{{pod}} writes"
-            }
-          ]
         }
       ],
       "schemaVersion": 39,
       "tags": ["postgresql", "database", "infra"],
-      "templating": { "list": [] },
+      "templating": { "list": [ { "current": { "selected": false, "text": "Prometheus", "value": "prometheus" }, "hide": 0, "includeAll": false, "label": "Data source", "multi": false, "name": "datasource", "options": [], "query": "prometheus", "refresh": 1, "regex": "", "skipUrlSync": false, "type": "datasource" } ] },
       "time": { "from": "now-6h", "to": "now" },
       "timepicker": {},
       "timezone": "browser",
