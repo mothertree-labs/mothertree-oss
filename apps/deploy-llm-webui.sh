@@ -74,7 +74,7 @@ kubectl create namespace "$NS_LLM" --dry-run=client -o yaml | kubectl apply -f -
 print_status "Setting up Open WebUI OIDC client in Keycloak realm $TENANT_KEYCLOAK_REALM..."
 
 # Get admin token
-TOKEN=$(curl -s -X POST "https://$AUTH_HOST/realms/master/protocol/openid-connect/token" \
+TOKEN=$(curl -sk -X POST "https://$AUTH_HOST/realms/master/protocol/openid-connect/token" \
     --data-urlencode "username=admin" \
     --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
     --data-urlencode "grant_type=password" \
@@ -86,7 +86,7 @@ if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
 fi
 
 # Check if client exists
-EXISTING_CLIENT=$(curl -s "https://$AUTH_HOST/admin/realms/$TENANT_KEYCLOAK_REALM/clients?clientId=open-webui" \
+EXISTING_CLIENT=$(curl -sk "https://$AUTH_HOST/admin/realms/$TENANT_KEYCLOAK_REALM/clients?clientId=open-webui" \
     -H "Authorization: Bearer $TOKEN")
 CLIENT_COUNT=$(echo "$EXISTING_CLIENT" | jq 'length')
 
@@ -114,13 +114,13 @@ CLIENT_CONFIG='{
 if [ "$CLIENT_COUNT" -gt 0 ]; then
     print_status "Updating existing open-webui client..."
     CLIENT_UUID=$(echo "$EXISTING_CLIENT" | jq -r '.[0].id')
-    curl -s -X PUT "https://$AUTH_HOST/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID" \
+    curl -sk -X PUT "https://$AUTH_HOST/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID" \
         -H "Authorization: Bearer $TOKEN" \
         -H "Content-Type: application/json" \
         -d "$CLIENT_CONFIG" > /dev/null
 else
     print_status "Creating new open-webui client..."
-    curl -s -X POST "https://$AUTH_HOST/admin/realms/$TENANT_KEYCLOAK_REALM/clients" \
+    curl -sk -X POST "https://$AUTH_HOST/admin/realms/$TENANT_KEYCLOAK_REALM/clients" \
         -H "Authorization: Bearer $TOKEN" \
         -H "Content-Type: application/json" \
         -d "$CLIENT_CONFIG" > /dev/null
