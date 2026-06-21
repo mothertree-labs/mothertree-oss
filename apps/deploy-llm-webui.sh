@@ -73,8 +73,28 @@ kubectl create namespace "$NS_LLM" --dry-run=client -o yaml | kubectl apply -f -
 # ---------------------------------------------------------------------------
 print_status "Setting up Open WebUI OIDC client in Keycloak realm $TENANT_KEYCLOAK_REALM..."
 
+# Access Keycloak through kubectl port-forward (avoids ingress TLS issues).
+# Follows the pattern from apps/scripts/ensure-keycloak-smtp.sh.
+STALE_PF=$(lsof -ti:8080 2>/dev/null || true)
+if [ -n "$STALE_PF" ]; then
+    print_status "Killing stale port-forward on port 8080 (PID: $STALE_PF)..."
+    kill $STALE_PF 2>/dev/null || true
+    sleep 1
+fi
+print_status "Setting up port-forward to Keycloak..."
+kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http 8080:80 > /tmp/keycloak-pf.log 2>&1 &
+PF_PID=$!
+sleep 3
+
+KEYCLOAK_URL="http://localhost:8080"
+
+_cleanup_keycloak_pf() {
+    kill $PF_PID 2>/dev/null || true
+}
+trap _cleanup_keycloak_pf EXIT
+
 # Get admin token
-TOKEN=$(curl -sk -X POST "https://$AUTH_HOST/realms/master/protocol/openid-connect/token" \
+TOKEN=$(curl -s -X POST "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
     --data-urlencode "username=admin" \
     --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
     --data-urlencode "grant_type=password" \
@@ -86,7 +106,7 @@ if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
 fi
 
 # Check if client exists
-EXISTING_CLIENT=$(curl -sk "https://$AUTH_HOST/admin/realms/$TENANT_KEYCLOAK_REALM/clients?clientId=open-webui" \
+EXISTING_CLIENT=$(curl -s "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients?clientId=open-webui" \
     -H "Authorization: Bearer $TOKEN")
 CLIENT_COUNT=$(echo "$EXISTING_CLIENT" | jq 'length')
 
@@ -114,13 +134,13 @@ CLIENT_CONFIG='{
 if [ "$CLIENT_COUNT" -gt 0 ]; then
     print_status "Updating existing open-webui client..."
     CLIENT_UUID=$(echo "$EXISTING_CLIENT" | jq -r '.[0].id')
-    curl -sk -X PUT "https://$AUTH_HOST/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID" \
+    curl -s -X PUT "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$CLIENT_UUID" \
         -H "Authorization: Bearer $TOKEN" \
         -H "Content-Type: application/json" \
         -d "$CLIENT_CONFIG" > /dev/null
 else
     print_status "Creating new open-webui client..."
-    curl -sk -X POST "https://$AUTH_HOST/admin/realms/$TENANT_KEYCLOAK_REALM/clients" \
+    curl -s -X POST "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients" \
         -H "Authorization: Bearer $TOKEN" \
         -H "Content-Type: application/json" \
         -d "$CLIENT_CONFIG" > /dev/null
