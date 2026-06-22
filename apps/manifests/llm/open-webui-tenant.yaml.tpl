@@ -56,6 +56,8 @@ spec:
                   key: client-secret
             - name: OPENID_PROVIDER_URL
               value: "https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/.well-known/openid-configuration"
+            - name: OAUTH_CODE_CHALLENGE_METHOD
+              value: "S256"
             - name: ENABLE_OAUTH_SIGNUP
               value: "true"
           volumeMounts:
