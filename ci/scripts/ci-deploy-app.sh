@@ -424,15 +424,17 @@ case "$MODE" in
     ;;
 
   llm)
-    echo "=== Deploying LLM WebUI ==="
-    source "$REPO_ROOT/scripts/lib/config.sh"
-    mt_load_tenant_config
-
-    if [ "${LLM_ENABLED:-false}" = "true" ]; then
-      "$REPO_ROOT/apps/deploy-llm-webui.sh" -e "$MT_ENV" -t "$E2E_TENANT" --nesting-level=0
-    else
-      echo "LLM WebUI: skipping (llm_enabled is not true)"
-    fi
+    echo "=== Deploying LLM WebUI for all tenants ==="
+    for config_file in "$REPO_ROOT/config/tenants"/*/"${MT_ENV}.config.yaml"; do
+      [[ -f "$config_file" ]] || continue
+      _tenant=$(basename "$(dirname "$config_file")")
+      [[ "$_tenant" == ".example" ]] && continue
+      echo "--- Deploying LLM WebUI for tenant: $_tenant ---"
+      # deploy-llm-webui.sh checks LLM_ENABLED internally and exits 0
+      # if not enabled, so it's safe to call for all tenants.
+      "$REPO_ROOT/apps/deploy-llm-webui.sh" -e "$MT_ENV" -t "$_tenant" --nesting-level=0
+      echo "--- Finished LLM WebUI for tenant: $_tenant ---"
+    done
     ;;
 
   imaps-readiness)
