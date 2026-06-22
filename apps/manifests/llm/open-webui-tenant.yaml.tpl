@@ -1,20 +1,3 @@
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: llm-data
-  namespace: ${NS_LLM}
-  labels:
-    app.kubernetes.io/name: open-webui
-    app.kubernetes.io/managed-by: mothertree
-    mothertree/component: llm
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: linode-block-storage-retain
-  resources:
-    requests:
-      storage: ${LLM_STORAGE_SIZE}
-
 ---
 apiVersion: v1
 kind: Secret
@@ -81,24 +64,23 @@ spec:
           resources:
             requests:
               cpu: "200m"
-              memory: "512Mi"
+              memory: "1Gi"
             limits:
               cpu: "1"
-              memory: "1Gi"
+              memory: "2Gi"
           readinessProbe:
             tcpSocket:
               port: 8080
-            initialDelaySeconds: 15
+            initialDelaySeconds: 120
             periodSeconds: 10
           livenessProbe:
             tcpSocket:
               port: 8080
-            initialDelaySeconds: 30
+            initialDelaySeconds: 120
             periodSeconds: 30
       volumes:
         - name: llm-data
-          persistentVolumeClaim:
-            claimName: llm-data
+          emptyDir: {}
 
 ---
 apiVersion: v1

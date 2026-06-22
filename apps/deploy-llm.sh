@@ -50,16 +50,6 @@ mt_require_commands kubectl yq
 print_status "Applying namespace..."
 kubectl apply -f "${MANIFESTS_DIR}/namespace.yaml"
 
-print_status "Applying PVC (model weights storage)..."
-kubectl apply -f "${MANIFESTS_DIR}/ollama-pvc.yaml"
-
-# The model is NOT pre-pulled with a blocking wait here. Doing so previously
-# ran a separate ollama-model-pull pod gated by `kubectl wait --timeout=900s`,
-# which on a cold cluster blocked deploy_infra for the full 15 min — and during
-# on-demand-dev bring-up that pushed the run past the CI tenant lease TTL. The
-# model is instead warmed in the background AFTER Ollama is up (see below), and
-# Ollama pulls it lazily on first request regardless.
-
 print_status "Deploying Ollama..."
 kubectl apply -f "${MANIFESTS_DIR}/ollama.yaml"
 

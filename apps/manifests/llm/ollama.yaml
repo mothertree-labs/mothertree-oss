@@ -60,8 +60,7 @@ spec:
 
       volumes:
         - name: ollama-models
-          persistentVolumeClaim:
-            claimName: ollama-models
+          emptyDir: {}
 
 ---
 apiVersion: v1

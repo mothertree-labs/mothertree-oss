@@ -155,7 +155,6 @@ mt_apply kubectl apply -f <(kubectl create secret generic open-webui-oidc \
     --dry-run=client -o yaml)
 
 print_status "Applying Open WebUI manifests..."
-export LLM_STORAGE_SIZE="${LLM_STORAGE_SIZE:-500Mi}"
 export LLM_MODEL
 # Resolve infra config path to read LLM_MODEL
 _mt_resolve_infra_config "$MT_ENV" 2>/dev/null || true
