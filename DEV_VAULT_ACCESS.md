@@ -102,7 +102,7 @@ Update the LastPass note, repeat steps 2–5. Re-share with the contributor.
 
 You need: the **dev vault password** (from the operator) and **write access to
 the `config/tenants` and `config/platform` submodules**. You do **not** need
-LastPass, the dev kubeconfig, terraform outputs, or tf-state credentials.
+LastPass, terraform outputs, or tf-state credentials.
 
 > **Note:** config/platform access is not narrow — that submodule holds
 > operator-level CI secrets. Granting a contributor config/platform access
@@ -164,8 +164,9 @@ You deploy via CI only — never directly.
    needed (GitHub issue #463).
 
 ### What the dev password actually grants
-The dev password decrypts the **entire** dev vault — the dev kubeconfig,
-terraform outputs, tf-state credentials, and **every** tenant's dev secrets —
-not just the tenant you edit. Patch mode also exposes all of that transiently
+The dev password decrypts the **entire** dev vault — terraform outputs,
+tf-state credentials, and **every** tenant's dev secrets — not just the tenant
+you edit. (The dev vault no longer ships a kubeconfig; CI fetches it live from
+the Linode LKE API.) Patch mode also exposes all of that transiently
 in a temp staging dir on your machine while it runs. It does **not** grant any
 access to prod or prod-eu.
