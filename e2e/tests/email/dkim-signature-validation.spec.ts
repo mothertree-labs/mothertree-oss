@@ -1,7 +1,6 @@
 import { test, expect } from '../../fixtures/authenticated';
-import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
-import { keycloakLogin } from '../../helpers/auth';
+import { roundcubeOidcLogin } from '../../helpers/roundcube';
 import { isImapConfigured, waitForEmailBody, deleteEmailsBySubject } from '../../helpers/imap';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -23,19 +22,6 @@ const echoGroupAddress = process.env.E2E_ECHO_GROUP_ADDRESS || config.echoGroupA
  */
 const expectDkimSigned =
   process.env.E2E_EXPECT_DKIM_SIGNED === 'true' || config.expectDkimSigned === true;
-
-async function roundcubeLogin(page: import('@playwright/test').Page, username: string, password: string) {
-  await page.goto(`${urls.webmail}/?_task=login&_action=oauth`);
-  await page.waitForLoadState('networkidle');
-
-  const onKeycloak = new URL(page.url()).hostname.startsWith('auth.');
-  if (onKeycloak) {
-    await keycloakLogin(page, username, password);
-    await page.waitForLoadState('networkidle');
-  }
-
-  await page.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
-}
 
 /**
  * Parse every DKIM-Signature header block in a raw MIME message.
@@ -106,7 +92,7 @@ test.describe('Email — DKIM Signature on Outbound Mail', () => {
     expect(senderDomain, 'sender email must include a domain').toBeTruthy();
 
     try {
-      await roundcubeLogin(senderPage, sender.username, sender.password);
+      await roundcubeOidcLogin(senderPage, sender.username, sender.password, 'dkim-sender');
 
       await senderPage.waitForFunction(
         () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
