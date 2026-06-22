@@ -13,7 +13,7 @@ spec:
   storageClassName: linode-block-storage-retain
   resources:
     requests:
-      storage: ${LLM_STORAGE_SIZE:-500Mi}
+      storage: ${LLM_STORAGE_SIZE}
 
 ---
 apiVersion: v1
