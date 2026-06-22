@@ -116,7 +116,12 @@ dump_component() {  # namespace selector friendly-name [since]
   echo ""
   if [[ -n "$since" ]]; then
     echo ">>> ${name} current logs (since ${since}, all containers):"
-    kubectl logs -n "$ns" -l "$sel" --since="$since" --all-containers=true --timestamps 2>&1 \
+    # NOTE: --tail=-1 is REQUIRED here. With a -l selector, kubectl defaults
+    # --tail to 10 and --since does NOT lift that cap — so without this the
+    # "time window" silently collapses to the last 10 lines (verified: #1628's
+    # 15m Stalwart capture returned a single 15:23:44 second, missing the
+    # 15:19:05 inbound echo). --tail=-1 returns ALL lines within the window.
+    kubectl logs -n "$ns" -l "$sel" --since="$since" --tail=-1 --all-containers=true --timestamps 2>&1 \
       | sed 's/^/    /'
   else
     echo ">>> ${name} current logs (last ${LOG_TAIL} lines, all containers):"
@@ -214,9 +219,25 @@ kubectl logs -n "$NS_MAIL" -l app=stalwart --tail=1000 --all-containers=true 2>/
 # off queueId (not user), so they're matched broadly and bounded by tail.
 echo ""
 echo ">>> STALWART mail round-trip / delivery (grep over --since=${LOG_SINCE} window):"
-kubectl logs -n "$NS_MAIL" -l app=stalwart --since="$LOG_SINCE" --all-containers=true --timestamps 2>/dev/null \
-  | grep -iE 'e2e-mailr(t|cv)|queue-message|mail-from|rcpt-to|delivery\.(attempt|domain|completed|null-mx)|dsn-(perm-fail|temp-fail|success)|queue-dsn|bounce|reject|message-ingest' \
+# --tail=-1: see dump_component — a -l selector caps --tail at 10 and --since
+# does not lift it, so the window must be forced open or delivery lines are lost.
+kubectl logs -n "$NS_MAIL" -l app=stalwart --since="$LOG_SINCE" --tail=-1 --all-containers=true --timestamps 2>/dev/null \
+  | grep -iE 'e2e-mailr(t|cv)|queue-message|mail-from|rcpt-to|delivery\.(attempt|domain|connect|delivered|completed|failed|null-mx)|dsn-(perm-fail|temp-fail|success)|queue-dsn|bounce|reject|message.?ingest' \
   | tail -n 120 | sed 's/^/    /' || echo "    (no mail-delivery lines found in window)"
+
+# (b) The internal inbound hop in isolation: what happened to the echo once it
+# reached the cluster MX? #1628 PROVED the echo was 250-accepted by Postfix
+# (queue C9F672A0DFE -> e2e-mailrcv@<tenant>) yet never reached the mailbox.
+# Surface every Stalwart line about e2e-mailrcv EXCEPT IMAP-poll auth noise, so
+# the next red names ingest-vs-reject on the Postfix->Stalwart->mailbox leg.
+# Empty here (with delivery events now emitted by the dev tracer, #489) => the
+# echo never reached Stalwart, i.e. the loss is the Postfix->Stalwart hop.
+echo ""
+echo ">>> STALWART inbound to e2e-mailrcv (ingest-vs-reject on the internal hop; auth-noise filtered):"
+kubectl logs -n "$NS_MAIL" -l app=stalwart --since="$LOG_SINCE" --tail=-1 --all-containers=true --timestamps 2>/dev/null \
+  | grep -iE 'e2e-mailrcv' \
+  | grep -ivE 'auth\.success|Authentication successful' \
+  | tail -n 80 | sed 's/^/    /' || echo "    (no non-auth e2e-mailrcv lines in window — inbound echo never reached Stalwart)"
 
 # Postfix — the inbound MX the echo returns through (Internet -> NodeBalancer:25
 # -> infra-mail Postfix -> per-tenant Stalwart). infra-mail is SHARED across all
@@ -233,7 +254,12 @@ echo "------------------------------------------------------------------"
 dump_pod_diagnostics "infra-mail" "app=postfix"
 echo ""
 echo ">>> POSTFIX round-trip lines (e2e-mailrt/e2e-mailrcv only, over --since=${LOG_SINCE}):"
-kubectl logs -n "infra-mail" -l app=postfix --since="$LOG_SINCE" --all-containers=true --timestamps 2>/dev/null \
+# --tail=-1 is essential here: infra-mail is high-churn (all tenants) and the
+# inbound echo can be thousands of lines back, so the selector's default
+# --tail=10 dropped it entirely (#1628: echo queued C9F672A0DFE at 15:19:05Z
+# was 250-accepted but never appeared here). The grep keeps it scoped to the
+# round-trip users, so --tail=-1 widens the window without dumping other tenants.
+kubectl logs -n "infra-mail" -l app=postfix --since="$LOG_SINCE" --tail=-1 --all-containers=true --timestamps 2>/dev/null \
   | grep -iE 'e2e-mailr(t|cv)' \
   | tail -n 80 | sed 's/^/    /' || echo "    (no postfix round-trip lines found in window)"
 
