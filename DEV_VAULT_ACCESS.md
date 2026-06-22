@@ -62,13 +62,19 @@ Run once, from an operator machine with LastPass + the repo checked out.
      && echo "OK: dev pw opens dev" || echo "FAIL: dev pw cannot open dev"
    ```
 
-4. **Let CI decrypt the re-keyed dev vault.** Add the dev password to the
-   **private, gitignored** `config/platform/ci/ansible-vars.yml`:
+4. **Let CI decrypt the re-keyed dev vault.** Add the dev password to
+   `config/platform/ci/ansible-vars.yml` in the **private config/platform
+   submodule**:
    ```yaml
    deploy_vault_password_dev: "<the dev password>"
    ```
-   > Never commit the real value. It belongs only in the gitignored
-   > `ansible-vars.yml`. Ansible writes it to
+   > **Heads-up on where this lives:** `ansible-vars.yml` is **tracked in the
+   > private, operator-only config/platform submodule** — it is *not* gitignored.
+   > It holds operator-level CI secrets, and the dev password is committed there
+   > alongside them, so anyone with config/platform access can read it. This is
+   > acceptable because config/platform is operator-restricted **and the shared
+   > prod/prod-eu vault password is _not_ in this file** (it is a Woodpecker
+   > secret) — so committing here never exposes prod. Ansible writes the value to
    > `/home/woodpecker/deploy-vaults/dev-vault-pass` (0600) with `no_log`.
 
 5. **Re-provision the CI host** to push the **dev password file**
@@ -97,6 +103,11 @@ Update the LastPass note, repeat steps 2–5. Re-share with the contributor.
 You need: the **dev vault password** (from the operator) and **write access to
 the `config/tenants` and `config/platform` submodules**. You do **not** need
 LastPass, the dev kubeconfig, terraform outputs, or tf-state credentials.
+
+> **Note:** config/platform access is not narrow — that submodule holds
+> operator-level CI secrets. Granting a contributor config/platform access
+> therefore exposes those too — it does **not** expose prod/prod-eu vault
+> secrets, but treat config/platform access as operator-level, not dev-only.
 
 You deploy via CI only — never directly.
 
