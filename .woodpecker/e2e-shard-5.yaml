@@ -72,6 +72,13 @@ steps:
         from_secret: e2e_pool1_tenant
       E2E_POOL2_TENANT:
         from_secret: e2e_pool2_tenant
+      # Declared so Woodpecker MASKS the echo-group address if it surfaces in the
+      # Stalwart mail round-trip grep (outbound to=<echo group>). The diagnostics
+      # script does not otherwise read these — they are here for log redaction.
+      E2E_POOL1_ECHO_GROUP_ADDRESS:
+        from_secret: e2e_pool1_echo_group_address
+      E2E_POOL2_ECHO_GROUP_ADDRESS:
+        from_secret: e2e_pool2_echo_group_address
       E2E_SHARD: "5/10"
     commands:
       - ci/scripts/ci-e2e-diagnostics.sh
