@@ -88,11 +88,6 @@ sleep 3
 
 KEYCLOAK_URL="http://localhost:8080"
 
-_cleanup_keycloak_pf() {
-    kill $PF_PID 2>/dev/null || true
-}
-trap _cleanup_keycloak_pf EXIT
-
 # Get admin token
 TOKEN=$(curl -s -X POST "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
     --data-urlencode "username=admin" \
@@ -147,14 +142,17 @@ else
 fi
 print_success "Open WebUI OIDC client configured"
 
+# Kill the port-forward — no longer needed
+kill $PF_PID 2>/dev/null || true
+
 # ---------------------------------------------------------------------------
 # 3. Create K8s Secret and apply template
 # ---------------------------------------------------------------------------
 print_status "Creating OIDC client secret in K8s..."
-kubectl create secret generic open-webui-oidc \
+mt_apply kubectl apply -f <(kubectl create secret generic open-webui-oidc \
     -n "$NS_LLM" \
     --from-literal=client-secret="$LLM_OIDC_CLIENT_SECRET" \
-    --dry-run=client -o yaml | mt_apply -f -
+    --dry-run=client -o yaml)
 
 print_status "Applying Open WebUI manifests..."
 export LLM_STORAGE_SIZE="${LLM_STORAGE_SIZE:-500Mi}"
@@ -166,7 +164,7 @@ if [ -n "$MT_INFRA_CONFIG" ] && [ -f "$MT_INFRA_CONFIG" ]; then
 else
   LLM_MODEL="llama3.2:1b"
 fi
-envsubst < "${REPO_ROOT}/apps/manifests/llm/open-webui-tenant.yaml.tpl" | mt_apply -f -
+mt_apply kubectl apply -f <(envsubst < "${REPO_ROOT}/apps/manifests/llm/open-webui-tenant.yaml.tpl")
 
 # ---------------------------------------------------------------------------
 # 4. Wait for rollout
