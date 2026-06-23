@@ -48,7 +48,6 @@ async function loginToLLM(page: any): Promise<void> {
   if (page.url().includes('auth.')) {
     await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
     await page.waitForLoadState('load');
-    return;
   }
 
   // Open WebUI login page — click the SSO button
@@ -68,24 +67,31 @@ async function loginToLLM(page: any): Promise<void> {
     await page.waitForLoadState('load');
   }
 
-  // Handle Open WebUI first-time onboarding (model selection / welcome modals)
-  // Close any modal dialogs that may overlay the page
-  const modalCloseBtn = page.locator('dialog button:has-text("Close"), [role="dialog"] button[aria-label="Close"]');
-  if (await modalCloseBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-    await modalCloseBtn.click({ force: true, timeout: 5000 }).catch(() => {});
-    await page.waitForTimeout(1000);
+  // Wait for the chat UI to be ready.
+  // The SPA has a race: chat input renders, then model selection onboarding
+  // may appear on top of it. Handle both cases with a simple sequential approach.
+  const chatInput = page.locator(selectors.llm.chatInput);
+  try {
+    await expect(chatInput).toBeVisible({ timeout: 30_000 });
+  } catch {
+    // Chat input not visible after 30s — onboarding is likely showing.
+    // Dismiss it by selecting a model and setting it as default.
+    await page.locator('button:has-text("Select a model")').click().catch(() => {});
+    await page.waitForTimeout(500);
+    await page.locator('button:has-text("llama3.2")').first().click({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    await page.locator('button:has-text("Set as default")').click({ timeout: 2000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+    await expect(chatInput).toBeVisible({ timeout: 30_000 });
   }
 
-  const setDefaultBtn = page.locator('button:has-text("Set as default")');
-  if (await setDefaultBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await setDefaultBtn.click({ force: true, timeout: 5000 }).catch(() => {});
-    await page.waitForTimeout(3000);
-  }
-
-  const startChattingBtn = page.locator('a:has-text("Start chatting"), button:has-text("Start chatting")');
-  if (await startChattingBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await startChattingBtn.click({ force: true, timeout: 5000 }).catch(() => {});
+  // After model is set, Open WebUI may redirect to a "Start chatting" page
+  try {
+    await page.waitForSelector('a:has-text("Start chatting"), button:has-text("Start chatting")', { timeout: 5000 });
+    await page.locator('a:has-text("Start chatting"), button:has-text("Start chatting")').first().click({ force: true });
     await page.waitForLoadState('networkidle');
+  } catch {
+    // Already on the chat page
   }
 }
 
