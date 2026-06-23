@@ -303,7 +303,7 @@ kubectl run -n "$NS_LLM" --rm -i --restart=Never llm-oidc-check \
     print_warning "OIDC discovery not reachable from inside cluster (expected if Keycloak ingress uses auth.dev.*)"
 
 # Restart if changes were detected
-mt_restart_if_changed deployment/open-webui "$NS_LLM"
+mt_restart_if_changed deployment/open-webui -n "$NS_LLM"
 
 print_success "Open WebUI deployed for $MT_TENANT!"
 print_success "  URL:  https://${LLM_HOST}"
