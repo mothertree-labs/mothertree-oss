@@ -60,6 +60,8 @@ spec:
               value: "S256"
             - name: ENABLE_OAUTH_SIGNUP
               value: "true"
+            - name: DEFAULT_USER_ROLE
+              value: "user"
           volumeMounts:
             - name: llm-data
               mountPath: /app/backend/data

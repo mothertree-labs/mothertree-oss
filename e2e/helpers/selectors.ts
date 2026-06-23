@@ -127,4 +127,38 @@ export const selectors = {
     formState: '#formState',
     loginLink: '#loginLink',
   },
+
+  // ─── Open WebUI / LLM Chat ──────────────────────────────────
+  llm: {
+    // Chat input area (Open WebUI 0.9.6 uses TipTap ProseMirror contenteditable div)
+    chatInput: 'div#chat-input[contenteditable="true"]',
+
+    // Send button
+    sendButton: 'button:has-text("Send"), button[aria-label="Send"]',
+
+    // Chat messages (general)
+    chatMessage: '.chat-message, [data-testid="chat-message"]',
+
+    // User-sent messages
+    userMessage: '.user-message, [data-testid="user-message"]',
+
+    // Assistant responses (Open WebUI 0.9.6 uses "chat-assistant" class)
+    assistantMessage: '.chat-assistant, [data-testid="assistant-message"]',
+
+    // Chat container
+    chatContainer: '.chat-container, [data-testid="chat-container"]',
+
+    // Authentication
+    loginButton: 'button:has-text("Sign in"), a:has-text("Sign in")',
+    ssoButton: 'button:has-text("Continue with SSO")',
+
+    // Loading states
+    loadingIndicator: '.loading, [data-testid="loading"]',
+
+    // Sidebar
+    sidebarToggle: 'button[aria-label="Toggle sidebar"]',
+
+    // Model selector
+    modelSelector: 'select, [data-testid="model-selector"]',
+  },
 };
