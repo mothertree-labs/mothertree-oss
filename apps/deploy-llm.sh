@@ -51,7 +51,8 @@ print_status "Applying namespace..."
 kubectl apply -f "${MANIFESTS_DIR}/namespace.yaml"
 
 print_status "Deploying Ollama..."
-kubectl apply -f "${MANIFESTS_DIR}/ollama.yaml"
+export LLM_MODEL
+mt_apply kubectl apply -f <(envsubst < "${MANIFESTS_DIR}/ollama.yaml.tpl")
 
 print_status "Waiting for Ollama to be ready..."
 kubectl rollout status deployment/ollama -n infra-llm --timeout=300s || {
@@ -59,10 +60,10 @@ kubectl rollout status deployment/ollama -n infra-llm --timeout=300s || {
   dump_pod_diagnostics infra-llm "app=ollama"
 }
 
-# Warm the model into the PVC in the background — non-blocking and best-effort.
+# Warm the model into the emptyDir in the background — non-blocking and best-effort.
 # Runs `ollama pull` inside the already-running Ollama pod via nohup so it
 # survives this exec returning; the pull proceeds server-side and lands in the
-# shared ollama-models PVC. The deploy does NOT wait for it, so a cold-cluster
+# shared ollama-models emptyDir. The deploy does NOT wait for it, so a cold-cluster
 # pull no longer blocks bring-up. Ollama also pulls lazily on first request, so
 # a slow or failed warm-up is harmless.
 _ollama_pod=$(kubectl get pod -n infra-llm -l app=ollama \
