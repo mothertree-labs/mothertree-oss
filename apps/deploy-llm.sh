@@ -85,7 +85,7 @@ kubectl get pods -n infra-llm
 
 print_status "Verifying Ollama model list (from inside cluster)..."
 kubectl run -n infra-llm --rm -i --restart=Never llm-check \
-  --image=curlimages/curl:latest \
+  --image=curlimages/curl:8.12.1 \
   -- curl -sf http://ollama.infra-llm.svc.cluster.local:11434/api/tags \
   | python3 -c "import sys,json; models=json.load(sys.stdin)['models']; [print(f'  OK {m[\"name\"]}') for m in models]" \
   2>/dev/null || print_warning "Could not verify model list — check pod logs"

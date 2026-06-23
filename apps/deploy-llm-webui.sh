@@ -296,7 +296,7 @@ kubectl get pods -n "$NS_LLM"
 # Check that the OIDC discovery endpoint resolves
 print_status "Verifying OpenID Connect discovery..."
 kubectl run -n "$NS_LLM" --rm -i --restart=Never llm-oidc-check \
-    --image=curlimages/curl:latest \
+    --image=curlimages/curl:8.12.1 \
     -- curl -sf "https://$AUTH_HOST/realms/$TENANT_KEYCLOAK_REALM/.well-known/openid-configuration" \
     > /dev/null 2>&1 && \
     print_success "OIDC discovery endpoint reachable" || \

@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: ollama
-          image: ollama/ollama:latest
+          image: ollama/ollama:0.5.7
           command:
             - /bin/sh
             - -c
