@@ -31,7 +31,7 @@ spec:
               sleep 3
               until ollama list >/dev/null 2>&1; do sleep 1; done
               ollama pull ${LLM_MODEL} 2>&1 | tail -5
-              fg
+              wait
           ports:
             - name: http
               containerPort: 11434
@@ -48,8 +48,8 @@ spec:
               mountPath: /root/.ollama
           resources:
             requests:
-              cpu: "1000m"
-              memory: "2Gi"
+              cpu: "500m"
+              memory: "1Gi"
             limits:
               cpu: "2000m"
               memory: "3500Mi"
