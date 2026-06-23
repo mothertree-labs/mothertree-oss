@@ -146,7 +146,7 @@ print_success "Open WebUI OIDC client configured"
 kill $PF_PID 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 3. Create K8s Secret and apply template
+# 3. Create K8s Secret
 # ---------------------------------------------------------------------------
 print_status "Creating OIDC client secret in K8s..."
 mt_apply kubectl apply -f <(kubectl create secret generic open-webui-oidc \
@@ -154,6 +154,118 @@ mt_apply kubectl apply -f <(kubectl create secret generic open-webui-oidc \
     --from-literal=client-secret="$LLM_OIDC_CLIENT_SECRET" \
     --dry-run=client -o yaml)
 
+# ---------------------------------------------------------------------------
+# 4. CoreDNS rewrite for AUTH_HOST → internal ingress
+#
+# Open WebUI's backend makes server-side HTTP requests to the OIDC provider
+# (Keycloak at $AUTH_HOST) during the login flow — it fetches the OpenID
+# Configuration metadata, exchanges the auth code for tokens, and retrieves
+# JWKS certs. From inside the cluster, $AUTH_HOST resolves to the external
+# NodeBalancer IP which drops hairpin connections. This rewrite makes it
+# resolve to the internal ingress controller instead, keeping the traffic
+# in-cluster while still matching the wildcard TLS cert.
+#
+# Follows the same pattern as deploy-stalwart.sh's mail rewrite.
+# =============================================================================
+print_status "Ensuring CoreDNS rewrite for $AUTH_HOST → internal ingress"
+if ! kubectl -n kube-system get configmap coredns-custom >/dev/null 2>&1; then
+    kubectl -n kube-system create configmap coredns-custom
+fi
+_coredns_key="auth-${MT_TENANT}.include"
+_coredns_target="ingress-nginx-internal-controller.infra-ingress-internal.svc.cluster.local"
+_coredns_body="rewrite name ${AUTH_HOST} ${_coredns_target}"$'\n'
+
+_coredns_existing=$(kubectl -n kube-system get configmap coredns-custom \
+    -o "jsonpath={.data.${_coredns_key}}" 2>/dev/null || true)
+if [ "$_coredns_existing" = "$_coredns_body" ]; then
+    print_status "CoreDNS rewrite already in place — skipping patch + rollout"
+    _coredns_changed=false
+else
+    _coredns_patch=$(jq -cn \
+        --arg key "$_coredns_key" \
+        --arg body "$_coredns_body" \
+        '{data: {($key): $body}}')
+    kubectl -n kube-system patch configmap coredns-custom --type=merge -p "$_coredns_patch"
+    print_success "CoreDNS rewrite applied"
+    _coredns_changed=true
+fi
+
+if [ "$_coredns_changed" = "true" ]; then
+    _coredns_deploy=$(kubectl -n kube-system get deploy -l k8s-app=kube-dns -o name | head -n1)
+    if [ -z "$_coredns_deploy" ]; then
+        print_error "No CoreDNS deployment found in kube-system (label k8s-app=kube-dns)"
+        exit 1
+    fi
+    print_status "Restarting $_coredns_deploy to propagate rewrite to all replicas"
+    kubectl -n kube-system rollout restart "$_coredns_deploy"
+    kubectl -n kube-system rollout status "$_coredns_deploy" --timeout=180s
+
+    if kubectl -n kube-system get ds node-local-dns >/dev/null 2>&1; then
+        print_status "Restarting node-local-dns DaemonSet to flush per-node caches"
+        kubectl -n kube-system rollout restart ds/node-local-dns
+        kubectl -n kube-system rollout status ds/node-local-dns --timeout=180s
+    fi
+fi
+
+# Verify the rewrite propagated to all CoreDNS replicas
+print_status "Verifying CoreDNS rewrite propagated to ALL replicas"
+_auth_cluster_ip=$(kubectl -n infra-ingress-internal get svc ingress-nginx-internal-controller \
+    -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+if [ -z "$_auth_cluster_ip" ]; then
+    print_warning "Could not read internal ingress ClusterIP — skipping per-replica verification"
+    print_warning "  (the rewrite rule is applied; CoreDNS reloaded; DNS will converge)"
+else
+    _coredns_pod_ips=$(kubectl -n kube-system get pods -l k8s-app=kube-dns -o json \
+        | jq -r '.items[]
+            | select(.status.phase == "Running")
+            | select(.metadata.deletionTimestamp == null)
+            | .status.podIP' \
+        | tr '\n' ' ')
+    if [ -z "${_coredns_pod_ips// /}" ]; then
+        print_warning "No running CoreDNS pods found — skipping per-replica verification"
+    else
+        print_status "Expecting $AUTH_HOST → $_auth_cluster_ip from CoreDNS pods: $_coredns_pod_ips"
+        _dns_probe_pod="auth-dns-probe-$$"
+        if kubectl run "$_dns_probe_pod" -n "$NS_LLM" \
+            --rm -i --restart=Never --image=busybox:1.36 --quiet \
+            --command -- sh -c "
+                pod_ips='${_coredns_pod_ips}'
+                want='${_auth_cluster_ip}'
+                host='${AUTH_HOST}'
+                for i in \$(seq 1 18); do
+                    all_ok=1
+                    last_state=
+                    for ip in \$pod_ips; do
+                        got=\$(nslookup \"\$host\" \"\$ip\" 2>/dev/null | awk '/^Name:/{f=1; next} f && /^Address/{print \$2; exit}')
+                        if [ \"\$got\" != \"\$want\" ]; then
+                            all_ok=0
+                            last_state=\"replica \$ip returned '\$got'\"
+                        fi
+                    done
+                    if [ \"\$all_ok\" = '1' ]; then
+                        echo \"OK: all CoreDNS replicas return \$want for \$host\"
+                        exit 0
+                    fi
+                    echo \"  attempt \$i: \$last_state (want \$want), retrying in 5s\"
+                    sleep 5
+                done
+                echo \"FAIL: not all CoreDNS replicas converged on \$want for \$host within 90s (\$last_state)\"
+                exit 1
+            "; then
+            print_success "CoreDNS rewrite verified across all replicas: $AUTH_HOST → $_auth_cluster_ip"
+        else
+            print_error "CoreDNS rewrite for $AUTH_HOST did not propagate to all replicas within 90s"
+            print_error "Check kube-system/coredns-custom ConfigMap and CoreDNS pod logs:"
+            print_error "  kubectl -n kube-system get configmap coredns-custom -o yaml"
+            print_error "  kubectl -n kube-system logs -l k8s-app=kube-dns --tail=100"
+            exit 1
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Apply Open WebUI manifests
+# ---------------------------------------------------------------------------
 print_status "Applying Open WebUI manifests..."
 export LLM_MODEL
 # Resolve infra config path to read LLM_MODEL
@@ -166,7 +278,7 @@ fi
 mt_apply kubectl apply -f <(envsubst < "${REPO_ROOT}/apps/manifests/llm/open-webui-tenant.yaml.tpl")
 
 # ---------------------------------------------------------------------------
-# 4. Wait for rollout
+# 6. Wait for rollout
 # ---------------------------------------------------------------------------
 print_status "Waiting for Open WebUI deployment to roll out..."
 kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=120s || {
@@ -176,7 +288,7 @@ kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=120s || {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Verification
+# 7. Verification
 # ---------------------------------------------------------------------------
 print_status "Verifying Open WebUI pod..."
 kubectl get pods -n "$NS_LLM"
