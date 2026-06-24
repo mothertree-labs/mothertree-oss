@@ -78,6 +78,7 @@ LOCAL_PORT=$((RANDOM + 10000))
 print_status "Setting up port-forward to Keycloak on port ${LOCAL_PORT}..."
 kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http ${LOCAL_PORT}:80 > /tmp/keycloak-pf.log 2>&1 &
 PF_PID=$!
+trap 'kill $PF_PID 2>/dev/null || true' EXIT
 sleep 3
 
 KEYCLOAK_URL="http://localhost:${LOCAL_PORT}"
