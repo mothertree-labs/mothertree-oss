@@ -141,21 +141,13 @@ print_success "Open WebUI OIDC client configured"
 kill $PF_PID 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 3. Create K8s Secret
-# ---------------------------------------------------------------------------
-print_status "Creating OIDC client secret in K8s..."
-mt_apply kubectl apply -f <(kubectl create secret generic open-webui-oidc \
-    -n "$NS_LLM" \
-    --from-literal=client-secret="$LLM_OIDC_CLIENT_SECRET" \
-    --dry-run=client -o yaml)
-
-# ---------------------------------------------------------------------------
-# 4. Ensure Keycloak auth ingress (external) for this tenant
+# 3. Ensure Keycloak auth ingress (external) for this tenant
 #
 # The OIDC flow redirects the browser to $AUTH_HOST (Keycloak). The external
 # ingress must exist so the public NodeBalancer routes the request to Keycloak
 # with the proper wildcard TLS cert. The template is also used by
 # deploy-matrix.sh — we apply it here so deploy-llm-webui.sh is self-sufficient.
+# Note: The open-webui-oidc Secret is defined in the template applied in step 6.
 # =============================================================================
 print_status "Ensuring external Keycloak ingress for $AUTH_HOST..."
 envsubst '${AUTH_HOST} ${TENANT} ${NS_AUTH} ${TENANT_DOMAIN} ${TENANT_NAME}' \
@@ -164,7 +156,7 @@ envsubst '${AUTH_HOST} ${TENANT} ${NS_AUTH} ${TENANT_DOMAIN} ${TENANT_NAME}' \
 print_success "External Keycloak ingress configured for $AUTH_HOST"
 
 # ---------------------------------------------------------------------------
-# 5. Ensure Keycloak internal ingress for this tenant
+# 4. Ensure Keycloak internal ingress for this tenant
 #
 # Open WebUI's backend fetches OIDC metadata from $AUTH_HOST server-side.
 # The CoreDNS rewrite below routes these requests to the internal ingress
@@ -211,7 +203,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. CoreDNS rewrite for AUTH_HOST → internal ingress
+# 5. CoreDNS rewrite for AUTH_HOST → internal ingress
 #
 # The CoreDNS rewrite makes $AUTH_HOST resolve to the internal ingress
 # controller IP, keeping server-side OIDC metadata requests in-cluster and
@@ -316,7 +308,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Apply Open WebUI manifests
+# 6. Apply Open WebUI manifests
 # ---------------------------------------------------------------------------
 print_status "Applying Open WebUI manifests..."
 export LLM_MODEL
@@ -356,7 +348,7 @@ export LLM_WEBUI_STORAGE_VALUE
 mt_apply kubectl apply -f <(envsubst < "${REPO_ROOT}/apps/manifests/llm/open-webui-tenant.yaml.tpl")
 
 # ---------------------------------------------------------------------------
-# 6. Deploy HPA for Open WebUI auto-scaling (only if min != max replicas)
+# 7. Deploy HPA for Open WebUI auto-scaling (only if min != max replicas)
 # ---------------------------------------------------------------------------
 if [ "$LLM_MIN_REPLICAS" != "$LLM_MAX_REPLICAS" ]; then
     print_status "Deploying HPA for Open WebUI..."
@@ -368,7 +360,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Wait for rollout
+# 8. Wait for rollout
 # ---------------------------------------------------------------------------
 print_status "Waiting for Open WebUI deployment to roll out..."
 kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=120s || {
@@ -377,7 +369,7 @@ kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=120s || {
 }
 
 # ---------------------------------------------------------------------------
-# 8. Verification
+# 9. Verification
 # ---------------------------------------------------------------------------
 print_status "Verifying Open WebUI pod..."
 kubectl get pods -n "$NS_LLM"
