@@ -56,21 +56,14 @@ kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=keycloakx -n "$
     exit 1
 }
 
-# Kill any stale port-forward on 8080
-STALE_PF=$(lsof -ti:8080 2>/dev/null || true)
-if [ -n "$STALE_PF" ]; then
-    print_status "Killing stale port-forward on port 8080 (PID: $STALE_PF)..."
-    kill $STALE_PF 2>/dev/null || true
-    sleep 1
-fi
-
-# Set up port-forward
-print_status "Setting up port-forward to Keycloak..."
-kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http 8080:80 > /tmp/keycloak-pf.log 2>&1 &
+# Set up port-forward on a random port to avoid CI DAG races
+LOCAL_PORT=$((RANDOM + 10000))
+print_status "Setting up port-forward to Keycloak on port ${LOCAL_PORT}..."
+kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http ${LOCAL_PORT}:80 > /tmp/keycloak-pf.log 2>&1 &
 PF_PID=$!
 sleep 3
 
-KEYCLOAK_URL="http://localhost:8080"
+KEYCLOAK_URL="http://localhost:${LOCAL_PORT}"
 
 cleanup() {
     kill $PF_PID 2>/dev/null || true

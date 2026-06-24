@@ -77,7 +77,7 @@ _mt_resolve_project_conf
 
 # Create infrastructure namespaces
 print_status "Creating infrastructure namespaces..."
-for ns in $NS_DB $NS_AUTH $NS_MONITORING $NS_INGRESS $NS_INGRESS_INTERNAL $NS_CERTMANAGER $NS_MAIL; do
+for ns in $NS_DB $NS_AUTH $NS_MONITORING $NS_INGRESS $NS_INGRESS_INTERNAL $NS_CERTMANAGER $NS_MAIL $NS_LLM; do
   kubectl create namespace "$ns" 2>/dev/null || print_status "Namespace $ns already exists"
 done
 
@@ -336,6 +336,19 @@ pushd "$REPO_ROOT/apps" >/dev/null
     retry_count=$((retry_count + 1))
     if [ $retry_count -lt $max_retries ]; then
       print_warning "helmfile sync failed (attempt $retry_count/$max_retries), retrying in 10 seconds..."
+
+      # Clean up stuck Helm releases left by the failed attempt.
+      # A partial ingress-nginx install can leave the release in a
+      # pending-install state with a held lock, causing subsequent
+      # attempts to fail with "another operation is in progress".
+      for _ns in "$NS_INGRESS" "$NS_INGRESS_INTERNAL"; do
+        helm ls -n "$_ns" --pending -q 2>/dev/null | while read -r _rel; do
+          [ -z "$_rel" ] && continue
+          print_warning "Cleaning up stuck Helm release: $_rel in $_ns"
+          helm uninstall "$_rel" -n "$_ns" 2>/dev/null || true
+        done || true
+      done
+
       sleep 10
     else
       print_error "helmfile sync failed after $max_retries attempts"
@@ -774,6 +787,17 @@ else
   print_status "files_linkeditor submodule not found, skipping (optional component)"
 fi
 
+# =============================================================================
+# Deploy Ollama inference engine (shared LLM backend)
+# =============================================================================
+if [ -x "$REPO_ROOT/apps/deploy-llm.sh" ]; then
+  print_status "Deploying Ollama inference engine..."
+  "$REPO_ROOT/apps/deploy-llm.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /' || \
+    print_warning "Ollama deploy incomplete — model may still be pulling on a cold-start node"
+else
+  print_warning "deploy-llm.sh not found, skipping Ollama deployment"
+fi
+
 # Deploy Tailscale subnet router for operator access to internal services.
 # Provides split DNS + subnet routing so operators can reach Grafana, Prometheus, etc.
 # Non-blocking — router failure shouldn't fail the deploy.
@@ -799,6 +823,7 @@ echo "  - $NS_INGRESS (Public ingress)"
 echo "  - $NS_INGRESS_INTERNAL (Internal ingress)"
 echo "  - $NS_CERTMANAGER (Cert-manager)"
 echo "  - $NS_MAIL (Postfix SMTP)"
+echo "  - $NS_LLM (Ollama)"
 echo ""
 echo "Next steps:"
 echo "  Deploy tenants with: ./scripts/create_env -e $MT_ENV -t <tenant>"

@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: infra-llm
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/managed-by: mothertree
+    mothertree/component: llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: ollama
+        mothertree/component: llm
+    spec:
+      containers:
+        - name: ollama
+          image: ollama/ollama:0.5.7
+          command:
+            - /bin/sh
+            - -c
+            - |
+              ollama serve &
+              sleep 3
+              until ollama list >/dev/null 2>&1; do sleep 1; done
+              ollama pull ${LLM_MODEL} 2>&1 | tail -5
+              wait
+          ports:
+            - name: http
+              containerPort: 11434
+              protocol: TCP
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0"
+            - name: OLLAMA_KEEP_ALIVE
+              value: "30m"
+            - name: OLLAMA_NUM_PARALLEL
+              value: "1"
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /root/.ollama
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "3500Mi"
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+
+      volumes:
+        - name: ollama-models
+          ${OLLAMA_STORAGE_VALUE}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: infra-llm
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/managed-by: mothertree
+    mothertree/component: llm
+spec:
+  selector:
+    app: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: 11434
+      protocol: TCP
+  type: ClusterIP

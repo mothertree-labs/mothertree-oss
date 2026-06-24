@@ -79,6 +79,7 @@ _mt_infra_set_namespaces() {
   export NS_INGRESS_INTERNAL="infra-ingress-internal"
   export NS_CERTMANAGER="infra-cert-manager"
   export NS_MAIL="infra-mail"
+  export NS_LLM="infra-llm"
 }
 
 # ---------------------------------------------------------------------------
@@ -143,9 +144,11 @@ _mt_infra_load_env_config() {
     TURN_TAILSCALE_IP=$(yq '.turn.tailscale_ip // ""' "$infra_config")
     export TURN_TAILSCALE_IP
 
-    # Cross-cluster metrics federation (grafana.prod queries prod-eu Prometheus
-    # over the Headscale mesh). role: exposer (prod-eu) | consumer (prod) | unset.
-    # source_mesh_ip is the prod-eu exposer's 100.64.x.x mesh IP (consumer only).
+    # LLM inference model (shared Ollama)
+    LLM_MODEL=$(yq '.llm.model // "llama3.2:1b"' "$infra_config")
+    export LLM_MODEL
+
+    # Cross-cluster metrics federation
     MT_METRICS_FED_ROLE=$(yq '.metrics_federation.role // ""' "$infra_config")
     MT_METRICS_FED_SOURCE_IP=$(yq '.metrics_federation.source_mesh_ip // ""' "$infra_config")
     [ "$MT_METRICS_FED_ROLE" = "null" ] && MT_METRICS_FED_ROLE=""

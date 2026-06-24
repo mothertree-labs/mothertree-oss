@@ -152,7 +152,9 @@ _mt_load_tenant_yaml() {
     "DEFAULT_EMAIL_QUOTA_MB=" + (.email.default_quota_mb // 5120 | tostring | @sh) + "\n" +
     "PRIVACY_POLICY_URL=" + (.policies.privacy_policy_url // "" | @sh) + "\n" +
     "TERMS_OF_USE_URL=" + (.policies.terms_of_use_url // "" | @sh) + "\n" +
-    "ACCEPTABLE_USE_POLICY_URL=" + (.policies.acceptable_use_policy_url // "" | @sh)
+    "ACCEPTABLE_USE_POLICY_URL=" + (.policies.acceptable_use_policy_url // "" | @sh) + "\n" +
+    "LLM_ENABLED=" + (.features.llm_enabled // false | tostring | @sh) + "\n" +
+    "LLM_SUBDOMAIN=" + (.dns.llm_subdomain // "llm" | tostring | @sh)
   ' "$TENANT_CONFIG")"
 
   # Validate required fields
@@ -249,6 +251,7 @@ _mt_derive_hostnames() {
     export OFFICE_HOST="office.${label}.${TENANT_DOMAIN}"
     export MATRIX_SERVER_NAME="${label}.${TENANT_DOMAIN}"
     export WEBADMIN_HOST="webadmin.internal.${label}.${TENANT_DOMAIN}"
+    export LLM_HOST="${LLM_SUBDOMAIN}.${label}.${TENANT_DOMAIN}"
   else
     export MATRIX_HOST="matrix.${TENANT_DOMAIN}"
     export SYNAPSE_HOST="synapse.${TENANT_DOMAIN}"
@@ -268,6 +271,7 @@ _mt_derive_hostnames() {
     export OFFICE_HOST="office.${TENANT_DOMAIN}"
     export MATRIX_SERVER_NAME="${TENANT_DOMAIN}"
     export WEBADMIN_HOST="webadmin.prod.${TENANT_DOMAIN}"
+    export LLM_HOST="${LLM_SUBDOMAIN}.${TENANT_DOMAIN}"
   fi
 }
 
@@ -287,6 +291,7 @@ _mt_set_namespaces() {
   export NS_ADMIN="${TENANT_NS_PREFIX}-admin"
   export NS_OFFICE="${TENANT_NS_PREFIX}-office"
   export NS_HOME="${TENANT_NS_PREFIX}-home"
+  export NS_LLM="${TENANT_NS_PREFIX}-llm"
 
   # Shared infrastructure namespaces
   export NS_DB="infra-db"
@@ -355,7 +360,13 @@ _mt_load_scaling_config() {
     "NEXTCLOUD_HPA_SCALEDOWN_WINDOW=" + (.resources.nextcloud.hpa_scaledown_window // 300 | tostring | @sh) + "\n" +
     "EMAIL_PROBE_MEMORY_REQUEST=" + (.resources.email_probe.memory_request // "32Mi" | tostring | @sh) + "\n" +
     "EMAIL_PROBE_MEMORY_LIMIT=" + (.resources.email_probe.memory_limit // "64Mi" | tostring | @sh) + "\n" +
-    "EMAIL_PROBE_CPU_REQUEST=" + (.resources.email_probe.cpu_request // "50m" | tostring | @sh)
+    "EMAIL_PROBE_CPU_REQUEST=" + (.resources.email_probe.cpu_request // "50m" | tostring | @sh) + "\n" +
+    "LLM_MIN_REPLICAS=" + (.resources.llm.min_replicas // 1 | tostring | @sh) + "\n" +
+    "LLM_MAX_REPLICAS=" + (.resources.llm.max_replicas // 3 | tostring | @sh) + "\n" +
+    "LLM_MEMORY_REQUEST=" + (.resources.llm.memory_request // "512Mi" | tostring | @sh) + "\n" +
+    "LLM_MEMORY_LIMIT=" + (.resources.llm.memory_limit // "1Gi" | tostring | @sh) + "\n" +
+    "LLM_CPU_REQUEST=" + (.resources.llm.cpu_request // "100m" | tostring | @sh) + "\n" +
+    "LLM_STORAGE_SIZE=" + (.resources.llm.storage_size // "1Gi" | tostring | @sh)
   ' "$TENANT_CONFIG")"
 
   # Validate required scaling fields — fail fast instead of propagating 'null'
@@ -384,6 +395,8 @@ _mt_load_scaling_config() {
   [ "$NEXTCLOUD_MIN_REPLICAS" = "null" ] || [ -z "$NEXTCLOUD_MIN_REPLICAS" ] && _missing+=("resources.nextcloud.min_replicas")
   [ "$NEXTCLOUD_MAX_REPLICAS" = "null" ] || [ -z "$NEXTCLOUD_MAX_REPLICAS" ] && _missing+=("resources.nextcloud.max_replicas")
   [ "$KEYCLOAK_REPLICAS" = "null" ] || [ -z "$KEYCLOAK_REPLICAS" ] && _missing+=("resources.keycloak.replicas")
+  [ "$LLM_MIN_REPLICAS" = "null" ] || [ -z "$LLM_MIN_REPLICAS" ] && _missing+=("resources.llm.min_replicas")
+  [ "$LLM_MAX_REPLICAS" = "null" ] || [ -z "$LLM_MAX_REPLICAS" ] && _missing+=("resources.llm.max_replicas")
   [ "$REDIS_REPLICAS" = "null" ] || [ -z "$REDIS_REPLICAS" ] && _missing+=("resources.redis.replicas")
 
   if [ ${#_missing[@]} -gt 0 ]; then
@@ -417,6 +430,9 @@ _mt_load_scaling_config() {
   export NEXTCLOUD_CPU_REQUEST NEXTCLOUD_HPA_SCALEDOWN_WINDOW
   export EMAIL_PROBE_MEMORY_REQUEST EMAIL_PROBE_MEMORY_LIMIT
   export EMAIL_PROBE_CPU_REQUEST
+  export LLM_MIN_REPLICAS LLM_MAX_REPLICAS
+  export LLM_MEMORY_REQUEST LLM_MEMORY_LIMIT LLM_CPU_REQUEST
+  export LLM_STORAGE_SIZE
 }
 
 # ---------------------------------------------------------------------------
@@ -490,7 +506,8 @@ _mt_load_tenant_secrets() {
     "_ALERTBOT_HOMESERVER=" + (.alertbot.homeserver // "" | @sh) + "\n" +
     "GOOGLE_CLIENT_ID=" + (.google.client_id // "" | @sh) + "\n" +
     "GOOGLE_CLIENT_SECRET=" + (.google.client_secret // "" | @sh) + "\n" +
-    "HEALTHCHECKS_DEADMAN_URL=" + (.healthchecks.deadman_url // "" | @sh)
+    "HEALTHCHECKS_DEADMAN_URL=" + (.healthchecks.deadman_url // "" | @sh) + "\n" +
+    "LLM_OIDC_CLIENT_SECRET=" + (.oidc.open_webui_client_secret // "" | @sh)
   ' "$TENANT_SECRETS")"
 
   # Derived secrets
@@ -606,6 +623,10 @@ _mt_export_all() {
   export WEBMAIL_ENABLED ADMIN_PORTAL_ENABLED ACCOUNT_PORTAL_ENABLED GOOGLE_IMPORT_ENABLED EMAIL_PROBE_ENABLED
   export LOGIN_PASSKEY_ENABLED LOGIN_MAGIC_LINK_ENABLED LOGIN_GOOGLE_SSO_ENABLED
   export EMAIL_PROBE_TARGET_EMAIL
+  export LLM_ENABLED LLM_SUBDOMAIN LLM_OIDC_CLIENT_SECRET
+  export LLM_MIN_REPLICAS LLM_MAX_REPLICAS
+  export LLM_MEMORY_REQUEST LLM_MEMORY_LIMIT LLM_CPU_REQUEST
+  export LLM_STORAGE_SIZE
   export MATRIX_HOST SYNAPSE_HOST SYNAPSE_ADMIN_HOST ADMIN_HOST ACCOUNT_HOST
   export KEYCLOAK_INTERNAL_URL="http://keycloak-keycloakx-http.infra-auth.svc.cluster.local"
 
@@ -620,10 +641,10 @@ _mt_export_all() {
   export RATE_LIMIT_WINDOW_MS="${RATE_LIMIT_WINDOW_MS:-60000}"  # 1 minute
   export DOCS_HOST FILES_HOST JITSI_HOST HOME_HOST AUTH_HOST
   export MAIL_HOST IMAP_HOST SMTP_HOST WEBMAIL_HOST CALENDAR_HOST OFFICE_HOST
-  export MATRIX_SERVER_NAME WEBADMIN_HOST
+  export MATRIX_SERVER_NAME WEBADMIN_HOST LLM_HOST
   export TENANT_NS_PREFIX NS_MATRIX NS_DOCS NS_FILES NS_JITSI
   export NS_STALWART NS_WEBMAIL NS_ADMIN NS_OFFICE NS_HOME
-  export NS_DB NS_AUTH NS_MONITORING NS_INGRESS NS_INGRESS_INTERNAL NS_CERTMANAGER NS_MAIL
+  export NS_DB NS_AUTH NS_MONITORING NS_INGRESS NS_INGRESS_INTERNAL NS_CERTMANAGER NS_MAIL NS_LLM
 
   export HELM_DIFF_USE_HELM_TEMPLATE=true
 }

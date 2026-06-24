@@ -95,6 +95,7 @@ print_status "Namespace prefix: $TENANT_NS_PREFIX"
 print_status "Email domain: $EMAIL_DOMAIN (for SPF/DKIM/DMARC records)"
 print_status "Hosts: matrix=$MATRIX_HOST, docs=$DOCS_HOST, files=$FILES_HOST, jitsi=$JITSI_HOST"
 print_status "Hosts: mail=$MAIL_HOST, webmail=$WEBMAIL_HOST, admin=$ADMIN_HOST, calendar=$CALENDAR_HOST, office=$OFFICE_HOST"
+print_status "Hosts: llm=$LLM_HOST"
 print_status "S3 bucket (files): $S3_FILES_BUCKET"
 print_status "Scaling: docs_backend=$DOCS_BACKEND_MIN_REPLICAS-$DOCS_BACKEND_MAX_REPLICAS, jvb=$JVB_MIN_REPLICAS-$JVB_MAX_REPLICAS, redis=$REDIS_REPLICAS"
 
@@ -159,6 +160,7 @@ kubectl create namespace "$NS_ADMIN" 2>/dev/null || true
 if [ "$OFFICE_ENABLED" = "true" ]; then
   kubectl create namespace "$NS_OFFICE" 2>/dev/null || true
 fi
+kubectl create namespace "$NS_LLM" 2>/dev/null || true
 print_status "Tenant namespaces created/verified"
 
 # =============================================================================
@@ -182,7 +184,7 @@ else
 fi
 
 # Build comma-separated list of namespaces for reflector (all tenant ns except NS_MATRIX, plus infra-auth)
-export TENANT_NAMESPACES="${NS_STALWART},${NS_DOCS},${NS_FILES},${NS_JITSI},${NS_WEBMAIL},${NS_ADMIN},${NS_AUTH}"
+export TENANT_NAMESPACES="${NS_STALWART},${NS_DOCS},${NS_FILES},${NS_JITSI},${NS_WEBMAIL},${NS_ADMIN},${NS_AUTH},${NS_LLM}"
 if [ "$OFFICE_ENABLED" = "true" ]; then
   export TENANT_NAMESPACES="${TENANT_NAMESPACES},${NS_OFFICE}"
 fi
@@ -404,7 +406,7 @@ else
 
   # Create CNAME records for all tenant subdomains pointing to the tenant LB record
   # Note: 'mail' is excluded — its A record is created above alongside the MX record
-  PROXIED_SUBDOMAINS="matrix synapse element docs files auth home admin account webmail calendar jitsi office"
+  PROXIED_SUBDOMAINS="matrix synapse element docs files auth home admin account webmail calendar jitsi office llm"
   DNS_ONLY_SUBDOMAINS="imap smtp"
 
   for subdomain in $PROXIED_SUBDOMAINS; do
@@ -896,6 +898,22 @@ if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
   fi
 fi
 
+# =============================================================================
+# Deploy LLM WebUI (if enabled)
+# =============================================================================
+if [ "${LLM_ENABLED:-false}" = "true" ]; then
+  print_status "LLM WebUI: deploy to $NS_LLM namespace"
+  if [ -x "$REPO_ROOT/apps/deploy-llm-webui.sh" ]; then
+    if ! "$REPO_ROOT/apps/deploy-llm-webui.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
+      print_warning "deploy-llm-webui.sh had issues (non-fatal, continuing)"
+    fi
+  else
+    print_warning "deploy-llm-webui.sh not found — skipping LLM WebUI deploy"
+  fi
+else
+  print_status "LLM WebUI: skipping (features.llm_enabled is not true)"
+fi
+
 # ── END app deploys ──────────────────────────────────────────────────
 fi  # end of FINALIZE_ONLY != true
 
@@ -972,6 +990,10 @@ if [ "$OFFICE_ENABLED" = "true" ]; then
   ENDPOINT_PROBE_TARGETS="${ENDPOINT_PROBE_TARGETS}        - https://${OFFICE_HOST}/
 "
 fi
+if [ "${LLM_ENABLED:-false}" = "true" ]; then
+  ENDPOINT_PROBE_TARGETS="${ENDPOINT_PROBE_TARGETS}        - https://${LLM_HOST}/
+"
+fi
 export ENDPOINT_PROBE_TARGETS
 
 # Select probe module names: dev uses SOCKS-proxied _ext variants to bypass
@@ -1008,6 +1030,9 @@ fi
 if [ "$OFFICE_ENABLED" = "true" ]; then
   echo "  - $NS_OFFICE (Collabora CODE)"
 fi
+if [ "${LLM_ENABLED:-false}" = "true" ]; then
+  echo "  - $NS_LLM (Open WebUI)"
+fi
 echo ""
 echo "URLs:"
 echo "  - Matrix: https://$MATRIX_HOST"
@@ -1025,6 +1050,9 @@ if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
 fi
 if [ "$OFFICE_ENABLED" = "true" ]; then
   echo "  - Office: https://$OFFICE_HOST"
+fi
+if [ "${LLM_ENABLED:-false}" = "true" ]; then
+  echo "  - LLM Chat: https://$LLM_HOST"
 fi
 # Run post-deploy health check (non-blocking)
 echo ""
@@ -1053,4 +1081,7 @@ if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
 fi
 if [ "$OFFICE_ENABLED" = "true" ]; then
   echo "  kubectl get pods -n $NS_OFFICE"
+fi
+if [ "${LLM_ENABLED:-false}" = "true" ]; then
+  echo "  kubectl get pods -n $NS_LLM"
 fi
