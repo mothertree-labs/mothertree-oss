@@ -270,6 +270,10 @@ ${STALWART_OUTBOUND_ROUTE_TOML}
 
     [auth.dmarc]
     verify = true
+
+    # Encrypt messages appended via IMAP APPEND (e.g., Sent folder copies from Roundcube)
+    [email.encryption]
+    append = true
     
     # Logging — env-gated tracer block (built in deploy-stalwart.sh).
     # Dev uses an explicit [tracer.stdout] that emits the full info-level event
@@ -287,7 +291,8 @@ ${STALWART_TRACING_TOML}
                   "storage.lookup", "storage.fts", "storage.directory", "certificate.*",
                   "session.rcpt.*", "queue.strategy.*", "queue.route.*", "queue.limiter.*", "oauth.*",
                   "spam.*", "spam-filter.list.*",
-                  "auth.iprev.*", "auth.spf.*", "auth.dkim.*", "auth.dmarc.*"]
+                  "auth.iprev.*", "auth.spf.*", "auth.dkim.*", "auth.dmarc.*",
+                  "email.encryption.*"]
 
 ---
 apiVersion: apps/v1
