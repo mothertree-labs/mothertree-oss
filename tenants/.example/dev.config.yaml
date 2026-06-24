@@ -176,14 +176,14 @@ resources:
   redis:
     replicas: 1  # 0 = standalone, 1+ = sentinel mode
 
-  # LLM WebUI - stateless, scales with HPA
+  # LLM WebUI - HPA-enabled, ephemeral storage (emptyDir)
   llm:
     min_replicas: 1
     max_replicas: 5
     memory_request: 512Mi
     memory_limit: 1Gi
     cpu_request: 100m
-    storage_size: 500Mi  # Conversation history PVC
+    storage_size: 500Mi  # Reserved: conversation history PVC (currently emptyDir)
 
 # Legal / policy document URLs (displayed in portal footers, login page, emails)
 # Leave empty to hide policy links

@@ -23,7 +23,7 @@ metadata:
     app.kubernetes.io/managed-by: mothertree
     mothertree/component: llm
 spec:
-  replicas: 1
+  replicas: ${LLM_MIN_REPLICAS}
   selector:
     matchLabels:
       app: open-webui
@@ -73,11 +73,10 @@ spec:
               mountPath: /app/backend/data
           resources:
             requests:
-              cpu: "200m"
-              memory: "1Gi"
+              cpu: "${LLM_CPU_REQUEST}"
+              memory: "${LLM_MEMORY_REQUEST}"
             limits:
-              cpu: "1"
-              memory: "2Gi"
+              memory: "${LLM_MEMORY_LIMIT}"
           readinessProbe:
             tcpSocket:
               port: 8080

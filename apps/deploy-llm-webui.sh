@@ -330,7 +330,19 @@ fi
 mt_apply kubectl apply -f <(envsubst < "${REPO_ROOT}/apps/manifests/llm/open-webui-tenant.yaml.tpl")
 
 # ---------------------------------------------------------------------------
-# 6. Wait for rollout
+# 6. Deploy HPA for Open WebUI auto-scaling (only if min != max replicas)
+# ---------------------------------------------------------------------------
+if [ "$LLM_MIN_REPLICAS" != "$LLM_MAX_REPLICAS" ]; then
+    print_status "Deploying HPA for Open WebUI..."
+    envsubst < "$REPO_ROOT/apps/manifests/llm/open-webui-hpa.yaml.tpl" | kubectl apply -f -
+    print_success "Open WebUI HPA deployed (CPU 80% threshold)"
+else
+    kubectl delete hpa open-webui-hpa -n "$NS_LLM" --ignore-not-found >/dev/null 2>&1
+    print_status "Open WebUI: fixed replicas ($LLM_MIN_REPLICAS), HPA removed"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Wait for rollout
 # ---------------------------------------------------------------------------
 print_status "Waiting for Open WebUI deployment to roll out..."
 kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=120s || {
@@ -340,7 +352,7 @@ kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=120s || {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Verification
+# 8. Verification
 # ---------------------------------------------------------------------------
 print_status "Verifying Open WebUI pod..."
 kubectl get pods -n "$NS_LLM"

@@ -154,7 +154,7 @@ _mt_load_tenant_yaml() {
     "TERMS_OF_USE_URL=" + (.policies.terms_of_use_url // "" | @sh) + "\n" +
     "ACCEPTABLE_USE_POLICY_URL=" + (.policies.acceptable_use_policy_url // "" | @sh) + "\n" +
     "LLM_ENABLED=" + (.features.llm_enabled // false | tostring | @sh) + "\n" +
-    "LLM_SUBDOMAIN=" + (.dns.llm_subdomain // "llm" | @sh)
+    "LLM_SUBDOMAIN=" + (.dns.llm_subdomain // "llm" | tostring | @sh)
   ' "$TENANT_CONFIG")"
 
   # Validate required fields
@@ -360,7 +360,13 @@ _mt_load_scaling_config() {
     "NEXTCLOUD_HPA_SCALEDOWN_WINDOW=" + (.resources.nextcloud.hpa_scaledown_window // 300 | tostring | @sh) + "\n" +
     "EMAIL_PROBE_MEMORY_REQUEST=" + (.resources.email_probe.memory_request // "32Mi" | tostring | @sh) + "\n" +
     "EMAIL_PROBE_MEMORY_LIMIT=" + (.resources.email_probe.memory_limit // "64Mi" | tostring | @sh) + "\n" +
-    "EMAIL_PROBE_CPU_REQUEST=" + (.resources.email_probe.cpu_request // "50m" | tostring | @sh)
+    "EMAIL_PROBE_CPU_REQUEST=" + (.resources.email_probe.cpu_request // "50m" | tostring | @sh) + "\n" +
+    "LLM_MIN_REPLICAS=" + (.resources.llm.min_replicas // 1 | tostring | @sh) + "\n" +
+    "LLM_MAX_REPLICAS=" + (.resources.llm.max_replicas // 3 | tostring | @sh) + "\n" +
+    "LLM_MEMORY_REQUEST=" + (.resources.llm.memory_request // "512Mi" | tostring | @sh) + "\n" +
+    "LLM_MEMORY_LIMIT=" + (.resources.llm.memory_limit // "1Gi" | tostring | @sh) + "\n" +
+    "LLM_CPU_REQUEST=" + (.resources.llm.cpu_request // "100m" | tostring | @sh) + "\n" +
+    "LLM_STORAGE_SIZE=" + (.resources.llm.storage_size // "1Gi" | tostring | @sh)
   ' "$TENANT_CONFIG")"
 
   # Validate required scaling fields — fail fast instead of propagating 'null'
@@ -389,6 +395,8 @@ _mt_load_scaling_config() {
   [ "$NEXTCLOUD_MIN_REPLICAS" = "null" ] || [ -z "$NEXTCLOUD_MIN_REPLICAS" ] && _missing+=("resources.nextcloud.min_replicas")
   [ "$NEXTCLOUD_MAX_REPLICAS" = "null" ] || [ -z "$NEXTCLOUD_MAX_REPLICAS" ] && _missing+=("resources.nextcloud.max_replicas")
   [ "$KEYCLOAK_REPLICAS" = "null" ] || [ -z "$KEYCLOAK_REPLICAS" ] && _missing+=("resources.keycloak.replicas")
+  [ "$LLM_MIN_REPLICAS" = "null" ] || [ -z "$LLM_MIN_REPLICAS" ] && _missing+=("resources.llm.min_replicas")
+  [ "$LLM_MAX_REPLICAS" = "null" ] || [ -z "$LLM_MAX_REPLICAS" ] && _missing+=("resources.llm.max_replicas")
   [ "$REDIS_REPLICAS" = "null" ] || [ -z "$REDIS_REPLICAS" ] && _missing+=("resources.redis.replicas")
 
   if [ ${#_missing[@]} -gt 0 ]; then
@@ -422,6 +430,9 @@ _mt_load_scaling_config() {
   export NEXTCLOUD_CPU_REQUEST NEXTCLOUD_HPA_SCALEDOWN_WINDOW
   export EMAIL_PROBE_MEMORY_REQUEST EMAIL_PROBE_MEMORY_LIMIT
   export EMAIL_PROBE_CPU_REQUEST
+  export LLM_MIN_REPLICAS LLM_MAX_REPLICAS
+  export LLM_MEMORY_REQUEST LLM_MEMORY_LIMIT LLM_CPU_REQUEST
+  export LLM_STORAGE_SIZE
 }
 
 # ---------------------------------------------------------------------------
@@ -613,6 +624,9 @@ _mt_export_all() {
   export LOGIN_PASSKEY_ENABLED LOGIN_MAGIC_LINK_ENABLED LOGIN_GOOGLE_SSO_ENABLED
   export EMAIL_PROBE_TARGET_EMAIL
   export LLM_ENABLED LLM_SUBDOMAIN LLM_OIDC_CLIENT_SECRET
+  export LLM_MIN_REPLICAS LLM_MAX_REPLICAS
+  export LLM_MEMORY_REQUEST LLM_MEMORY_LIMIT LLM_CPU_REQUEST
+  export LLM_STORAGE_SIZE
   export MATRIX_HOST SYNAPSE_HOST SYNAPSE_ADMIN_HOST ADMIN_HOST ACCOUNT_HOST
   export KEYCLOAK_INTERNAL_URL="http://keycloak-keycloakx-http.infra-auth.svc.cluster.local"
 
