@@ -373,7 +373,6 @@ fi
 print_status "Waiting for Open WebUI deployment to roll out..."
 kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=120s || {
     print_warning "Open WebUI rollout not ready within timeout — dumping pod diagnostics"
-    mt_reset_change_tracker
     dump_pod_diagnostics "$NS_LLM" "app=open-webui"
 }
 

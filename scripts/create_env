@@ -905,8 +905,7 @@ if [ "${LLM_ENABLED:-false}" = "true" ]; then
   print_status "LLM WebUI: deploy to $NS_LLM namespace"
   if [ -x "$REPO_ROOT/apps/deploy-llm-webui.sh" ]; then
     if ! "$REPO_ROOT/apps/deploy-llm-webui.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
-      print_error "deploy-llm-webui.sh failed"
-      exit 1
+      print_warning "deploy-llm-webui.sh had issues (non-fatal, continuing)"
     fi
   else
     print_warning "deploy-llm-webui.sh not found — skipping LLM WebUI deploy"
