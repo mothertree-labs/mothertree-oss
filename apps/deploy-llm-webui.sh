@@ -311,7 +311,6 @@ fi
 # 6. Apply Open WebUI manifests
 # ---------------------------------------------------------------------------
 print_status "Applying Open WebUI manifests..."
-export LLM_MODEL
 # Resolve infra config path to read LLM_MODEL
 _mt_resolve_infra_config "$MT_ENV" 2>/dev/null || true
 if [ -n "$MT_INFRA_CONFIG" ] && [ -f "$MT_INFRA_CONFIG" ]; then
@@ -319,6 +318,7 @@ if [ -n "$MT_INFRA_CONFIG" ] && [ -f "$MT_INFRA_CONFIG" ]; then
 else
   LLM_MODEL="llama3.2:1b"
 fi
+export LLM_MODEL
 
 # Choose volume type based on environment.
 # Dev: emptyDir is fine (ephemeral, matches Linode block-storage cap).
