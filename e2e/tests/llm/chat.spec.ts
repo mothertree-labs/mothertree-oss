@@ -25,9 +25,22 @@ async function loginToLLM(page: any): Promise<void> {
   await page.goto(urls.llm);
   await page.waitForLoadState('load');
 
-  if (page.url().includes('auth.')) {
-    await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
-    await page.waitForLoadState('load');
+  // Navigate through any login steps until we reach the chat.
+  // Handles both auto-redirect to Keycloak and native SSO button flow.
+  for (let i = 0; i < 3; i++) {
+    if (page.url().includes('auth.')) {
+      await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
+      await page.waitForLoadState('load');
+    }
+
+    const ssoBtn = page.locator('button:has-text("Continue with SSO")');
+    if (await ssoBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await ssoBtn.click();
+      await page.waitForLoadState('load');
+    }
+
+    const chatInput = page.locator('div#chat-input[contenteditable="true"]');
+    if (await chatInput.isVisible({ timeout: 3000 }).catch(() => false)) break;
   }
 
   const chatInput = page.locator('div#chat-input[contenteditable="true"]');
