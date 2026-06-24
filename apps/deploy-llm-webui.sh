@@ -74,19 +74,13 @@ kubectl create namespace "$NS_LLM" --dry-run=client -o yaml | kubectl apply -f -
 print_status "Setting up Open WebUI OIDC client in Keycloak realm $TENANT_KEYCLOAK_REALM..."
 
 # Access Keycloak through kubectl port-forward (avoids ingress TLS issues).
-# Follows the pattern from apps/scripts/ensure-keycloak-smtp.sh.
-STALE_PF=$(lsof -ti:8080 2>/dev/null || true)
-if [ -n "$STALE_PF" ]; then
-    print_status "Killing stale port-forward on port 8080 (PID: $STALE_PF)..."
-    kill $STALE_PF 2>/dev/null || true
-    sleep 1
-fi
-print_status "Setting up port-forward to Keycloak..."
-kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http 8080:80 > /tmp/keycloak-pf.log 2>&1 &
+LOCAL_PORT=$((RANDOM + 10000))
+print_status "Setting up port-forward to Keycloak on port ${LOCAL_PORT}..."
+kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http ${LOCAL_PORT}:80 > /tmp/keycloak-pf.log 2>&1 &
 PF_PID=$!
 sleep 3
 
-KEYCLOAK_URL="http://localhost:8080"
+KEYCLOAK_URL="http://localhost:${LOCAL_PORT}"
 
 # Get admin token
 TOKEN=$(curl -s -X POST "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
