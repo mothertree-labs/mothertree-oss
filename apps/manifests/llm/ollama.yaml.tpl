@@ -69,7 +69,7 @@ spec:
 
       volumes:
         - name: ollama-models
-          emptyDir: {}
+          ${OLLAMA_STORAGE_VALUE}
 
 ---
 apiVersion: v1

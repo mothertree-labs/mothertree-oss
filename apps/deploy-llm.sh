@@ -52,6 +52,33 @@ kubectl apply -f "${MANIFESTS_DIR}/namespace.yaml"
 
 print_status "Deploying Ollama..."
 export LLM_MODEL
+
+# Choose volume type based on environment.
+# Dev: emptyDir is fine (ephemeral, matches Linode block-storage cap).
+# Prod: PVC survives restarts and avoids cold model re-downloads.
+if [ "$MT_ENV" = "prod" ]; then
+    OLLAMA_STORAGE_VALUE="persistentVolumeClaim:
+            claimName: ollama-models"
+    _ollama_storage_size=$(yq '.llm.storage_size // "10Gi"' "$MT_INFRA_CONFIG")
+    print_status "Creating PVC for Ollama model weights (${_ollama_storage_size})..."
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-models
+  namespace: infra-llm
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: ${_ollama_storage_size}
+EOF
+else
+    OLLAMA_STORAGE_VALUE="emptyDir: {}"
+fi
+export OLLAMA_STORAGE_VALUE
+
 mt_apply kubectl apply -f <(envsubst < "${MANIFESTS_DIR}/ollama.yaml.tpl")
 
 print_status "Waiting for Ollama to be ready..."
@@ -60,12 +87,12 @@ kubectl rollout status deployment/ollama -n infra-llm --timeout=300s || {
   dump_pod_diagnostics infra-llm "app=ollama"
 }
 
-# Warm the model into the emptyDir in the background — non-blocking and best-effort.
+# Warm the model into the volume in the background — non-blocking and best-effort.
 # Runs `ollama pull` inside the already-running Ollama pod via nohup so it
 # survives this exec returning; the pull proceeds server-side and lands in the
-# shared ollama-models emptyDir. The deploy does NOT wait for it, so a cold-cluster
-# pull no longer blocks bring-up. Ollama also pulls lazily on first request, so
-# a slow or failed warm-up is harmless.
+# shared ollama-models volume (emptyDir in dev, PVC in prod). The deploy does
+# NOT wait for it, so a cold-cluster pull no longer blocks bring-up. Ollama also
+# pulls lazily on first request, so a slow or failed warm-up is harmless.
 _ollama_pod=$(kubectl get pod -n infra-llm -l app=ollama \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -n "${_ollama_pod}" ]; then

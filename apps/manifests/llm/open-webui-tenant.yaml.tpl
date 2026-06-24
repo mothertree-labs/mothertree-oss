@@ -89,7 +89,7 @@ spec:
             periodSeconds: 30
       volumes:
         - name: llm-data
-          emptyDir: {}
+          ${LLM_WEBUI_STORAGE_VALUE}
 
 ---
 apiVersion: v1

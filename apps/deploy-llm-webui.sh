@@ -327,6 +327,32 @@ if [ -n "$MT_INFRA_CONFIG" ] && [ -f "$MT_INFRA_CONFIG" ]; then
 else
   LLM_MODEL="llama3.2:1b"
 fi
+
+# Choose volume type based on environment.
+# Dev: emptyDir is fine (ephemeral, matches Linode block-storage cap).
+# Prod: PVC survives restarts and avoids conversation data loss.
+if [ "$MT_ENV" = "prod" ]; then
+    LLM_WEBUI_STORAGE_VALUE="persistentVolumeClaim:
+            claimName: llm-data-${MT_TENANT}"
+    print_status "Creating PVC for Open WebUI data (${LLM_STORAGE_SIZE})..."
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-data-${MT_TENANT}
+  namespace: ${NS_LLM}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: ${LLM_STORAGE_SIZE}
+EOF
+else
+    LLM_WEBUI_STORAGE_VALUE="emptyDir: {}"
+fi
+export LLM_WEBUI_STORAGE_VALUE
+
 mt_apply kubectl apply -f <(envsubst < "${REPO_ROOT}/apps/manifests/llm/open-webui-tenant.yaml.tpl")
 
 # ---------------------------------------------------------------------------
