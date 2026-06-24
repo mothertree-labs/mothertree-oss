@@ -271,10 +271,11 @@ ${STALWART_OUTBOUND_ROUTE_TOML}
     [auth.dmarc]
     verify = true
     
-    # Logging
-    [tracing]
-    level = "info"
-    method = "stdout"
+    # Logging — env-gated tracer block (built in deploy-stalwart.sh).
+    # Dev uses an explicit [tracer.stdout] that emits the full info-level event
+    # stream (smtp/queue/delivery/dsn) so the e2e shard-5 round-trip diagnostics
+    # can name the outbound leg; prod keeps the quieter legacy [tracing] block.
+${STALWART_TRACING_TOML}
     
     # Force local configuration for session.rcpt and queue routing (not database)
     # Without this, these settings are stored in DB and local config is ignored

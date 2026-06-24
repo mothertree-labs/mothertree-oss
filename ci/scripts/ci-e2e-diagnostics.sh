@@ -17,6 +17,18 @@
 # pod logs/state) AT THE MOMENT OF FAILURE, while the failing pods are still
 # live, so the NEXT failure NAMES the layer instead of needing CI archaeology.
 #
+# Shard 5 ALSO runs tests/email/email-roundtrip.spec.ts, whose failure is a
+# mail DELIVERY problem, not a login one (sender -> external echo group ->
+# receiver inbox). The login-shaped capture above is blind to it: a fixed
+# `--tail` of the Stalwart log can cover only a few seconds under IMAP-auth
+# churn (pipeline #1597: 300 lines = a 28s window that MISSED the echo-group
+# send and any inbound echo), the auth/oauth grep filters delivery lines out,
+# and Postfix (the inbound MX the echo returns through) was never captured at
+# all. So we ALSO capture, time-windowed (not line-capped): the Stalwart mail
+# round-trip/delivery lines and the infra-mail Postfix inbound-MX log — naming
+# WHICH leg of the round-trip broke (outbound reject vs. reflector latency vs.
+# inbound loss).
+#
 # CONTRACT
 # --------
 # - Runs ONLY as a `when: status: [failure]` step inside e2e-shard-5/10, so it
@@ -38,6 +50,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"   # provides vcli()
 source "$REPO_ROOT/scripts/lib/common.sh"           # provides dump_pod_diagnostics, print_status
 
 LOG_TAIL="${MT_DIAG_LOG_TAIL:-300}"
+# Time window for components where line-capping loses the signal (Stalwart's
+# mail-delivery trace, Postfix). The whole e2e shard runs in well under this, so
+# a time window captures the round-trip's outbound send + inbound echo that a
+# fixed --tail (28s under IMAP-auth churn, #1597) drops on the floor.
+LOG_SINCE="${MT_DIAG_LOG_SINCE:-15m}"
 
 echo "=================================================================="
 echo "  E2E ROUNDCUBE-LOGIN FAILURE DIAGNOSTICS"
@@ -86,17 +103,31 @@ NS_WEBMAIL="tn-${E2E_TENANT}-webmail"
 NS_MAIL="tn-${E2E_TENANT}-mail"
 NS_AUTH="infra-auth"
 
-dump_component() {  # namespace selector friendly-name
-  local ns="$1" sel="$2" name="$3"
+dump_component() {  # namespace selector friendly-name [since]
+  # Pass a 4th arg (e.g. "$LOG_SINCE") to capture by time window instead of a
+  # fixed line tail — use it for components whose log churns past LOG_TAIL lines
+  # in seconds (Stalwart, Postfix), so the failure window isn't truncated away.
+  local ns="$1" sel="$2" name="$3" since="${4:-}"
   echo ""
   echo "------------------------------------------------------------------"
   echo "  ${name}   (ns=${ns}, selector=${sel})"
   echo "------------------------------------------------------------------"
   dump_pod_diagnostics "$ns" "$sel"
   echo ""
-  echo ">>> ${name} current logs (last ${LOG_TAIL} lines, all containers):"
-  kubectl logs -n "$ns" -l "$sel" --tail="$LOG_TAIL" --all-containers=true --timestamps 2>&1 \
-    | sed 's/^/    /'
+  if [[ -n "$since" ]]; then
+    echo ">>> ${name} current logs (since ${since}, all containers):"
+    # NOTE: --tail=-1 is REQUIRED here. With a -l selector, kubectl defaults
+    # --tail to 10 and --since does NOT lift that cap — so without this the
+    # "time window" silently collapses to the last 10 lines (verified: #1628's
+    # 15m Stalwart capture returned a single 15:23:44 second, missing the
+    # 15:19:05 inbound echo). --tail=-1 returns ALL lines within the window.
+    kubectl logs -n "$ns" -l "$sel" --since="$since" --tail=-1 --all-containers=true --timestamps 2>&1 \
+      | sed 's/^/    /'
+  else
+    echo ">>> ${name} current logs (last ${LOG_TAIL} lines, all containers):"
+    kubectl logs -n "$ns" -l "$sel" --tail="$LOG_TAIL" --all-containers=true --timestamps 2>&1 \
+      | sed 's/^/    /'
+  fi
   echo ""
   echo ">>> ${name} PREVIOUS logs (only if a container restarted):"
   kubectl logs -n "$ns" -l "$sel" --previous --tail="$LOG_TAIL" --all-containers=true 2>/dev/null \
@@ -167,13 +198,70 @@ else
 fi
 
 # Stalwart — the OAUTHBEARER token validator + IMAP backend. Token-decode /
-# unauthorized errors here mean the OIDC->IMAP auth leg failed.
-dump_component "$NS_MAIL" "app=stalwart" "STALWART"
+# unauthorized errors here mean the OIDC->IMAP auth leg failed. Capture the log
+# by TIME WINDOW (not a 300-line tail): under e2e IMAP-auth churn a fixed tail
+# covers only ~28s and drops the round-trip's send/echo lines (#1597).
+dump_component "$NS_MAIL" "app=stalwart" "STALWART" "$LOG_SINCE"
 echo ""
 echo ">>> STALWART auth/oauth/token highlights (grep over last 1000 lines):"
 kubectl logs -n "$NS_MAIL" -l app=stalwart --tail=1000 --all-containers=true 2>/dev/null \
   | grep -iE 'oauth|bearer|token|jwt|jwks|unauthor|decode|introspect|oidc|authenticat' \
   | tail -n 60 | sed 's/^/    /' || echo "    (no auth-related lines found)"
+
+# ── Mail round-trip / delivery (the email-roundtrip shard-5 failure) ──────────
+# email-roundtrip.spec.ts sends e2e-mailrt -> external echo group -> e2e-mailrcv
+# and fails if the echo never lands in the receiver's inbox within 120s. Surface
+# the whole round-trip from Stalwart's side over the same time window: the
+# OUTBOUND submission (from=e2e-mailrt, to=<echo group>) and its remote-delivery
+# RESULT (completed / dsn-perm-fail / bounce / null-mx), plus any INBOUND echo
+# back (rcpt-to / message-ingest to e2e-mailrcv). The to=<...> field names the
+# echo-group domain without needing its secret here. Delivery-result lines key
+# off queueId (not user), so they're matched broadly and bounded by tail.
+echo ""
+echo ">>> STALWART mail round-trip / delivery (grep over --since=${LOG_SINCE} window):"
+# --tail=-1: see dump_component — a -l selector caps --tail at 10 and --since
+# does not lift it, so the window must be forced open or delivery lines are lost.
+kubectl logs -n "$NS_MAIL" -l app=stalwart --since="$LOG_SINCE" --tail=-1 --all-containers=true --timestamps 2>/dev/null \
+  | grep -iE 'e2e-mailr(t|cv)|queue-message|mail-from|rcpt-to|delivery\.(attempt|domain|connect|delivered|completed|failed|null-mx)|dsn-(perm-fail|temp-fail|success)|queue-dsn|bounce|reject|message.?ingest' \
+  | tail -n 120 | sed 's/^/    /' || echo "    (no mail-delivery lines found in window)"
+
+# (b) The internal inbound hop in isolation: what happened to the echo once it
+# reached the cluster MX? #1628 PROVED the echo was 250-accepted by Postfix
+# (queue C9F672A0DFE -> e2e-mailrcv@<tenant>) yet never reached the mailbox.
+# Surface every Stalwart line about e2e-mailrcv EXCEPT IMAP-poll auth noise, so
+# the next red names ingest-vs-reject on the Postfix->Stalwart->mailbox leg.
+# Empty here (with delivery events now emitted by the dev tracer, #489) => the
+# echo never reached Stalwart, i.e. the loss is the Postfix->Stalwart hop.
+echo ""
+echo ">>> STALWART inbound to e2e-mailrcv (ingest-vs-reject on the internal hop; auth-noise filtered):"
+kubectl logs -n "$NS_MAIL" -l app=stalwart --since="$LOG_SINCE" --tail=-1 --all-containers=true --timestamps 2>/dev/null \
+  | grep -iE 'e2e-mailrcv' \
+  | grep -ivE 'auth\.success|Authentication successful' \
+  | tail -n 80 | sed 's/^/    /' || echo "    (no non-auth e2e-mailrcv lines in window — inbound echo never reached Stalwart)"
+
+# Postfix — the inbound MX the echo returns through (Internet -> NodeBalancer:25
+# -> infra-mail Postfix -> per-tenant Stalwart). infra-mail is SHARED across all
+# tenants, so deliberately do NOT dump its full log (that would surface other
+# tenants' envelope metadata into this log): capture pod health + a grep SCOPED
+# to the round-trip users only. The inbound echo is addressed to e2e-mailrcv, so
+# the user-scoped grep is both tighter and sufficient — no match => the echo
+# never re-entered the cluster MX (outbound-reject or reflector-side); present
+# here but absent from Stalwart => the loss is the Postfix->Stalwart hop.
+echo ""
+echo "------------------------------------------------------------------"
+echo "  POSTFIX (inbound MX)   (ns=infra-mail, selector=app=postfix)"
+echo "------------------------------------------------------------------"
+dump_pod_diagnostics "infra-mail" "app=postfix"
+echo ""
+echo ">>> POSTFIX round-trip lines (e2e-mailrt/e2e-mailrcv only, over --since=${LOG_SINCE}):"
+# --tail=-1 is essential here: infra-mail is high-churn (all tenants) and the
+# inbound echo can be thousands of lines back, so the selector's default
+# --tail=10 dropped it entirely (#1628: echo queued C9F672A0DFE at 15:19:05Z
+# was 250-accepted but never appeared here). The grep keeps it scoped to the
+# round-trip users, so --tail=-1 widens the window without dumping other tenants.
+kubectl logs -n "infra-mail" -l app=postfix --since="$LOG_SINCE" --tail=-1 --all-containers=true --timestamps 2>/dev/null \
+  | grep -iE 'e2e-mailr(t|cv)' \
+  | tail -n 80 | sed 's/^/    /' || echo "    (no postfix round-trip lines found in window)"
 
 # Keycloak — token issuance / redirect_uri / invalid_client errors. Helm-managed,
 # so match pods by name rather than a fixed label.
@@ -288,5 +376,12 @@ echo "     (shard-5 Echo Group, pipeline #1580). Read the oauth-flow errors + th
 echo "     keycloak code->token highlights for that user to name WHY."
 echo "   • browser-side [roundcube-stuck:*] lines in the e2e log show WHERE"
 echo "     the browser stopped (Keycloak vs webmail-no-inbox)."
+echo "   • email-roundtrip (shard-5) — read STALWART mail round-trip + POSTFIX:"
+echo "     OUTBOUND from=e2e-mailrt to=<echo group> then dsn-perm-fail/bounce/"
+echo "     reject -> outbound leg broke; queued+completed but NO inbound echo to"
+echo "     e2e-mailrcv (no rcpt-to / message-ingest, nothing in Postfix) -> the"
+echo "     external reflector didn't return in time (120s budget vs #419 cold"
+echo "     edge); echo present in POSTFIX but not Stalwart -> Postfix->Stalwart"
+echo "     hop. No outbound at all in-window -> send never left Roundcube."
 echo "=================================================================="
 exit 0

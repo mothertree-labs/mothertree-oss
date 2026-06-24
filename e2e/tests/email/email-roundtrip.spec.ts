@@ -1,7 +1,6 @@
 import { test, expect } from '../../fixtures/authenticated';
-import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
-import { keycloakLogin } from '../../helpers/auth';
+import { roundcubeOidcLogin } from '../../helpers/roundcube';
 import { isImapConfigured, waitForEmailBody, deleteEmailsBySubject } from '../../helpers/imap';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -13,25 +12,6 @@ const config = fs.existsSync(configPath)
   : {};
 
 const echoGroupAddress = process.env.E2E_ECHO_GROUP_ADDRESS || config.echoGroupAddress;
-
-/**
- * Helper: log into Roundcube via OIDC for the given page/user.
- * Triggers the OIDC flow directly, handles Keycloak login if no SSO session.
- */
-async function roundcubeLogin(page: import('@playwright/test').Page, username: string, password: string) {
-  await page.goto(`${urls.webmail}/?_task=login&_action=oauth`);
-  await page.waitForLoadState('networkidle');
-
-  // Check hostname (not full URL) — the OIDC callback URL contains 'auth.' in
-  // query params (iss=https://auth.../realms/...) which would false-positive.
-  const onKeycloak = new URL(page.url()).hostname.startsWith('auth.');
-  if (onKeycloak) {
-    await keycloakLogin(page, username, password);
-    await page.waitForLoadState('networkidle');
-  }
-
-  await page.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 30_000 });
-}
 
 test.describe('Email — Round-Trip via Echo Group', () => {
   // This test verifies the full email path: outbound (Roundcube → Stalwart → Postfix → internet)
@@ -55,7 +35,7 @@ test.describe('Email — Round-Trip via Echo Group', () => {
 
     try {
       // ── Step 1: Sender logs into Roundcube and sends email to the echo group ──
-      await roundcubeLogin(senderPage, sender.username, sender.password);
+      await roundcubeOidcLogin(senderPage, sender.username, sender.password, 'roundtrip-sender');
 
       // Wait for Roundcube JS app to finish initializing (rcmail.busy clears
       // after IMAP inbox load completes — large inboxes delay this)
@@ -86,7 +66,7 @@ test.describe('Email — Round-Trip via Echo Group', () => {
       await senderPage.waitForSelector('#messagelist, #mailboxlist, .mailbox-list', { timeout: 60_000 });
 
       // ── Step 2: Receiver logs into Roundcube and polls for the forwarded email ──
-      await roundcubeLogin(receiverPage, receiver.username, receiver.password);
+      await roundcubeOidcLogin(receiverPage, receiver.username, receiver.password, 'roundtrip-receiver');
 
       const maxWait = 120_000;
       const pollInterval = 5_000;
