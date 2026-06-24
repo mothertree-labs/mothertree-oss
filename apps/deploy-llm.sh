@@ -86,27 +86,6 @@ kubectl rollout status deployment/ollama -n infra-llm --timeout=300s || {
   print_warning "Ollama rollout not ready within timeout — dumping pod diagnostics"
   dump_pod_diagnostics infra-llm "app=ollama"
 }
-
-# Warm the model into the volume in the background — non-blocking and best-effort.
-# Runs `ollama pull` inside the already-running Ollama pod via nohup so it
-# survives this exec returning; the pull proceeds server-side and lands in the
-# shared ollama-models volume (emptyDir in dev, PVC in prod). The deploy does
-# NOT wait for it, so a cold-cluster pull no longer blocks bring-up. Ollama also
-# pulls lazily on first request, so a slow or failed warm-up is harmless.
-_ollama_pod=$(kubectl get pod -n infra-llm -l app=ollama \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-if [ -n "${_ollama_pod}" ]; then
-  print_status "Warming model ${LLM_MODEL} in the background (non-blocking)..."
-  # Pass the model as a positional arg ("$1") rather than interpolating it into
-  # the remote shell string, so a model name with spaces/metacharacters can't be
-  # re-parsed inside the pod's `sh -c`.
-  kubectl exec -n infra-llm "${_ollama_pod}" -- \
-    sh -c 'nohup ollama pull "$1" >/tmp/model-pull.log 2>&1 &' _ "${LLM_MODEL}" 2>/dev/null || \
-    print_warning "Could not start background model warm-up — Ollama will pull on first request"
-else
-  print_warning "Ollama pod not found — skipping warm-up (Ollama will pull on first request)"
-fi
-
 print_status "Verifying pods..."
 kubectl get pods -n infra-llm
 
