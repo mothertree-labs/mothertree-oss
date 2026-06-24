@@ -100,26 +100,26 @@ EXISTING_CLIENT=$(curl -s "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/cli
     -H "Authorization: Bearer $TOKEN")
 CLIENT_COUNT=$(echo "$EXISTING_CLIENT" | jq 'length')
 
-CLIENT_CONFIG='{
-    "clientId": "open-webui",
-    "name": "Open WebUI",
-    "enabled": true,
-    "protocol": "openid-connect",
-    "publicClient": false,
-    "secret": "'"$LLM_OIDC_CLIENT_SECRET"'",
-    "standardFlowEnabled": true,
-    "directAccessGrantsEnabled": false,
-    "serviceAccountsEnabled": false,
-    "redirectUris": [
-        "https://'"$LLM_HOST"'/*"
-    ],
-    "webOrigins": [
-        "https://'"$LLM_HOST"'"
-    ],
-    "attributes": {
-        "pkce.code.challenge.method": "S256"
-    }
-}'
+CLIENT_CONFIG=$(jq -cn \
+    --arg client_secret "$LLM_OIDC_CLIENT_SECRET" \
+    --arg redirect_uri "https://$LLM_HOST/*" \
+    --arg web_origin "https://$LLM_HOST" \
+    '{
+        clientId: "open-webui",
+        name: "Open WebUI",
+        enabled: true,
+        protocol: "openid-connect",
+        publicClient: false,
+        secret: $client_secret,
+        standardFlowEnabled: true,
+        directAccessGrantsEnabled: false,
+        serviceAccountsEnabled: false,
+        redirectUris: [$redirect_uri],
+        webOrigins: [$web_origin],
+        attributes: {
+            "pkce.code.challenge.method": "S256"
+        }
+    }')
 
 if [ "$CLIENT_COUNT" -gt 0 ]; then
     print_status "Updating existing open-webui client..."
