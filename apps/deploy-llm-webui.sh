@@ -155,15 +155,72 @@ mt_apply kubectl apply -f <(kubectl create secret generic open-webui-oidc \
     --dry-run=client -o yaml)
 
 # ---------------------------------------------------------------------------
-# 4. CoreDNS rewrite for AUTH_HOST → internal ingress
+# 4. Ensure Keycloak auth ingress (external) for this tenant
 #
-# Open WebUI's backend makes server-side HTTP requests to the OIDC provider
-# (Keycloak at $AUTH_HOST) during the login flow — it fetches the OpenID
-# Configuration metadata, exchanges the auth code for tokens, and retrieves
-# JWKS certs. From inside the cluster, $AUTH_HOST resolves to the external
-# NodeBalancer IP which drops hairpin connections. This rewrite makes it
-# resolve to the internal ingress controller instead, keeping the traffic
-# in-cluster while still matching the wildcard TLS cert.
+# The OIDC flow redirects the browser to $AUTH_HOST (Keycloak). The external
+# ingress must exist so the public NodeBalancer routes the request to Keycloak
+# with the proper wildcard TLS cert. The template is also used by
+# deploy-matrix.sh — we apply it here so deploy-llm-webui.sh is self-sufficient.
+# =============================================================================
+print_status "Ensuring external Keycloak ingress for $AUTH_HOST..."
+envsubst '${AUTH_HOST} ${TENANT} ${NS_AUTH} ${TENANT_DOMAIN} ${TENANT_NAME}' \
+    < "$REPO_ROOT/apps/manifests/keycloak/tenant-auth-ingress.yaml.tpl" \
+    | kubectl apply -f -
+print_success "External Keycloak ingress configured for $AUTH_HOST"
+
+# ---------------------------------------------------------------------------
+# 5. Ensure Keycloak internal ingress for this tenant
+#
+# Open WebUI's backend fetches OIDC metadata from $AUTH_HOST server-side.
+# The CoreDNS rewrite below routes these requests to the internal ingress
+# controller. That controller needs a matching ingress with the wildcard TLS
+# cert — otherwise it serves its default (fake) cert and the Python HTTPX
+# client rejects the connection.
+# =============================================================================
+print_status "Ensuring internal Keycloak ingress for $AUTH_HOST..."
+if ! kubectl -n "$NS_AUTH" get ingress "keycloak-internal-${MT_TENANT}" >/dev/null 2>&1; then
+    kubectl apply -f - <<INGRESS
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+  labels:
+    app: keycloak
+    purpose: internal-oidc
+    tenant: ${MT_TENANT}
+  name: keycloak-internal-${MT_TENANT}
+  namespace: ${NS_AUTH}
+spec:
+  ingressClassName: nginx-internal
+  rules:
+  - host: ${AUTH_HOST}
+    http:
+      paths:
+      - backend:
+          service:
+            name: keycloak-keycloakx-http
+            port:
+              name: http
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts:
+    - ${AUTH_HOST}
+    secretName: wildcard-tls-${TENANT_NAME}
+INGRESS
+    print_success "Internal Keycloak ingress created for $AUTH_HOST"
+else
+    print_status "Internal Keycloak ingress already exists for $AUTH_HOST"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. CoreDNS rewrite for AUTH_HOST → internal ingress
+#
+# The CoreDNS rewrite makes $AUTH_HOST resolve to the internal ingress
+# controller IP, keeping server-side OIDC metadata requests in-cluster and
+# avoiding hairpin connections through the public NodeBalancer.
 #
 # Follows the same pattern as deploy-stalwart.sh's mail rewrite.
 # =============================================================================

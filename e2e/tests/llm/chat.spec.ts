@@ -33,11 +33,12 @@ async function checkLLMAvailable(page: any): Promise<boolean> {
 }
 
 /**
- * Navigate to the LLM UI and authenticate via Open WebUI's SSO flow.
+ * Navigate to the LLM UI and authenticate via Open WebUI's SSO auto-redirect.
  *
- * Open WebUI presents its own login page with a "Continue with SSO"
- * button rather than auto-redirecting to Keycloak. This helper clicks
- * that button, then completes the Keycloak OIDC flow if needed.
+ * With OAUTH_AUTO_REDIRECT=true and ENABLE_LOGIN_FORM=false, Open WebUI
+ * skips its native login page and auto-redirects to Keycloak OIDC.
+ * This helper navigates to the LLM URL, completes the Keycloak login
+ * if redirected, then handles the model selection onboarding dialog.
  */
 async function loginToLLM(page: any): Promise<void> {
   await page.setViewportSize({ width: 1280, height: 1080 });
@@ -45,23 +46,7 @@ async function loginToLLM(page: any): Promise<void> {
   await page.goto(urls.llm);
   await page.waitForLoadState('load');
 
-  if (page.url().includes('auth.')) {
-    await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
-    await page.waitForLoadState('load');
-  }
-
-  // Open WebUI login page — click the SSO button
-  const ssoButton = page.locator(selectors.llm.ssoButton);
-  await ssoButton.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {});
-  if (await ssoButton.isVisible()) {
-    // The button may be inside a scrollable container; use evaluate to dispatch click
-    await ssoButton.evaluate((el: HTMLElement) => {
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    });
-    await page.waitForURL(/(auth\.|\/c\/)/, { timeout: 15_000 }).catch(() => {});
-  }
-
-  // If redirected to Keycloak, complete login
+  // With OAUTH_AUTO_REDIRECT=true, Open WebUI redirects to Keycloak
   if (page.url().includes('auth.')) {
     await keycloakLogin(page, TEST_USERS.member.username, TEST_USERS.member.password);
     await page.waitForLoadState('load');
@@ -69,8 +54,7 @@ async function loginToLLM(page: any): Promise<void> {
 
   // Wait for the chat UI to be ready.
   // The SPA renders the chat input first, then may show a model selection
-  // onboarding modal on top (async SPA behavior). Wait briefly for the
-  // modal to appear and dismiss it.
+  // onboarding modal on top (async SPA behavior).
   const chatInput = page.locator(selectors.llm.chatInput);
   await expect(chatInput).toBeVisible({ timeout: 30_000 });
 

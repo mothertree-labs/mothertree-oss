@@ -64,6 +64,10 @@ spec:
               value: "true"
             - name: DEFAULT_USER_ROLE
               value: "user"
+            - name: ENABLE_LOGIN_FORM
+              value: "false"
+            - name: OAUTH_AUTO_REDIRECT
+              value: "true"
           volumeMounts:
             - name: llm-data
               mountPath: /app/backend/data
