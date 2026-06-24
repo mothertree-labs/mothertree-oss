@@ -47,6 +47,8 @@ spec:
               value: "true"
             - name: OLLAMA_DEFAULT_MODELS
               value: "${LLM_MODEL}"
+            - name: DEFAULT_MODELS
+              value: "${LLM_MODEL}"
             - name: OAUTH_CLIENT_ID
               value: "open-webui"
             - name: OAUTH_CLIENT_SECRET

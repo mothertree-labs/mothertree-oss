@@ -68,21 +68,26 @@ async function loginToLLM(page: any): Promise<void> {
   }
 
   // Wait for the chat UI to be ready.
-  // The SPA has a race: chat input renders, then model selection onboarding
-  // may appear on top of it. Handle both cases with a simple sequential approach.
+  // The SPA renders the chat input first, then may show a model selection
+  // onboarding modal on top (async SPA behavior). Wait briefly for the
+  // modal to appear and dismiss it.
   const chatInput = page.locator(selectors.llm.chatInput);
-  try {
-    await expect(chatInput).toBeVisible({ timeout: 30_000 });
-  } catch {
-    // Chat input not visible after 30s — onboarding is likely showing.
-    // Dismiss it by selecting a model and setting it as default.
-    await page.locator('button:has-text("Select a model")').click().catch(() => {});
+  await expect(chatInput).toBeVisible({ timeout: 30_000 });
+
+  // Poll for the model selection onboarding dialog — it may appear after
+  // the chat input. If present, select a model and set it as default.
+  const dialog = page.locator('div[role="dialog"][aria-modal="true"]');
+  for (let i = 0; i < 20; i++) {
+    if (await dialog.isVisible().catch(() => false)) {
+      await page.locator('button:has-text("Select a model")').click().catch(() => {});
+      await page.waitForTimeout(500);
+      await page.locator('li').first().click({ timeout: 3000 }).catch(() => {});
+      await page.waitForTimeout(500);
+      await page.locator('button:has-text("Set as default")').click({ timeout: 2000 }).catch(() => {});
+      await page.waitForTimeout(2000);
+      break;
+    }
     await page.waitForTimeout(500);
-    await page.locator('button:has-text("llama3.2")').first().click({ timeout: 3000 }).catch(() => {});
-    await page.waitForTimeout(500);
-    await page.locator('button:has-text("Set as default")').click({ timeout: 2000 }).catch(() => {});
-    await page.waitForTimeout(2000);
-    await expect(chatInput).toBeVisible({ timeout: 30_000 });
   }
 
   // After model is set, Open WebUI may redirect to a "Start chatting" page
