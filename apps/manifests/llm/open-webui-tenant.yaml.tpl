@@ -27,6 +27,11 @@ spec:
   selector:
     matchLabels:
       app: open-webui
+  strategy:
+    # Recreate (not RollingUpdate): prod mounts a RWO PVC for conversation history,
+    # so a surge pod cannot mount the volume the old pod still holds — that deadlocks
+    # restarts. Matches the ollama Deployment for the same reason.
+    type: Recreate
   template:
     metadata:
       labels:

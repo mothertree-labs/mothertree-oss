@@ -160,7 +160,9 @@ kubectl create namespace "$NS_ADMIN" 2>/dev/null || true
 if [ "$OFFICE_ENABLED" = "true" ]; then
   kubectl create namespace "$NS_OFFICE" 2>/dev/null || true
 fi
-kubectl create namespace "$NS_LLM" 2>/dev/null || true
+if [ "$LLM_ENABLED" = "true" ]; then
+  kubectl create namespace "$NS_LLM" 2>/dev/null || true
+fi
 print_status "Tenant namespaces created/verified"
 
 # =============================================================================
@@ -184,9 +186,12 @@ else
 fi
 
 # Build comma-separated list of namespaces for reflector (all tenant ns except NS_MATRIX, plus infra-auth)
-export TENANT_NAMESPACES="${NS_STALWART},${NS_DOCS},${NS_FILES},${NS_JITSI},${NS_WEBMAIL},${NS_ADMIN},${NS_AUTH},${NS_LLM}"
+export TENANT_NAMESPACES="${NS_STALWART},${NS_DOCS},${NS_FILES},${NS_JITSI},${NS_WEBMAIL},${NS_ADMIN},${NS_AUTH}"
 if [ "$OFFICE_ENABLED" = "true" ]; then
   export TENANT_NAMESPACES="${TENANT_NAMESPACES},${NS_OFFICE}"
+fi
+if [ "$LLM_ENABLED" = "true" ]; then
+  export TENANT_NAMESPACES="${TENANT_NAMESPACES},${NS_LLM}"
 fi
 
 if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
@@ -406,7 +411,13 @@ else
 
   # Create CNAME records for all tenant subdomains pointing to the tenant LB record
   # Note: 'mail' is excluded — its A record is created above alongside the MX record
-  PROXIED_SUBDOMAINS="matrix synapse element docs files auth home admin account webmail calendar jitsi office llm"
+  PROXIED_SUBDOMAINS="matrix synapse element docs files auth home admin account webmail calendar jitsi office"
+  # Only advertise the LLM (Open WebUI) subdomain when the feature is enabled for this
+  # tenant. Otherwise the CNAME dangles to an origin with no ingress route, and
+  # Cloudflare returns 526 (invalid origin cert) to anyone who visits it.
+  if [ "$LLM_ENABLED" = "true" ]; then
+    PROXIED_SUBDOMAINS="$PROXIED_SUBDOMAINS llm"
+  fi
   DNS_ONLY_SUBDOMAINS="imap smtp"
 
   for subdomain in $PROXIED_SUBDOMAINS; do
