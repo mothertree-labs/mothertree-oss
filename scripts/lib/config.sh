@@ -364,7 +364,7 @@ _mt_load_scaling_config() {
     "LLM_MIN_REPLICAS=" + (.resources.llm.min_replicas // 1 | tostring | @sh) + "\n" +
     "LLM_MAX_REPLICAS=" + (.resources.llm.max_replicas // 3 | tostring | @sh) + "\n" +
     "LLM_MEMORY_REQUEST=" + (.resources.llm.memory_request // "512Mi" | tostring | @sh) + "\n" +
-    "LLM_MEMORY_LIMIT=" + (.resources.llm.memory_limit // "1Gi" | tostring | @sh) + "\n" +
+    "LLM_MEMORY_LIMIT=" + (.resources.llm.memory_limit // "2Gi" | tostring | @sh) + "\n" +
     "LLM_CPU_REQUEST=" + (.resources.llm.cpu_request // "100m" | tostring | @sh) + "\n" +
     "LLM_STORAGE_SIZE=" + (.resources.llm.storage_size // "1Gi" | tostring | @sh)
   ' "$TENANT_CONFIG")"
