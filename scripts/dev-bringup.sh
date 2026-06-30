@@ -132,15 +132,19 @@ if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
         # no-ops on the existing cluster) to finish infra-db. A small retry
         # absorbs a transient kube-API blip so we don't trigger a needless
         # ~10-min redeploy; a genuinely-missing Secret falls through to repair.
-        WARM_PG_SECRET=""
+        # Existence check only: the downstream guard reads the value, but here
+        # we just need to know deploy_infra got far enough to create the Secret
+        # — so probe with `-o name` and never bind the password into a variable.
+        WARM_DB_READY=""
         for _wp_attempt in 1 2 3; do
-            WARM_PG_SECRET=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-db \
-                get secret postgres-credentials \
-                -o jsonpath='{.data.postgres-password}' 2>/dev/null || true)
-            [ -n "$WARM_PG_SECRET" ] && break
+            if kubectl --kubeconfig="$KUBECONFIG" -n infra-db \
+                get secret postgres-credentials -o name >/dev/null 2>&1; then
+                WARM_DB_READY=yes
+                break
+            fi
             [ "$_wp_attempt" -lt 3 ] && sleep 5
         done
-        if [ -z "$WARM_PG_SECRET" ]; then
+        if [ -z "$WARM_DB_READY" ]; then
             print_warning "dev-bringup: cluster id=$EXISTING_ID has ingress LB IP=$WARM_LB_IP but infra-db/postgres-credentials is missing"
             print_warning "dev-bringup: deploy_infra was likely killed mid-run (ingress up, PgBouncer not yet deployed); treating as degraded to repair"
             CLUSTER_DEGRADED=true
