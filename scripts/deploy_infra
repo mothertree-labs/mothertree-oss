@@ -337,16 +337,43 @@ pushd "$REPO_ROOT/apps" >/dev/null
     if [ $retry_count -lt $max_retries ]; then
       print_warning "helmfile sync failed (attempt $retry_count/$max_retries), retrying in 10 seconds..."
 
-      # Clean up stuck Helm releases left by the failed attempt.
-      # A partial ingress-nginx install can leave the release in a
-      # pending-install state with a held lock, causing subsequent
-      # attempts to fail with "another operation is in progress".
-      for _ns in "$NS_INGRESS" "$NS_INGRESS_INTERNAL"; do
-        helm ls -n "$_ns" --pending -q 2>/dev/null | while read -r _rel; do
-          [ -z "$_rel" ] && continue
-          print_warning "Cleaning up stuck Helm release: $_rel in $_ns"
-          helm uninstall "$_rel" -n "$_ns" 2>/dev/null || true
-        done || true
+      # Clean up stuck Helm releases left by the failed attempt — or by a
+      # previously KILLED deploy_infra. An install/upgrade interrupted partway
+      # leaves the release in a pending-* state holding a lock, so every later
+      # sync fails with "another operation (install/upgrade/rollback) is in
+      # progress" — which retrying alone can never clear.
+      #
+      # Scan every infra namespace deploy_infra owns, not just the two ingress
+      # ones the old code checked: a deploy_infra killed mid tier=system sync
+      # (e.g. Woodpecker cancels the prior pipeline on a new push) strands
+      # metrics-server (kube-system) or reflector (infra-cert-manager) exactly
+      # the same way, and the ingress-only scan missed them — wedging every dev
+      # PR at deploy-dev-prep (pipelines #1679-#1685).
+      #
+      # Deliberately scoped to infra namespaces (NOT `helm ls -A`): tenant
+      # tn-<tenant>-* releases are installed by create_env, which in dev runs
+      # AFTER deploy_infra releases the infra lock — so a cluster-wide scan
+      # could uninstall another pipeline's first-time tenant install mid-flight.
+      # Status-aware to stay prod-safe:
+      #   pending-install            -> never deployed   -> uninstall
+      #   pending-upgrade/-rollback  -> a good rev IS live -> rollback to it
+      #                                 (NEVER uninstall a live release)
+      for _ns in kube-system "$NS_INGRESS" "$NS_INGRESS_INTERNAL" \
+                 "$NS_CERTMANAGER" "$NS_MONITORING" "$NS_DB" "$NS_AUTH" \
+                 "$NS_MAIL" "$NS_LLM"; do
+        helm ls -n "$_ns" --pending --output json 2>/dev/null \
+          | jq -r '.[] | "\(.name)\t\(.status)"' 2>/dev/null \
+          | while IFS=$'\t' read -r _rel _status; do
+              [ -z "$_rel" ] && continue
+              case "$_status" in
+                pending-install)
+                  print_warning "Cleaning up stuck Helm release (uninstall): $_rel in $_ns ($_status)"
+                  helm uninstall "$_rel" -n "$_ns" 2>/dev/null || true ;;
+                pending-upgrade|pending-rollback)
+                  print_warning "Cleaning up stuck Helm release (rollback): $_rel in $_ns ($_status)"
+                  helm rollback "$_rel" -n "$_ns" 2>/dev/null || true ;;
+              esac
+            done || true
       done
 
       sleep 10
