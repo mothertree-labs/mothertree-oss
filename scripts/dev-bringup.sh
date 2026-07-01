@@ -113,7 +113,44 @@ if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
         print_warning "dev-bringup: treating as cold; running phase1-dev + deploy_infra to repair"
         CLUSTER_DEGRADED=true
     else
-        print_success "dev-bringup: warm cluster healthy (ingress LB IP=$WARM_LB_IP)"
+        # An ingress LB IP is necessary but NOT sufficient for "warm healthy".
+        # deploy_infra assigns the ingress LB IP EARLY (it waits on it right
+        # after the tier=system helmfile sync) but creates infra-db's
+        # postgres-credentials Secret LATE — PgBouncer is deployed only after
+        # the monitoring/Loki/cert-manager readiness waits, several minutes
+        # later. A deploy_infra KILLED in that window (e.g. Woodpecker cancels
+        # the previous pipeline on a new push) leaves a cluster that LOOKS warm
+        # (LB IP up) but has no infra-db. The old check only probed the LB IP,
+        # so every later pipeline skipped deploy_infra and the Nextcloud
+        # poison guard below then hard-aborted on the missing Secret, wedging
+        # the cluster for every PR until the reaper destroyed it (pipelines
+        # #1679/#1680 on cluster 623930, after the cancelled #1673-#1678).
+        #
+        # So also probe the LATE artifact — the EXACT Secret the guard reads.
+        # If it's absent, the cluster is half-provisioned: mark it degraded so
+        # the repair block below re-runs deploy_infra (idempotent; phase1-dev
+        # no-ops on the existing cluster) to finish infra-db. A small retry
+        # absorbs a transient kube-API blip so we don't trigger a needless
+        # ~10-min redeploy; a genuinely-missing Secret falls through to repair.
+        # Existence check only: the downstream guard reads the value, but here
+        # we just need to know deploy_infra got far enough to create the Secret
+        # — so probe with `-o name` and never bind the password into a variable.
+        WARM_DB_READY=""
+        for _wp_attempt in 1 2 3; do
+            if kubectl --kubeconfig="$KUBECONFIG" -n infra-db \
+                get secret postgres-credentials -o name >/dev/null 2>&1; then
+                WARM_DB_READY=yes
+                break
+            fi
+            [ "$_wp_attempt" -lt 3 ] && sleep 5
+        done
+        if [ -z "$WARM_DB_READY" ]; then
+            print_warning "dev-bringup: cluster id=$EXISTING_ID has ingress LB IP=$WARM_LB_IP but infra-db/postgres-credentials is missing"
+            print_warning "dev-bringup: deploy_infra was likely killed mid-run (ingress up, PgBouncer not yet deployed); treating as degraded to repair"
+            CLUSTER_DEGRADED=true
+        else
+            print_success "dev-bringup: warm cluster healthy (ingress LB IP=$WARM_LB_IP, infra-db ready)"
+        fi
     fi
 fi
 
