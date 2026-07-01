@@ -187,6 +187,30 @@ EOF
     umask 022
     print_status "dev-bringup: wrote $SECRETS_FILE"
 
+    # Serialize the infra repair across concurrent pipelines. Several pipelines
+    # detecting the SAME degraded cluster (e.g. right after several PRs are
+    # merged at once) would otherwise each run manage_infra + deploy_infra here
+    # with NO coordination — concurrent unlocked helm operations corrupt each
+    # other's release state ("another operation in progress" / "release secret
+    # v<N> not found"), wedging all of them (pipelines #1692/#1694). Hold the
+    # SAME infra lock ci-deploy.sh uses for the prep-phase deploy_infra so only
+    # one bringup repairs at a time; the rest wait, then find the cluster
+    # already healed (re-check below) and skip the redundant run.
+    #
+    # Only in CI (CI_PIPELINE_NUMBER set): an operator running dev-bringup by
+    # hand has no concurrent pipelines and no Valkey creds. INFRA_LOCK_TTL is
+    # raised because this near-cold deploy_infra runs ~15 min, well past the
+    # lock's 600s default — letting it expire mid-repair would re-open the race.
+    # ~30 min TTL is ~2x headroom; if the repair ever grows past that, switch to
+    # background lease renewal (like ci-deploy.sh's _start_lease_renewal) rather
+    # than a still-longer fixed TTL.
+    _INFRA_LOCK_HELD=""
+    if [ -n "${CI_PIPELINE_NUMBER:-}" ]; then
+        INFRA_LOCK_TTL=1800 "$REPO_ROOT/ci/scripts/ci-infra-lock.sh" acquire
+        _INFRA_LOCK_HELD=1
+        trap '[ -n "${_INFRA_LOCK_HELD:-}" ] && "$REPO_ROOT/ci/scripts/ci-infra-lock.sh" release >/dev/null 2>&1 || true' EXIT
+    fi
+
     # --phase1-dev-only: provision only the ephemeral phase1-dev (LKE
     # cluster + subnet). The local-state phase1 root holds
     # operator-managed always-up VMs (postgres-dev / headscale-dev /
@@ -207,8 +231,39 @@ EOF
     export KUBECONFIG="$REPO_ROOT/kubeconfig.${MT_ENV:-dev}.yaml"
     print_status "dev-bringup: KUBECONFIG repointed to $KUBECONFIG"
 
-    print_status "dev-bringup: running deploy_infra..."
-    "$REPO_ROOT/scripts/deploy_infra" -e dev
+    # Re-check after acquiring the lock: a pipeline that held the lock before us
+    # may have already completed deploy_infra while we waited. manage_infra
+    # above is idempotent (terraform finds the cluster in the shared phase1-dev
+    # state), so KUBECONFIG now points at the live cluster. If BOTH the ingress
+    # LB IP and infra-db/postgres-credentials are present, infra is already
+    # healed — skip the ~10-min redundant deploy_infra. (On a genuine cold
+    # provision the LB IP is absent here, so this correctly runs deploy_infra.)
+    _REPAIR_LB_IP=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress \
+        get svc ingress-nginx-controller \
+        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+    if [ -n "$_REPAIR_LB_IP" ] && kubectl --kubeconfig="$KUBECONFIG" -n infra-db \
+            get secret postgres-credentials -o name >/dev/null 2>&1; then
+        print_success "dev-bringup: infra already healed by another pipeline (LB IP=$_REPAIR_LB_IP, infra-db ready); skipping deploy_infra"
+    else
+        print_status "dev-bringup: running deploy_infra..."
+        "$REPO_ROOT/scripts/deploy_infra" -e dev
+    fi
+
+    # Release the infra lock as soon as the repair is done — the DNS reconcile
+    # and heartbeat below don't touch shared infra and needn't hold it.
+    if [ -n "$_INFRA_LOCK_HELD" ]; then
+        # Let the normal release print its "Released infra lock" line (useful
+        # when debugging lock contention); only the EXIT-trap fallback is quiet.
+        # Clear the safety net ONLY if the release actually succeeded — if the
+        # Valkey DEL transiently fails, keep the EXIT trap armed so it retries
+        # on the way out (the lock TTL is the final backstop either way).
+        if "$REPO_ROOT/ci/scripts/ci-infra-lock.sh" release; then
+            _INFRA_LOCK_HELD=""
+            trap - EXIT
+        else
+            print_warning "dev-bringup: infra lock release failed; EXIT trap will retry (TTL backstops it)"
+        fi
+    fi
 
     print_success "dev-bringup: cluster + infra ready (DNS update follows)"
 fi
