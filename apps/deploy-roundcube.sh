@@ -216,36 +216,37 @@ print_success "Ingress applied for $WEBMAIL_HOST"
 # Restart deployment to pick up config changes
 mt_restart_if_changed deployment/roundcube -n "$NS_WEBMAIL"
 
-# Wait for Deployment to be ready
-if mt_has_changes; then
-    print_status "Waiting for Roundcube Deployment to be ready..."
-    if kubectl rollout status deployment/roundcube -n "$NS_WEBMAIL" --timeout=180s; then
-        print_success "Roundcube Deployment is ready"
-    else
-        # Fail loudly. A rollout timeout means the new pods never became Ready
-        # (e.g. CrashLoopBackOff on a failing health probe). This was previously
-        # only a warning + exit 0, so a broken image — e.g. the Roundcube 1.7
-        # docroot change that 404'd the old skin-asset probe and crashlooped the
-        # pod — deployed "successfully" and was only caught later by e2e, and
-        # only when no healthy old replica happened to keep serving. Fail fast
-        # per CLAUDE.md so a broken deploy can never report success.
-        print_error "Roundcube Deployment did not become Ready within 180s"
-        echo ""
-        print_error "=== Diagnostic dump ==="
-        # Guard every kubectl call so one missing object doesn't skip later dumps
-        # (set -euo pipefail is active).
-        set +e
-        dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
-        echo ""
-        print_error "Diagnostics: roundcube pod logs (current, last 200 lines)"
-        kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --tail=200 --all-containers=true || true
-        echo ""
-        print_error "Diagnostics: roundcube pod logs (previous, last 200 lines — if CrashLoop)"
-        kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --previous --tail=200 --all-containers=true 2>/dev/null || \
-            echo "  (no previous container — pod did not restart)"
-        exit 1
-    fi
+# Wait for a RUNNING Roundcube pod — NOT Ready. The rc-readiness probe fails with
+# SQLSTATE 42P01 (undefined_table) while the schema is missing, so gating on Ready
+# here DEADLOCKS: the pod can't go Ready until the schema exists, but the schema
+# repair below needs a Running pod to exec into. So wait for Running, repair the
+# schema, THEN wait for Ready (moved below the gate). A genuinely broken image
+# (ImagePull/crash-before-Running) never reaches Running and still fails fast here.
+# Unconditional (not gated on mt_has_changes) because the schema gate below is too.
+print_status "Waiting for a Running Roundcube pod (schema repair precedes the readiness gate)..."
+_rc_running=""
+for _rc_try in $(seq 1 36); do
+    _rc_running=$(kubectl get pod -n "$NS_WEBMAIL" -l app=roundcube \
+        -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null | awk '{print $1}')
+    [ -n "$_rc_running" ] && break
+    sleep 5
+done
+if [ -z "$_rc_running" ]; then
+    print_error "No Running Roundcube pod within 180s"
+    echo ""
+    print_error "=== Diagnostic dump ==="
+    set +e
+    dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
+    echo ""
+    print_error "Diagnostics: roundcube pod logs (current, last 200 lines)"
+    kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --tail=200 --all-containers=true || true
+    echo ""
+    print_error "Diagnostics: roundcube pod logs (previous, last 200 lines — if CrashLoop)"
+    kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --previous --tail=200 --all-containers=true 2>/dev/null || \
+        echo "  (no previous container — pod did not restart)"
+    exit 1
 fi
+print_success "Roundcube pod is Running ($_rc_running)"
 
 # =============================================================================
 # Schema-initialization gate (UNCONDITIONAL — runs on every deploy)
@@ -257,10 +258,11 @@ fi
 # `database "roundcube_<tenant>" does not exist` negative entry from a dev
 # drop/recreate window — the schema is never built and never retried. Every
 # request then fails `relation "session" does not exist`, so Roundcube cannot
-# persist the OIDC session and webmail login hangs at the inbox. Because the
-# readiness probe is `GET /` (returns 200 even with zero tables), a schema-less
-# pod sails through the rollout gate above and the broken DB only surfaces later
-# (CI pipelines #1547/#1571). See memory project_shard5_10_roundcube_login_root_cause.
+# persist the OIDC session and webmail login hangs at the inbox. The rc-readiness
+# probe (roundcube.yaml.tpl) returns NotReady on exactly this SQLSTATE 42P01, so a
+# schema-less pod never goes Ready — which is why this repair MUST run before the
+# Ready gate: a Running pod is enough to exec bin/initdb.sh into, but a Ready gate
+# before the repair would deadlock. See memory project_shard5_10_roundcube_login_root_cause.
 #
 # This gate is UNCONDITIONAL — deliberately OUTSIDE the `if mt_has_changes` block
 # above. The DB can be left empty independent of any manifest change: when config
@@ -269,15 +271,9 @@ fi
 # with no restart to heal it. So we must verify on EVERY deploy.
 print_status "Verifying Roundcube DB schema is initialized..."
 
-# A pod must be Running to exec into / serve queries. The rollout-status wait
-# above only ran on the mt_has_changes path; make it unconditional here
-# (idempotent — returns immediately if already rolled out).
-if ! kubectl rollout status deployment/roundcube -n "$NS_WEBMAIL" --timeout=180s >/dev/null 2>&1; then
-    print_error "Roundcube deployment not Ready within 180s — cannot verify/repair DB schema"
-    set +e
-    dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
-    exit 1
-fi
+# The Running-pod wait above already ensured a pod we can exec into / query.
+# We deliberately do NOT wait for Ready here: the rc-readiness probe 42P01's on an
+# empty schema, so the Ready gate must come AFTER this repair (moved below).
 
 # Returns 0 iff the canonical "schema initialized" marker (system.roundcube-version)
 # is present AND reachable over the SAME path the app uses: as the roundcube DB
@@ -344,6 +340,30 @@ else
         dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
         exit 1
     fi
+fi
+
+# Schema is present now → the rc-readiness probe (which 42P01's on an empty schema)
+# can pass. Wait for the rollout to reach Ready. This is the fail-fast gate that
+# used to run BEFORE the repair and deadlocked on a dropped/empty DB; moved here so
+# it still catches a genuinely broken image (crashloop on a non-schema fault) but
+# only after the DB is healed. Idempotent if already rolled out.
+print_status "Waiting for Roundcube Deployment to be Ready..."
+if kubectl rollout status deployment/roundcube -n "$NS_WEBMAIL" --timeout=180s; then
+    print_success "Roundcube Deployment is Ready"
+else
+    print_error "Roundcube Deployment did not become Ready within 180s"
+    echo ""
+    print_error "=== Diagnostic dump ==="
+    set +e
+    dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
+    echo ""
+    print_error "Diagnostics: roundcube pod logs (current, last 200 lines)"
+    kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --tail=200 --all-containers=true || true
+    echo ""
+    print_error "Diagnostics: roundcube pod logs (previous, last 200 lines — if CrashLoop)"
+    kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --previous --tail=200 --all-containers=true 2>/dev/null || \
+        echo "  (no previous container — pod did not restart)"
+    exit 1
 fi
 
 
