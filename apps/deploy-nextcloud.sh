@@ -221,6 +221,69 @@ if ! poll_pod_ready "$NS_FILES" "app=redis" 60 5; then
 fi
 print_success "Redis deployed to $NS_FILES"
 
+# === Step 4d: Detect & recover from Nextcloud DB split-brain =================
+# Split-brain = nextcloud-identity Secret exists (so seed-identity writes
+# config.php installed=true every boot) but the tenant DB has NO Nextcloud
+# schema. Pod then 500s on status.php and crash-loops; the warm path skips the
+# install Job forever -> rollout timeout. A plain "DB exists" check is NOT
+# enough: db-init recreates the DB *empty* every run, so probe the SCHEMA.
+NC_SPLIT_BRAIN_RECOVERY=false
+IDENTITY_SECRET_EXISTS_PRE_SB=$(kubectl get secret nextcloud-identity -n "$NS_FILES" \
+    --ignore-not-found -o name 2>/dev/null || true)
+if [ -n "$IDENTITY_SECRET_EXISTS_PRE_SB" ]; then
+    # Only the emptyDir architecture auto-recovers; never auto-wipe a legacy PVC install.
+    _nc_pvc=$(kubectl get pvc nextcloud-nextcloud -n "$NS_FILES" -o name 2>/dev/null || true)
+    if [ -z "$_nc_pvc" ]; then
+        # Probe robustly, on two axes:
+        #  1. EXIT STATUS, not empty stdout: a connection flake (PgBouncer/mesh
+        #     blip) must resolve to "unknown" -> proceed, NOT "schema_absent" ->
+        #     which would wipe/abort a HEALTHY tenant on every warm redeploy.
+        #  2. grep the expected token out of stdout, don't string-compare it:
+        #     `mt_psql` (kubectl run --rm) appends a `pod "..." deleted` line to
+        #     STDOUT (not stderr), so a healthy DB returns "1\npod ... deleted".
+        #     A `tr`+`!= "1"` compare would misread that as schema_absent.
+        DB_PRESENT=0
+        _nc_state="unknown"
+        if _nc_q1=$(printf "SELECT 1 FROM pg_database WHERE datname='%s'" "$NEXTCLOUD_DB_NAME" \
+                | mt_psql -d postgres -tA 2>/dev/null); then
+            # Stage 1: a line that is exactly "1" means the DB is in the catalog.
+            if printf '%s\n' "$_nc_q1" | grep -Fxq '1'; then DB_PRESENT=1; fi
+            if [ "$DB_PRESENT" != "1" ]; then
+                _nc_state="schema_absent"    # DB genuinely absent from the catalog
+            else
+                # Stage 2: DB exists -> does the Nextcloud schema (oc_appconfig) exist?
+                if _nc_q2=$(printf "SELECT to_regclass('public.oc_appconfig')" \
+                        | mt_psql -d "$NEXTCLOUD_DB_NAME" -tA 2>/dev/null); then
+                    if printf '%s\n' "$_nc_q2" | grep -q 'oc_appconfig'; then
+                        _nc_state="schema_present"
+                    else
+                        _nc_state="schema_absent"
+                    fi
+                else
+                    _nc_state="unknown"    # DB exists but schema probe couldn't run
+                fi
+            fi
+        else
+            _nc_state="unknown"    # stage-1 probe could not connect -> do NOT act
+        fi
+        if [ "$_nc_state" = "schema_absent" ]; then
+            print_warning "SPLIT-BRAIN: nextcloud-identity Secret exists but ${NEXTCLOUD_DB_NAME} has no Nextcloud schema (DB_PRESENT=${DB_PRESENT:-0})"
+            if [ "$MT_ENV" = "dev" ]; then
+                print_warning "dev pool tenant: auto-recovering via clean cold-start reinstall (dev data loss acceptable)"
+                kubectl delete secret nextcloud-identity -n "$NS_FILES" --ignore-not-found
+                NC_SPLIT_BRAIN_RECOVERY=true
+            else
+                print_error "PROD split-brain: ${NEXTCLOUD_DB_NAME} is missing/empty while its identity Secret persists."
+                print_error "Refusing to auto-wipe a prod tenant. Investigate the Postgres VM / PgBouncer / an accidental DROP, then reinstall by hand. Aborting."
+                exit 1
+            fi
+        elif [ "$_nc_state" = "unknown" ]; then
+            print_warning "Could not introspect ${NEXTCLOUD_DB_NAME} schema (transient?); proceeding with normal flow."
+        fi
+    fi
+fi
+# === end Step 4d =============================================================
+
 # Step 5: Run Nextcloud database initialization job (in files namespace where secrets are accessible)
 print_status "Running Nextcloud database initialization..."
 
@@ -654,6 +717,17 @@ pushd "$REPO_ROOT/apps" >/dev/null
   fi
 popd >/dev/null
 
+# Step 6a: If we recovered from a split-brain, force a pod re-creation.
+# Init containers (seed-identity) don't re-run on CrashLoop container restarts,
+# only on pod re-creation — so a rollout restart is required to make the pods
+# re-seed from the fresh identity Secret + the just-repopulated schema.
+if [ "${NC_SPLIT_BRAIN_RECOVERY:-false}" = "true" ]; then
+    if kubectl get deployment nextcloud -n "$NS_FILES" >/dev/null 2>&1; then
+        print_status "Split-brain recovery: rollout restart so pods re-seed from the fresh identity + repopulated DB"
+        kubectl rollout restart deployment/nextcloud -n "$NS_FILES" || true
+    fi
+fi
+
 # Step 6b: Route in-cluster traffic through internal ingress (PROXY protocol workaround)
 # The external ingress requires PROXY protocol headers (from Cloudflare → NodeBalancer).
 # In-cluster pods connecting to external hostnames get ECONNRESET because kube-proxy
@@ -791,7 +865,13 @@ else
         -p '{"spec":{"template":{"spec":{"hostAliases":[{"ip":"'"$INTERNAL_INGRESS_IP"'","hostnames":['"$INTERNAL_HOSTNAMES"']}]}}}}'
 
     # Wait for rollout to complete (immediate if patch was a no-op)
-    kubectl rollout status deployment/nextcloud -n "$NS_FILES" --timeout=900s
+    if ! kubectl rollout status deployment/nextcloud -n "$NS_FILES" --timeout=900s; then
+        print_error "Nextcloud rollout did not reach Ready within 900s"
+        dump_pod_diagnostics "$NS_FILES" "app.kubernetes.io/instance=nextcloud"
+        kubectl -n "$NS_FILES" logs -l app.kubernetes.io/instance=nextcloud \
+            --tail=120 --all-containers=true --prefix 2>/dev/null || true
+        exit 1
+    fi
     print_success "Nextcloud configured to route traffic internally"
 
     # Patch the Collabora deployment so it resolves FILES_HOST via internal ingress.
