@@ -550,6 +550,16 @@ else
   print_warning "deploy-headscale-cleanup.sh not found"
 fi
 
+# =============================================================================
+# Deploy ACME challenge cleanup CronJob
+# =============================================================================
+print_status "Deploying ACME challenge cleanup CronJob..."
+if [ -x "$REPO_ROOT/apps/deploy-acme-challenge-cleanup.sh" ]; then
+  "$REPO_ROOT/apps/deploy-acme-challenge-cleanup.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
+else
+  print_warning "deploy-acme-challenge-cleanup.sh not found"
+fi
+
 # Create Keycloak theme ConfigMap BEFORE deploying Keycloak.
 # Track whether the ConfigMap actually changed so we can conditionally restart
 # Keycloak below — unnecessary restarts destroy all user sessions (Infinispan).

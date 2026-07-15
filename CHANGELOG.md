@@ -7,6 +7,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- ACME DNS-01 challenge records accumulated in the shared Cloudflare zone until
+  it hit its record quota, wedging cert renewals. cert-manager creates ephemeral
+  `_acme-challenge.<name>` TXT records during DNS-01 validation and removes them
+  once solved, but a cluster torn down mid-challenge (notably the ephemeral dev
+  clusters, which share the same zone as prod) orphans them. Over weeks these
+  filled the zone's ~200-record cap; cert-manager then got Cloudflare error
+  `81045: Record quota exceeded` and could not create the TXT records for the
+  apex/wildcard renewal, which sat `pending` for 42h (caught by the
+  `CertificateRenewalStuck` alert, ~29 days before actual expiry). Added an
+  hourly `acme-challenge-cleanup` CronJob (namespace `infra-cert-manager`,
+  deployed by `deploy_infra`) that prunes `_acme-challenge.*` TXT records older
+  than 6h from the infra zone. The age threshold protects in-flight challenges
+  (which complete within minutes); deletes are idempotent so running it in more
+  than one environment against the shared zone is safe. Scoped to the infra zone
+  only — per-tenant zones (which have far fewer records) are not yet swept.
 - Cert-expiry alerting was silently dead. The cert-manager `ServiceMonitor`
   was missing the `release: kube-prometheus-stack` label that
   kube-prometheus-stack's Prometheus uses to select ServiceMonitors, so
