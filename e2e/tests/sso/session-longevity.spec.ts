@@ -21,8 +21,13 @@ import { TEST_USERS } from '../../helpers/test-users';
  * Complements the deploy-time drift gate in docs/import-keycloak-realm.sh, which
  * guards the same values on every deploy (including prod, where e2e does not run).
  */
+// The leased tenant's realm arrives via E2E_KC_REALM (ci-resolve-tenant.sh maps
+// E2E_POOL<n>_KC_REALM → E2E_KC_REALM). In CI we MUST use it: falling back to a
+// hardcoded realm silently probes a DIFFERENT, unprepped realm and reports a
+// false regression — which is exactly what happened when the e2e-shard steps
+// forgot to inject E2E_POOL<n>_KC_REALM (the test hit the stale 'docs' realm and
+// read its old 7200s). Fail loudly instead. 'docs' stays as a local-dev default.
 const realm = process.env.E2E_KC_REALM || 'docs';
-const tokenEndpoint = `${urls.keycloak}/realms/${realm}/protocol/openid-connect/token`;
 
 // The realm intends 30-day sessions; require at least 7 days so the assertion is
 // robust to a deliberate future trim while still catching the 2h/10h regression.
@@ -30,6 +35,14 @@ const MIN_ONLINE_REFRESH_SECONDS = 7 * 24 * 60 * 60; // 604800
 
 test.describe('SSO — session longevity (regression guard)', () => {
   test('online OIDC refresh token outlives a work session (no premature logout)', async ({ request }) => {
+    expect(
+      Boolean(process.env.E2E_KC_REALM) || !process.env.CI,
+      'E2E_KC_REALM is not set in CI — the leased tenant realm did not propagate to ' +
+        'the e2e step. Check the E2E_POOL<n>_KC_REALM injection in .woodpecker/e2e-shard-*.yaml ' +
+        '(without it this test would silently probe the wrong realm).',
+    ).toBeTruthy();
+
+    const tokenEndpoint = `${urls.keycloak}/realms/${realm}/protocol/openid-connect/token`;
     const res = await request.post(tokenEndpoint, {
       form: {
         grant_type: 'password',
