@@ -204,27 +204,32 @@ print_status "User Profile updated"
 #############################################
 
 #############################################
-# 2. Configure Session Timeouts
+# 2. Configure short-lived action / access-code lifespans
 #############################################
-print_status "Configuring session timeouts..."
-
-TIMEOUT_CONFIG=$(echo "$REALM_CONFIG" | jq '. + {
-    "ssoSessionIdleTimeout": 7200,
-    "ssoSessionMaxLifespan": 36000,
-    "ssoSessionIdleTimeoutRememberMe": 604800,
-    "ssoSessionMaxLifespanRememberMe": 2592000,
-    "accessCodeLifespan": 300,
-    "accessCodeLifespanLogin": 1800,
-    "accessCodeLifespanUserAction": 600,
-    "actionTokenGeneratedByUserLifespan": 600
-}')
+# IMPORTANT: SSO SESSION timeouts (ssoSessionIdleTimeout / ssoSessionMaxLifespan
+# and their rememberMe variants) are OWNED by the realm template
+# docs/keycloak-realm-config.json.tpl — applied by import-keycloak-realm.sh and
+# guarded by its deploy-time drift gate (#509). This script runs AFTER that
+# import (in deploy-portals). It previously hardcoded ssoSessionIdleTimeout=7200
+# / ssoSessionMaxLifespan=36000 here and PUT them back, silently reverting the
+# 30-day base session right after prep raised it and re-exposing the Nextcloud
+# ~daily-logout bug (#509). Do NOT set SSO session timeouts here — same footgun
+# as the SMTP block removed above. Only the short-lived action/access-code
+# lifespans (which the realm template does not set) belong here. Partial realm
+# PUT: Keycloak preserves every omitted field, so this never touches sessions.
+print_status "Configuring action/access-code lifespans..."
 
 curl -s -X PUT "https://$AUTH_HOST/admin/realms/$KEYCLOAK_REALM" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
-    -d "$TIMEOUT_CONFIG" > /dev/null
+    -d '{
+        "accessCodeLifespan": 300,
+        "accessCodeLifespanLogin": 1800,
+        "accessCodeLifespanUserAction": 600,
+        "actionTokenGeneratedByUserLifespan": 600
+    }' > /dev/null
 
-print_status "Session timeouts configured"
+print_status "Action/access-code lifespans configured"
 
 #############################################
 # 3. Fix Authentication Flow
