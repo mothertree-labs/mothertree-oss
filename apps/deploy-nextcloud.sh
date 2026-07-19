@@ -319,6 +319,20 @@ if ! poll_job_complete "$NS_FILES" "nextcloud-db-init" 180 5; then
 fi
 print_success "Nextcloud database initialized"
 
+# Step 5b: Force every PgBouncer pod to serve the (db, tenant-user) pool before
+# anything consumes it. After a drop/recreate window (split-brain recovery
+# above, dev DB sweeps) PgBouncer pods can keep serving a cached "database ...
+# does not exist" login error for exactly this pool even though db-init just
+# succeeded — db-init runs as the postgres user, which is a DIFFERENT pool, and
+# may land on the other PgBouncer replica. Pipeline #1746: the install Job
+# burned its whole backoff on that cached error and the deploy failed. The
+# verify gate retries through each PgBouncer pod IP until the pool heals, and
+# fails loudly here if one never does.
+if ! mt_pgbouncer_verify_db "$NS_FILES" "$NEXTCLOUD_DB_NAME" "$TENANT_DB_USER" "$DB_PASSWORD"; then
+    print_error "PgBouncer cannot serve ${NEXTCLOUD_DB_NAME} as ${TENANT_DB_USER}; aborting before the install Job."
+    exit 1
+fi
+
 # Step 5a.1: Ensure nextcloud-credentials Secret exists (chart `existingSecret`)
 # This is the single source of truth for admin creds + SMTP creds. The install
 # Job reads the same Secret so the password ends up matching the DB-stored

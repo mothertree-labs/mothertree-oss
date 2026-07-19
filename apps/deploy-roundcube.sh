@@ -181,6 +181,22 @@ else
     fi
 fi
 
+# Force every PgBouncer pod to serve the (db, roundcube-user) pool before the
+# Deployment (and its entrypoint's one-shot, failure-swallowing initdb) touches
+# it. After a drop/recreate window PgBouncer pods can keep serving a cached
+# "database ... does not exist" login error for this pool even though db-init
+# just succeeded — db-init runs as the postgres user (a different pool) and may
+# land on the other PgBouncer replica. Pipeline #1746: the container-start
+# initdb hit exactly that cached error, was swallowed by the entrypoint, and
+# the deploy died much later at the readiness gate. The verify gate retries
+# through each PgBouncer pod IP until the pool heals, and fails loudly here —
+# also converting the soft "may not have completed" timeout above into a hard
+# check that the DB actually accepts app connections.
+if ! mt_pgbouncer_verify_db "$NS_WEBMAIL" "$ROUNDCUBE_DB_NAME" "$ROUNDCUBE_DB_USER" "$ROUNDCUBE_DB_PASSWORD"; then
+    print_error "PgBouncer cannot serve ${ROUNDCUBE_DB_NAME} as ${ROUNDCUBE_DB_USER}; aborting before the rollout."
+    exit 1
+fi
+
 # =============================================================================
 # Load Roundcube image tag from CI-built tags (or fall back to :latest)
 # =============================================================================
@@ -275,15 +291,25 @@ print_status "Verifying Roundcube DB schema is initialized..."
 # We deliberately do NOT wait for Ready here: the rc-readiness probe 42P01's on an
 # empty schema, so the Ready gate must come AFTER this repair (moved below).
 
-# Returns 0 iff the canonical "schema initialized" marker (system.roundcube-version)
-# is present AND reachable over the SAME path the app uses: as the roundcube DB
-# user, through PgBouncer, into the tenant DB. A throwaway psql pod keeps this
-# independent of whether the roundcube image ships a psql client.
+# Returns 0 iff the schema is usably initialized, probed over the SAME path the
+# app uses: as the roundcube DB user, through PgBouncer, into the tenant DB. A
+# throwaway psql pod keeps this independent of whether the roundcube image
+# ships a psql client.
+#
+# "Usably initialized" is TWO conditions, both required (pipeline #1746 showed
+# the marker alone is not enough — the deploy sailed past this check and then
+# sat NotReady for 3 minutes on a missing table):
+#   1. the canonical marker (system.roundcube-version) is set, AND
+#   2. the session table exists — the exact relation the rc-readiness probe
+#      checks (SQLSTATE 42P01), so this gate can never pass a schema the probe
+#      will then reject.
+# The query emits an explicit RC_SCHEMA_OK token and we grep for it, so stray
+# kubectl chatter on stdout can never be mistaken for a healthy result.
 #
 # Retries up to 3x: a transient throwaway-pod scheduling/PgBouncer hiccup returns
 # empty just like a genuinely-missing schema, so without retries a flaky query
 # could masquerade as "schema missing" and spuriously fail an otherwise-healthy
-# deploy. Returns 0 as soon as a version is read; only concludes "missing" after
+# deploy. Returns 0 as soon as the token is read; only concludes "missing" after
 # all attempts come back empty. On a healthy DB the first attempt succeeds (no
 # added latency); the cost is paid only on the missing/transient path.
 _rc_schema_ok() {
@@ -293,21 +319,21 @@ _rc_schema_ok() {
             --image=postgres:15-alpine --quiet -n "$NS_WEBMAIL" --pod-running-timeout=120s \
             --env "PGHOST=$PG_HOST" --env "PGUSER=$ROUNDCUBE_DB_USER" \
             --env "PGPASSWORD=$ROUNDCUBE_DB_PASSWORD" --env "PGDATABASE=$ROUNDCUBE_DB_NAME" \
-            -- psql -tAc "SELECT value FROM system WHERE name='roundcube-version';" 2>/dev/null || true)
-        [ -n "$(printf '%s' "$_out" | tr -d '[:space:]')" ] && return 0
+            -- psql -tAc "SELECT 'RC_SCHEMA_OK' FROM system WHERE name='roundcube-version' AND to_regclass('public.session') IS NOT NULL;" 2>/dev/null || true)
+        printf '%s' "$_out" | grep -q 'RC_SCHEMA_OK' && return 0
         [ "$_attempt" -lt 3 ] && sleep $((_attempt * 5))
     done
     return 1
 }
 
 if _rc_schema_ok; then
-    print_success "Roundcube DB schema present (system.roundcube-version set) — OK"
+    print_success "Roundcube DB schema present (version marker + session table) — OK"
 else
-    # Schema missing: the entrypoint's one-shot initdb was swallowed. Re-run the
-    # SAME idempotent command in the live pod — by now the DB is reachable
-    # (PgBouncer's ~15s negative-cache TTL has long expired since db-init created
-    # the DB), so this builds the schema. No-op on an already-initialized DB.
-    print_warning "Roundcube DB schema MISSING — entrypoint initdb was swallowed; repairing in-pod"
+    # Schema missing/partial: the entrypoint's one-shot initdb was swallowed or
+    # died mid-run. Re-run the SAME idempotent command in the live pod — the
+    # PgBouncer verify gate above guarantees the DB is reachable as the app
+    # user by now, so this builds the schema. No-op on an already-initialized DB.
+    print_warning "Roundcube DB schema MISSING/PARTIAL — entrypoint initdb was swallowed; repairing in-pod"
     RC_POD=$(kubectl get pod -n "$NS_WEBMAIL" -l app=roundcube \
         -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null | awk '{print $1}')
     if [ -z "$RC_POD" ]; then
@@ -326,19 +352,48 @@ else
     [ "$RC_INITDB_RC" -ne 0 ] && print_warning "initdb.sh exited $RC_INITDB_RC (verifying schema regardless)"
 
     if _rc_schema_ok; then
-        print_success "Roundcube DB schema repaired and verified (system.roundcube-version set)"
+        print_success "Roundcube DB schema repaired and verified (version marker + session table)"
     else
-        # Fail loudly per CLAUDE.md — a schema-less Roundcube means webmail OIDC
-        # login hangs; never report a broken deploy as success.
-        print_error "Roundcube DB schema STILL missing after initdb — webmail OIDC login would hang"
-        print_error "(relation \"session\" does not exist family — see memory project_shard5_10_roundcube_login_root_cause)"
-        echo ""
-        print_error "=== bin/initdb.sh output ==="
-        printf '%s\n' "$RC_INITDB_OUT" | sed 's/^/    /'
-        echo ""
-        set +e
-        dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
-        exit 1
+        # initdb --update could not converge. The one state it cannot heal is a
+        # PARTIAL schema: the version marker exists so its update path has
+        # nothing to migrate, yet base tables are missing (an earlier initdb
+        # died mid-run — e.g. against a PgBouncer pool that flipped mid-init).
+        # dev pool tenants: the roundcube DB holds only sessions/cache/prefs
+        # and is rebuilt constantly, so wipe the schema and re-run initdb from
+        # scratch rather than wedging every subsequent pipeline on this tenant.
+        # prod: never auto-wipe — fail loudly below (repo rule).
+        if [ "$MT_ENV" = "dev" ]; then
+            print_warning "dev pool tenant: initdb --update did not converge (partial schema?) — resetting public schema and re-running initdb"
+            # Recreate the schema with the same grants roundcube-db-init sets
+            # (REVOKE PUBLIC for cross-tenant isolation, ALL to the tenant user).
+            if ! printf 'DROP SCHEMA public CASCADE; CREATE SCHEMA public; REVOKE ALL ON SCHEMA public FROM PUBLIC; GRANT ALL ON SCHEMA public TO "%s";' "$ROUNDCUBE_DB_USER" \
+                    | mt_psql -d "$ROUNDCUBE_DB_NAME"; then
+                print_error "Failed to reset public schema in $ROUNDCUBE_DB_NAME"
+                exit 1
+            fi
+            print_status "Re-running bin/initdb.sh in pod $RC_POD against the fresh schema..."
+            set +e
+            RC_INITDB_OUT=$(kubectl exec -n "$NS_WEBMAIL" "$RC_POD" -c roundcube -- \
+                bash -c 'cd /var/www/html && bin/initdb.sh --dir=/var/www/html/SQL --update' 2>&1)
+            RC_INITDB_RC=$?
+            set -e
+            printf '%s\n' "$RC_INITDB_OUT" | sed 's/^/    /'
+            [ "$RC_INITDB_RC" -ne 0 ] && print_warning "initdb.sh exited $RC_INITDB_RC (verifying schema regardless)"
+        fi
+        if ! _rc_schema_ok; then
+            # Fail loudly per CLAUDE.md — a schema-less Roundcube means webmail OIDC
+            # login hangs; never report a broken deploy as success.
+            print_error "Roundcube DB schema STILL missing after initdb — webmail OIDC login would hang"
+            print_error "(relation \"session\" does not exist family — see memory project_shard5_10_roundcube_login_root_cause)"
+            echo ""
+            print_error "=== bin/initdb.sh output ==="
+            printf '%s\n' "$RC_INITDB_OUT" | sed 's/^/    /'
+            echo ""
+            set +e
+            dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
+            exit 1
+        fi
+        print_success "Roundcube DB schema rebuilt from scratch and verified"
     fi
 fi
 

@@ -7,6 +7,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- Recurring `deploy-dev-nextcloud` / `deploy-dev-roundcube` CI flakes caused by
+  PgBouncer serving a stale cached login error after a tenant DB was dropped and
+  recreated (CI pipeline #1746). PgBouncer pools are keyed on (database, user)
+  and only clear a cached `database ... does not exist (server_login_retry)`
+  failure on the next successful server login for that exact pool; with two
+  PgBouncer replicas behind one ClusterIP, db-init succeeding (as `postgres`, a
+  different pool, possibly a different replica) proved nothing about the pool
+  the app then used — the Nextcloud install Job burned its whole backoff on the
+  cached error, and Roundcube's container-start `initdb` failed silently,
+  leaving an unusable schema and a rollout timeout. Fixes:
+  - New `mt_pgbouncer_verify_db` gate (`scripts/lib/common.sh`) runs after
+    db-init in `deploy-nextcloud.sh` and `deploy-roundcube.sh`: it connects as
+    the app user to the tenant DB via **every** PgBouncer pod IP, retrying past
+    the `server_login_retry` window so each poisoned pool is forced to re-login
+    and heal. If a pod still can't serve the pool it fails the deploy loudly at
+    that point, naming the pod, instead of three steps later with a mystery
+    SQLSTATE.
+  - Roundcube's schema verification now requires the `session` table (the exact
+    relation the readiness probe checks) in addition to the
+    `system.roundcube-version` marker, so a partially-built schema can no longer
+    pass verification and then wedge the readiness gate. On dev pool tenants a
+    partial schema that `initdb --update` cannot converge is reset
+    (`DROP SCHEMA public CASCADE` + full re-init); prod still fails loudly
+    rather than auto-wiping.
 - ACME DNS-01 challenge records accumulated in the shared Cloudflare zone until
   it hit its record quota, wedging cert renewals. cert-manager creates ephemeral
   `_acme-challenge.<name>` TXT records during DNS-01 validation and removes them
