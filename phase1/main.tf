@@ -305,3 +305,36 @@ module "postgres_server" {
   tags               = sort(concat(var.common_tags, [var.env]))
 }
 
+# LLM (Ollama) model-weight S3 cache bucket + scoped key.
+#
+# Ollama restores its weights from this bucket on pod start instead of pulling
+# ~1.3 GB from ollama.com (see docs/plans/llm/s3-model-cache.md). The bucket is
+# external to the cluster, so it survives cluster rebuilds; the key is scoped to
+# just this bucket (least privilege).
+#
+# Dev's bucket (`mothertree-models` in us-lax-1) was created out-of-band (Phase 0
+# of the plan) and the dev workspace shares the us-lax-1 cluster with prod, so
+# dev is skipped here to avoid colliding with the manually-created bucket. Prod
+# and prod-eu each get their own `<label>-<env>` bucket via `manage_infra --phase1`.
+locals {
+  llm_models_bucket_label = "${var.llm_models_bucket_label}-${var.env}"
+  llm_models_region       = var.llm_models_region != "" ? var.llm_models_region : var.linode_region
+}
+
+resource "linode_object_storage_bucket" "llm_models" {
+  count  = var.env == "dev" ? 0 : 1
+  region = local.llm_models_region
+  label  = local.llm_models_bucket_label
+}
+
+resource "linode_object_storage_key" "llm_models" {
+  count = var.env == "dev" ? 0 : 1
+  label = "tf-managed-${local.llm_models_bucket_label}"
+
+  bucket_access {
+    region      = local.llm_models_region
+    bucket_name = linode_object_storage_bucket.llm_models[0].label
+    permissions = "read_write"
+  }
+}
+

@@ -184,3 +184,28 @@ output "postgres_server_label" {
   description = "Label of the PostgreSQL server"
   value       = var.postgres_enabled ? module.postgres_server[0].postgres_server_label : null
 }
+
+# LLM (Ollama) model-weight S3 cache bucket outputs.
+# After `manage_infra -e <env> --phase1`, read the scoped secret key with:
+#   terraform output -raw llm_models_secret_key   (from the phase1 workspace)
+# and store it in the infra tenant secrets as `llm.s3_secret` (see the plan doc).
+output "llm_models_bucket" {
+  description = "Label of the LLM model-weight Object Storage bucket"
+  value       = length(linode_object_storage_bucket.llm_models) > 0 ? linode_object_storage_bucket.llm_models[0].label : null
+}
+
+output "llm_models_bucket_hostname" {
+  description = "Hostname of the LLM model-weight Object Storage bucket"
+  value       = length(linode_object_storage_bucket.llm_models) > 0 ? linode_object_storage_bucket.llm_models[0].hostname : null
+}
+
+output "llm_models_access_key" {
+  description = "Access key scoped to the LLM model-weight bucket"
+  value       = length(linode_object_storage_key.llm_models) > 0 ? linode_object_storage_key.llm_models[0].access_key : null
+}
+
+output "llm_models_secret_key" {
+  description = "Secret key scoped to the LLM model-weight bucket"
+  value       = length(linode_object_storage_key.llm_models) > 0 ? linode_object_storage_key.llm_models[0].secret_key : null
+  sensitive   = true
+}

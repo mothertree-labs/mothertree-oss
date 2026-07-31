@@ -152,32 +152,36 @@ re-seeds if the bucket is ever wiped):
 
 ## Bucket & IAM
 
-Single bucket (recommend `mothertree-models`) in the same Linode Object Storage
-cluster used elsewhere (us-lax-1 / nl-ams-1 for prod-eu). No public access — S3
-keys only.
+Per-env bucket in the same Linode Object Storage cluster used elsewhere
+(us-lax-1 for dev/prod, nl-ams-1 for prod-eu). No public access — S3 keys only.
 
 - **Read key** for the pod restore initContainer (least privilege, read-only).
 - **Write key** for the seed Job `upload` container (and any manual re-seed).
 
-Existing `pgbackrest` buckets are **not** Terraform-managed (created out-of-band).
-The ollama bucket should follow the same pattern or be added as IaC — see Open
-Decision 3.
+Provisioning is Terraform-managed for prod/prod-eu (`phase1/main.tf` —
+`linode_object_storage_bucket.llm_models` + `linode_object_storage_key.llm_models`,
+created by `manage_infra -e <env> --phase1`), matching the `phase1-dev` `dev_state`
+precedent. The dev bucket was created out-of-band (Phase 0) and the dev workspace
+skips the resources (`count = var.env == "dev" ? 0 : 1`) to avoid colliding with
+the manually-created `mothertree-models` bucket in us-lax-1. After apply, read the
+scoped secret key with `terraform output -raw llm_models_secret_key` and store it
+in the infra tenant secrets as `llm.s3_secret`.
 
-## Open Decisions
+## Resolved Decisions
 
-1. **Dedicated bucket vs. prefix in the existing pgbackrest bucket.**
-   Recommend a **dedicated bucket** — model blobs are large with a different
-   lifecycle than DB backups, and it allows least-privilege creds scoped to just
-   the weights.
-2. **Reuse the pgbackrest S3 credential vs. a dedicated scoped key.**
-   Recommend a **dedicated key** scoped to the ollama bucket.
-3. **Bucket provisioning:** manual (Linode CLI / `s3cmd mb`) vs. a
-   `linode_object_storage_bucket` Terraform resource.
-4. **`RollingUpdate` now vs. keep `Recreate`/`replicas: 1`.**
-   With emptyDir, `RollingUpdate` (`maxUnavailable: 0`) is safe and gives
-   zero-downtime restarts; recommend flipping.
-5. **Auto-seed Job vs. documented one-time manual seed.**
-   Recommend the **auto Job** so on-demand-dev stays hands-off.
+1. **Dedicated bucket, not a prefix in the pgbackrest bucket.** Model blobs are
+   large with a different lifecycle than DB backups; a dedicated bucket allows a
+   least-privilege credential scoped to just the weights.
+2. **Dedicated scoped key, not the pgbackrest credential.** One key per env,
+   scoped `read_write` to its bucket only (serves both the restore initContainer
+   and the seed Job).
+3. **Terraform provisioning in `phase1/` for prod/prod-eu** (managed by
+   `manage_infra --phase1`); **dev provisioned out-of-band** (Phase 0, skipped by
+   Terraform). Bucket labels: `mothertree-models` (dev, manual), `mothertree-models-prod`,
+   `mothertree-models-prod-eu`.
+4. **`RollingUpdate` now** (`maxUnavailable: 0`) — safe once emptyDir removes the
+   volume lock.
+5. **Auto-seed Job** so on-demand-dev stays hands-off.
 
 ## Edge Cases
 
@@ -222,3 +226,77 @@ Decision 3.
 | **FUSE-mount bucket** (s3fs/goofys) | No local copy | Ollama does concurrent content-addressed writes; FUSE-S3 is slow, lacks locking, risks corruption — explicitly not this |
 | **Sidecar + rsync** | No S3 dependency | Needs a persistent model-server pod, more complex |
 | **emptyDir + internet pull** (current dev) | Simple, zero config | 15–20 min slow restarts, internet dependency, wasted bandwidth |
+
+## Execution Plan (Phases)
+
+Decisions locked: dedicated bucket + key, Terraform provisioning for prod/prod-eu
+(dev out-of-band), `RollingUpdate` now, target envs dev + prod + prod-eu.
+
+### Phase 0 — Provision (dev) ✅ DONE
+- [x] Create bucket `mothertree-models` in `us-lax-1` (private ACL,
+      `mothertree-models.us-lax-1.linodeobjects.com`) via Linode API
+- [x] Create dedicated limited key `mothertree-llm-dev` (id 4840464), scoped
+      `read_write` to the `mothertree-models` bucket only
+- [x] Persist key in `config/tenants/mothertree/dev.secrets.yaml` under
+      `llm.s3_key` / `llm.s3_secret` (gitignored source for `build-deploy-vaults.sh`)
+- [x] Verify: put/get/delete round-trip with the new key against the bucket
+
+> Note: `dev.secrets.yaml` is gitignored and assembled into the deploy vault by
+> `scripts/build-deploy-vaults.sh` — rebuild the dev vault before CI can read
+> `llm.s3_*`. The read-write key serves both restore and seed (single key).
+
+### Phase 0b — Terraform provisioning (prod/prod-eu) ✅ DONE (code; apply pending)
+- [x] Add `linode_object_storage_bucket.llm_models` +
+      `linode_object_storage_key.llm_models` to `phase1/main.tf`
+      (`count = var.env == "dev" ? 0 : 1`), per-env labels
+      `mothertree-models-<env>`, scoped `read_write` key, region defaults to
+      `linode_region` (us-lax prod / nl-ams prod-eu)
+- [x] Add `llm_models_bucket_label` / `llm_models_region` vars
+      (`phase1/variables.tf`) and outputs `llm_models_bucket[_hostname]`,
+      `llm_models_access_key`, `llm_models_secret_key` (sensitive)
+      (`phase1/outputs.tf`)
+- [x] Document in `terraform.tfvars.example`
+- [x] `terraform validate` + `fmt` pass; plan verified: prod creates
+      `mothertree-models-prod` + `tf-managed-mothertree-models-prod`, dev skips
+- [ ] **Apply**: `manage_infra -e prod --phase1` and `-e prod-eu --phase1`, then
+      copy each `terraform output -raw llm_models_secret_key` into the infra
+      tenant secrets as `llm.s3_secret` (Phase 1)
+
+### Phase 1 — Infra config + secrets (dev/prod/prod-eu)
+- [ ] Add `llm:` block to `config/platform/infra/{dev,prod,prod-eu}.config.yaml`:
+      `model`, `s3_bucket`, `s3_endpoint`, `s3_region`, `s3_prefix: ollama`
+      (us-lax-1 for dev/prod, nl-ams-1 for prod-eu)
+- [ ] Add `llm.s3_key` / `llm.s3_secret` to the infra tenant secrets for
+      prod/prod-eu (dev already done in Phase 0)
+
+### Phase 2 — `scripts/lib/infra-config.sh`
+- [ ] Config loader (~line 149, after `LLM_MODEL`): load
+      `LLM_S3_BUCKET` / `LLM_S3_ENDPOINT` / `LLM_S3_REGION` / `LLM_S3_PREFIX`
+- [ ] Secrets loader (~line 422, after pgbackrest secrets): load
+      `LLM_S3_KEY` / `LLM_S3_SECRET`, fail-fast if unset
+
+### Phase 3 — Manifests
+- [ ] New `apps/manifests/llm/ollama-model-seed-job.yaml`: initContainer `pull`
+      (ollama image: `ollama serve &` → wait `/api/tags` → `ollama pull $LLM_MODEL`),
+      main container `upload` (pinned `amazon/aws-cli`, `aws s3 sync` up),
+      shared emptyDir, `restartPolicy: OnFailure`, `envFrom` `ollama-s3`
+- [ ] Edit `apps/manifests/llm/ollama.yaml.tpl`: volume → `emptyDir: {}`
+      (disk-backed), add `restore-models` initContainer (aws-cli `aws s3 sync`
+      down, no `--delete`), strip `ollama pull` from main command → `ollama serve`,
+      `strategy: RollingUpdate` (`maxUnavailable: 0`), `envFrom` `ollama-s3`
+
+### Phase 4 — `apps/deploy-llm.sh`
+- [ ] Delete the PVC creation + `OLLAMA_STORAGE_VALUE` block (~lines 56–80) and the
+      template placeholder
+- [ ] Create `ollama-s3` Secret from `LLM_S3_*`, wrapped in `mt_apply`
+- [ ] Gate + apply seed Job non-blocking: local `aws s3 ls` check → apply only if
+      model manifest absent; no `kubectl wait`
+- [ ] Keep `/api/tags` post-deploy verification
+
+### Phase 5 — Deploy + verify (dev → prod/prod-eu)
+- [ ] `deploy_infra -e dev` → seed Job runs once, objects under `ollama/blobs/` +
+      `ollama/manifests/`
+- [ ] `kubectl rollout restart deploy/ollama -n infra-llm` → ready in seconds, model
+      in `/api/tags`
+- [ ] `kubectl get pvc,pv -n infra-llm` empty; no deploy blocking on the model pull
+- [ ] Replicate to prod/prod-eu (config + `deploy_infra`) with the same checks
