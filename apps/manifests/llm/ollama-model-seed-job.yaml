@@ -1,0 +1,61 @@
+# One-shot Job that populates the S3 model cache from ollama.com.
+#
+# Runs once per bucket lifetime (gated in deploy-llm.sh): the initContainer
+# pulls the model into a shared emptyDir, then the main container syncs it up
+# to s3://bucket/prefix/. Non-blocking — deploy_infra never waits on the pull.
+# To re-seed a wiped bucket, delete this Job and re-run deploy-llm.sh.
+#
+# Templated via envsubst (LLM_MODEL, LLM_S3_BUCKET, LLM_S3_PREFIX).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ollama-model-seed
+  namespace: infra-llm
+  labels:
+    app.kubernetes.io/name: ollama-model-seed
+    app.kubernetes.io/managed-by: mothertree
+    mothertree/component: llm
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: ollama-model-seed
+        mothertree/component: llm
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: pull
+          image: ollama/ollama:0.5.7
+          command:
+            - /bin/sh
+            - -c
+            - |
+              ollama serve &
+              sleep 3
+              until ollama list >/dev/null 2>&1; do sleep 1; done
+              ollama pull ${LLM_MODEL} 2>&1 | tail -5
+              wait
+          env:
+            - name: LLM_MODEL
+              value: "${LLM_MODEL}"
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /root/.ollama
+      containers:
+        - name: upload
+          image: amazon/aws-cli:2.22.35
+          command:
+            - /bin/sh
+            - -c
+            - |
+              aws s3 sync --no-progress /root/.ollama s3://${LLM_S3_BUCKET}/${LLM_S3_PREFIX}
+          envFrom:
+            - secretRef:
+                name: ollama-s3
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /root/.ollama
+      volumes:
+        - name: ollama-models
+          emptyDir: {}

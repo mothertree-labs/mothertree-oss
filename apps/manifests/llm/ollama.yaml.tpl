@@ -13,25 +13,42 @@ spec:
     matchLabels:
       app: ollama
   strategy:
-    type: Recreate
+    # No PVC volume lock anymore (emptyDir) — RollingUpdate with zero downtime.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   template:
     metadata:
       labels:
         app: ollama
         mothertree/component: llm
     spec:
-      containers:
-        - name: ollama
-          image: ollama/ollama:0.5.7
+      initContainers:
+        - name: restore-models
+          # Restore model weights from the S3 model cache into the shared
+          # emptyDir before Ollama starts. Idempotent (content-addressed blobs,
+          # no --delete). No-op when the bucket is empty (first-ever deploy) —
+          # Ollama then lazy-pulls on first request while the seed Job populates
+          # the bucket in the background.
+          image: amazon/aws-cli:2.22.35
           command:
             - /bin/sh
             - -c
             - |
-              ollama serve &
-              sleep 3
-              until ollama list >/dev/null 2>&1; do sleep 1; done
-              ollama pull ${LLM_MODEL} 2>&1 | tail -5
-              wait
+              aws s3 sync --no-progress s3://${LLM_S3_BUCKET}/${LLM_S3_PREFIX}/ /root/.ollama/
+          envFrom:
+            - secretRef:
+                name: ollama-s3
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /root/.ollama
+      containers:
+        - name: ollama
+          image: ollama/ollama:0.5.7
+          command:
+            - ollama
+            - serve
           ports:
             - name: http
               containerPort: 11434
@@ -69,7 +86,10 @@ spec:
 
       volumes:
         - name: ollama-models
-          ${OLLAMA_STORAGE_VALUE}
+          # Disk-backed (NOT medium: Memory) — the multi-GB model must not
+          # count against pod memory. Ephemeral cache; the source of truth is
+          # the S3 model cache, restored by the initContainer above.
+          emptyDir: {}
 
 ---
 apiVersion: v1

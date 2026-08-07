@@ -148,6 +148,17 @@ _mt_infra_load_env_config() {
     LLM_MODEL=$(yq '.llm.model // "llama3.2:1b"' "$infra_config")
     export LLM_MODEL
 
+    # LLM S3 model cache — non-secret parts (bucket/endpoint/region/prefix).
+    # Ollama weights live in Linode Object Storage and are restored into an
+    # emptyDir by the deployment's initContainer instead of being pulled over
+    # the internet on every pod start (s3-model-cache.md). Required inputs are
+    # validated in deploy-llm.sh — an empty value here must not silently skip.
+    LLM_S3_BUCKET=$(yq '.llm.s3_bucket // ""' "$infra_config")
+    LLM_S3_ENDPOINT=$(yq '.llm.s3_endpoint // ""' "$infra_config")
+    LLM_S3_REGION=$(yq '.llm.s3_region // ""' "$infra_config")
+    LLM_S3_PREFIX=$(yq '.llm.s3_prefix // "ollama"' "$infra_config")
+    export LLM_S3_BUCKET LLM_S3_ENDPOINT LLM_S3_REGION LLM_S3_PREFIX
+
     # Cross-cluster metrics federation
     MT_METRICS_FED_ROLE=$(yq '.metrics_federation.role // ""' "$infra_config")
     MT_METRICS_FED_SOURCE_IP=$(yq '.metrics_federation.source_mesh_ip // ""' "$infra_config")
@@ -419,6 +430,19 @@ _mt_infra_load_shared_secrets() {
   [ -n "$_pgb_cipher" ] && [ "$_pgb_cipher" != "null" ] && export PGBACKREST_CIPHER_PASS="$_pgb_cipher"
   if [ -n "${PGBACKREST_S3_KEY:-}" ]; then
     echo "[INFO] pgBackRest S3 credentials loaded from infra tenant secrets"
+  fi
+
+  # LLM S3 model cache — credentials (scoped Linode Object Storage key).
+  # Required: the Ollama restore initContainer and seed Job both need these, so
+  # a missing value is a hard error (never silently skip — see CLAUDE.md).
+  local _llm_s3_key _llm_s3_secret
+  _llm_s3_key=$(yq '.llm.s3_key // ""' "$_infra_secrets")
+  _llm_s3_secret=$(yq '.llm.s3_secret // ""' "$_infra_secrets")
+  if [ -n "$_llm_s3_key" ] && [ "$_llm_s3_key" != "null" ] && \
+     [ -n "$_llm_s3_secret" ] && [ "$_llm_s3_secret" != "null" ]; then
+    export LLM_S3_KEY="$_llm_s3_key"
+    export LLM_S3_SECRET="$_llm_s3_secret"
+    echo "[INFO] LLM S3 credentials loaded from infra tenant secrets"
   fi
 
   # PostgreSQL monitoring exporter password

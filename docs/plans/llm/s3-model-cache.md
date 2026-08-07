@@ -263,40 +263,53 @@ Decisions locked: dedicated bucket + key, Terraform provisioning for prod/prod-e
       tenant secrets as `llm.s3_secret` (Phase 1)
 
 ### Phase 1 — Infra config + secrets (dev/prod/prod-eu)
-- [ ] Add `llm:` block to `config/platform/infra/{dev,prod,prod-eu}.config.yaml`:
+- [x] Add `llm:` block to `config/platform/infra/{dev,prod,prod-eu}.config.yaml`:
       `model`, `s3_bucket`, `s3_endpoint`, `s3_region`, `s3_prefix: ollama`
       (us-lax-1 for dev/prod, nl-ams-1 for prod-eu)
 - [ ] Add `llm.s3_key` / `llm.s3_secret` to the infra tenant secrets for
-      prod/prod-eu (dev already done in Phase 0)
+      prod/prod-eu (dev already done in Phase 0). Blocked on Phase 0b apply —
+      values come from `terraform output -raw llm_models_secret_key` after
+      `manage_infra -e prod/prod-eu --phase1`, then the vault must be rebuilt
+      (`scripts/build-deploy-vaults.sh prod/prod-eu`). Until then, deploy-llm.sh
+      fail-fasts on prod/prod-eu (loud warning, no cluster changes).
 
 ### Phase 2 — `scripts/lib/infra-config.sh`
-- [ ] Config loader (~line 149, after `LLM_MODEL`): load
+- [x] Config loader (~line 149, after `LLM_MODEL`): load
       `LLM_S3_BUCKET` / `LLM_S3_ENDPOINT` / `LLM_S3_REGION` / `LLM_S3_PREFIX`
-- [ ] Secrets loader (~line 422, after pgbackrest secrets): load
-      `LLM_S3_KEY` / `LLM_S3_SECRET`, fail-fast if unset
+- [x] Secrets loader (~line 422, after pgbackrest secrets): load
+      `LLM_S3_KEY` / `LLM_S3_SECRET`; deploy-llm.sh validates them fail-fast
+      before any cluster mutation (the shared loader stays lenient so unrelated
+      infra deploys never break)
 
 ### Phase 3 — Manifests
-- [ ] New `apps/manifests/llm/ollama-model-seed-job.yaml`: initContainer `pull`
+- [x] New `apps/manifests/llm/ollama-model-seed-job.yaml`: initContainer `pull`
       (ollama image: `ollama serve &` → wait `/api/tags` → `ollama pull $LLM_MODEL`),
       main container `upload` (pinned `amazon/aws-cli`, `aws s3 sync` up),
       shared emptyDir, `restartPolicy: OnFailure`, `envFrom` `ollama-s3`
-- [ ] Edit `apps/manifests/llm/ollama.yaml.tpl`: volume → `emptyDir: {}`
+- [x] Edit `apps/manifests/llm/ollama.yaml.tpl`: volume → `emptyDir: {}`
       (disk-backed), add `restore-models` initContainer (aws-cli `aws s3 sync`
       down, no `--delete`), strip `ollama pull` from main command → `ollama serve`,
       `strategy: RollingUpdate` (`maxUnavailable: 0`), `envFrom` `ollama-s3`
 
 ### Phase 4 — `apps/deploy-llm.sh`
-- [ ] Delete the PVC creation + `OLLAMA_STORAGE_VALUE` block (~lines 56–80) and the
+- [x] Delete the PVC creation + `OLLAMA_STORAGE_VALUE` block and the
       template placeholder
-- [ ] Create `ollama-s3` Secret from `LLM_S3_*`, wrapped in `mt_apply`
-- [ ] Gate + apply seed Job non-blocking: local `aws s3 ls` check → apply only if
-      model manifest absent; no `kubectl wait`
-- [ ] Keep `/api/tags` post-deploy verification
+- [x] Create `ollama-s3` Secret from `LLM_S3_*`, wrapped in `mt_apply`
+- [x] Gate + apply seed Job non-blocking: no `kubectl wait`. The bucket check
+      uses a throwaway `kubectl run` pod with the pinned aws-cli image
+      (no local aws CLI dependency) — model manifest present in the bucket ⇒
+      skip; Job already applied ⇒ skip; otherwise apply. A failed check
+      degrades to applying the (idempotent) seed Job.
+- [x] Keep `/api/tags` post-deploy verification
 
 ### Phase 5 — Deploy + verify (dev → prod/prod-eu)
-- [ ] `deploy_infra -e dev` → seed Job runs once, objects under `ollama/blobs/` +
-      `ollama/manifests/`
-- [ ] `kubectl rollout restart deploy/ollama -n infra-llm` → ready in seconds, model
-      in `/api/tags`
-- [ ] `kubectl get pvc,pv -n infra-llm` empty; no deploy blocking on the model pull
-- [ ] Replicate to prod/prod-eu (config + `deploy_infra`) with the same checks
+- [x] Bucket seeded: `ollama/blobs/` + `ollama/manifests/` present in
+      `mothertree-models` (seeded by the validation seed Job, 2026-08-07). A
+      full `deploy_infra -e dev` run with the repo code is still pending — the
+      gate will skip re-seeding since the manifest is already in the bucket.
+- [x] `kubectl rollout restart deploy/ollama -n infra-llm` → ready in **31s**
+      (validated, hand-applied), model listed in `/api/tags`
+- [x] `kubectl get pvc,pv -n infra-llm` empty (validated); no deploy blocking on
+      the model pull
+- [ ] Replicate to prod/prod-eu (Phase 0b apply → add `llm.s3_*` to vault →
+      `deploy_infra`) with the same checks
