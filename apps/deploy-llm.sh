@@ -97,23 +97,57 @@ kubectl rollout status deployment/ollama -n infra-llm --timeout=300s || {
 # never `kubectl wait` on it. Skip entirely when the bucket is already seeded.
 print_status "Checking whether the model is already in the S3 model cache..."
 # Check the model manifest (content-addressed, so presence == seeded). Uses the
-# pinned aws-cli image via a throwaway pod — no local aws CLI dependency.
+# pinned aws-cli image via a throwaway pod that references the ollama-s3 Secret
+# through envFrom — the S3 credentials never touch argv or the pod spec (etcd).
+# No local aws CLI dependency.
 _mt_model_manifest="s3://${LLM_S3_BUCKET}/${LLM_S3_PREFIX}/models/manifests/registry.ollama.ai/library/${LLM_MODEL%:*}/${LLM_MODEL#*:}"
 if kubectl get job ollama-model-seed -n infra-llm >/dev/null 2>&1; then
   print_status "Seed Job already applied — skipping (delete the Job to re-seed)."
-elif kubectl run "ollama-seed-check-$$" -n infra-llm --rm -i --restart=Never \
-    --image=amazon/aws-cli:2.22.35 \
-    --env="AWS_ACCESS_KEY_ID=${LLM_S3_KEY}" \
-    --env="AWS_SECRET_ACCESS_KEY=${LLM_S3_SECRET}" \
-    --env="AWS_ENDPOINT_URL=https://${LLM_S3_ENDPOINT}" \
-    --env="AWS_REGION=${LLM_S3_REGION}" \
-    --command -- aws s3 ls "$_mt_model_manifest" >/dev/null 2>&1; then
-  print_status "Model manifest already in S3 cache — skipping seed Job."
 else
-  print_status "Bucket not seeded — applying seed Job (populates S3 in the background)..."
-  export LLM_MODEL
-  kubectl apply -f <(envsubst < "${MANIFESTS_DIR}/ollama-model-seed-job.yaml")
-  print_status "Seed Job applied — deploy continues without waiting for the model pull."
+  _mt_check_pod="ollama-seed-check-$$"
+  _mt_seed_manifest=$(mktemp) || exit 1
+  cat > "${_mt_seed_manifest}" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${_mt_check_pod}
+  namespace: infra-llm
+spec:
+  restartPolicy: Never
+  containers:
+    - name: check
+      image: amazon/aws-cli:2.22.35
+      args: ["s3", "ls", "${_mt_model_manifest}"]
+      envFrom:
+        - secretRef:
+            name: ollama-s3
+EOF
+  if kubectl create -f "${_mt_seed_manifest}" >/dev/null 2>&1; then
+    # Poll briefly for a terminal phase (Succeeded or Failed) — accept both.
+    _mt_phase=""
+    for _ in $(seq 1 30); do
+      _mt_phase="$(kubectl get pod "${_mt_check_pod}" -n infra-llm -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+      if [[ "${_mt_phase}" == "Succeeded" || "${_mt_phase}" == "Failed" ]]; then
+        break
+      fi
+      sleep 2
+    done
+    if [[ "${_mt_phase}" == "Succeeded" ]]; then
+      print_status "Model manifest already in S3 cache — skipping seed Job."
+    else
+      print_status "Bucket not seeded — applying seed Job (populates S3 in the background)..."
+      export LLM_MODEL
+      kubectl apply -f <(envsubst < "${MANIFESTS_DIR}/ollama-model-seed-job.yaml")
+      print_status "Seed Job applied — deploy continues without waiting for the model pull."
+    fi
+  else
+    print_status "Could not create seed-check pod — applying seed Job (idempotent) instead."
+    export LLM_MODEL
+    kubectl apply -f <(envsubst < "${MANIFESTS_DIR}/ollama-model-seed-job.yaml")
+    print_status "Seed Job applied — deploy continues without waiting for the model pull."
+  fi
+  rm -f "${_mt_seed_manifest}"
+  kubectl delete pod "${_mt_check_pod}" -n infra-llm --wait=false >/dev/null 2>&1 || true
 fi
 
 print_status "Verifying pods..."

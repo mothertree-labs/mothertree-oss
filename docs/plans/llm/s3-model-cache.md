@@ -235,7 +235,7 @@ Decisions locked: dedicated bucket + key, Terraform provisioning for prod/prod-e
 ### Phase 0 — Provision (dev) ✅ DONE
 - [x] Create bucket `mothertree-models` in `us-lax-1` (private ACL,
       `mothertree-models.us-lax-1.linodeobjects.com`) via Linode API
-- [x] Create dedicated limited key `mothertree-llm-dev` (id 4840464), scoped
+- [x] Create dedicated limited key `mothertree-llm-dev` (id `<key-id>`), scoped
       `read_write` to the `mothertree-models` bucket only
 - [x] Persist key in `config/tenants/mothertree/dev.secrets.yaml` under
       `llm.s3_key` / `llm.s3_secret` (gitignored source for `build-deploy-vaults.sh`)
