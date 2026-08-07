@@ -34,7 +34,8 @@ set -euo pipefail
 #
 # Prerequisites:
 #   - ansible-vault, tar installed
-#   - Full build: kubeconfig.<env>.yaml at repo root,
+#   - Full build: kubeconfig.<env>.yaml at repo root (prod / prod-eu only;
+#                 dev fetches its kubeconfig live from the Linode LKE API),
 #                 config/platform/infra/terraform-outputs.<env>.env,
 #                 config/tenants/<tenant>/<env>.secrets.yaml,
 #                 and a password source (LastPass login or MT_VAULT_PASSWORD*)
@@ -310,13 +311,22 @@ for env in "${ENVS[@]}"; do
 
   ERRORS=()
 
-  # 1. Kubeconfig
-  KUBECONFIG_SRC="$REPO_ROOT/kubeconfig.${env}.yaml"
-  if [[ -f "$KUBECONFIG_SRC" ]]; then
-    cp "$KUBECONFIG_SRC" "$STAGING/kubeconfig.yaml"
-    print_status "  Added kubeconfig.yaml"
+  # 1. Kubeconfig (prod / prod-eu only)
+  # Dev does NOT ship a kubeconfig in the vault: CI refetches it live from the
+  # Linode LKE API on every dev step (ci_fetch_dev_kubeconfig in ci-lib.sh), and
+  # the ephemeral on-demand dev cluster makes any baked-in copy stale within a
+  # reaper cycle. Staging one here would silently re-add it on the next full
+  # rebuild. Prod / prod-eu have stable clusters and still rely on the vault copy.
+  if [[ "$env" == "dev" ]]; then
+    print_status "  Skipping kubeconfig (dev fetches it live from the Linode LKE API)"
   else
-    ERRORS+=("Kubeconfig not found: $KUBECONFIG_SRC")
+    KUBECONFIG_SRC="$REPO_ROOT/kubeconfig.${env}.yaml"
+    if [[ -f "$KUBECONFIG_SRC" ]]; then
+      cp "$KUBECONFIG_SRC" "$STAGING/kubeconfig.yaml"
+      print_status "  Added kubeconfig.yaml"
+    else
+      ERRORS+=("Kubeconfig not found: $KUBECONFIG_SRC")
+    fi
   fi
 
   # 2. Terraform outputs

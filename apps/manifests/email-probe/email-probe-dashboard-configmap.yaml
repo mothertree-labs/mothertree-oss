@@ -40,7 +40,7 @@ data:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "thresholds" },
@@ -75,7 +75,7 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "email_probe_up{tenant=~\"$tenant\"}",
               "legendFormat": "{{tenant}}",
               "refId": "A"
@@ -85,7 +85,7 @@ data:
           "type": "stat"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "thresholds" },
@@ -113,7 +113,7 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "email_probe_roundtrip_seconds{tenant=~\"$tenant\"}",
               "legendFormat": "{{tenant}}",
               "refId": "A"
@@ -123,7 +123,7 @@ data:
           "type": "stat"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "thresholds" },
@@ -151,7 +151,7 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "time() - email_probe_last_success_timestamp{tenant=~\"$tenant\"}",
               "legendFormat": "{{tenant}}",
               "refId": "A"
@@ -161,7 +161,7 @@ data:
           "type": "stat"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "thresholds" },
@@ -189,7 +189,7 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "email_probe_send_seconds{tenant=~\"$tenant\"}",
               "legendFormat": "{{tenant}}",
               "refId": "A"
@@ -207,7 +207,7 @@ data:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -247,7 +247,7 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "email_probe_roundtrip_seconds{tenant=~\"$tenant\"}",
               "legendFormat": "{{tenant}} roundtrip",
               "refId": "A"
@@ -257,7 +257,7 @@ data:
           "type": "timeseries"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -303,7 +303,7 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "email_probe_consecutive_failures{tenant=~\"$tenant\"}",
               "legendFormat": "{{tenant}} failures",
               "refId": "A"
@@ -321,7 +321,7 @@ data:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -361,13 +361,13 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "email_probe_inbound_total_seconds{tenant=~\"$tenant\"}",
               "legendFormat": "{{tenant}} total",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "email_probe_inbound_infra_seconds{tenant=~\"$tenant\"}",
               "legendFormat": "{{tenant}} MT infra",
               "refId": "B"
@@ -377,7 +377,7 @@ data:
           "type": "timeseries"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "thresholds" },
@@ -405,7 +405,7 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "email_probe_inbound_total_seconds{tenant=~\"$tenant\"}",
               "legendFormat": "{{tenant}}",
               "refId": "A"
@@ -415,7 +415,7 @@ data:
           "type": "stat"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "thresholds" },
@@ -443,7 +443,7 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "email_probe_inbound_infra_seconds{tenant=~\"$tenant\"}",
               "legendFormat": "{{tenant}}",
               "refId": "A"
@@ -461,7 +461,7 @@ data:
           "type": "row"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -506,13 +506,13 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "increase(email_probe_send_total{tenant=~\"$tenant\"}[1h])",
               "legendFormat": "{{tenant}} sends",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "increase(email_probe_send_errors_total{tenant=~\"$tenant\"}[1h])",
               "legendFormat": "{{tenant}} send errors",
               "refId": "B"
@@ -522,7 +522,7 @@ data:
           "type": "timeseries"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": {
             "defaults": {
               "color": { "mode": "palette-classic" },
@@ -567,13 +567,13 @@ data:
           },
           "targets": [
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "increase(email_probe_roundtrip_total{tenant=~\"$tenant\"}[1h])",
               "legendFormat": "{{tenant}} roundtrips",
               "refId": "A"
             },
             {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
               "expr": "increase(email_probe_roundtrip_errors_total{tenant=~\"$tenant\"}[1h])",
               "legendFormat": "{{tenant}} roundtrip errors",
               "refId": "B"
@@ -595,8 +595,22 @@ data:
       "templating": {
         "list": [
           {
+            "current": { "selected": false, "text": "Prometheus", "value": "prometheus" },
+            "hide": 0,
+            "includeAll": false,
+            "label": "Data source",
+            "multi": false,
+            "name": "datasource",
+            "options": [],
+            "query": "prometheus",
+            "refresh": 1,
+            "regex": "",
+            "skipUrlSync": false,
+            "type": "datasource"
+          },
+          {
             "current": { "selected": false, "text": "All", "value": "$__all" },
-            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
             "definition": "label_values(email_probe_up, tenant)",
             "includeAll": true,
             "multi": true,

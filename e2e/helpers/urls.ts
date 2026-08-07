@@ -17,5 +17,6 @@ export const urls = {
   office: `https://office.${baseDomain}`,
   webmail: `https://webmail.${baseDomain}`,
   keycloak: `https://auth.${baseDomain}`,
+  llm: `https://llm.${baseDomain}`,
   baseDomain,
 };

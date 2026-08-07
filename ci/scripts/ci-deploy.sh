@@ -239,6 +239,26 @@ else
   fi
   TENANTS=("$E2E_TENANT")
   echo "Leased tenant for dev deploy: $E2E_TENANT"
+
+  # When prepping, ensure ALL tenants get their infra resources
+  # (TLS certs, Keycloak realms, namespaces) so per-app deploy
+  # steps work regardless of which pool is leased.
+  if [[ "$PREP_ONLY" == "true" ]]; then
+    for config_file in "$REPO_ROOT/config/tenants"/*/"${MT_ENV}.config.yaml"; do
+      [[ -f "$config_file" ]] || continue
+      tenant=$(basename "$(dirname "$config_file")")
+      [[ "$tenant" == ".example" ]] && continue
+      if [[ "$(yq '.tenant.infra_only // false' "$config_file")" == "true" ]]; then
+        continue
+      fi
+      # Deduplicate: skip if already in TENANTS (the pool tenant)
+      already=false
+      for t in "${TENANTS[@]}"; do [[ "$t" == "$tenant" ]] && already=true && break; done
+      if [ "$already" = "true" ]; then continue; fi
+      TENANTS+=("$tenant")
+      echo "Adding non-pool tenant to prep phase: $tenant"
+    done
+  fi
 fi
 
 if [[ ${#TENANTS[@]} -eq 0 ]]; then
@@ -419,8 +439,9 @@ for tenant in "${TENANTS[@]}"; do
     echo "=== FAILED: Tenant $tenant deploy failed ==="
     FAILED_TENANTS+=("$tenant")
     # Continue deploying remaining tenants (prod multi-tenant resilience)
-    if [[ "$ALL_TENANTS" != "true" ]]; then
-      exit 1  # For dev (single tenant), fail immediately
+    if [[ "$ALL_TENANTS" != "true" ]] && [[ "$PREP_ONLY" != "true" ]]; then
+      exit 1  # For dev app deploy (single tenant), fail immediately
+              # For prep-only, continue so infra is created for remaining tenants
     fi
   fi
 done

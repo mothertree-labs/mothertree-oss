@@ -227,6 +227,15 @@ spec:
           value: "elastic"
         - name: ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE
           value: "25M"
+        # DB coordinates for the readiness probe's schema check (non-secret — the
+        # password stays in the Secret above). These mirror the db_dsnw the
+        # ConfigMap builds, so the probe connects exactly like the app does.
+        - name: ROUNDCUBE_DB_HOST
+          value: "${PG_HOST}"
+        - name: ROUNDCUBE_DB_NAME
+          value: "${ROUNDCUBE_DB_NAME}"
+        - name: ROUNDCUBE_DB_USER
+          value: "${ROUNDCUBE_DB_USER}"
         volumeMounts:
         - name: config
           mountPath: /var/roundcube/config/custom.config.php
@@ -251,12 +260,35 @@ spec:
             port: 80
           initialDelaySeconds: 30
           periodSeconds: 30
+        # Readiness gates on the DB SCHEMA, not just HTTP. A bare GET / returns 200
+        # even when roundcube_<tenant> has no `session` table (empty/never-built
+        # schema), so a schema-less pod used to pass as healthy and only surfaced as
+        # a webmail-login hang in e2e (#1571/#1586). This PDO check connects as the
+        # roundcube DB user (the same path the app uses) and probes the `session`
+        # table. It reports NotReady ONLY on undefined_table (SQLSTATE 42P01 = schema
+        # missing): a connection/auth error (PgBouncer down, bad creds — different
+        # SQLSTATE classes, never 42P01) exits 0 (Ready), so a brief DB/PgBouncer
+        # blip can't depool webmail. A SUSTAINED session-store hang (e.g. PgBouncer
+        # pool saturation) does depool after failureThreshold×period (~60s) — by
+        # design: webmail login is non-functional then anyway, and the pod re-pools
+        # within one period on recovery. Liveness stays HTTP, so a DB issue never
+        # crashloops the pod. $-prefixed names are PHP vars — the explicit-list
+        # envsubst in deploy-roundcube.sh leaves them untouched (only ${...} of
+        # listed vars is substituted).
         readinessProbe:
-          httpGet:
-            path: /
-            port: 80
-          initialDelaySeconds: 10
-          periodSeconds: 10
+          exec:
+            command:
+            - php
+            - -r
+            - |
+              $h=getenv('ROUNDCUBE_DB_HOST');$d=getenv('ROUNDCUBE_DB_NAME');
+              $u=getenv('ROUNDCUBE_DB_USER');$p=getenv('ROUNDCUBE_DB_PASSWORD');
+              try{$dbh=new PDO("pgsql:host=$h;dbname=$d;connect_timeout=3",$u,$p,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);$dbh->query('SELECT 1 FROM session LIMIT 1');exit(0);}
+              catch(PDOException $e){fwrite(STDERR,'rc-readiness: SQLSTATE '.$e->getCode());exit($e->getCode()==='42P01'?1:0);}
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
       volumes:
       - name: config
         configMap:

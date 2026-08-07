@@ -309,6 +309,36 @@ else
     exit 1
 fi
 
+# ── SSO session-longevity drift gate (regression guard) ──────────────────────
+# The realm's SSO session timeouts have silently regressed to short values more
+# than once, bouncing users (Nextcloud especially, since it uses an ONLINE OIDC
+# session with no offline_access) to the login screen roughly once a day. The
+# template deliberately sets long base sessions; here we read the LIVE realm back
+# and FAIL the deploy if Keycloak did not actually apply them — a deterministic
+# anti-drift check, same spirit as the post-deploy roundcube schema gate (#477).
+# Expected values are read from the rendered template itself so this gate is a
+# single source of truth and can never drift from the config it guards.
+print_status "Verifying realm SSO session timeouts were applied (drift gate)..."
+EXPECTED_SSO_IDLE=$(jq -r '.ssoSessionIdleTimeout // empty' "$TEMP_CONFIG")
+EXPECTED_SSO_MAX=$(jq -r '.ssoSessionMaxLifespan // empty' "$TEMP_CONFIG")
+case "$EXPECTED_SSO_IDLE" in ''|*[!0-9]*) print_error "Template ssoSessionIdleTimeout is not numeric ('$EXPECTED_SSO_IDLE') — cannot verify"; exit 1 ;; esac
+case "$EXPECTED_SSO_MAX"  in ''|*[!0-9]*) print_error "Template ssoSessionMaxLifespan is not numeric ('$EXPECTED_SSO_MAX') — cannot verify"; exit 1 ;; esac
+REALM_LIVE=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM") || exit 1
+LIVE_SSO_IDLE=$(echo "$REALM_LIVE" | jq -r '.ssoSessionIdleTimeout // empty')
+LIVE_SSO_MAX=$(echo "$REALM_LIVE" | jq -r '.ssoSessionMaxLifespan // empty')
+# Coerce a missing/non-numeric live value to -1 so it fails the check (fail-fast).
+case "$LIVE_SSO_IDLE" in ''|*[!0-9]*) LIVE_SSO_IDLE=-1 ;; esac
+case "$LIVE_SSO_MAX"  in ''|*[!0-9]*) LIVE_SSO_MAX=-1 ;; esac
+if [ "$LIVE_SSO_IDLE" -lt "$EXPECTED_SSO_IDLE" ] || [ "$LIVE_SSO_MAX" -lt "$EXPECTED_SSO_MAX" ]; then
+    print_error "Realm '$TENANT_KEYCLOAK_REALM' SSO session timeouts did not apply as intended:"
+    print_error "  ssoSessionIdleTimeout=${LIVE_SSO_IDLE}s  (want >= ${EXPECTED_SSO_IDLE}s)"
+    print_error "  ssoSessionMaxLifespan=${LIVE_SSO_MAX}s  (want >= ${EXPECTED_SSO_MAX}s)"
+    print_error "Users would be logged out prematurely; aborting so the regression cannot ship."
+    print_error "See ssoSessionIdleTimeout/ssoSessionMaxLifespan in docs/keycloak-realm-config.json.tpl."
+    exit 1
+fi
+print_success "Realm SSO session timeouts verified (idle=${LIVE_SSO_IDLE}s, max=${LIVE_SSO_MAX}s)"
+
 # Disable brute force protection in dev — CI runs 10 parallel E2E shards that
 # authenticate the same test user simultaneously, triggering Keycloak's quick
 # login check and temporarily disabling the account.

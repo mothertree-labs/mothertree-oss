@@ -27,6 +27,8 @@ steps:
         from_secret: e2e_pool1_tenant
       E2E_POOL1_BASE_DOMAIN:
         from_secret: e2e_pool1_base_domain
+      E2E_POOL1_KC_REALM:
+        from_secret: e2e_pool1_kc_realm
       E2E_POOL1_STALWART_ADMIN_PASSWORD:
         from_secret: e2e_pool1_stalwart_admin_password
       E2E_POOL1_STALWART_IMAP_HOST:
@@ -39,6 +41,8 @@ steps:
         from_secret: e2e_pool2_tenant
       E2E_POOL2_BASE_DOMAIN:
         from_secret: e2e_pool2_base_domain
+      E2E_POOL2_KC_REALM:
+        from_secret: e2e_pool2_kc_realm
       E2E_POOL2_STALWART_ADMIN_PASSWORD:
         from_secret: e2e_pool2_stalwart_admin_password
       E2E_POOL2_STALWART_IMAP_HOST:
@@ -72,6 +76,13 @@ steps:
         from_secret: e2e_pool1_tenant
       E2E_POOL2_TENANT:
         from_secret: e2e_pool2_tenant
+      # Declared so Woodpecker MASKS the echo-group address if it surfaces in the
+      # Stalwart mail round-trip grep (outbound to=<echo group>). The diagnostics
+      # script does not otherwise read these — they are here for log redaction.
+      E2E_POOL1_ECHO_GROUP_ADDRESS:
+        from_secret: e2e_pool1_echo_group_address
+      E2E_POOL2_ECHO_GROUP_ADDRESS:
+        from_secret: e2e_pool2_echo_group_address
       E2E_SHARD: "10/10"
     commands:
       - ci/scripts/ci-e2e-diagnostics.sh

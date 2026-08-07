@@ -354,6 +354,97 @@ mt_psql() {
         --command -- psql -h pgbouncer -U postgres -v ON_ERROR_STOP=1 "$@" 2>/dev/null
 }
 
+# Verify a tenant database is reachable AS THE APP USER through EVERY PgBouncer
+# pod — and, as a side effect, force PgBouncer to heal a poisoned login cache
+# for that pool.
+#
+# Why this exists (CI pipeline #1746): PgBouncer pools are keyed on
+# (database, user). While a database is dropped (dev drop/recreate windows:
+# destroy-side DB sweep, dev-bringup orphan guard, split-brain recovery), any
+# pool that attempts a server login records the failure and serves clients a
+# cached error — "server login has been failing, cached error: database ...
+# does not exist (server_login_retry)". The cache only clears on the next
+# SUCCESSFUL server login for that exact pool. On top of that there are two
+# PgBouncer replicas behind one ClusterIP: kube-proxy picks a backend per
+# connection, so a single probe through the Service can hit the healthy pod
+# while the app keeps landing on the poisoned one (in #1746 nextcloud-install
+# failed with the cached error for 2.5 minutes, seconds AFTER db-init succeeded
+# through the very same Service). Hence: probe each pod IP, as the app user.
+#
+# Every attempt that lands outside PgBouncer's server_login_retry window
+# triggers a real server login; once the DB exists that login succeeds and the
+# pool is healed for all subsequent clients (app pods, install Jobs, readiness
+# probes). So this gate both VERIFIES and REPAIRS. If a pod still cannot serve
+# the pool within the deadline, we fail loudly here — naming the pod — instead
+# of letting an install Job or readiness probe fail three steps later with a
+# mystery SQLSTATE.
+#
+# Usage: mt_pgbouncer_verify_db <pod_ns> <db> <user> <password> [deadline_secs]
+#   pod_ns        namespace to run the throwaway psql pod in (the app's ns)
+#   deadline_secs per-pod deadline before declaring the pod poisoned (default 90)
+mt_pgbouncer_verify_db() {
+    local pod_ns="$1" db="$2" db_user="$3" db_password="$4" deadline="${5:-90}"
+    local ns="${NS_DB:-infra-db}"
+    : "${pod_ns:?mt_pgbouncer_verify_db: pod_ns required}"
+    : "${db:?mt_pgbouncer_verify_db: db required}"
+    : "${db_user:?mt_pgbouncer_verify_db: db_user required}"
+    : "${db_password:?mt_pgbouncer_verify_db: db_password required}"
+
+    local pod_ips
+    pod_ips=$(kubectl get pods -n "$ns" -l app=pgbouncer \
+        --field-selector=status.phase=Running \
+        -o jsonpath='{range .items[*]}{.status.podIP}{" "}{end}' 2>/dev/null | xargs echo -n || true)
+    if [ -z "$pod_ips" ]; then
+        print_error "mt_pgbouncer_verify_db: no Running PgBouncer pods found in $ns"
+        return 1
+    fi
+
+    print_status "Verifying ${db} is reachable as ${db_user} via every PgBouncer pod (${pod_ips})..."
+    # Single throwaway pod loops over all PgBouncer pod IPs so we pay pod
+    # startup once. Attempts are spaced >server_login_retry (3s) apart so each
+    # one can trigger a fresh real server login rather than the cached error.
+    local out rc=0
+    out=$(kubectl run "pgb-verify-$$-${RANDOM}" --rm -i --restart=Never \
+        --image=postgres:15-alpine --quiet -n "$pod_ns" --pod-running-timeout=240s \
+        --env "PGPASSWORD=$db_password" \
+        --env "PGCONNECT_TIMEOUT=5" \
+        --env "PGB_IPS=$pod_ips" \
+        --env "PGB_DB=$db" \
+        --env "PGB_USER=$db_user" \
+        --env "PGB_DEADLINE=$deadline" \
+        -- sh -c '
+            rc=0
+            for ip in $PGB_IPS; do
+                start=$(date +%s); ok=""
+                while : ; do
+                    if psql -h "$ip" -U "$PGB_USER" -d "$PGB_DB" -tAc "SELECT 1" >/dev/null 2>&1; then
+                        ok=1; break
+                    fi
+                    now=$(date +%s)
+                    [ $((now - start)) -ge "$PGB_DEADLINE" ] && break
+                    sleep 4
+                done
+                if [ -n "$ok" ]; then
+                    echo "PGB_VERIFY_OK ${ip} ($(( $(date +%s) - start ))s)"
+                else
+                    echo "PGB_VERIFY_FAIL ${ip} (deadline ${PGB_DEADLINE}s)"
+                    rc=1
+                fi
+            done
+            exit $rc
+        ' 2>&1) || rc=1
+    printf '%s\n' "$out" | sed 's/^/    /'
+    if [ "$rc" -ne 0 ]; then
+        print_error "PgBouncer pool for (${db}, ${db_user}) is not serving on at least one pod."
+        print_error "That pod is likely stuck on a cached login failure from a drop/recreate window."
+        print_error "Inspect: kubectl logs -n $ns -l app=pgbouncer | grep '$db' — or bounce it:"
+        print_error "  kubectl rollout restart deployment/pgbouncer -n $ns"
+        return 1
+    fi
+    print_success "All PgBouncer pods serve (${db}, ${db_user})"
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Cold-start readiness gates (on-demand-dev Phase 3)
 # ---------------------------------------------------------------------------

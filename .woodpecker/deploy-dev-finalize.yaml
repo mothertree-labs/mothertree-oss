@@ -12,6 +12,7 @@ depends_on:
   - deploy-dev-calendar
   - deploy-dev-email-probe
   - deploy-dev-portals
+  - deploy-dev-llm
 
 clone:
   - name: clone

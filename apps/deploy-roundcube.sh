@@ -181,6 +181,22 @@ else
     fi
 fi
 
+# Force every PgBouncer pod to serve the (db, roundcube-user) pool before the
+# Deployment (and its entrypoint's one-shot, failure-swallowing initdb) touches
+# it. After a drop/recreate window PgBouncer pods can keep serving a cached
+# "database ... does not exist" login error for this pool even though db-init
+# just succeeded — db-init runs as the postgres user (a different pool) and may
+# land on the other PgBouncer replica. Pipeline #1746: the container-start
+# initdb hit exactly that cached error, was swallowed by the entrypoint, and
+# the deploy died much later at the readiness gate. The verify gate retries
+# through each PgBouncer pod IP until the pool heals, and fails loudly here —
+# also converting the soft "may not have completed" timeout above into a hard
+# check that the DB actually accepts app connections.
+if ! mt_pgbouncer_verify_db "$NS_WEBMAIL" "$ROUNDCUBE_DB_NAME" "$ROUNDCUBE_DB_USER" "$ROUNDCUBE_DB_PASSWORD"; then
+    print_error "PgBouncer cannot serve ${ROUNDCUBE_DB_NAME} as ${ROUNDCUBE_DB_USER}; aborting before the rollout."
+    exit 1
+fi
+
 # =============================================================================
 # Load Roundcube image tag from CI-built tags (or fall back to :latest)
 # =============================================================================
@@ -216,35 +232,193 @@ print_success "Ingress applied for $WEBMAIL_HOST"
 # Restart deployment to pick up config changes
 mt_restart_if_changed deployment/roundcube -n "$NS_WEBMAIL"
 
-# Wait for Deployment to be ready
-if mt_has_changes; then
-    print_status "Waiting for Roundcube Deployment to be ready..."
-    if kubectl rollout status deployment/roundcube -n "$NS_WEBMAIL" --timeout=180s; then
-        print_success "Roundcube Deployment is ready"
-    else
-        # Fail loudly. A rollout timeout means the new pods never became Ready
-        # (e.g. CrashLoopBackOff on a failing health probe). This was previously
-        # only a warning + exit 0, so a broken image — e.g. the Roundcube 1.7
-        # docroot change that 404'd the old skin-asset probe and crashlooped the
-        # pod — deployed "successfully" and was only caught later by e2e, and
-        # only when no healthy old replica happened to keep serving. Fail fast
-        # per CLAUDE.md so a broken deploy can never report success.
-        print_error "Roundcube Deployment did not become Ready within 180s"
-        echo ""
-        print_error "=== Diagnostic dump ==="
-        # Guard every kubectl call so one missing object doesn't skip later dumps
-        # (set -euo pipefail is active).
+# Wait for a RUNNING Roundcube pod — NOT Ready. The rc-readiness probe fails with
+# SQLSTATE 42P01 (undefined_table) while the schema is missing, so gating on Ready
+# here DEADLOCKS: the pod can't go Ready until the schema exists, but the schema
+# repair below needs a Running pod to exec into. So wait for Running, repair the
+# schema, THEN wait for Ready (moved below the gate). A genuinely broken image
+# (ImagePull/crash-before-Running) never reaches Running and still fails fast here.
+# Unconditional (not gated on mt_has_changes) because the schema gate below is too.
+print_status "Waiting for a Running Roundcube pod (schema repair precedes the readiness gate)..."
+_rc_running=""
+for _rc_try in $(seq 1 36); do
+    _rc_running=$(kubectl get pod -n "$NS_WEBMAIL" -l app=roundcube \
+        -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null | awk '{print $1}')
+    [ -n "$_rc_running" ] && break
+    sleep 5
+done
+if [ -z "$_rc_running" ]; then
+    print_error "No Running Roundcube pod within 180s"
+    echo ""
+    print_error "=== Diagnostic dump ==="
+    set +e
+    dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
+    echo ""
+    print_error "Diagnostics: roundcube pod logs (current, last 200 lines)"
+    kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --tail=200 --all-containers=true || true
+    echo ""
+    print_error "Diagnostics: roundcube pod logs (previous, last 200 lines — if CrashLoop)"
+    kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --previous --tail=200 --all-containers=true 2>/dev/null || \
+        echo "  (no previous container — pod did not restart)"
+    exit 1
+fi
+print_success "Roundcube pod is Running ($_rc_running)"
+
+# =============================================================================
+# Schema-initialization gate (UNCONDITIONAL — runs on every deploy)
+# =============================================================================
+# The roundcube image entrypoint runs `bin/initdb.sh --update` exactly once at
+# container start and SWALLOWS its failure (`|| echo "Failed to initialize the
+# database..."`), then starts Apache anyway. If the Postgres DB was unreachable
+# at that single instant — e.g. PgBouncer was still serving a cached
+# `database "roundcube_<tenant>" does not exist` negative entry from a dev
+# drop/recreate window — the schema is never built and never retried. Every
+# request then fails `relation "session" does not exist`, so Roundcube cannot
+# persist the OIDC session and webmail login hangs at the inbox. The rc-readiness
+# probe (roundcube.yaml.tpl) returns NotReady on exactly this SQLSTATE 42P01, so a
+# schema-less pod never goes Ready — which is why this repair MUST run before the
+# Ready gate: a Running pod is enough to exec bin/initdb.sh into, but a Ready gate
+# before the repair would deadlock. See memory project_shard5_10_roundcube_login_root_cause.
+#
+# This gate is UNCONDITIONAL — deliberately OUTSIDE the `if mt_has_changes` block
+# above. The DB can be left empty independent of any manifest change: when config
+# is unchanged, mt_restart_if_changed does NOT restart the pod, so the entrypoint
+# never re-runs initdb, and the per-request PHP app keeps hitting the empty DB
+# with no restart to heal it. So we must verify on EVERY deploy.
+print_status "Verifying Roundcube DB schema is initialized..."
+
+# The Running-pod wait above already ensured a pod we can exec into / query.
+# We deliberately do NOT wait for Ready here: the rc-readiness probe 42P01's on an
+# empty schema, so the Ready gate must come AFTER this repair (moved below).
+
+# Returns 0 iff the schema is usably initialized, probed over the SAME path the
+# app uses: as the roundcube DB user, through PgBouncer, into the tenant DB. A
+# throwaway psql pod keeps this independent of whether the roundcube image
+# ships a psql client.
+#
+# "Usably initialized" is TWO conditions, both required (pipeline #1746 showed
+# the marker alone is not enough — the deploy sailed past this check and then
+# sat NotReady for 3 minutes on a missing table):
+#   1. the canonical marker (system.roundcube-version) is set, AND
+#   2. the session table exists — the exact relation the rc-readiness probe
+#      checks (SQLSTATE 42P01), so this gate can never pass a schema the probe
+#      will then reject.
+# The query emits an explicit RC_SCHEMA_OK token and we grep for it, so stray
+# kubectl chatter on stdout can never be mistaken for a healthy result.
+#
+# Retries up to 3x: a transient throwaway-pod scheduling/PgBouncer hiccup returns
+# empty just like a genuinely-missing schema, so without retries a flaky query
+# could masquerade as "schema missing" and spuriously fail an otherwise-healthy
+# deploy. Returns 0 as soon as the token is read; only concludes "missing" after
+# all attempts come back empty. On a healthy DB the first attempt succeeds (no
+# added latency); the cost is paid only on the missing/transient path.
+_rc_schema_ok() {
+    local _out _attempt
+    for _attempt in 1 2 3; do
+        _out=$(kubectl run "rc-schema-verify-$$-${RANDOM}" --rm -i --restart=Never \
+            --image=postgres:15-alpine --quiet -n "$NS_WEBMAIL" --pod-running-timeout=120s \
+            --env "PGHOST=$PG_HOST" --env "PGUSER=$ROUNDCUBE_DB_USER" \
+            --env "PGPASSWORD=$ROUNDCUBE_DB_PASSWORD" --env "PGDATABASE=$ROUNDCUBE_DB_NAME" \
+            -- psql -tAc "SELECT 'RC_SCHEMA_OK' FROM system WHERE name='roundcube-version' AND to_regclass('public.session') IS NOT NULL;" 2>/dev/null || true)
+        printf '%s' "$_out" | grep -q 'RC_SCHEMA_OK' && return 0
+        [ "$_attempt" -lt 3 ] && sleep $((_attempt * 5))
+    done
+    return 1
+}
+
+if _rc_schema_ok; then
+    print_success "Roundcube DB schema present (version marker + session table) — OK"
+else
+    # Schema missing/partial: the entrypoint's one-shot initdb was swallowed or
+    # died mid-run. Re-run the SAME idempotent command in the live pod — the
+    # PgBouncer verify gate above guarantees the DB is reachable as the app
+    # user by now, so this builds the schema. No-op on an already-initialized DB.
+    print_warning "Roundcube DB schema MISSING/PARTIAL — entrypoint initdb was swallowed; repairing in-pod"
+    RC_POD=$(kubectl get pod -n "$NS_WEBMAIL" -l app=roundcube \
+        -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null | awk '{print $1}')
+    if [ -z "$RC_POD" ]; then
+        print_error "No Running Roundcube pod found — cannot repair DB schema"
         set +e
         dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
-        echo ""
-        print_error "Diagnostics: roundcube pod logs (current, last 200 lines)"
-        kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --tail=200 --all-containers=true || true
-        echo ""
-        print_error "Diagnostics: roundcube pod logs (previous, last 200 lines — if CrashLoop)"
-        kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --previous --tail=200 --all-containers=true 2>/dev/null || \
-            echo "  (no previous container — pod did not restart)"
         exit 1
     fi
+    print_status "Running bin/initdb.sh --update in pod $RC_POD..."
+    set +e
+    RC_INITDB_OUT=$(kubectl exec -n "$NS_WEBMAIL" "$RC_POD" -c roundcube -- \
+        bash -c 'cd /var/www/html && bin/initdb.sh --dir=/var/www/html/SQL --update' 2>&1)
+    RC_INITDB_RC=$?
+    set -e
+    printf '%s\n' "$RC_INITDB_OUT" | sed 's/^/    /'
+    [ "$RC_INITDB_RC" -ne 0 ] && print_warning "initdb.sh exited $RC_INITDB_RC (verifying schema regardless)"
+
+    if _rc_schema_ok; then
+        print_success "Roundcube DB schema repaired and verified (version marker + session table)"
+    else
+        # initdb --update could not converge. The one state it cannot heal is a
+        # PARTIAL schema: the version marker exists so its update path has
+        # nothing to migrate, yet base tables are missing (an earlier initdb
+        # died mid-run — e.g. against a PgBouncer pool that flipped mid-init).
+        # dev pool tenants: the roundcube DB holds only sessions/cache/prefs
+        # and is rebuilt constantly, so wipe the schema and re-run initdb from
+        # scratch rather than wedging every subsequent pipeline on this tenant.
+        # prod: never auto-wipe — fail loudly below (repo rule).
+        if [ "$MT_ENV" = "dev" ]; then
+            print_warning "dev pool tenant: initdb --update did not converge (partial schema?) — resetting public schema and re-running initdb"
+            # Recreate the schema with the same grants roundcube-db-init sets
+            # (REVOKE PUBLIC for cross-tenant isolation, ALL to the tenant user).
+            if ! printf 'DROP SCHEMA public CASCADE; CREATE SCHEMA public; REVOKE ALL ON SCHEMA public FROM PUBLIC; GRANT ALL ON SCHEMA public TO "%s";' "$ROUNDCUBE_DB_USER" \
+                    | mt_psql -d "$ROUNDCUBE_DB_NAME"; then
+                print_error "Failed to reset public schema in $ROUNDCUBE_DB_NAME"
+                exit 1
+            fi
+            print_status "Re-running bin/initdb.sh in pod $RC_POD against the fresh schema..."
+            set +e
+            RC_INITDB_OUT=$(kubectl exec -n "$NS_WEBMAIL" "$RC_POD" -c roundcube -- \
+                bash -c 'cd /var/www/html && bin/initdb.sh --dir=/var/www/html/SQL --update' 2>&1)
+            RC_INITDB_RC=$?
+            set -e
+            printf '%s\n' "$RC_INITDB_OUT" | sed 's/^/    /'
+            [ "$RC_INITDB_RC" -ne 0 ] && print_warning "initdb.sh exited $RC_INITDB_RC (verifying schema regardless)"
+        fi
+        if ! _rc_schema_ok; then
+            # Fail loudly per CLAUDE.md — a schema-less Roundcube means webmail OIDC
+            # login hangs; never report a broken deploy as success.
+            print_error "Roundcube DB schema STILL missing after initdb — webmail OIDC login would hang"
+            print_error "(relation \"session\" does not exist family — see memory project_shard5_10_roundcube_login_root_cause)"
+            echo ""
+            print_error "=== bin/initdb.sh output ==="
+            printf '%s\n' "$RC_INITDB_OUT" | sed 's/^/    /'
+            echo ""
+            set +e
+            dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
+            exit 1
+        fi
+        print_success "Roundcube DB schema rebuilt from scratch and verified"
+    fi
+fi
+
+# Schema is present now → the rc-readiness probe (which 42P01's on an empty schema)
+# can pass. Wait for the rollout to reach Ready. This is the fail-fast gate that
+# used to run BEFORE the repair and deadlocked on a dropped/empty DB; moved here so
+# it still catches a genuinely broken image (crashloop on a non-schema fault) but
+# only after the DB is healed. Idempotent if already rolled out.
+print_status "Waiting for Roundcube Deployment to be Ready..."
+if kubectl rollout status deployment/roundcube -n "$NS_WEBMAIL" --timeout=180s; then
+    print_success "Roundcube Deployment is Ready"
+else
+    print_error "Roundcube Deployment did not become Ready within 180s"
+    echo ""
+    print_error "=== Diagnostic dump ==="
+    set +e
+    dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
+    echo ""
+    print_error "Diagnostics: roundcube pod logs (current, last 200 lines)"
+    kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --tail=200 --all-containers=true || true
+    echo ""
+    print_error "Diagnostics: roundcube pod logs (previous, last 200 lines — if CrashLoop)"
+    kubectl logs -n "$NS_WEBMAIL" -l app=roundcube --previous --tail=200 --all-containers=true 2>/dev/null || \
+        echo "  (no previous container — pod did not restart)"
+    exit 1
 fi
 
 

@@ -423,6 +423,20 @@ case "$MODE" in
     fi
     ;;
 
+  llm)
+    echo "=== Deploying LLM WebUI for all tenants ==="
+    for config_file in "$REPO_ROOT/config/tenants"/*/"${MT_ENV}.config.yaml"; do
+      [[ -f "$config_file" ]] || continue
+      _tenant=$(basename "$(dirname "$config_file")")
+      [[ "$_tenant" == ".example" ]] && continue
+      echo "--- Deploying LLM WebUI for tenant: $_tenant ---"
+      # deploy-llm-webui.sh checks LLM_ENABLED internally and exits 0
+      # if not enabled, so it's safe to call for all tenants.
+      "$REPO_ROOT/apps/deploy-llm-webui.sh" -e "$MT_ENV" -t "$_tenant" --nesting-level=0
+      echo "--- Finished LLM WebUI for tenant: $_tenant ---"
+    done
+    ;;
+
   imaps-readiness)
     # Cold-start gap #20 — FATAL gate for the EXTERNAL IMAPS path the e2e
     # tests use.
@@ -561,7 +575,7 @@ sys.exit(1)
 
   *)
     echo "ERROR: Unknown mode: $MODE"
-    echo "Valid modes: prep, finalize, matrix, nextcloud, jitsi, stalwart, roundcube, calendar, email-probe, portals, remint-caldav-tokens, imaps-readiness"
+    echo "Valid modes: prep, finalize, matrix, nextcloud, jitsi, stalwart, roundcube, calendar, email-probe, portals, llm, remint-caldav-tokens, imaps-readiness"
     exit 1
     ;;
 esac

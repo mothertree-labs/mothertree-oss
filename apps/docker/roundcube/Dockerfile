@@ -3,7 +3,7 @@
 #
 # Build from repo root: docker buildx build -f apps/docker/roundcube/Dockerfile -t ghcr.io/myorg/mothertree-roundcube:latest .
 
-FROM roundcube/roundcubemail:1.7.1-apache
+FROM roundcube/roundcubemail:1.7.2-apache
 
 ENV COMPOSER_ALLOW_SUPERUSER=1
 

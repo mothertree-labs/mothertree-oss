@@ -47,7 +47,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -113,9 +113,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_ready{namespace=\"mail\", pod=~\"postfix-.*\", container=\"postfix\"}",
+              "expr": "kube_pod_container_status_ready{namespace=\"infra-mail\", pod=~\"postfix-.*\", container=\"postfix\"}",
               "legendFormat": "Postfix",
               "refId": "A"
             }
@@ -126,7 +126,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -181,9 +181,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_restarts_total{namespace=\"mail\", pod=~\"postfix-.*\", container=\"postfix\"}",
+              "expr": "kube_pod_container_status_restarts_total{namespace=\"infra-mail\", pod=~\"postfix-.*\", container=\"postfix\"}",
               "legendFormat": "Restarts",
               "refId": "A"
             }
@@ -207,7 +207,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -284,9 +284,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"mail\", pod=~\"postfix-.*\", container=\"postfix\"}[5m]) * 100",
+              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"infra-mail\", pod=~\"postfix-.*\", container=\"postfix\"}[5m]) * 100",
               "legendFormat": "Postfix",
               "refId": "A"
             }
@@ -297,7 +297,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -374,9 +374,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "container_memory_usage_bytes{namespace=\"mail\", pod=~\"postfix-.*\", container=\"postfix\"}",
+              "expr": "container_memory_usage_bytes{namespace=\"infra-mail\", pod=~\"postfix-.*\", container=\"postfix\"}",
               "legendFormat": "Postfix",
               "refId": "A"
             }
@@ -400,7 +400,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -477,18 +477,18 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_receive_bytes_total{namespace=\"mail\", pod=~\"postfix-.*\"}[5m])",
+              "expr": "rate(container_network_receive_bytes_total{namespace=\"infra-mail\", pod=~\"postfix-.*\"}[5m])",
               "legendFormat": "Receive (RX)",
               "refId": "A"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_transmit_bytes_total{namespace=\"mail\", pod=~\"postfix-.*\"}[5m])",
+              "expr": "rate(container_network_transmit_bytes_total{namespace=\"infra-mail\", pod=~\"postfix-.*\"}[5m])",
               "legendFormat": "Transmit (TX)",
               "refId": "B"
             }
@@ -499,7 +499,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "description": "Network traffic can indicate email activity - higher TX typically means emails being sent",
           "fieldConfig": {
@@ -547,9 +547,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "increase(container_network_transmit_bytes_total{namespace=\"mail\", pod=~\"postfix-.*\"}[1h])",
+              "expr": "increase(container_network_transmit_bytes_total{namespace=\"infra-mail\", pod=~\"postfix-.*\"}[1h])",
               "legendFormat": "Bytes Transmitted (1h)",
               "refId": "A"
             }
@@ -568,7 +568,26 @@ data:
         "email"
       ],
       "templating": {
-        "list": []
+        "list": [
+          {
+            "current": {
+              "selected": false,
+              "text": "Prometheus",
+              "value": "prometheus"
+            },
+            "hide": 0,
+            "includeAll": false,
+            "label": "Data source",
+            "multi": false,
+            "name": "datasource",
+            "options": [],
+            "query": "prometheus",
+            "refresh": 1,
+            "regex": "",
+            "skipUrlSync": false,
+            "type": "datasource"
+          }
+        ]
       },
       "time": {
         "from": "now-1h",
@@ -581,4 +600,3 @@ data:
       "version": 1,
       "weekStart": ""
     }
-

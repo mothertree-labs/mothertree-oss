@@ -8,7 +8,6 @@
 #   ghcr_username, ghcr_pat
 #
 # Optional vars for CI deploy vaults:
-#   ci_deploy_vaults — list of local paths to encrypted vault files to provision
 #   deploy_vault_password_dev — dev-only ansible-vault password. When set, it is
 #       written to /home/woodpecker/deploy-vaults/dev-vault-pass (0600) so CI can
 #       decrypt the re-keyed dev vault. Keep this ONLY in the private (gitignored)
@@ -564,11 +563,11 @@
       args:
         creates: /home/woodpecker/.docker/buildx
 
-    # ── Deploy Vaults (encrypted secrets for CI deploy steps) ─────
-    # Vault files are Ansible Vault-encrypted tarballs containing
-    # kubeconfigs, tenant secrets, and terraform outputs per environment.
-    # They remain encrypted at rest on disk; CI scripts decrypt them
-    # into temp dirs at build time using DEPLOY_VAULT_PASSWORD.
+    # ── Deploy Vaults directory ──────────────────────────────────
+    # The encrypted deploy-vault blobs are NO LONGER pushed to the host: CI
+    # decrypts them from the committed copy inside the cloned config/platform
+    # submodule (ci_decrypt_committed_vault, GitHub issue #463). This directory
+    # now only holds the dev-only vault password (dev-vault-pass) written below.
     - name: Create deploy-vaults directory
       ansible.builtin.file:
         path: /home/woodpecker/deploy-vaults
@@ -577,15 +576,18 @@
         group: woodpecker
         mode: "0700"
 
-    - name: Deploy encrypted vault files
-      ansible.builtin.copy:
-        src: "{{ item }}"
-        dest: /home/woodpecker/deploy-vaults/
-        owner: woodpecker
-        group: woodpecker
-        mode: "0600"
-        decrypt: false
-      loop: "{{ ci_deploy_vaults | default([]) }}"
+    # Remove the vestigial host-copied vault blobs from the pre-#463 model.
+    # Nothing reads them anymore (CI uses the committed copy); this converges
+    # any host provisioned before the host-copy task was dropped. Targets only
+    # the .vault blobs — dev-vault-pass in the same dir must survive.
+    - name: Remove vestigial host-copied deploy-vault blobs
+      ansible.builtin.file:
+        path: "/home/woodpecker/deploy-vaults/deploy-vault-{{ item }}.vault"
+        state: absent
+      loop:
+        - dev
+        - prod
+        - prod-eu
 
     # ── Dev vault password (dev-only re-key) ──────────────────────
     # The dev vault is encrypted with its OWN password, separate from the

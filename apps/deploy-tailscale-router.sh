@@ -173,13 +173,37 @@ if [[ -z "$HS_IP" ]]; then
   fi
 fi
 
-if [[ -n "$HS_IP" ]]; then
-  export ROUTER_NAME="router-${MT_ENV}"
+# Public :22 on the Headscale box is firewalled to admin_ssh_cidrs, so an operator
+# who isn't on an allowlisted IP (e.g. travelling) can't reach it that way. The box
+# also runs a Tailscale client joined to its own mesh, so its mesh IP is reachable
+# from anywhere on the mesh. Override the SSH target with that mesh IP when needed:
+#   HEADSCALE_SSH_HOST=100.64.0.x ./apps/deploy-tailscale-router.sh -e prod
+HS_SSH_HOST="${HEADSCALE_SSH_HOST:-$HS_IP}"
+SSH_OPTS=(-n -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
 
-  # Query Headscale node list once and extract both node ID and Tailscale IP
-  print_status "Querying Headscale for router node ($HS_IP)..."
-  ROUTER_INFO=$(ssh -n -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
-    "root@${HS_IP}" \
+if [[ -z "$HS_SSH_HOST" ]]; then
+  print_error "No Headscale SSH host available."
+  print_error "Set HEADSCALE_SERVER_IP, provide prod-eu terraform outputs, or set HEADSCALE_SSH_HOST=<headscale mesh IP>."
+  exit 1
+fi
+
+# Fail fast if the box is unreachable rather than silently skipping split DNS
+# (the original silent '|| print_warning' is exactly what hid the 2026-06 outage).
+if ! ssh "${SSH_OPTS[@]}" "root@${HS_SSH_HOST}" true 2>/dev/null; then
+  print_error "Cannot SSH to the Headscale server at root@${HS_SSH_HOST}."
+  print_error "Public :22 is firewalled to admin_ssh_cidrs — if you are not on an allowlisted IP,"
+  print_error "re-run with HEADSCALE_SSH_HOST set to the Headscale box's Tailscale mesh IP."
+  exit 1
+fi
+
+export ROUTER_NAME="router-${MT_ENV}"
+
+# Query Headscale for the router's node ID + Tailscale IP. The router pod may take
+# a few seconds to register after its rollout, so retry briefly before giving up.
+print_status "Querying Headscale for router node (ssh root@${HS_SSH_HOST})..."
+ROUTER_NODE_ID="" ROUTER_TS_IP=""
+for _attempt in 1 2 3; do
+  ROUTER_INFO=$(ssh "${SSH_OPTS[@]}" "root@${HS_SSH_HOST}" \
     "headscale nodes list --output json" 2>/dev/null \
     | ROUTER_NAME="$ROUTER_NAME" python3 -c "
 import json, sys, os
@@ -191,34 +215,38 @@ for n in json.load(sys.stdin):
         print(f'{n[\"id\"]} {ips[0] if ips else \"\"}')
         break
 " 2>/dev/null || true)
-
   ROUTER_NODE_ID="${ROUTER_INFO%% *}"
   ROUTER_TS_IP="${ROUTER_INFO#* }"
-
-  # ── Approve routes ──────────────────────────────────────────────────
-  if [[ -n "$ROUTER_NODE_ID" ]]; then
-    print_status "Approving route in Headscale..."
-    ssh -n -o ConnectTimeout=10 "root@${HS_IP}" \
-      "headscale nodes approve-routes -i $ROUTER_NODE_ID -r $SERVICE_CIDR" > /dev/null 2>&1 && \
-      print_status "  Route $SERVICE_CIDR approved for node $ROUTER_NODE_ID" || \
-      print_warning "  Route approval failed (may need manual approval)"
-  else
-    print_warning "  Router node '$ROUTER_NAME' not found in Headscale — approve route manually"
+  if [[ -n "$ROUTER_TS_IP" ]]; then break; fi
+  if [[ "$_attempt" -lt 3 ]]; then
+    print_status "  Router '$ROUTER_NAME' not registered yet (attempt ${_attempt}/3) — retrying in 5s..."
+    sleep 5
   fi
+done
 
-  # ── Configure split DNS in Headscale ──────────────────────────────
-  # Route internal domain queries to this router's Unbound DNS.
-  if [[ -n "$ROUTER_TS_IP" ]]; then
-    # Determine the split DNS domain for this environment
-    case "$MT_ENV" in
-      dev)     SPLIT_DOMAIN="internal.dev.${INFRA_DOMAIN}" ;;
-      prod-eu) SPLIT_DOMAIN="prod-eu.${INFRA_DOMAIN}" ;;
-      *)       SPLIT_DOMAIN="${MT_ENV}.${INFRA_DOMAIN}" ;;
-    esac
+if [[ -z "$ROUTER_TS_IP" ]]; then
+  print_error "Router node '$ROUTER_NAME' did not register in Headscale (queried root@${HS_SSH_HOST})."
+  exit 1
+fi
 
-    print_status "Configuring split DNS: ${SPLIT_DOMAIN} → ${ROUTER_TS_IP}"
-    ssh -n -o ConnectTimeout=10 "root@${HS_IP}" \
-      "DOMAIN='${SPLIT_DOMAIN}' IP='${ROUTER_TS_IP}' python3 -c \"
+# ── Approve the /32 route (idempotent — tolerated) ───────────────────────────
+print_status "Approving route in Headscale..."
+ssh "${SSH_OPTS[@]}" "root@${HS_SSH_HOST}" \
+  "headscale nodes approve-routes -i $ROUTER_NODE_ID -r $SERVICE_CIDR" >/dev/null 2>&1 \
+  && print_status "  Route $SERVICE_CIDR approved for node $ROUTER_NODE_ID" \
+  || print_warning "  Route approval returned non-zero (routes persist in the Headscale DB; likely already approved)"
+
+# ── Configure split DNS (REQUIRED — never silently skip) ─────────────────────
+# Route internal domain queries to this router's Unbound DNS.
+case "$MT_ENV" in
+  dev)     SPLIT_DOMAIN="internal.dev.${INFRA_DOMAIN}" ;;
+  prod-eu) SPLIT_DOMAIN="prod-eu.${INFRA_DOMAIN}" ;;
+  *)       SPLIT_DOMAIN="${MT_ENV}.${INFRA_DOMAIN}" ;;
+esac
+
+print_status "Configuring split DNS: ${SPLIT_DOMAIN} → ${ROUTER_TS_IP}"
+if ! ssh "${SSH_OPTS[@]}" "root@${HS_SSH_HOST}" \
+  "DOMAIN='${SPLIT_DOMAIN}' IP='${ROUTER_TS_IP}' python3 -c \"
 import yaml, os
 domain = os.environ['DOMAIN']
 ip = os.environ['IP']
@@ -230,23 +258,28 @@ config['dns']['override_local_dns'] = False
 with open('/etc/headscale/config.yaml', 'w') as f:
     yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 print(f'Split DNS: {domain} -> {ip}')
-\" && systemctl restart headscale" 2>&1 | sed 's/^/  /' || \
-      print_warning "  Split DNS configuration failed (configure manually)"
-
-    # Persist split DNS config for Ansible so manage_infra --ansible
-    # won't overwrite it. Write a state file that manage_infra reads
-    # to populate the tailscale_router_dns Ansible variable.
-    ROUTER_DNS_DIR="${REPO_ROOT}/config/platform/infra"
-    if [[ -d "$ROUTER_DNS_DIR" ]]; then
-      ROUTER_DNS_FILE="${ROUTER_DNS_DIR}/tailscale-router-dns.${MT_ENV}.env"
-      echo "# Auto-generated by deploy-tailscale-router.sh — do not edit manually" > "$ROUTER_DNS_FILE"
-      echo "TAILSCALE_ROUTER_DNS_DOMAIN=\"${SPLIT_DOMAIN}\"" >> "$ROUTER_DNS_FILE"
-      echo "TAILSCALE_ROUTER_DNS_IP=\"${ROUTER_TS_IP}\"" >> "$ROUTER_DNS_FILE"
-      print_status "  Saved split DNS state to ${ROUTER_DNS_FILE}"
-    fi
-  fi
-else
-  print_warning "  Headscale server IP not available — approve route manually"
+\" && systemctl restart headscale" 2>&1 | sed 's/^/  /'; then
+  print_error "Split DNS configuration failed on the Headscale server (root@${HS_SSH_HOST})."
+  exit 1
 fi
+
+# ── Persist split DNS state so 'manage_infra --ansible' rebuilds it ──────────
+# Without this file the next Headscale reprovision re-renders config.yaml with no
+# split block and wipes the mapping (the 2026-06 split-DNS outage).
+ROUTER_DNS_DIR="${REPO_ROOT}/config/platform/infra"
+[[ -d "$ROUTER_DNS_DIR" ]] || ROUTER_DNS_DIR="${REPO_ROOT}/infra"
+if [[ ! -d "$ROUTER_DNS_DIR" ]]; then
+  print_error "Split DNS state dir not found (looked for config/platform/infra and infra/)."
+  print_error "Cannot persist split DNS state; a future 'manage_infra --ansible' would wipe the split block."
+  exit 1
+fi
+ROUTER_DNS_FILE="${ROUTER_DNS_DIR}/tailscale-router-dns.${MT_ENV}.env"
+{
+  echo "# Auto-generated by deploy-tailscale-router.sh — do not edit manually"
+  echo "TAILSCALE_ROUTER_DNS_DOMAIN=\"${SPLIT_DOMAIN}\""
+  echo "TAILSCALE_ROUTER_DNS_IP=\"${ROUTER_TS_IP}\""
+} > "$ROUTER_DNS_FILE"
+print_status "  Saved split DNS state to ${ROUTER_DNS_FILE}"
+print_warning "  Commit this file to the config/platform submodule so the split block survives reprovision."
 
 print_success "Tailscale router deployed to $NS_INGRESS_INTERNAL"

@@ -238,6 +238,10 @@ Never skip this step, even if the changes seem trivial.
 - **Tailscale connectivity issues**: If K8s pods can't reach the PostgreSQL VM, check that the PgBouncer pod's Tailscale sidecar is connected to the Headscale mesh. Verify with `tailscale status` inside the sidecar. Ensure the pre-auth key hasn't expired.
 - **PgBouncer SCRAM-SHA-256**: PgBouncer requires `auth_type = scram-sha-256` to match PostgreSQL's default. If auth fails, check that `userlist.txt` has the correct SCRAM hashes, not plaintext passwords.
 - **Stale SSH host keys**: If Ansible fails with SSH errors against a VM that was rebuilt, remove the old key: `ssh-keygen -R <ip>`, then re-run `manage_infra --ansible`.
+- **Stale kubeconfig after cluster rebuild**: CI redeploys the cluster with a new API endpoint. Refresh `kubeconfig.dev.yaml` from the Linode API. This command requires the dev vault password and is for **zsh on Linux**:
+  ```zsh
+  export LINODE_CLI_TOKEN="$(ansible-vault decrypt config/platform/ci/deploy-vault-dev.vault --vault-password-file /home/marekj/.mt-dev-vault-pass --output - | tar -xzOf - ./tenants/mothertree/dev.secrets.yaml | yq '.linode.token')" && ID=$(linode-cli lke clusters-list --json 2>/dev/null | jq -r '.[]|select(.label=="matrix-cluster-dev").id') && linode-cli lke kubeconfig-view --json "$ID" | jq -r '.[0].kubeconfig' | base64 -d > kubeconfig.dev.yaml
+  ```
 
 ## Release Versioning
 

@@ -47,7 +47,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -113,9 +113,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_ready{namespace=\"docs\", pod=~\"backend-.*\", container=\"backend\"}",
+              "expr": "kube_pod_container_status_ready{namespace=~\"tn-.*-docs\", pod=~\"backend-.*\", container=\"backend\"}",
               "legendFormat": "Backend",
               "refId": "A"
             }
@@ -126,7 +126,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -192,9 +192,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_ready{namespace=\"docs\", pod=~\"frontend-.*\", container=\"frontend\"}",
+              "expr": "kube_pod_container_status_ready{namespace=~\"tn-.*-docs\", pod=~\"frontend-.*\", container=\"frontend\"}",
               "legendFormat": "Frontend",
               "refId": "A"
             }
@@ -205,7 +205,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -271,9 +271,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_ready{namespace=\"docs\", pod=~\"docs-y-provider-.*\", container=\"docs\"}",
+              "expr": "kube_pod_container_status_ready{namespace=~\"tn-.*-docs\", pod=~\"docs-y-provider-.*\", container=\"docs\"}",
               "legendFormat": "Y-Provider",
               "refId": "A"
             }
@@ -284,86 +284,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
-              "mappings": [
-                {
-                  "options": {
-                    "0": {
-                      "color": "red",
-                      "index": 1,
-                      "text": "Down"
-                    },
-                    "1": {
-                      "color": "green",
-                      "index": 0,
-                      "text": "Ready"
-                    }
-                  },
-                  "type": "value"
-                }
-              ],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "green",
-                    "value": 1
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 4,
-            "x": 12,
-            "y": 1
-          },
-          "id": 4,
-          "options": {
-            "colorMode": "background",
-            "graphMode": "none",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": "",
-              "values": false
-            },
-            "textMode": "auto"
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "kube_pod_container_status_ready{namespace=\"docs\", pod=~\"docs-postgresql-.*\", container=\"postgresql\"}",
-              "legendFormat": "PostgreSQL",
-              "refId": "A"
-            }
-          ],
-          "title": "PostgreSQL",
-          "type": "stat"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -429,9 +350,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_ready{namespace=\"docs\", pod=~\"redis-.*\", container=\"redis\"}",
+              "expr": "kube_pod_container_status_ready{namespace=~\"tn-.*-docs\", pod=~\"redis-.*\", container=\"redis\"}",
               "legendFormat": "Redis",
               "refId": "A"
             }
@@ -442,7 +363,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -508,9 +429,9 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_ready{namespace=\"docs\", pod=~\"keycloak-.*\"}",
+              "expr": "kube_pod_container_status_ready{namespace=\"infra-auth\", pod=~\"keycloak-.*\"}",
               "legendFormat": "Keycloak",
               "refId": "A"
             }
@@ -534,7 +455,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -611,140 +532,32 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"docs\", pod=~\"backend-.*\", container=\"backend\"}[5m]) * 100",
+              "expr": "rate(container_cpu_usage_seconds_total{namespace=~\"tn-.*-docs\", pod=~\"backend-.*\", container=\"backend\"}[5m]) * 100",
               "legendFormat": "Backend",
               "refId": "A"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"docs\", pod=~\"frontend-.*\", container=\"frontend\"}[5m]) * 100",
+              "expr": "rate(container_cpu_usage_seconds_total{namespace=~\"tn-.*-docs\", pod=~\"frontend-.*\", container=\"frontend\"}[5m]) * 100",
               "legendFormat": "Frontend",
               "refId": "B"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"docs\", pod=~\"docs-y-provider-.*\", container=\"docs\"}[5m]) * 100",
+              "expr": "rate(container_cpu_usage_seconds_total{namespace=~\"tn-.*-docs\", pod=~\"docs-y-provider-.*\", container=\"docs\"}[5m]) * 100",
               "legendFormat": "Y-Provider",
               "refId": "C"
             }
           ],
           "title": "Application CPU Usage",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "percent"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 6
-          },
-          "id": 11,
-          "options": {
-            "legend": {
-              "calcs": [
-                "mean",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"docs\", pod=~\"docs-postgresql-.*\", container=\"postgresql\"}[5m]) * 100",
-              "legendFormat": "PostgreSQL",
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"docs\", pod=~\"redis-.*\", container=\"redis\"}[5m]) * 100",
-              "legendFormat": "Redis",
-              "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"docs\", pod=~\"keycloak-.*\"}[5m]) * 100",
-              "legendFormat": "Keycloak",
-              "refId": "C"
-            }
-          ],
-          "title": "Infrastructure CPU Usage",
           "type": "timeseries"
         },
         {
@@ -763,7 +576,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -840,140 +653,32 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "container_memory_usage_bytes{namespace=\"docs\", pod=~\"backend-.*\", container=\"backend\"}",
+              "expr": "container_memory_usage_bytes{namespace=~\"tn-.*-docs\", pod=~\"backend-.*\", container=\"backend\"}",
               "legendFormat": "Backend",
               "refId": "A"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "container_memory_usage_bytes{namespace=\"docs\", pod=~\"frontend-.*\", container=\"frontend\"}",
+              "expr": "container_memory_usage_bytes{namespace=~\"tn-.*-docs\", pod=~\"frontend-.*\", container=\"frontend\"}",
               "legendFormat": "Frontend",
               "refId": "B"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "container_memory_usage_bytes{namespace=\"docs\", pod=~\"docs-y-provider-.*\", container=\"docs\"}",
+              "expr": "container_memory_usage_bytes{namespace=~\"tn-.*-docs\", pod=~\"docs-y-provider-.*\", container=\"docs\"}",
               "legendFormat": "Y-Provider",
               "refId": "C"
             }
           ],
           "title": "Application Memory Usage",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "bytes"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 15
-          },
-          "id": 21,
-          "options": {
-            "legend": {
-              "calcs": [
-                "mean",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "container_memory_usage_bytes{namespace=\"docs\", pod=~\"docs-postgresql-.*\", container=\"postgresql\"}",
-              "legendFormat": "PostgreSQL",
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "container_memory_usage_bytes{namespace=\"docs\", pod=~\"redis-.*\", container=\"redis\"}",
-              "legendFormat": "Redis",
-              "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "prometheus"
-              },
-              "expr": "container_memory_usage_bytes{namespace=\"docs\", pod=~\"keycloak-.*\"}",
-              "legendFormat": "Keycloak",
-              "refId": "C"
-            }
-          ],
-          "title": "Infrastructure Memory Usage",
           "type": "timeseries"
         },
         {
@@ -992,7 +697,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1069,36 +774,36 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_receive_bytes_total{namespace=\"docs\", pod=~\"backend-.*\"}[5m])",
+              "expr": "rate(container_network_receive_bytes_total{namespace=~\"tn-.*-docs\", pod=~\"backend-.*\"}[5m])",
               "legendFormat": "Backend RX",
               "refId": "A"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_transmit_bytes_total{namespace=\"docs\", pod=~\"backend-.*\"}[5m])",
+              "expr": "rate(container_network_transmit_bytes_total{namespace=~\"tn-.*-docs\", pod=~\"backend-.*\"}[5m])",
               "legendFormat": "Backend TX",
               "refId": "B"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_receive_bytes_total{namespace=\"docs\", pod=~\"frontend-.*\"}[5m])",
+              "expr": "rate(container_network_receive_bytes_total{namespace=~\"tn-.*-docs\", pod=~\"frontend-.*\"}[5m])",
               "legendFormat": "Frontend RX",
               "refId": "C"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_transmit_bytes_total{namespace=\"docs\", pod=~\"frontend-.*\"}[5m])",
+              "expr": "rate(container_network_transmit_bytes_total{namespace=~\"tn-.*-docs\", pod=~\"frontend-.*\"}[5m])",
               "legendFormat": "Frontend TX",
               "refId": "D"
             }
@@ -1109,7 +814,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1186,36 +891,36 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_receive_bytes_total{namespace=\"docs\", pod=~\"docs-y-provider-.*\"}[5m])",
+              "expr": "rate(container_network_receive_bytes_total{namespace=~\"tn-.*-docs\", pod=~\"docs-y-provider-.*\"}[5m])",
               "legendFormat": "Y-Provider RX",
               "refId": "A"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_transmit_bytes_total{namespace=\"docs\", pod=~\"docs-y-provider-.*\"}[5m])",
+              "expr": "rate(container_network_transmit_bytes_total{namespace=~\"tn-.*-docs\", pod=~\"docs-y-provider-.*\"}[5m])",
               "legendFormat": "Y-Provider TX",
               "refId": "B"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_receive_bytes_total{namespace=\"docs\", pod=~\"docs-postgresql-.*\"}[5m])",
+              "expr": "rate(container_network_receive_bytes_total{namespace=~\"tn-.*-docs\", pod=~\"docs-postgresql-.*\"}[5m])",
               "legendFormat": "PostgreSQL RX",
               "refId": "C"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "rate(container_network_transmit_bytes_total{namespace=\"docs\", pod=~\"docs-postgresql-.*\"}[5m])",
+              "expr": "rate(container_network_transmit_bytes_total{namespace=~\"tn-.*-docs\", pod=~\"docs-postgresql-.*\"}[5m])",
               "legendFormat": "PostgreSQL TX",
               "refId": "D"
             }
@@ -1239,7 +944,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1324,36 +1029,36 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_restarts_total{namespace=\"docs\", pod=~\"backend-.*\", container=\"backend\"}",
+              "expr": "kube_pod_container_status_restarts_total{namespace=~\"tn-.*-docs\", pod=~\"backend-.*\", container=\"backend\"}",
               "legendFormat": "Backend",
               "refId": "A"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_restarts_total{namespace=\"docs\", pod=~\"frontend-.*\", container=\"frontend\"}",
+              "expr": "kube_pod_container_status_restarts_total{namespace=~\"tn-.*-docs\", pod=~\"frontend-.*\", container=\"frontend\"}",
               "legendFormat": "Frontend",
               "refId": "B"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_restarts_total{namespace=\"docs\", pod=~\"docs-y-provider-.*\", container=\"docs\"}",
+              "expr": "kube_pod_container_status_restarts_total{namespace=~\"tn-.*-docs\", pod=~\"docs-y-provider-.*\", container=\"docs\"}",
               "legendFormat": "Y-Provider",
               "refId": "C"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_pod_container_status_restarts_total{namespace=\"docs\", pod=~\"docs-postgresql-.*\", container=\"postgresql\"}",
+              "expr": "kube_pod_container_status_restarts_total{namespace=~\"tn-.*-docs\", pod=~\"docs-postgresql-.*\", container=\"postgresql\"}",
               "legendFormat": "PostgreSQL",
               "refId": "D"
             }
@@ -1364,7 +1069,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1440,27 +1145,27 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_deployment_status_replicas_available{namespace=\"docs\", deployment=\"backend\"}",
+              "expr": "kube_deployment_status_replicas_available{namespace=~\"tn-.*-docs\", deployment=\"backend\"}",
               "legendFormat": "Backend",
               "refId": "A"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_deployment_status_replicas_available{namespace=\"docs\", deployment=\"frontend\"}",
+              "expr": "kube_deployment_status_replicas_available{namespace=~\"tn-.*-docs\", deployment=\"frontend\"}",
               "legendFormat": "Frontend",
               "refId": "B"
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
-              "expr": "kube_deployment_status_replicas_available{namespace=\"docs\", deployment=\"docs-y-provider\"}",
+              "expr": "kube_deployment_status_replicas_available{namespace=~\"tn-.*-docs\", deployment=\"docs-y-provider\"}",
               "legendFormat": "Y-Provider",
               "refId": "C"
             }
@@ -1484,7 +1189,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1569,7 +1274,7 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
               "expr": "sum(rate(nginx_ingress_controller_requests{ingress=\"docs\", status=~\"5..\"}[5m])) by (status)",
               "legendFormat": "Docs {{status}}",
@@ -1578,7 +1283,7 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
               "expr": "sum(rate(nginx_ingress_controller_requests{ingress=\"keycloak-keycloakx\", status=~\"5..\"}[5m])) by (status)",
               "legendFormat": "Keycloak {{status}}",
@@ -1591,7 +1296,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1668,7 +1373,7 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
               "expr": "sum(rate(nginx_ingress_controller_requests{ingress=\"docs\", status=~\"4..\"}[5m])) by (status)",
               "legendFormat": "Docs {{status}}",
@@ -1677,7 +1382,7 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
               "expr": "sum(rate(nginx_ingress_controller_requests{ingress=\"keycloak-keycloakx\", status=~\"4..\"}[5m])) by (status)",
               "legendFormat": "Keycloak {{status}}",
@@ -1690,7 +1395,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1767,7 +1472,7 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
               "expr": "sum(rate(nginx_ingress_controller_requests{ingress=\"docs\"}[5m])) by (status)",
               "legendFormat": "{{status}}",
@@ -1780,7 +1485,7 @@ data:
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1835,7 +1540,7 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
               "expr": "100 * sum(rate(nginx_ingress_controller_requests{ingress=\"docs\", status=~\"5..\"}[5m])) / sum(rate(nginx_ingress_controller_requests{ingress=\"docs\"}[5m]))",
               "legendFormat": "Docs 5xx %",
@@ -1844,7 +1549,7 @@ data:
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "prometheus"
+                "uid": "${datasource}"
               },
               "expr": "100 * sum(rate(nginx_ingress_controller_requests{ingress=\"docs\", status=~\"4..\"}[5m])) / sum(rate(nginx_ingress_controller_requests{ingress=\"docs\"}[5m]))",
               "legendFormat": "Docs 4xx %",
@@ -1864,7 +1569,26 @@ data:
         "collaboration"
       ],
       "templating": {
-        "list": []
+        "list": [
+          {
+            "current": {
+              "selected": false,
+              "text": "Prometheus",
+              "value": "prometheus"
+            },
+            "hide": 0,
+            "includeAll": false,
+            "label": "Data source",
+            "multi": false,
+            "name": "datasource",
+            "options": [],
+            "query": "prometheus",
+            "refresh": 1,
+            "regex": "",
+            "skipUrlSync": false,
+            "type": "datasource"
+          }
+        ]
       },
       "time": {
         "from": "now-1h",
@@ -1877,5 +1601,3 @@ data:
       "version": 1,
       "weekStart": ""
     }
-
-

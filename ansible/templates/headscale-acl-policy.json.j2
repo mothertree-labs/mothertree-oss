@@ -16,6 +16,7 @@
   "acls": [
     {"action": "accept", "src": ["tag:pgbouncer"], "dst": ["tag:postgres:5432"]},
     {"action": "accept", "src": ["tag:monitoring"], "dst": ["tag:postgres:9187"]},
+    {"action": "accept", "src": ["tag:monitoring"], "dst": ["tag:monitoring:9090"]},
     {"action": "accept", "src": ["tag:ci"], "dst": ["tag:k8s-node:6443", "tag:postgres:5432"]},
     {"action": "accept", "src": ["tag:router"], "dst": ["*:*"]},
     {"action": "accept", "src": ["tag:headscale"], "dst": ["*:*"]},

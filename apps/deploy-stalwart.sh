@@ -178,6 +178,27 @@ else
     print_status "Outbound relay: direct MX (no SES configured for this env)"
 fi
 
+# Logging tracer config (env-gated, baked into ${STALWART_TRACING_TOML} in the
+# ConfigMap template). Stalwart's legacy [tracing] block only surfaces a curated
+# event subset (auth + warn/error) — NOT smtp/queue/delivery/dsn events (verified
+# empty across the full 15m Stalwart capture in CI pipeline #1628). Dev needs the
+# full info-level delivery stream so ci-e2e-diagnostics.sh can name which leg of
+# the email round-trip (shard-5) broke. Prod keeps the quieter legacy block to
+# bound log volume — flip an env here if prod delivery debugging is ever needed.
+if [[ "$MT_ENV" == "dev" ]]; then
+    export STALWART_TRACING_TOML="    [tracer.\"stdout\"]
+    type = \"stdout\"
+    level = \"info\"
+    ansi = false
+    enable = true"
+    print_status "Tracing: full info-level event stream (dev — incl. smtp/queue/delivery)"
+else
+    export STALWART_TRACING_TOML="    [tracing]
+    level = \"info\"
+    method = \"stdout\""
+    print_status "Tracing: legacy curated subset (prod)"
+fi
+
 # Generate config checksum for pod annotations. Include every value the pod
 # reads from a Secret/ConfigMap so rotating any of them forces a rollout.
 # STALWART_OUTBOUND_ROUTE_TOML is baked into RENDERED_CONFIG below, but we hash
