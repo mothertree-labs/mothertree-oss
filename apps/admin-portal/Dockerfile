@@ -4,8 +4,9 @@ FROM node:22-alpine
 WORKDIR /app
 
 # Install all dependencies (including devDeps for Tailwind build)
-COPY package.json ./
-RUN npm install
+# npm ci enforces the committed lockfile so transitive deps can't float
+COPY package*.json ./
+RUN npm ci
 
 # Copy app source
 COPY . .

@@ -125,7 +125,9 @@ export POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-60}"
 
 # Generate config checksum for pod annotations (triggers restart on config change)
 RENDERED_CONFIG=$(envsubst < "$REPO_ROOT/apps/manifests/calendar-automation/deployment.yaml.tpl" 2>/dev/null || echo "")
-APP_CODE_HASH=$(sha256sum "$REPO_ROOT/apps/calendar-automation/server.js" | cut -d' ' -f1 | head -c 12)
+APP_CODE_HASH=$(cat "$REPO_ROOT/apps/calendar-automation/server.js" \
+    "$REPO_ROOT/apps/calendar-automation/package.json" \
+    "$REPO_ROOT/apps/calendar-automation/package-lock.json" | sha256sum | cut -d' ' -f1 | head -c 12)
 export CONFIG_CHECKSUM
 CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$NEXTCLOUD_ADMIN_PASSWORD$RENDERED_CONFIG$APP_CODE_HASH" | sha256sum | cut -d' ' -f1 | head -c 12)
 print_status "Config checksum: $CONFIG_CHECKSUM"
@@ -147,6 +149,7 @@ kubectl create configmap calendar-automation-app \
     --namespace="$NS_MAIL" \
     --from-file=server.js="$REPO_ROOT/apps/calendar-automation/server.js" \
     --from-file=package.json="$REPO_ROOT/apps/calendar-automation/package.json" \
+    --from-file=package-lock.json="$REPO_ROOT/apps/calendar-automation/package-lock.json" \
     --dry-run=client -o yaml | kubectl apply -f -
 print_success "Application ConfigMap created"
 
@@ -169,9 +172,10 @@ data:
     #!/bin/sh
     set -e
     cp /app-src/package.json /app/package.json
+    cp /app-src/package-lock.json /app/package-lock.json
     cp /app-src/server.js /app/server.js
     cd /app
-    npm install --production 2>&1
+    npm ci --omit=dev 2>&1
     echo "Dependencies installed successfully"
 EOF
 print_success "Install script ConfigMap created"
