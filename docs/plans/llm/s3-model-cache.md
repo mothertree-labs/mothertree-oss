@@ -204,6 +204,20 @@ in the infra tenant secrets as `llm.s3_secret`.
 4. Post-deploy: `kubectl get pvc,pv -n infra-llm` is empty; `kubectl rollout
    restart deploy/ollama -n infra-llm` restores weights in seconds, model listed
    in `/api/tags`.
+5. **Manual cleanup on envs that predate this change (prod/prod-eu):** the old
+   `ollama-models` PVC is orphaned — the deployment no longer references it but
+   nothing deletes it. It was created with `linode-block-storage-retain`, so
+   deleting the PVC alone leaves the PV `Released` and the underlying Linode
+   volume still billed (and still counting against the active-services cap).
+   Run once the rollout has settled (nothing mounts the PVC anymore):
+
+   ```
+   kubectl delete pvc ollama-models -n infra-llm
+   kubectl get pv                  # find the Released PV
+   kubectl delete pv <released-pv> # hygiene — removes the dangling PV object
+   linode-cli volumes list         # retained volume, label pvc-<uuid>
+   linode-cli volumes delete <id>  # this actually stops the charge
+   ```
 
 ## Testing / Acceptance
 
@@ -313,3 +327,5 @@ Decisions locked: dedicated bucket + key, Terraform provisioning for prod/prod-e
       the model pull
 - [ ] Replicate to prod/prod-eu (Phase 0b apply → add `llm.s3_*` to vault →
       `deploy_infra`) with the same checks
+- [ ] Orphan cleanup on prod/prod-eu: delete the old `ollama-models` PVC and its
+      retained Linode volume (Migration step 5)
