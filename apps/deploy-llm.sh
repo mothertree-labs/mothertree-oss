@@ -103,7 +103,14 @@ print_status "Checking whether the model is already in the S3 model cache..."
 # pinned aws-cli image via a throwaway pod that references the ollama-s3 Secret
 # through envFrom — the S3 credentials never touch argv or the pod spec (etcd).
 # No local aws CLI dependency.
-_mt_model_manifest="s3://${LLM_S3_BUCKET}/${LLM_S3_PREFIX}/models/manifests/registry.ollama.ai/library/${LLM_MODEL%:*}/${LLM_MODEL#*:}"
+_mt_model_tag="${LLM_MODEL#*:}"
+# A bare model name (no :tag) is equivalent to :latest in Ollama's registry
+# layout — without this the manifest path would be .../llama3.2/llama3.2 and
+# the gate would never find the seeded manifest. The seed Job uploads whatever
+# ollama itself wrote (bare names land under .../llama3.2/latest), so the probe
+# path must match that.
+[[ "${_mt_model_tag}" == "${LLM_MODEL}" ]] && _mt_model_tag="latest"
+_mt_model_manifest="s3://${LLM_S3_BUCKET}/${LLM_S3_PREFIX}/models/manifests/registry.ollama.ai/library/${LLM_MODEL%:*}/${_mt_model_tag}"
 _mt_seed_skip=""
 if kubectl get job ollama-model-seed -n infra-llm >/dev/null 2>&1; then
   # Existence alone is not success: a Job that exhausted backoffLimit would
