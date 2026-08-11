@@ -44,8 +44,6 @@ mt_require_env
 source "${REPO_ROOT}/scripts/lib/infra-config.sh"
 mt_load_infra_config
 
-LLM_MODEL=$(yq '.llm.model // "llama3.2:1b"' "$MT_INFRA_CONFIG")
-
 # Fail fast — the restore initContainer and seed Job are expected to run, so a
 # missing S3 cache config is a hard error (see CLAUDE.md).
 : "${LLM_S3_BUCKET:?LLM_S3_BUCKET not set — add 'llm.s3_bucket' to $MT_INFRA_CONFIG}"
