@@ -142,9 +142,15 @@ spec:
             name: ollama-s3
 EOF
   if kubectl create -f "${_mt_seed_manifest}" >/dev/null 2>&1; then
-    # Poll briefly for a terminal phase (Succeeded or Failed) — accept both.
+    # Poll for a terminal phase (Succeeded or Failed) — accept both. If the
+    # pod is still Pending after the cap (e.g. slow aws-cli image pull on a
+    # cold node), treat it as "not seeded": that is the right default on first
+    # boot, where an empty bucket and a cold node coincide. A false apply on a
+    # warm, already-seeded bucket is harmless — the seed Job is idempotent and
+    # self-cleans via ttlSecondsAfterFinished — so a longer cap (120s) only
+    # narrows that window without risking first-boot seeding.
     _mt_phase=""
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 60); do
       _mt_phase="$(kubectl get pod "${_mt_check_pod}" -n infra-llm -o jsonpath='{.status.phase}' 2>/dev/null || true)"
       if [[ "${_mt_phase}" == "Succeeded" || "${_mt_phase}" == "Failed" ]]; then
         break
