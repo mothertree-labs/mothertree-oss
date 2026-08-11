@@ -16,6 +16,10 @@ metadata:
     app.kubernetes.io/managed-by: mothertree
     mothertree/component: llm
 spec:
+  # Backstop: never hang the Job indefinitely (a stuck pull must surface as
+  # a failed Job, not a silent never-completing one). 3600s covers a slow
+  # model pull across the backoffLimit retries.
+  activeDeadlineSeconds: 3600
   backoffLimit: 2
   template:
     metadata:
@@ -31,11 +35,13 @@ spec:
             - /bin/sh
             - -c
             - |
+              # Pull is this init container's only job: exit as soon as it
+              # succeeds — do NOT `wait` on the backgrounded ollama serve
+              # (it never exits, which would hang the init container forever).
               ollama serve &
               sleep 3
               until ollama list >/dev/null 2>&1; do sleep 1; done
               ollama pull ${LLM_MODEL} 2>&1 | tail -5
-              wait
           env:
             - name: LLM_MODEL
               value: "${LLM_MODEL}"
