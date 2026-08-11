@@ -94,16 +94,35 @@ kubectl rollout status deployment/ollama -n infra-llm --timeout=300s || {
 
 # Seed Job gate — idempotent and non-blocking. The 15-20 min model pull must
 # not block deploy_infra (and must not blow the CI tenant-lease TTL), so we
-# never `kubectl wait` on it. Skip entirely when the bucket is already seeded.
+# never `kubectl wait` on it. Skip when the bucket is already seeded or the
+# Job is still running; retry when the Job failed (backoffLimit exhausted, e.g.
+# a transient ollama.com outage) — a failed Job must not silently suppress
+# re-seeding forever. Finished Jobs also self-delete (ttlSecondsAfterFinished).
 print_status "Checking whether the model is already in the S3 model cache..."
 # Check the model manifest (content-addressed, so presence == seeded). Uses the
 # pinned aws-cli image via a throwaway pod that references the ollama-s3 Secret
 # through envFrom — the S3 credentials never touch argv or the pod spec (etcd).
 # No local aws CLI dependency.
 _mt_model_manifest="s3://${LLM_S3_BUCKET}/${LLM_S3_PREFIX}/models/manifests/registry.ollama.ai/library/${LLM_MODEL%:*}/${LLM_MODEL#*:}"
+_mt_seed_skip=""
 if kubectl get job ollama-model-seed -n infra-llm >/dev/null 2>&1; then
-  print_status "Seed Job already applied — skipping (delete the Job to re-seed)."
-else
+  # Existence alone is not success: a Job that exhausted backoffLimit would
+  # make every future deploy skip while the bucket stays empty. Check the
+  # terminal condition instead.
+  _mt_seed_complete="$(kubectl get job ollama-model-seed -n infra-llm -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)"
+  _mt_seed_failed="$(kubectl get job ollama-model-seed -n infra-llm -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
+  if [[ "${_mt_seed_complete}" == "True" ]]; then
+    print_status "Seed Job already completed — skipping (delete the Job to force a re-seed)."
+    _mt_seed_skip=1
+  elif [[ "${_mt_seed_failed}" == "True" ]]; then
+    print_status "Seed Job failed previously (e.g. transient ollama.com outage) — deleting to retry."
+    kubectl delete job ollama-model-seed -n infra-llm --wait=false >/dev/null 2>&1 || true
+  else
+    print_status "Seed Job still running — skipping (it populates the bucket when done)."
+    _mt_seed_skip=1
+  fi
+fi
+if [[ -z "${_mt_seed_skip}" ]]; then
   _mt_check_pod="ollama-seed-check-$$"
   _mt_seed_manifest=$(mktemp) || exit 1
   cat > "${_mt_seed_manifest}" <<EOF

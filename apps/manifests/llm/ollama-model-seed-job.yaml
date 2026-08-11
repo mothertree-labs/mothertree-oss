@@ -3,7 +3,10 @@
 # Runs once per bucket lifetime (gated in deploy-llm.sh): the initContainer
 # pulls the model into a shared emptyDir, then the main container syncs it up
 # to s3://bucket/prefix/. Non-blocking — deploy_infra never waits on the pull.
-# To re-seed a wiped bucket, delete this Job and re-run deploy-llm.sh.
+# Finished Jobs self-delete 10 min after completion (ttlSecondsAfterFinished),
+# so a failed seed (e.g. transient ollama.com outage) does not linger and make
+# every future deploy skip re-seeding. To re-seed a wiped bucket immediately,
+# delete this Job (if still present) and re-run deploy-llm.sh.
 #
 # Templated via envsubst (LLM_MODEL, LLM_S3_BUCKET, LLM_S3_PREFIX).
 apiVersion: batch/v1
@@ -20,6 +23,10 @@ spec:
   # a failed Job, not a silent never-completing one). 3600s covers a slow
   # model pull across the backoffLimit retries.
   activeDeadlineSeconds: 3600
+  # Self-clean: succeeded Jobs vanish (the deploy's S3 check still gates
+  # re-seeding), and a failed Job (backoffLimit exhausted) disappears so the
+  # next deploy's gate retries instead of skipping forever.
+  ttlSecondsAfterFinished: 600
   backoffLimit: 2
   template:
     metadata:
