@@ -78,7 +78,7 @@ mt_apply kubectl apply -f <(kubectl create secret generic ollama-s3 \
   --dry-run=client -o yaml)
 
 print_status "Deploying Ollama..."
-export LLM_S3_BUCKET LLM_S3_PREFIX
+export LLM_S3_BUCKET LLM_S3_PREFIX LLM_MODEL
 mt_apply kubectl apply -f <(envsubst < "${MANIFESTS_DIR}/ollama.yaml.tpl")
 
 # Restart only when config actually changed (mt_apply tracked it). In particular
