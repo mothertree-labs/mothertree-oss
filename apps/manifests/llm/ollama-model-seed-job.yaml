@@ -45,10 +45,17 @@ spec:
               # Pull is this init container's only job: exit as soon as it
               # succeeds — do NOT `wait` on the backgrounded ollama serve
               # (it never exits, which would hang the init container forever).
+              # The pull's exit code must propagate (sh is dash — a pipe to
+              # tail would mask it and report a failed pull as Complete, so
+              # backoffLimit/Failed would never engage): log to a file instead.
               ollama serve &
               sleep 3
               until ollama list >/dev/null 2>&1; do sleep 1; done
-              ollama pull ${LLM_MODEL} 2>&1 | tail -5
+              if ! ollama pull "${LLM_MODEL}" > /tmp/pull.log 2>&1; then
+                tail -20 /tmp/pull.log >&2
+                exit 1
+              fi
+              tail -5 /tmp/pull.log
           env:
             - name: LLM_MODEL
               value: "${LLM_MODEL}"
