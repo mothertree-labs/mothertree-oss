@@ -75,9 +75,28 @@ mt_apply kubectl apply -f <(kubectl create secret generic ollama-s3 \
   -n infra-llm \
   --dry-run=client -o yaml)
 
+# Canonical model ref — bare names (no :tag) are equivalent to :latest in
+# Ollama's registry layout, and `ollama list` prints the tag explicitly. Both
+# the pod's model-presence check (ollama.yaml.tpl) and the S3 manifest probe
+# below must use the canonical form or a tagless llm.model never matches.
+_mt_model_tag="${LLM_MODEL#*:}"
+[[ "${_mt_model_tag}" == "${LLM_MODEL}" ]] && _mt_model_tag="latest"
+LLM_MODEL_CANONICAL="${LLM_MODEL%:*}:${_mt_model_tag}"
+# The model ref is pasted textually into pod shell scripts by envsubst below —
+# constrain it to Ollama's ref grammar so a malformed/malicious llm.model can
+# never inject shell or corrupt the rendered YAML.
+[[ "${LLM_MODEL_CANONICAL}" =~ ^[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+$ ]] || {
+  print_error "Invalid llm.model '${LLM_MODEL}' — expected [name[:tag]] with [A-Za-z0-9._/-] only"
+  exit 1
+}
+
 print_status "Deploying Ollama..."
-export LLM_S3_BUCKET LLM_S3_PREFIX LLM_MODEL
-mt_apply kubectl apply -f <(envsubst < "${MANIFESTS_DIR}/ollama.yaml.tpl")
+export LLM_S3_BUCKET LLM_S3_PREFIX LLM_MODEL LLM_MODEL_CANONICAL
+# Whitelist the substituted variables: bare envsubst would substitute ANY
+# exported var a template references (and blank unknowns) — this makes the
+# contract explicit and keeps unrelated env values out of rendered manifests.
+_MT_ENVSUBST_VARS='${LLM_MODEL} ${LLM_MODEL_CANONICAL} ${LLM_S3_BUCKET} ${LLM_S3_PREFIX}'
+mt_apply kubectl apply -f <(envsubst "${_MT_ENVSUBST_VARS}" < "${MANIFESTS_DIR}/ollama.yaml.tpl")
 
 # Restart only when config actually changed (mt_apply tracked it). In particular
 # an ollama-s3 credential rotation does not change the pod template, so without
@@ -101,13 +120,8 @@ print_status "Checking whether the model is already in the S3 model cache..."
 # pinned aws-cli image via a throwaway pod that references the ollama-s3 Secret
 # through envFrom — the S3 credentials never touch argv or the pod spec (etcd).
 # No local aws CLI dependency.
-_mt_model_tag="${LLM_MODEL#*:}"
-# A bare model name (no :tag) is equivalent to :latest in Ollama's registry
-# layout — without this the manifest path would be .../llama3.2/llama3.2 and
-# the gate would never find the seeded manifest. The seed Job uploads whatever
-# ollama itself wrote (bare names land under .../llama3.2/latest), so the probe
-# path must match that.
-[[ "${_mt_model_tag}" == "${LLM_MODEL}" ]] && _mt_model_tag="latest"
+# The seed Job uploads whatever ollama itself wrote (bare names land under
+# .../<name>/latest), so the probe path uses the canonical tag computed above.
 _mt_model_manifest="s3://${LLM_S3_BUCKET}/${LLM_S3_PREFIX}/models/manifests/registry.ollama.ai/library/${LLM_MODEL%:*}/${_mt_model_tag}"
 _mt_seed_skip=""
 if kubectl get job ollama-model-seed -n infra-llm >/dev/null 2>&1; then
@@ -121,7 +135,10 @@ if kubectl get job ollama-model-seed -n infra-llm >/dev/null 2>&1; then
     _mt_seed_skip=1
   elif [[ "${_mt_seed_failed}" == "True" ]]; then
     print_status "Seed Job failed previously (e.g. transient ollama.com outage) — deleting to retry."
-    kubectl delete job ollama-model-seed -n infra-llm --wait=false >/dev/null 2>&1 || true
+    # Wait for the deletion to finish: the re-apply below would error against a
+    # still-terminating Job object and set -e would fail the whole deploy.
+    # Bounded so a finalizer-stuck object can't hang the deploy indefinitely.
+    kubectl delete job ollama-model-seed -n infra-llm --timeout=60s >/dev/null 2>&1 || true
   else
     print_status "Seed Job still running — skipping (it populates the bucket when done)."
     _mt_seed_skip=1
@@ -167,13 +184,13 @@ EOF
     else
       print_status "Bucket not seeded — applying seed Job (populates S3 in the background)..."
       export LLM_MODEL
-      kubectl apply -f <(envsubst < "${MANIFESTS_DIR}/ollama-model-seed-job.yaml")
+      kubectl apply -f <(envsubst "${_MT_ENVSUBST_VARS}" < "${MANIFESTS_DIR}/ollama-model-seed-job.yaml")
       print_status "Seed Job applied — deploy continues without waiting for the model pull."
     fi
   else
     print_status "Could not create seed-check pod — applying seed Job (idempotent) instead."
     export LLM_MODEL
-    kubectl apply -f <(envsubst < "${MANIFESTS_DIR}/ollama-model-seed-job.yaml")
+    kubectl apply -f <(envsubst "${_MT_ENVSUBST_VARS}" < "${MANIFESTS_DIR}/ollama-model-seed-job.yaml")
     print_status "Seed Job applied — deploy continues without waiting for the model pull."
   fi
   rm -f "${_mt_seed_manifest}"

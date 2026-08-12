@@ -50,7 +50,15 @@ spec:
             - /bin/sh
             - -c
             - |
+              # NOTE: this script is envsubst-templated at deploy time — do not
+              # introduce shell variable references beyond the LLM_* ones
+              # (envsubst blanks any it doesn't know). $! and awk's $1 are safe
+              # (not valid envsubst identifiers).
               ollama serve &
+              # Graceful drain: forward TERM to the backgrounded serve (sh
+              # won't), so rolling updates let in-flight requests finish
+              # instead of SIGKILLing ollama at container teardown.
+              trap 'kill $! 2>/dev/null' TERM
               sleep 3
               until ollama list >/dev/null 2>&1; do sleep 1; done
               # Ollama's HTTP API does NOT auto-pull a missing model (it 404s),
@@ -58,9 +66,11 @@ spec:
               # manual rollout restart. Pull it ourselves when the restore
               # initContainer had nothing to restore. `wait` is intentional:
               # it keeps serve alive as this container's long-running process.
-              if ! ollama list | awk -v m="${LLM_MODEL}" '$1 == m { found = 1 } END { exit !found }'; then
-                echo "Model ${LLM_MODEL} missing locally — pulling from ollama.com (first boot on empty S3 cache)..."
-                if ! ollama pull "${LLM_MODEL}" > /tmp/pull.log 2>&1; then
+              # LLM_MODEL_CANONICAL (bare names normalized to :latest by
+              # deploy-llm.sh) matches how `ollama list` prints model names.
+              if ! ollama list | awk -v m="${LLM_MODEL_CANONICAL}" '$1 == m { found = 1 } END { exit !found }'; then
+                echo "Model ${LLM_MODEL_CANONICAL} missing locally — pulling from ollama.com (first boot on empty S3 cache)..."
+                if ! ollama pull "${LLM_MODEL_CANONICAL}" > /tmp/pull.log 2>&1; then
                   tail -20 /tmp/pull.log >&2
                   exit 1
                 fi
