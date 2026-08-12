@@ -299,6 +299,19 @@ variable "headscale_url" {
   default     = ""
 }
 
+# LLM (Ollama) model-weight S3 cache bucket
+variable "llm_models_bucket_label" {
+  description = "Base label for the LLM model-weight Object Storage bucket. Suffixed with -<env> (e.g., mothertree-models-prod). Dev's bucket is created out-of-band (Phase 0) and skipped here."
+  type        = string
+  default     = "mothertree-models"
+}
+
+variable "llm_models_region" {
+  description = "Linode region for the LLM model-weight Object Storage bucket. Empty defaults to the cluster region (us-lax for prod, nl-ams for prod-eu)."
+  type        = string
+  default     = ""
+}
+
 variable "tailscale_auth_key" {
   description = "Pre-authenticated key from Headscale for infrastructure nodes to join the tailnet"
   type        = string

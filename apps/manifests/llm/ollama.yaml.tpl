@@ -13,13 +13,36 @@ spec:
     matchLabels:
       app: ollama
   strategy:
-    type: Recreate
+    # No PVC volume lock anymore (emptyDir) — RollingUpdate with zero downtime.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   template:
     metadata:
       labels:
         app: ollama
         mothertree/component: llm
     spec:
+      initContainers:
+        - name: restore-models
+          # Restore model weights from the S3 model cache into the shared
+          # emptyDir before Ollama starts. Idempotent (content-addressed blobs,
+          # no --delete). No-op when the bucket is empty (first-ever deploy);
+          # the main container then pulls the model directly (see below) while
+          # the seed Job populates the bucket in the background.
+          image: amazon/aws-cli:2.22.35
+          command:
+            - /bin/sh
+            - -c
+            - |
+              aws s3 sync --no-progress s3://${LLM_S3_BUCKET}/${LLM_S3_PREFIX}/ /root/.ollama/
+          envFrom:
+            - secretRef:
+                name: ollama-s3
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /root/.ollama
       containers:
         - name: ollama
           image: ollama/ollama:0.5.7
@@ -30,7 +53,19 @@ spec:
               ollama serve &
               sleep 3
               until ollama list >/dev/null 2>&1; do sleep 1; done
-              ollama pull ${LLM_MODEL} 2>&1 | tail -5
+              # Ollama's HTTP API does NOT auto-pull a missing model (it 404s),
+              # so a first boot on an empty S3 cache would serve 404s until a
+              # manual rollout restart. Pull it ourselves when the restore
+              # initContainer had nothing to restore. `wait` is intentional:
+              # it keeps serve alive as this container's long-running process.
+              if ! ollama list | awk -v m="${LLM_MODEL}" '$1 == m { found = 1 } END { exit !found }'; then
+                echo "Model ${LLM_MODEL} missing locally — pulling from ollama.com (first boot on empty S3 cache)..."
+                if ! ollama pull "${LLM_MODEL}" > /tmp/pull.log 2>&1; then
+                  tail -20 /tmp/pull.log >&2
+                  exit 1
+                fi
+                tail -5 /tmp/pull.log
+              fi
               wait
           ports:
             - name: http
@@ -39,6 +74,8 @@ spec:
           env:
             - name: OLLAMA_HOST
               value: "0.0.0.0"
+            - name: LLM_MODEL
+              value: "${LLM_MODEL}"
             - name: OLLAMA_KEEP_ALIVE
               value: "30m"
             - name: OLLAMA_NUM_PARALLEL
@@ -69,7 +106,10 @@ spec:
 
       volumes:
         - name: ollama-models
-          ${OLLAMA_STORAGE_VALUE}
+          # Disk-backed (NOT medium: Memory) — the multi-GB model must not
+          # count against pod memory. Ephemeral cache; the source of truth is
+          # the S3 model cache, restored by the initContainer above.
+          emptyDir: {}
 
 ---
 apiVersion: v1

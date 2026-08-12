@@ -97,5 +97,13 @@ openvpn_disk_size = 25
 # Common tags
 common_tags = ["production", "matrix", "terraform"] 
 
+# LLM (Ollama) model-weight S3 cache bucket.
+# Created per-env as `<llm_models_bucket_label>-<env>` (dev is skipped — its
+# bucket is provisioned out-of-band). After `manage_infra --phase1`, grab the
+# scoped secret key via `terraform output -raw llm_models_secret_key` and store
+# it in the infra tenant secrets as `llm.s3_secret`.
+# llm_models_bucket_label = "mothertree-models"
+# llm_models_region      = "us-lax"   # us-lax for prod, nl-ams for prod-eu (defaults to linode_region)
+
 export TF_VAR_docs_db_password="SET_A_STRONG_PASSWORD"
 export TF_VAR_oidc_rp_client_secret_docs="SET_TO_KEYCLOAK_DOCS_APP_SECRET"
