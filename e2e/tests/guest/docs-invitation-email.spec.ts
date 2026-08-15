@@ -1,7 +1,7 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
-import { loginToApp } from '../../helpers/auth';
+import { keycloakLogin } from '../../helpers/auth';
 import {
   isImapConfigured,
   waitForEmailBody,
@@ -63,11 +63,40 @@ test.describe('Docs — Invitation Email', () => {
 
     try {
       // ── Phase 1: Login inviter to Docs (OIDC) ───────────────────────────
-      await loginToApp(emailTestPage, urls.docs, inviter.username, inviter.password);
-      await emailTestPage.waitForLoadState('networkidle').catch(() => {});
+      // The Docs SPA redirects unauthenticated visitors to Keycloak via
+      // client-side JS (FRONTEND_HOMEPAGE_FEATURE_ENABLED=false), so the
+      // auth. hop is NOT visible immediately after goto — wait for it.
+      // loginToApp() can't be used here: it checks page.url() synchronously.
+      await emailTestPage.goto(urls.docs);
+      await emailTestPage
+        .waitForURL((u) => u.hostname.startsWith('auth.'), { timeout: 20_000 })
+        .catch(() => {}); // already authenticated → no redirect
+      if (new URL(emailTestPage.url()).hostname.startsWith('auth.')) {
+        await keycloakLogin(emailTestPage, inviter.username, inviter.password);
+        await emailTestPage.waitForURL((u) => !u.hostname.startsWith('auth.'), {
+          timeout: 30_000,
+        });
+      }
 
-      // Prime the session and grab the CSRF token cookie for API POSTs.
-      await emailTestPage.request.get(`${urls.docs}/api/v1.0/documents/`);
+      // Wait until the Django session is actually established. The OIDC
+      // code-for-session exchange happens in the SPA's redirect chain, so
+      // poll the API rather than trusting page load state.
+      await expect
+        .poll(
+          async () =>
+            (
+              await emailTestPage.request.get(`${urls.docs}/api/v1.0/users/me/`)
+            ).status(),
+          {
+            message:
+              'Docs API never returned 200 for /users/me/ — OIDC login did not complete',
+            timeout: 60_000,
+          },
+        )
+        .toBe(200);
+
+      // Django sets the csrftoken cookie on the OIDC callback response
+      // (rotate_token during auth.login) — required for API POSTs.
       const cookies = await emailTestPage.context().cookies(urls.docs);
       const csrfToken = cookies.find((c) => c.name === 'csrftoken')?.value;
       expect(
