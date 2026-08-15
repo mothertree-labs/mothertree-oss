@@ -7,7 +7,7 @@ with open(models_path, "r") as f:
     content = f.read()
 
 # Check if already patched
-if "ADMIN_PORTAL_URL" in content:
+if "ACCOUNT_PORTAL_URL" in content:
     print("[invitation-patch] Already patched")
 else:
     # 1. In send_email: change context.update({...}) to use defaults that caller context can override
@@ -24,17 +24,17 @@ else:
     # 2. In send_invitation_email: add admin portal link to context before calling send_email
     old_send_call = "        self.send_email(subject, [email], context, language)"
 
-    new_send_call = """        # Redirect invitation link through admin portal guest landing
-        _admin_url = os.environ.get("ADMIN_PORTAL_URL", "")
-        if _admin_url:
+    new_send_call = """        # Redirect invitation link through account portal guest landing
+        _account_portal_url = os.environ.get("ACCOUNT_PORTAL_URL", "")
+        if _account_portal_url:
             import urllib.parse
-            context["link"] = f"{_admin_url}/guest-landing?email={urllib.parse.quote(email)}&doc={self.id}"
+            context["link"] = f"{_account_portal_url}/guest-landing?email={urllib.parse.quote(email)}&doc={self.id}"
         self.send_email(subject, [email], context, language)"""
 
     if old_send_call in content:
         # Only replace the first occurrence (in send_invitation_email)
         content = content.replace(old_send_call, new_send_call, 1)
-        print("[invitation-patch] Patched send_invitation_email to use admin portal link")
+        print("[invitation-patch] Patched send_invitation_email to use account portal link")
     else:
         print("[invitation-patch] WARNING: Could not patch send_invitation_email")
 

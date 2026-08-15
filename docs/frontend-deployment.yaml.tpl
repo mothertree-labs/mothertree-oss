@@ -58,9 +58,19 @@ spec:
             - name: save-status-scripts
               mountPath: /usr/share/nginx/html/static
               readOnly: true
+            # Email logo served at /email-assets/logo-email.png (referenced by
+            # DJANGO_EMAIL_LOGO_IMG in the backend's invitation emails).
+            # Own directory mount — nesting a file mount inside the read-only
+            # /static ConfigMap mount can fail pod start.
+            - name: email-assets
+              mountPath: /usr/share/nginx/html/email-assets
+              readOnly: true
       volumes:
         - name: save-status-scripts
           configMap:
             name: save-status-scripts
+        - name: email-assets
+          configMap:
+            name: docs-email-assets
       restartPolicy: Always
 

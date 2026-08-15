@@ -149,9 +149,15 @@ mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/env-d-yprovider-configmap.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/docs-config.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 
-# Create invitation patch ConfigMap (patches Docs email links to go through admin portal)
+# Create invitation patch ConfigMap (patches Docs email links to go through the account portal guest landing)
 mt_apply kubectl apply -f <(kubectl -n "$NS_DOCS" create configmap docs-invitation-patch \
   --from-file=patch_invitation.py="$REPO_ROOT/docs/patch_invitation.py" \
+  --dry-run=client -o yaml)
+
+# Email assets ConfigMap — logo served by the frontend at /email-assets/logo-email.png
+# (referenced by DJANGO_EMAIL_LOGO_IMG in docs-config for invitation emails)
+mt_apply kubectl apply -f <(kubectl -n "$NS_DOCS" create configmap docs-email-assets \
+  --from-file=logo-email.png="$REPO_ROOT/docs/assets/logo-email.png" \
   --dry-run=client -o yaml)
 
 # Update backend deployment to reference PostgreSQL in db namespace
