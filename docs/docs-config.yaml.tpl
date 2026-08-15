@@ -70,12 +70,12 @@ data:
   EMAIL_BACKEND: "django.core.mail.backends.smtp.EmailBackend"
   EMAIL_USE_TLS: "True"
   EMAIL_USE_SSL: "False"
-  DEFAULT_FROM_EMAIL: "MotherTree Docs <noreply@${SMTP_DOMAIN}>"
+  DEFAULT_FROM_EMAIL: "mothertree docs <noreply@${SMTP_DOMAIN}>"
 
   # Impress/LaSuite Docs specific email settings (host/port/user/password from Secret)
   DJANGO_EMAIL_USE_TLS: "True"
-  DJANGO_EMAIL_FROM: "MotherTree Docs <noreply@${SMTP_DOMAIN}>"
-  DJANGO_EMAIL_BRAND_NAME: "Mother Tree Docs"
+  DJANGO_EMAIL_FROM: "mothertree docs <noreply@${SMTP_DOMAIN}>"
+  DJANGO_EMAIL_BRAND_NAME: "mothertree docs"
   # Logo shown in invitation/share emails — served by the docs frontend from
   # the docs-email-assets ConfigMap (unset upstream default renders src="None")
   DJANGO_EMAIL_LOGO_IMG: "https://${DOCS_HOST}/email-assets/logo-email.png"

@@ -44,4 +44,28 @@ test.describe('Smoke — Docs Backend Health', () => {
     const body = await response.json();
     expect(body).toBeDefined();
   });
+
+  test('email logo asset is served by the frontend', async ({ request }) => {
+    // Invitation/share emails reference DJANGO_EMAIL_LOGO_IMG, which points at
+    // /email-assets/logo-email.png served from the docs-email-assets ConfigMap
+    // mounted into the frontend nginx. If the mount or ConfigMap is missing,
+    // every share email renders a broken logo image.
+    const response = await request.get(`${urls.docs}/email-assets/logo-email.png`);
+
+    if (response.status() === 0) {
+      test.skip(true, 'Docs not reachable (DNS or connection error)');
+    }
+
+    expect(
+      response.status(),
+      'Expected the email logo at /email-assets/logo-email.png to be served. ' +
+      'Check the docs-email-assets ConfigMap and its volume mount in the frontend deployment.'
+    ).toBe(200);
+
+    const contentType = response.headers()['content-type'] || '';
+    expect(
+      contentType,
+      'Expected an image content-type for the email logo, got: ' + contentType
+    ).toContain('image/png');
+  });
 });
