@@ -144,6 +144,18 @@ test.describe('Docs — Invitation Email', () => {
       });
       const source = decodeForUrls(rawSource);
 
+      // Stalwart encryption-at-rest turns the stored message into an
+      // OpenPGP blob — no URLs are extractable from the raw source. This
+      // bit pipeline 1831: the unmerged email-encryption experiment had
+      // left encryption enabled on the pool tenants' e2e-mailrcv mailbox.
+      expect(
+        source.includes('multipart/encrypted'),
+        `${invitee.email}'s mailbox has Stalwart encryption-at-rest enabled, ` +
+          'so email content cannot be inspected. Disable it via the Stalwart ' +
+          'API: POST /api/account/crypto {"type":"disabled"} authenticated as ' +
+          `${invitee.username}%master.`,
+      ).toBe(false);
+
       // ── Phase 5: Verify the guest-landing link ──────────────────────────
       const linkMatch = source.match(/https:\/\/[^\s"'<>[\]]+\/guest-landing\?[^\s"'<>[\]]+/);
       expect(
