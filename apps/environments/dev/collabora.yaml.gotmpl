@@ -1,10 +1,13 @@
-# Match prod base values — actual usage ~550-620Mi, 256Mi was severely under-requested.
+# Lower CPU request than base for dev node packing; memory matches base.
+# Usage observed at ~1015Mi (2026-08-15 eviction on tn-*-office): a 512Mi
+# request made the pod the eviction victim under node memory pressure, and
+# the old 1Gi limit sat exactly at real usage (OOMKill territory).
 resources:
   requests:
     cpu: 100m
-    memory: 512Mi
-  limits:
     memory: 1Gi
+  limits:
+    memory: 2Gi
 
 collabora:
   server_name: '{{ env "OFFICE_HOST" }}'
