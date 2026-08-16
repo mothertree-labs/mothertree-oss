@@ -73,6 +73,27 @@ spec:
               value: "false"
             - name: OAUTH_AUTO_REDIRECT
               value: "true"
+            # Web search via the shared SearXNG service in infra-llm.
+            # BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL is a narrow workaround
+            # for the 0.9.6 web-search collection RAG gap (page texts are fed
+            # straight into the chat context instead of via the vector store);
+            # it does not affect file/knowledge-base RAG. See
+            # docs/plans/llm/web-search.md.
+            - name: ENABLE_WEB_SEARCH
+              value: "true"
+            - name: WEB_SEARCH_ENGINE
+              value: "searxng"
+            - name: SEARXNG_QUERY_URL
+              value: "http://searxng.infra-llm.svc.cluster.local:8080/search"
+            - name: BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
+              value: "true"
+            # 0.9.6 filters /api/models for role 'user' through per-model
+            # access control, dropping every non-registered model (plain
+            # Ollama models) unless granted — regular users see an empty model
+            # list. This is the documented escape hatch; the shared LLM has a
+            # single model and per-model grants are not used.
+            - name: BYPASS_MODEL_ACCESS_CONTROL
+              value: "true"
           volumeMounts:
             - name: llm-data
               mountPath: /app/backend/data

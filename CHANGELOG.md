@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- LLM web search for Open WebUI, self-hosted via SearXNG (the alternative
+  provider route from `docs/plans/llm/web-search.md`; no external API key).
+  A shared `searxng` deployment now lives in `infra-llm`
+  (`apps/manifests/llm/searxng.yaml`, deployed by `apps/deploy-llm.sh`) and
+  serves an Open WebUI-compatible JSON search API. All Open WebUI tenant
+  deployments (`apps/manifests/llm/open-webui-tenant.yaml.tpl`) enable web
+  search against it with `ENABLE_WEB_SEARCH=true`, `WEB_SEARCH_ENGINE=searxng`,
+  `SEARXNG_QUERY_URL`, and `BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=true`.
+  The bypass flag is a narrow workaround for the 0.9.6 RAG gap where
+  `type: web_search` collections are dropped by the retrieval access-control
+  path: page texts go straight into the chat context, and file/knowledge-base
+  RAG access control is unaffected. Also sets
+  `BYPASS_MODEL_ACCESS_CONTROL=true`: 0.9.6 filters `/api/models` for
+  non-admin users through per-model access control and drops non-registered
+  (Ollama) models, so regular users saw an empty model selector; the flag is
+  the documented escape hatch and per-model grants are not used on the shared
+  single-model setup. Verified end-to-end on dev (SearXNG JSON API → Open
+  WebUI retrieval → sources + cited answer; user-role JWT sees both models).
+
 ### Fixed
 - Recurring `deploy-dev-nextcloud` / `deploy-dev-roundcube` CI flakes caused by
   PgBouncer serving a stale cached login error after a tenant DB was dropped and
