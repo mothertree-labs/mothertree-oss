@@ -198,17 +198,6 @@ function calling delegates to a `web_search` tool instead). Making web search
 work for regular users on 0.11 therefore needs explicit permission + tool wiring
 that is outside this change. 0.9.6 stays as the pinned image.
 
-### Test users (dev only)
-
-Keycloak realm `docs`:
-
-- `test-websearch` / `TestWebSearch1!` (id `fc990f19-0588-4bbd-b90e-fe4acd1e8c14`)
-  — used for OIDC login during verification; the first user of a fresh DB,
-  so role drifts to admin.
-- `marek-webui` / `Marek-LLM-Dev-2026!` — the everyday dev login for
-  `llm.dev.mother-tree.org`, role `docs-user` (non-admin, the realistic path:
-  sees both models and can chat, verified manually on 2026-08-14).
-
 ### Permanent repo changes (working tree, uncommitted — status 2026-08-16)
 All changes below are applied to the working tree on branch
 `feat/Web-Search-in-Open-WebUI` but **not committed yet**; CI has not deployed
