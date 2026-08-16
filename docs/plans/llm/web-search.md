@@ -1,7 +1,7 @@
 ## Why the model can't browse on its own
 
-No local LLM (including self-hosted Llama) can access the internet by itself.\
-Open WebUI has a built-in **Web Search** feature that sits between the model and the\
+No local LLM (including self-hosted Llama) can access the internet by itself.
+Open WebUI has a built-in **Web Search** feature that sits between the model and the
 internet:
 
 1. Your prompt goes to an LLM "task model" (can be the same Llama model), which generates a search query.
@@ -12,13 +12,13 @@ internet:
 
 4. Your model writes the final answer using that injected context.
 
-So the model never touches the internet directly — Open WebUI's backend does, via\
+So the model never touches the internet directly — Open WebUI's backend does, via
 a search API.
 
 ## Recommended plan
 
-Use **Brave Search API** to start — free tier of ~2,000 searches/month, minimal\
-setup, decent quality. Upgrade to a paid provider later only if you outgrow the\
+Use **Brave Search API** to start — free tier of ~2,000 searches/month, minimal
+setup, decent quality. Upgrade to a paid provider later only if you outgrow the
 free tier.
 
 ### Steps to enable
@@ -45,15 +45,15 @@ free tier.
 
 11. In a chat, click the **+** button in the prompt box and enable "Web Search" for that message (or set it as always-on for a model).
 
-If you hit rate limits on a free-tier key, set the environment variable\
-`WEB_SEARCH_CONCURRENT_REQUESTS=1` so requests go out one at a time instead of\
+If you hit rate limits on a free-tier key, set the environment variable
+`WEB_SEARCH_CONCURRENT_REQUESTS=1` so requests go out one at a time instead of
 in parallel.
 
-> Note: if you don't see "Admin Panel" as an option, your logged-in user isn't\
-> set as admin. The first account created on a fresh Open WebUI instance is\
+> Note: if you don't see "Admin Panel" as an option, your logged-in user isn't
+> set as admin. The first account created on a fresh Open WebUI instance is
 > admin by default; this can be changed under Admin Panel → Users.
 
-***
+---
 
 ## Alternatives
 
@@ -73,11 +73,11 @@ in parallel.
 
 * **Serper / SerpAPI / Serply** — essentially "Google SERP as an API," they handle the scraping/anti-bot problem for you.
 
-* **Google Programmable Search (PSE)**, **Bing Search API**, **Kagi**, **Yandex**, **Yacy**, **Mojeek**, **[you.com](http://you.com)** — all supported natively as dropdown options in Open WebUI's Web Search settings.
+* **Google Programmable Search (PSE)**, **Bing Search API**, **Kagi**, **Yandex**, **Yacy**, **Mojeek**, **[you.com](https://you.com)** — all supported natively as dropdown options in Open WebUI's Web Search settings.
 
 ### How ChatGPT / Codex etc. do it (and avoid CAPTCHAs)
 
-They don't scrape `google.com/search` in a headless browser — that's exactly\
+They don't scrape `google.com/search` in a headless browser — that's exactly
 what triggers CAPTCHAs. Instead:
 
 * **Licensed search APIs** — ChatGPT's browsing historically ran on the **Bing Search API** via a commercial agreement with Microsoft: sanctioned, high-volume access, no scraping involved.
@@ -86,13 +86,13 @@ what triggers CAPTCHAs. Instead:
 
 * Commercial products like Tavily/Exa/Serper exist precisely to be "the thing that deals with rate limits, JS rendering, and anti-bot detection so your app doesn't have to."
 
-The pattern at every scale: never scrape the consumer search page directly —\
-pay for or license API-level access (Bing/Brave/Google PSE), or self-host a\
-metasearch aggregator (SearXNG) built to behave as a legitimate client rather\
+The pattern at every scale: never scrape the consumer search page directly —
+pay for or license API-level access (Bing/Brave/Google PSE), or self-host a
+metasearch aggregator (SearXNG) built to behave as a legitimate client rather
 than a browser impersonating a human.
 
 
-***
+---
 
 ## Implementation status (2026-08-14)
 
