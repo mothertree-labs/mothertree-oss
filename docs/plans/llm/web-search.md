@@ -17,6 +17,11 @@ a search API.
 
 ## Recommended plan
 
+> Superseded (2026-08-14): implemented with **self-hosted SearXNG**, deployed via
+> env vars in the tenant template — see "Implementation status" below. The Brave
+> + Admin Panel path described here is retained as the original design/history;
+> do not follow it for the current deployment.
+
 Use **Brave Search API** to start — free tier of ~2,000 searches/month, minimal
 setup, decent quality. Upgrade to a paid provider later only if you outgrow the
 free tier.
@@ -65,7 +70,7 @@ in parallel.
 
   * Needs a real `USER_AGENT` set, or content extraction can silently fail (bot detection).
 
-  * The official SearXNG GitHub repo was archived in late May 2026, so some older tutorials are now broken — use an up-to-date guide.
+  * Note (verified 2026-08-16): the `searxng/searxng-docker` helper repo (Docker Compose setup) was archived on 2026-03-28, but the main `searxng/searxng` repo is alive and actively maintained (a commit landed 2026-08-14; the pinned image `2026.8.5-1689cb1b5` comes from its release train). Older tutorials are still worth checking for staleness, but the project is not dead.
 
 ### Paid / managed APIs
 
@@ -122,6 +127,20 @@ Open WebUI wiring (`tn-mothertree-llm` deployment `open-webui`, image
 - `BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=true`
 - `BYPASS_MODEL_ACCESS_CONTROL=true` — see "Model visibility for regular
   users" below
+
+### Operational caveats
+
+- `ENABLE_WEB_SEARCH`, `WEB_SEARCH_ENGINE`, and `SEARXNG_QUERY_URL` are
+  **PersistentConfig**-backed in Open WebUI: the env value only applies if the
+  setting was never saved via the Admin Panel (a saved value wins, stored in
+  webui.db). Nothing in the tenant template or deploy scripts saves them, so
+  CI/env wins unless an operator touches the Admin Panel Web Search page. On
+  dev the DB is emptyDir anyway, so any such override evaporates on restart.
+- All tenants share the single `infra-llm` SearXNG instance (each tenant runs
+  its own open-webui, but they all point at the same `searxng` service).
+  SearXNG's `server.limiter` is off by default; upstream engines may
+  throttle/rate-limit shared egress, visible as intermittent 429s or empty
+  results. Watch it if usage grows.
 
 ### Why `BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=true` (0.9.6 bug workaround)
 
