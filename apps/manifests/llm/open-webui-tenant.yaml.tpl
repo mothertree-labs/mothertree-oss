@@ -94,6 +94,12 @@ spec:
             # single model and per-model grants are not used.
             - name: BYPASS_MODEL_ACCESS_CONTROL
               value: "true"
+            # Open WebUI appends its built-in evaluation-arena entry
+            # ("Arena Model", id: arena-model) to /api/models by default
+            # (ENABLE_EVALUATION_ARENA_MODELS defaults to true). We don't use
+            # the battle/vote feature, so keep it out of users' model lists.
+            - name: ENABLE_EVALUATION_ARENA_MODELS
+              value: "false"
           volumeMounts:
             - name: llm-data
               mountPath: /app/backend/data
