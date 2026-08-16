@@ -230,7 +230,7 @@ mt_reset_change_tracker
 SEARXNG_SECRET_KEY="$(kubectl get secret searxng-settings -n infra-llm -o yaml 2>/dev/null \
   | yq '.data["settings.yml"] // ""' 2>/dev/null \
   | base64 -d 2>/dev/null \
-  | sed -n 's/^[[:space:]]*secret_key:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  | sed -n 's/^[[:space:]]*secret_key:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
 if [ -z "$SEARXNG_SECRET_KEY" ]; then
   print_status "No existing SearXNG secret key found — generating one"
   SEARXNG_SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
