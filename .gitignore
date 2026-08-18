@@ -4,6 +4,11 @@
 *.tfplan
 .terraform/
 .terraform.lock.hcl
+# ...but commit the root-config lockfiles so every checkout (operator, CI,
+# reaper) resolves identical provider versions. A stale uncommitted lockfile
+# on the reaper host broke `terraform destroy` for six weeks (2026-08-17).
+!phase1/.terraform.lock.hcl
+!phase1-dev/.terraform.lock.hcl
 terraform.tfvars
 *.tfvars
 *.tfvars.json

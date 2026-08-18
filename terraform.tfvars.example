@@ -4,7 +4,7 @@
 # Cluster Configuration
 cluster_label = "matrix-cluster"
 linode_region = "us-east"
-linode_k8s_version = "1.28"
+linode_k8s_version = "1.36"
 
 # Node pool configuration - optimized for cost (~$60-70/month)
 # g6-standard-2: 2 vCPU, 4GB RAM, $12/month per node

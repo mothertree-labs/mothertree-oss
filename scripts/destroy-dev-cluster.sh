@@ -233,6 +233,35 @@ if [ "$DRY_RUN" = "true" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Step 1.5: terraform preflight — fail BEFORE any destructive action
+#
+# The K8s sweep + tenant DB drops below are only safe when the terraform
+# destroy in step 3 can actually complete: a destroy that dies after the sweep
+# leaves the cluster half-dead, and the reaper's 15-minute cron then repeats
+# the destructive prefix on every tick (2026-08-17: six weeks of dropped
+# tenant DBs and force-deleted pods because a stale phase1-dev provider
+# lockfile made `terraform init` fail AFTER the sweep had already run).
+# Validate everything step 3 needs now, while the cluster is still intact.
+# ---------------------------------------------------------------------------
+print_status "Preflight: validating terraform can run in phase1-dev..."
+
+if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+  print_error "phase1-dev S3 backend requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in your secrets env."
+  print_error "See phase1-dev/MIGRATION.md. Aborting before any destructive step."
+  exit 1
+fi
+
+pushd "$REPO_ROOT/phase1-dev" >/dev/null
+  if ! terraform init -input=false; then
+    print_error "PREFLIGHT FAILED: terraform init failed in phase1-dev — aborting before any destructive step."
+    print_error "Nothing has been deleted. Fix the terraform setup (a provider lockfile/constraint mismatch"
+    print_error "usually means 'terraform init -upgrade' is needed here) and re-run."
+    exit 7
+  fi
+popd >/dev/null
+print_success "Preflight OK — terraform initialized in phase1-dev"
+
+# ---------------------------------------------------------------------------
 # Step 2: K8s pre-destroy sweep (if cluster exists)
 # ---------------------------------------------------------------------------
 if [ "$CLUSTER_EXISTS" = "true" ]; then
@@ -270,7 +299,15 @@ if [ "$CLUSTER_EXISTS" = "true" ]; then
   # the orphan sweep below will catch them.
   print_status "Waiting for PVs to detach..."
   for _ in {1..30}; do
-    pv_count=$("${KUBECTL[@]}" get pv --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    # A transient kubectl/API failure here must retry, not kill the whole
+    # script via set -e (observed 2026-08-18: one failed `get pv` silently
+    # aborted the run right after the sweep) — and not masquerade as "0 PVs".
+    if ! pv_list=$("${KUBECTL[@]}" get pv --no-headers 2>/dev/null); then
+      echo "  kubectl get pv failed (transient?), retrying..."
+      sleep 2
+      continue
+    fi
+    pv_count=$(printf '%s' "$pv_list" | grep -c . || true)
     if [ "$pv_count" = "0" ]; then
       print_success "All PVs detached"
       break
@@ -362,12 +399,6 @@ fi
 # ---------------------------------------------------------------------------
 print_status "Running terraform destroy (LKE cluster only, in phase1-dev)..."
 
-if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
-  print_error "phase1-dev S3 backend requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in your secrets env."
-  print_error "See phase1-dev/MIGRATION.md."
-  exit 1
-fi
-
 VAR_FILE_FLAGS=()
 if [ -f "$REPO_ROOT/terraform.tfvars" ]; then
   VAR_FILE_FLAGS+=("-var-file=$REPO_ROOT/terraform.tfvars")
@@ -378,6 +409,7 @@ fi
 
 pushd "$REPO_ROOT/phase1-dev" >/dev/null
 
+  # Already validated by the preflight above; re-run in case anything changed.
   terraform init -input=false >/dev/null
 
   # Target only the ephemeral cluster pieces — NOT the VPC, the heartbeat

@@ -14,6 +14,9 @@
 #   REPO_DIR                                  — checkout used by destroy script
 #   LINODE_CLI_TOKEN                          — for cluster-existence check + destroy
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  — for phase1-dev terraform state
+# Optional keys:
+#   MT_NOTIFY_HOMESERVER, MT_NOTIFY_TOKEN,
+#   MT_NOTIFY_ROOM_ID                         — Matrix alert on reaper failure
 #
 # Logs everything to stdout; cron redirects to /var/log/dev-reaper.log.
 
@@ -30,6 +33,39 @@ set -a; source "$REAPER_ENV"; set +a
 log() {
     echo "[dev-reaper $(date -Iseconds)] $*"
 }
+
+# ── Failure alerting ────────────────────────────────────────────────────────
+# The reaper runs unattended from cron; a failure that only lands in the log
+# can go unnoticed for weeks (2026-08-17: 3,535 consecutive terraform-init
+# failures over six weeks left the dev cluster half-destroyed on every idle
+# tick). Any non-zero exit sends a Matrix alert via scripts/lib/notify.sh,
+# using MT_NOTIFY_HOMESERVER / MT_NOTIFY_TOKEN / MT_NOTIFY_ROOM_ID from the
+# reaper env. The EXIT trap also scrubs the secrets the destroy path writes
+# into the checkout (see SECRETS_FILE/KCFG below).
+SECRETS_FILE=""
+KCFG=""
+_on_exit() {
+    local code=$?
+    # Disable errexit inside the trap: a failing command in the alert path
+    # must never skip the scrub/alert below or clobber the exit code.
+    set +e
+    [ -n "$SECRETS_FILE" ] && rm -f "$SECRETS_FILE"
+    [ -n "$KCFG" ] && rm -f "$KCFG"
+    if [ "$code" -ne 0 ]; then
+        local msg="dev-reaper FAILED (exit=$code) on $(hostname) — the dev cluster may be left half-destroyed and the failure will repeat every cron tick; see /var/log/dev-reaper.log"
+        log "REAPER FAILURE: $msg"
+        if [ -n "${MT_NOTIFY_HOMESERVER:-}" ] && [ -n "${MT_NOTIFY_TOKEN:-}" ] && [ -n "${MT_NOTIFY_ROOM_ID:-}" ] \
+            && [ -f "${REPO_DIR:-/nonexistent}/scripts/lib/notify.sh" ]; then
+            # shellcheck disable=SC1091
+            source "${REPO_DIR}/scripts/lib/notify.sh"
+            mt_notify "🔴 $msg" || log "REAPER FAILURE: Matrix notification also failed"
+        else
+            log "REAPER FAILURE: MT_NOTIFY_* not configured in $REAPER_ENV — this failure is only visible in this log"
+        fi
+    fi
+    exit "$code"
+}
+trap _on_exit EXIT
 
 : "${IDLE_HOURS:=2}"
 : "${VALKEY_HOST:=127.0.0.1}"
@@ -145,13 +181,10 @@ sudo -u woodpecker -H git -C "$REPO_DIR" submodule update --init --recursive --q
 # Files we write into the repo dir that contain the Linode API token / kubeconfig.
 # Mode 0600 root-owned, but still: scrub on exit so a compromise of the
 # woodpecker user (which can't read root-mode-0600 files but might gain it
-# later) doesn't find them between reaper runs.
+# later) doesn't find them between reaper runs. The scrub itself happens in
+# the _on_exit trap installed at the top of this script.
 SECRETS_FILE="$REPO_DIR/secrets.tfvars.env"
 KCFG="$REPO_DIR/kubeconfig.dev.yaml"
-cleanup() {
-    rm -f "$SECRETS_FILE" "$KCFG"
-}
-trap cleanup EXIT
 
 # Write the minimal tfvars secrets the destroy script will source.
 # phase1-dev only needs linode_token at variable level (others have defaults).

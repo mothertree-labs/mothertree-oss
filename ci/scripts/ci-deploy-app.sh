@@ -236,6 +236,41 @@ case "$MODE" in
         *) echo "FATAL: provision-smtp-service-accounts failed (exit $rc)"; exit "$rc" ;;
       esac
 
+      # Cold-start gap #20: Docs deploys in the prep step, BEFORE this step
+      # provisions smtp-credentials, and its backend mounts the Secret via
+      # env valueFrom with optional:true — so on a fresh cluster the pod
+      # starts credential-less and Django silently falls back to
+      # localhost:25 ("invitation was not sent: please run connect() first").
+      # The monolithic create_env rollout-restarts the backend after
+      # provisioning; this split path must do the same. Portals don't need
+      # this — deploy-dev-portals serialises behind this step (see its
+      # depends_on comment); Synapse/Nextcloud read the Secret at deploy time.
+      if kubectl -n "$NS_DOCS" get deployment backend >/dev/null 2>&1; then
+        docs_needs_restart=false
+        if [ "$rc" -eq 0 ]; then
+          docs_needs_restart=true
+        else
+          # rc=2 (no-op) can still mean a credential-less pod: a prior run may
+          # have provisioned the Secret but died before restarting, and a rerun
+          # then sees "already provisioned". Detect it directly — if the Secret
+          # is newer than the oldest running backend pod, that pod started
+          # without it (ISO8601 timestamps compare lexicographically).
+          sec_ts=$(kubectl -n "$NS_DOCS" get secret smtp-credentials \
+            -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || true)
+          pod_ts=$(kubectl -n "$NS_DOCS" get pods -l io.kompose.service=backend \
+            -o jsonpath='{.items[0].status.startTime}' 2>/dev/null || true)
+          if [ -n "$sec_ts" ] && [ -n "$pod_ts" ] && [[ "$sec_ts" > "$pod_ts" ]]; then
+            echo "smtp-credentials ($sec_ts) is newer than the running Docs backend pod ($pod_ts)"
+            docs_needs_restart=true
+          fi
+        fi
+        if [ "$docs_needs_restart" = "true" ]; then
+          echo "=== Docs backend: rollout restart (pick up smtp-credentials) ==="
+          kubectl -n "$NS_DOCS" rollout restart deployment/backend
+          kubectl -n "$NS_DOCS" rollout status deployment/backend --timeout=180s
+        fi
+      fi
+
       # Drift-correct the Keycloak realm SMTP config now that creds exist.
       # Non-fatal — ensure-keycloak-smtp can be re-run manually.
       echo "=== Drift-correcting Keycloak realm SMTP ==="
