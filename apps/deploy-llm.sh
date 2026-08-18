@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# Deploy Ollama inference engine to the shared infra-llm namespace
-# This is a shared-infra service (not per-tenant), so -t/--tenant is not required.
+# Deploy the shared LLM infrastructure to the infra-llm namespace:
+#   - Ollama inference engine (app: ollama)
+#   - SearXNG metasearch engine for Open WebUI web search (app: searxng)
+# This is shared-infra (not per-tenant), so -t/--tenant is not required.
 #
 # Called by: deploy_infra
 # Can also be run standalone.
@@ -210,3 +212,67 @@ kubectl run -n infra-llm --rm -i --restart=Never llm-check \
 print_success "Ollama inference engine deployed!"
 print_success "  API:      http://ollama.infra-llm.svc.cluster.local:11434 (cluster-internal)"
 print_success "  OpenAI-compatible endpoint: http://ollama.infra-llm.svc.cluster.local:11434/v1"
+
+# ---------------------------------------------------------------------------
+# SearXNG metasearch engine — shared infra-llm service powering Open WebUI web
+# search (the alternative-provider route from docs/plans/llm/web-search.md:
+# self-hosted metasearch, no external API key). Keyless JSON API consumed by
+# Open WebUI tenants via SEARXNG_QUERY_URL.
+# ---------------------------------------------------------------------------
+print_status "Deploying SearXNG metasearch engine..."
+mt_reset_change_tracker
+
+# Stable cookie-signing key across deploys: reuse the existing secret's key
+# when present, otherwise generate one (read-or-generate, same pattern as the
+# repo's password helpers). The key only signs the SearXNG UI's own cookies —
+# the Open WebUI JSON API is keyless — but it MUST differ from the image
+# default "ultrasecretkey", which SearXNG refuses to start with.
+SEARXNG_SECRET_KEY="$(kubectl get secret searxng-settings -n infra-llm -o yaml 2>/dev/null \
+  | yq '.data["settings.yml"] // ""' 2>/dev/null \
+  | base64 -d 2>/dev/null \
+  | sed -n 's/^[[:space:]]*secret_key:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+if [ -z "$SEARXNG_SECRET_KEY" ]; then
+  print_status "No existing SearXNG secret key found — generating one"
+  SEARXNG_SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+fi
+export SEARXNG_SECRET_KEY
+
+# The settings Secret is applied OUTSIDE mt_apply: kubectl client-side apply
+# always reports "configured" for a stringData Secret (stored as data but
+# annotated as stringData), which would otherwise force a restart on every
+# deploy. Real settings changes are detected by diffing the settings.yml
+# content before/after the apply instead.
+_mt_searxng_prev="$(kubectl get secret searxng-settings -n infra-llm -o yaml 2>/dev/null \
+  | yq '.data["settings.yml"] // ""' 2>/dev/null | base64 -d 2>/dev/null || true)"
+
+kubectl apply -f <(envsubst '${SEARXNG_SECRET_KEY}' < "${MANIFESTS_DIR}/searxng-settings.yaml.tpl")
+
+_mt_searxng_cur="$(kubectl get secret searxng-settings -n infra-llm -o yaml 2>/dev/null \
+  | yq '.data["settings.yml"] // ""' 2>/dev/null | base64 -d 2>/dev/null || true)"
+if [ "${_mt_searxng_prev}" != "${_mt_searxng_cur}" ]; then
+  print_status "SearXNG settings changed — restart will be triggered"
+  _mt_deploy_changed=true
+fi
+
+# Deployment + Service go through the change tracker normally.
+mt_apply kubectl apply -f <(envsubst '${SEARXNG_SECRET_KEY}' < "${MANIFESTS_DIR}/searxng.yaml.tpl")
+
+# Restart on config change (e.g. the settings secret changing) so the new
+# settings are actually picked up — same conditional-restart pattern as Ollama.
+mt_restart_if_changed deployment/searxng -n infra-llm
+
+print_status "Waiting for SearXNG to be ready..."
+kubectl rollout status deployment/searxng -n infra-llm --timeout=180s || {
+  print_warning "SearXNG rollout not ready within timeout — dumping pod diagnostics"
+  dump_pod_diagnostics infra-llm "app=searxng"
+}
+
+print_status "Verifying SearXNG health endpoint..."
+kubectl run -n infra-llm --rm -i --restart=Never searxng-health-check \
+  --image=curlimages/curl:8.12.1 \
+  -- curl -sf http://searxng.infra-llm.svc.cluster.local:8080/healthz >/dev/null 2>&1 \
+  && print_success "SearXNG health endpoint OK" \
+  || print_warning "SearXNG health check failed — check pod logs"
+
+print_success "SearXNG metasearch engine deployed!"
+print_success "  API:  http://searxng.infra-llm.svc.cluster.local:8080/search?format=json"
