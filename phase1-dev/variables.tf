@@ -23,7 +23,11 @@ variable "linode_region" {
 variable "linode_k8s_version" {
   description = "Kubernetes version for the LKE cluster"
   type        = string
-  default     = "1.34"
+  # Must be a version Linode currently offers for NEW clusters (`linode-cli
+  # lke versions-list`) — LKE retires old versions, and a retired default
+  # breaks every from-scratch dev rebuild (2026-08-18: 1.34 retired underneath
+  # us; only 1.35/1.36 creatable).
+  default     = "1.36"
   validation {
     condition     = can(regex("^1\\.(2[4-9]|3[0-9])$", var.linode_k8s_version))
     error_message = "Kubernetes version must be between 1.24 and 1.39."
