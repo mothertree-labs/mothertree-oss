@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Web-search functional gate in `deploy-llm-webui.sh` (step 10,
+  `apps/websearch-gate/websearch-gate.py`): after every Open WebUI deploy,
+  the gate runs inside the pod as a provisioned role=`user` account and
+  verifies the feature end to end — SearXNG JSON canary, then a chat
+  completion with `features.web_search=true` asserting the response cites a
+  non-empty `sources` array (structural assertion, so LLM nondeterminism
+  cannot flake it). Catches upgrades that break search without breaking the
+  deployment (pod healthy, OIDC fine, model list renders, but search
+  silently never runs — the 0.9.6→0.11 native-function-calling regression).
+  Fails the deploy loudly; verified to pass on 0.9.6 with current wiring,
+  pass on 0.11.0 with `function_calling=legacy`, and fail (exit 1, no
+  sources) on a naive 0.11.0 bump.
 - LLM web search for Open WebUI, self-hosted via SearXNG (the alternative
   provider route from `docs/plans/llm/web-search.md`; no external API key).
   A shared `searxng` deployment now lives in `infra-llm`

@@ -114,3 +114,4 @@ e2e/.env
 
 # Local tool profiles (browser sessions with live cookies)
 .rodney/
+__pycache__/
