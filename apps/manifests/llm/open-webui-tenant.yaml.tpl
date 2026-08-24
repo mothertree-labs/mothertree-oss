@@ -50,10 +50,20 @@ spec:
               value: "http://ollama.infra-llm.svc.cluster.local:11434"
             - name: WEBUI_AUTH
               value: "true"
-            - name: OLLAMA_DEFAULT_MODELS
-              value: "${LLM_MODEL}"
             - name: DEFAULT_MODELS
               value: "${LLM_MODEL}"
+            # Open WebUI 0.11 defaults to native function calling, which
+            # routes web search through the injected search_web tool. The
+            # pinned single model (llama3.2:1b) cannot reliably emit native
+            # tool calls when the full builtin tool suite (23 specs) is
+            # injected — in testing it degraded to legacy <|python_tag|>
+            # output and search silently never ran. Legacy FC instead forces
+            # the deterministic SearXNG RAG path below. This env seeds the
+            # PersistentConfig value; deploy-llm-webui.sh also upserts it into
+            # webui.db so the setting survives on PVC-backed prod databases
+            # (where a pre-existing "{}" row would otherwise shadow the env).
+            - name: DEFAULT_MODEL_PARAMS
+              value: '{"function_calling": "legacy"}'
             - name: OAUTH_CLIENT_ID
               value: "open-webui"
             - name: OAUTH_CLIENT_SECRET
@@ -75,9 +85,11 @@ spec:
               value: "true"
             # Web search via the shared SearXNG service in infra-llm.
             # BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL is a narrow workaround
-            # for the 0.9.6 web-search collection RAG gap (page texts are fed
-            # straight into the chat context instead of via the vector store);
-            # it does not affect file/knowledge-base RAG. See
+            # for the legacy-FC web-search collection RAG gap (page texts are
+            # fed straight into the chat context instead of via the vector
+            # store); it does not affect file/knowledge-base RAG. Requires
+            # function_calling=legacy (see DEFAULT_MODEL_PARAMS above) — under
+            # native FC the forced-RAG handler is skipped. See
             # docs/plans/llm/web-search.md.
             - name: ENABLE_WEB_SEARCH
               value: "true"
@@ -87,7 +99,7 @@ spec:
               value: "http://searxng.infra-llm.svc.cluster.local:8080/search"
             - name: BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
               value: "true"
-            # 0.9.6 filters /api/models for role 'user' through per-model
+            # Open WebUI filters /api/models for role 'user' through per-model
             # access control, dropping every non-registered model (plain
             # Ollama models) unless granted — regular users see an empty model
             # list. This is the documented escape hatch; the shared LLM has a

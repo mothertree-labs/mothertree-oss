@@ -185,18 +185,39 @@ becomes admin, which is why it wasn't obvious). Fixed with the documented
 escape hatch `BYPASS_MODEL_ACCESS_CONTROL=true` — per-model grants are not used
 on this shared single-model setup.
 
-Verified by minting a token as the affected account (`marek.dev@…`, role
-`user`) via the pod's own `WEBUI_SECRET_KEY`: `/api/models` returned `[]`
-before the flag and `['llama3.2:1b', 'arena-model']` after.
+Verified by minting a token as a role=`user` account via the pod's own
+`WEBUI_SECRET_KEY`: `/api/models` returned `[]` before the flag and
+`['llama3.2:1b', 'arena-model']` after.
 
-### Findings on newer images (why not bumping yet)
+### Upgrade to 0.11.0 (applied 2026-08-24)
 
-0.11.0 (2026-07-27) changed the web-search trigger: `features.web_search` is now
-permission-gated (admins must grant it to non-admin users) and the forced RAG
-path only runs with `metadata.params.function_calling == 'legacy'` (native
-function calling delegates to a `web_search` tool instead). Making web search
-work for regular users on 0.11 therefore needs explicit permission + tool wiring
-that is outside this change. 0.9.6 stays as the pinned image.
+Bumped the image to `openwebui/open-webui:0.11.0` and verified the wiring live
+on the dev cluster (role=user JWT, the same method as above):
+
+- **Permission gate is open by default on 0.11.0** — `features.web_search`
+  defaults to `true` in `USER_PERMISSIONS_FEATURES_WEB_SEARCH` and in the
+  seeded `user.permissions` config; a role=user token got real SearXNG results
+  from `/api/v1/retrieval/process/web/search` (HTTP 200). No grant wiring
+  needed (the "admins must grant it" concern in the 0.9.6-era note above did
+  not materialize on 0.11.0).
+- **The forced-RAG path only runs under legacy function calling** —
+  confirmed in `utils/middleware.py` (`function_calling == 'legacy'` gate).
+  With native FC (0.11's default), web search delegates to the injected
+  `search_web` tool. The pinned model (`llama3.2:1b`) cannot reliably emit
+  native `tool_calls` when the whole builtin suite (23 specs, incl. memory /
+  notes / calendar…) is injected — in testing it degraded to legacy
+  `<|python_tag|>` text and search silently never ran. With
+  `function_calling=legacy` the deterministic SearXNG handler runs: verified
+  end-to-end as role=user (results fetched, sources + citations, correct
+  2026 population answer).
+- **Wiring applied**: `DEFAULT_MODEL_PARAMS='{"function_calling": "legacy"}'`
+  in `open-webui-tenant.yaml.tpl` (seeds fresh DBs) plus an idempotent
+  `models.default_params` upsert in `deploy-llm-webui.sh` step 10 (the
+  PersistentConfig DB row shadows the env on existing PVC-backed installs).
+- `BYPASS_MODEL_ACCESS_CONTROL=true` still required on 0.11.0 — same
+  role==user /api/models filter exists in `routers/openai.py`.
+- `OLLAMA_DEFAULT_MODELS` removed from the template — dead in both 0.9.6 and
+  0.11.0 source (`DEFAULT_MODELS` is the live key).
 
 ### Permanent repo changes (working tree, uncommitted — status 2026-08-16)
 All changes below are applied to the working tree on branch
