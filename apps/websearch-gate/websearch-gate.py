@@ -35,6 +35,7 @@ import os
 import sys
 import time
 import uuid
+from datetime import timedelta
 
 import requests
 
@@ -102,7 +103,11 @@ async def run(model):
     if user is None:
         fail(f"could not provision gate user {GATE_EMAIL}")
     print(f"gate user ready: {user.id} (role={user.role})")
-    token = create_token(data={"id": user.id})
+    try:
+        token = create_token(data={"id": user.id}, expires_delta=timedelta(minutes=10))
+    except TypeError:
+        # Older create_token without expires_delta support.
+        token = create_token(data={"id": user.id})
 
     payload = {
         "model": model,

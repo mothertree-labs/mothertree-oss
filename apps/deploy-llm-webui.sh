@@ -402,8 +402,10 @@ print_status "Waiting for Open WebUI rollout before web-search gate..."
 kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=180s
 
 print_status "Running web-search functional gate (SearXNG + chat completion sources)..."
-if ! kubectl exec -i -n "$NS_LLM" deploy/open-webui -- sh -c \
-    "export WEBUI_SECRET_KEY=\"\${WEBUI_SECRET_KEY:-\$(cat /app/backend/.webui_secret_key 2>/dev/null)}\"; GATE_MODEL='$LLM_MODEL' python3 -" \
+# GATE_MODEL is passed via env(1), not spliced into the sh -c string, so a
+# quote in the config value cannot break out into the remote shell.
+if ! kubectl exec -i -n "$NS_LLM" deploy/open-webui -- env "GATE_MODEL=$LLM_MODEL" sh -c \
+    'export WEBUI_SECRET_KEY="${WEBUI_SECRET_KEY:-$(cat /app/backend/.webui_secret_key 2>/dev/null)}"; python3 -' \
     < "$REPO_ROOT/apps/websearch-gate/websearch-gate.py"; then
     print_error "Web-search gate FAILED for $MT_TENANT — web search is broken on this deployment."
     print_error "Debug: kubectl logs -n $NS_LLM deploy/open-webui --tail=100"
