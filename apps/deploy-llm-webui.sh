@@ -386,6 +386,34 @@ kubectl run -n "$NS_LLM" --rm -i --restart=Never llm-oidc-check \
 # Restart if changes were detected
 mt_restart_if_changed deployment/open-webui -n "$NS_LLM"
 
+# ---------------------------------------------------------------------------
+# 10. Web-search functional gate
+#
+# Image upgrades can break web search without breaking the deployment: the
+# pod comes up healthy, OIDC works, the model list renders, but search
+# silently never runs (e.g. Open WebUI 0.11 changed the function-calling
+# default so the forced-RAG search handler was skipped — see
+# docs/plans/llm/web-search.md). This gate exercises the real path as a
+# role=user account: SearXNG canary, then a chat completion with
+# features.web_search=true asserting the response cites sources. It fails
+# the deploy loudly — no silent skip.
+# ---------------------------------------------------------------------------
+print_status "Waiting for Open WebUI rollout before web-search gate..."
+kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=180s
+
+print_status "Running web-search functional gate (SearXNG + chat completion sources)..."
+# GATE_MODEL is passed via env(1), not spliced into the sh -c string, so a
+# quote in the config value cannot break out into the remote shell.
+if ! kubectl exec -i -n "$NS_LLM" deploy/open-webui -- env "GATE_MODEL=$LLM_MODEL" sh -c \
+    'export WEBUI_SECRET_KEY="${WEBUI_SECRET_KEY:-$(cat /app/backend/.webui_secret_key 2>/dev/null)}"; python3 -' \
+    < "$REPO_ROOT/apps/websearch-gate/websearch-gate.py"; then
+    print_error "Web-search gate FAILED for $MT_TENANT — web search is broken on this deployment."
+    print_error "Debug: kubectl logs -n $NS_LLM deploy/open-webui --tail=100"
+    print_error "       kubectl logs -n infra-llm deploy/searxng --tail=50"
+    exit 1
+fi
+print_success "Web-search gate passed"
+
 print_success "Open WebUI deployed for $MT_TENANT!"
 print_success "  URL:  https://${LLM_HOST}"
 print_success "  Auth: Keycloak realm $TENANT_KEYCLOAK_REALM via $AUTH_HOST"
