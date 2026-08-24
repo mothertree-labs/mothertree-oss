@@ -62,6 +62,27 @@ async def acall(fn, *args, **kwargs):
     return result
 
 
+def wait_for_ollama(ollama_url):
+    # The inference backend can be mid-restart when the gate runs (e.g.
+    # rescheduled during the deploy). Wait for it rather than failing the
+    # very first chat attempt; a backend that never comes up is still a
+    # hard failure.
+    base = ollama_url.rstrip("/")
+    last = ""
+    for attempt in range(1, 19):
+        try:
+            r = requests.get(f"{base}/api/version", timeout=5)
+            if r.ok:
+                print(f"ollama ready at {base} (attempt {attempt})")
+                return
+            last = f"HTTP {r.status_code}"
+        except Exception as e:  # noqa: BLE001 — any transport error is a retry
+            last = repr(e)
+        print(f"  waiting for ollama {attempt}/18 ({last}), retrying in 10s")
+        time.sleep(10)
+    fail(f"Ollama not reachable at {base} after ~3 minutes ({last}) — inference backend down")
+
+
 def searxng_canary(searxng_url):
     base = searxng_url.split("?")[0]
     last = ""
@@ -116,22 +137,27 @@ async def run(model):
         "stream": False,
     }
     resp = None
-    for attempt in range(1, 3):
-        resp = requests.post(
-            CHAT_URL,
-            headers={"Authorization": f"Bearer {token}"},
-            json=payload,
-            timeout=240,
-        )
-        if resp.status_code == 200:
-            break
-        print(
-            f"  chat completion attempt {attempt}/2: HTTP {resp.status_code} "
-            f"{resp.text[:300]}"
-        )
-        time.sleep(10)
+    last = ""
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(
+                CHAT_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+                timeout=240,
+            )
+            if resp.status_code == 200:
+                break
+            last = f"HTTP {resp.status_code} {resp.text[:300]}"
+        except Exception as e:  # noqa: BLE001 — transport errors are retryable
+            resp = None
+            last = repr(e)
+        print(f"  chat completion attempt {attempt}/3: {last}")
+        # Backoff long enough for an evicted/restarting Ollama to reload
+        # the model before the next attempt.
+        time.sleep(20)
     if resp is None or resp.status_code != 200:
-        fail(f"chat completion failed: HTTP {resp.status_code} {resp.text[:300]}")
+        fail(f"chat completion failed after 3 attempts: {last}")
 
     try:
         body = resp.json()
@@ -185,6 +211,10 @@ def main():
         fail(f"WEBUI_SECRET_KEY not in env and no key file found in {SECRET_KEY_FILES}")
 
     searxng_canary(searxng_url)
+    ollama_url = os.environ.get("OLLAMA_BASE_URL", "")
+    if not ollama_url:
+        fail("OLLAMA_BASE_URL not set in the container env")
+    wait_for_ollama(ollama_url)
     asyncio.run(run(model))
 
 

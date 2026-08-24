@@ -95,8 +95,16 @@ spec:
               mountPath: /root/.ollama
           resources:
             requests:
+              # Sized for the model loaded for inference (~1.7Gi for
+              # llama3.2:1b), not the idle server. A 1Gi request made the
+              # pod the prime memory-eviction victim whenever inference
+              # ran (usage exceeded request by ~0.7Gi). 1536Mi is the
+              # largest request that still fits current node packing
+              # without forcing a scale-up; usage can still slightly
+              # exceed it, so the web-search gate also tolerates a
+              # transient Ollama restart.
               cpu: "500m"
-              memory: "1Gi"
+              memory: "1536Mi"
             limits:
               cpu: "2000m"
               memory: "3500Mi"
