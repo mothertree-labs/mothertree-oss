@@ -436,7 +436,9 @@ fi
 # the deploy loudly — no silent skip.
 # ---------------------------------------------------------------------------
 print_status "Waiting for Open WebUI rollout before web-search gate..."
-kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=180s
+# 300s: under concurrent CI deploys the pod can take >180s to become Ready
+# (image churn + node CPU contention) — observed live in pipeline 1894.
+kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=300s
 
 print_status "Running web-search functional gate (SearXNG + chat completion sources)..."
 # GATE_MODEL is passed via env(1), not spliced into the sh -c string, so a

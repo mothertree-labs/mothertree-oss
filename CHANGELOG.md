@@ -48,6 +48,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   WebUI retrieval → sources + cited answer; user-role JWT sees both models).
 
 ### Fixed
+- LLM stack memory-pressure eviction storms on the fixed-size dev pool
+  (autoscaling is disabled there): the web-search gate's inference left the
+  model resident in Ollama for `OLLAMA_KEEP_ALIVE` (30m) — ~1.7Gi squatting
+  after every deploy — which pushed nodes into memory-pressure eviction
+  (webui/ollama pods killed, `NoSchedule` taints, CoreDNS rollout timeouts
+  failing unrelated deploy steps). The gate now unloads the model
+  (`keep_alive: 0`) after its check, pass or fail. Ollama's Deployment also
+  switches to kill-before-create rollouts (`maxUnavailable: 1, maxSurge: 0`):
+  with surge, old + new pods need both memory requests simultaneously, which
+  cannot schedule on the packed fixed-size pool and wedged the rollout
+  Pending forever.
 - Recurring `deploy-dev-nextcloud` / `deploy-dev-roundcube` CI flakes caused by
   PgBouncer serving a stale cached login error after a tenant DB was dropped and
   recreated (CI pipeline #1746). PgBouncer pools are keyed on (database, user)

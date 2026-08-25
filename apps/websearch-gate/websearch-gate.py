@@ -32,6 +32,7 @@ import asyncio
 import inspect
 import json
 import os
+import random
 import sys
 import time
 import uuid
@@ -40,7 +41,28 @@ from datetime import timedelta
 import requests
 
 GATE_EMAIL = "ci-websearch-gate@invalid.local"
-GATE_QUERY = "What is the current population of France? Answer in one short sentence."
+# Vary the search traffic: firing the identical query from the same egress
+# IP on every deploy is a bot signature — upstream engines rate-limited and
+# CAPTCHA-suspended all of SearXNG's engines after a day of repeated
+# identical gate queries (observed live: brave/google "too many requests",
+# duckduckgo/startpage CAPTCHA). The assertion is structural (sources
+# present), so any factual question works.
+GATE_QUESTIONS = [
+    "What is the current population of France? Answer in one short sentence.",
+    "What is the tallest building in the world right now? Answer briefly.",
+    "Who is the current secretary general of the United Nations? Answer briefly.",
+    "What is the current world record for the marathon? Answer in one sentence.",
+    "How many countries are members of the European Union today? Answer briefly.",
+    "What is the most recent version of the Linux kernel? Answer in one sentence.",
+]
+CANARY_QUERIES = [
+    "population of France 2026",
+    "tallest building in the world",
+    "United Nations secretary general",
+    "marathon world record",
+    "European Union member countries",
+    "latest Linux kernel version",
+]
 CHAT_URL = "http://localhost:8080/api/chat/completions"
 SECRET_KEY_FILES = (
     "/app/backend/.webui_secret_key",
@@ -86,11 +108,12 @@ def wait_for_ollama(ollama_url):
 def searxng_canary(searxng_url):
     base = searxng_url.split("?")[0]
     last = ""
+    queries = random.sample(CANARY_QUERIES, 3)
     for attempt in range(1, 4):
         try:
             r = requests.get(
                 base,
-                params={"q": "current population of France", "format": "json"},
+                params={"q": queries[attempt - 1], "format": "json"},
                 timeout=30,
             )
             results = r.json().get("results", []) if r.ok else []
@@ -130,52 +153,68 @@ async def run(model):
         # Older create_token without expires_delta support.
         token = create_token(data={"id": user.id})
 
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": GATE_QUERY}],
-        "features": {"web_search": True},
-        "stream": False,
-    }
-    resp = None
-    last = ""
-    for attempt in range(1, 4):
+    def chat_once(question):
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": question}],
+            "features": {"web_search": True},
+            "stream": False,
+        }
+        resp = None
+        last = ""
+        for attempt in range(1, 4):
+            try:
+                resp = requests.post(
+                    CHAT_URL,
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                    timeout=240,
+                )
+                if resp.status_code == 200:
+                    break
+                last = f"HTTP {resp.status_code} {resp.text[:300]}"
+            except Exception as e:  # noqa: BLE001 — transport errors are retryable
+                resp = None
+                last = repr(e)
+            print(f"  chat completion attempt {attempt}/3: {last}")
+            # Backoff long enough for an evicted/restarting Ollama to reload
+            # the model before the next attempt.
+            time.sleep(20)
+        if resp is None or resp.status_code != 200:
+            fail(f"chat completion failed after 3 attempts: {last}")
         try:
-            resp = requests.post(
-                CHAT_URL,
-                headers={"Authorization": f"Bearer {token}"},
-                json=payload,
-                timeout=240,
-            )
-            if resp.status_code == 200:
-                break
-            last = f"HTTP {resp.status_code} {resp.text[:300]}"
-        except Exception as e:  # noqa: BLE001 — transport errors are retryable
-            resp = None
-            last = repr(e)
-        print(f"  chat completion attempt {attempt}/3: {last}")
-        # Backoff long enough for an evicted/restarting Ollama to reload
-        # the model before the next attempt.
-        time.sleep(20)
-    if resp is None or resp.status_code != 200:
-        fail(f"chat completion failed after 3 attempts: {last}")
+            body = resp.json()
+        except ValueError:
+            fail(f"chat completion returned non-JSON body: {resp.text[:300]}")
+        try:
+            answer = body["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            answer = ""
+        print(f"answer: {json.dumps(answer[:200])}")
+        return body
 
-    try:
-        body = resp.json()
-    except ValueError:
-        fail(f"chat completion returned non-JSON body: {resp.text[:300]}")
-
-    try:
-        answer = body["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        answer = ""
-    print(f"answer: {json.dumps(answer[:200])}")
-
-    sources = body.get("sources") or []
+    # A transient "search ran but upstream engines returned 0 results" is
+    # indistinguishable from the real regression in a single response (both
+    # come back without sources) — but the regression is deterministic, so a
+    # second question separates them: transient → retry passes; broken
+    # wiring → both attempts have no sources and the gate fails.
+    sources = []
+    for attempt, question in enumerate(random.sample(GATE_QUESTIONS, 2), 1):
+        body = chat_once(question)
+        sources = body.get("sources") or []
+        if sources:
+            break
+        print(
+            f"  no sources on chat attempt {attempt}/2 — possibly transient "
+            "empty search results; retrying with a different question"
+        )
+        time.sleep(10)
     if not sources:
         fail(
-            "chat completion returned NO sources — web search did not run. "
-            "The wiring silently regressed (permission gate, function-calling "
-            "mode, or search handler); see docs/plans/llm/web-search.md. "
+            "chat completions returned NO sources (2 different questions) — "
+            "web search did not run. The wiring silently regressed "
+            "(permission gate, function-calling mode, or search handler); "
+            "see docs/plans/llm/web-search.md. "
             f"Response keys: {sorted(body.keys())}"
         )
     print(f"GATE PASS: web search ran, {len(sources)} source(s) cited")
@@ -185,6 +224,23 @@ async def run(model):
         await acall(Users.delete_user_by_id, user.id)
     except Exception as e:  # noqa: BLE001 — cleanup is non-fatal
         print(f"note: gate user cleanup failed ({e!r}) — harmless, reused next run")
+
+
+def unload_model(ollama_url, model):
+    # The gate's inference leaves the model resident for OLLAMA_KEEP_ALIVE
+    # (30m) — ~1.7Gi squatting on a memory-tight cluster, which triggered
+    # eviction storms (webui/ollama pods evicted, memory-pressure taints,
+    # CoreDNS rollout timeouts) after every deploy. Nothing else needs the
+    # model resident between requests; it reloads on demand in seconds.
+    try:
+        requests.post(
+            f"{ollama_url.rstrip('/')}/api/generate",
+            json={"model": model, "keep_alive": 0},
+            timeout=20,
+        )
+        print("model unloaded from Ollama (freed inference memory)")
+    except Exception as e:  # noqa: BLE001 — unload is best-effort
+        print(f"note: model unload failed ({e!r}) — will unload via keep_alive")
 
 
 def main():
@@ -215,7 +271,12 @@ def main():
     if not ollama_url:
         fail("OLLAMA_BASE_URL not set in the container env")
     wait_for_ollama(ollama_url)
-    asyncio.run(run(model))
+    try:
+        asyncio.run(run(model))
+    finally:
+        # Always release the model — on failure too, so a failed gate does
+        # not leave 1.7Gi resident and destabilize the next deploy attempt.
+        unload_model(ollama_url, model)
 
 
 if __name__ == "__main__":
