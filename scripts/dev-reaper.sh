@@ -7,7 +7,7 @@
 #
 # Reads config from /etc/mothertree-reaper.env (templated by Ansible).
 # Required keys:
-#   IDLE_HOURS                                — defaults to 2 if unset
+#   IDLE_HOURS                                — defaults to 1.5 if unset
 #   DEV_STATE_BUCKET, DEV_STATE_S3_ENDPOINT,
 #   DEV_STATE_S3_KEY, DEV_STATE_S3_SECRET     — heartbeat bucket read access
 #   VALKEY_HOST, VALKEY_PORT, VALKEY_PASSWORD — for lease check
@@ -67,7 +67,7 @@ _on_exit() {
 }
 trap _on_exit EXIT
 
-: "${IDLE_HOURS:=2}"
+: "${IDLE_HOURS:=1.5}"
 : "${VALKEY_HOST:=127.0.0.1}"
 : "${VALKEY_PORT:=6379}"
 : "${CLUSTER_LABEL:=matrix-cluster-dev}"
