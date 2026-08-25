@@ -13,11 +13,16 @@ spec:
     matchLabels:
       app: ollama
   strategy:
-    # No PVC volume lock anymore (emptyDir) — RollingUpdate with zero downtime.
+    # Kill-before-create: with maxSurge, old + new pods need BOTH memory
+    # requests simultaneously, which cannot schedule on the fixed-size,
+    # tightly-packed dev pool (autoscaling disabled) — the rollout wedges
+    # Pending forever. Brief downtime per rollout is fine: the web-search
+    # gate waits for Ollama readiness, and rollouts only happen on manifest
+    # changes.
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+      maxUnavailable: 1
+      maxSurge: 0
   template:
     metadata:
       labels:

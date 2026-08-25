@@ -187,6 +187,23 @@ async def run(model):
         print(f"note: gate user cleanup failed ({e!r}) — harmless, reused next run")
 
 
+def unload_model(ollama_url, model):
+    # The gate's inference leaves the model resident for OLLAMA_KEEP_ALIVE
+    # (30m) — ~1.7Gi squatting on a memory-tight cluster, which triggered
+    # eviction storms (webui/ollama pods evicted, memory-pressure taints,
+    # CoreDNS rollout timeouts) after every deploy. Nothing else needs the
+    # model resident between requests; it reloads on demand in seconds.
+    try:
+        requests.post(
+            f"{ollama_url.rstrip('/')}/api/generate",
+            json={"model": model, "keep_alive": 0},
+            timeout=20,
+        )
+        print("model unloaded from Ollama (freed inference memory)")
+    except Exception as e:  # noqa: BLE001 — unload is best-effort
+        print(f"note: model unload failed ({e!r}) — will unload via keep_alive")
+
+
 def main():
     if os.environ.get("ENABLE_WEB_SEARCH") != "true":
         fail("ENABLE_WEB_SEARCH != true in the container env — web search is expected wired on every deployment")
@@ -215,7 +232,12 @@ def main():
     if not ollama_url:
         fail("OLLAMA_BASE_URL not set in the container env")
     wait_for_ollama(ollama_url)
-    asyncio.run(run(model))
+    try:
+        asyncio.run(run(model))
+    finally:
+        # Always release the model — on failure too, so a failed gate does
+        # not leave 1.7Gi resident and destabilize the next deploy attempt.
+        unload_model(ollama_url, model)
 
 
 if __name__ == "__main__":
