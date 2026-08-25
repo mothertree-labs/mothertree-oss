@@ -51,10 +51,21 @@ test.describe('LLM', () => {
       await page.waitForTimeout(1000);
     }
 
-    // Handle model selection onboarding dialog if it appears
+    // Handle post-login dialogs if they appear:
+    // - 0.11+: "What's New" release-notes modal — dismiss via its button.
+    //   (Do NOT fall through to the generic li-click below: the release
+    //   notes are full of commit links and clicking one navigates away,
+    //   which is what broke this test on the 0.11 upgrade.)
+    // - 0.9.x: model-selection onboarding dialog — pick the first model.
     const dialog = page.locator('div[role="dialog"][aria-modal="true"]');
     for (let i = 0; i < 20; i++) {
       if (await dialog.isVisible().catch(() => false)) {
+        const whatsNewBtn = page.locator('button:has-text("Okay, Let\'s Go!")');
+        if (await whatsNewBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+          await whatsNewBtn.click().catch(() => {});
+          await page.waitForTimeout(1000);
+          break;
+        }
         await page.locator('button:has-text("Select a model")').click().catch(() => {});
         await page.waitForTimeout(500);
         await page.locator('li').first().click({ timeout: 3000 }).catch(() => {});
