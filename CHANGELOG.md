@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- On-demand dev cluster grows to 4 nodes (`phase1-dev` pool count 3 → 4):
+  at 3 nodes the pool ran 85-99% memory-requested with no autoscaler, and
+  the kubelet evicted LLM pods whenever inference ran (memory-pressure
+  taints, CoreDNS rollout timeouts, e2e flakes). To offset the cost, the
+  idle reaper's threshold drops from 2h to 1.5h (`reaper_idle_hours` in the
+  platform config, plus matching defaults in `scripts/dev-reaper.sh` and
+  `ci/ansible/templates/reaper.env.j2`). Takes effect on the next dev
+  bring-up (node count) and the next CI provisioning run
+  (`provision-ci.sh --ansible-only`, reaper threshold).
+
 ### Added
 - Web-search functional gate in `deploy-llm-webui.sh` (step 10,
   `apps/websearch-gate/websearch-gate.py`): after every Open WebUI deploy,

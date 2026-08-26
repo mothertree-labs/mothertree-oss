@@ -54,7 +54,11 @@ variable "linode_node_pools" {
   default = [
     {
       type  = "g6-standard-4"
-      count = 3
+      # 4 nodes: at 3 the cluster ran 85-99% memory-requested and the kubelet
+      # evicted LLM pods (ollama/open-webui usage exceeds requests) whenever
+      # inference ran, taking down CoreDNS rollouts and flaking e2e. The pool
+      # has no autoscaler, so the count must cover peak deploy+e2e load.
+      count = 4
       tags  = ["matrix", "dev", "primary"]
     }
   ]
