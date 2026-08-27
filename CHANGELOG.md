@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- Keycloak `26.5.1` → `26.7.2` (`apps/values/keycloak-codecentric.yaml`).
+  Fixes CVE-2026-18963 (keycloak/keycloak#51833, severity critical): an
+  unauthenticated attacker who knows a username could complete the built-in
+  `reset credentials` flow without the emailed action token and set a new
+  password — full account takeover, bypassing OTP. Every 26.0–26.7.1 community
+  release is affected and `26.7.2` is the only patched public image (26.4.15 /
+  26.6.6 are Red Hat-only tags). All tenant realms have "Forgot password"
+  enabled, so this platform was exploitable. Crosses the 26.6 and 26.7 minor
+  lines; see the upgrade notes in the PR for what was checked.
+- phasetwo `keycloak-magic-link` provider `0.57` → `0.75`, now pinned by
+  SHA-256 in the init container. Required by the Keycloak bump: KC ≥ 26.6.3
+  renamed `Cors.allowedOrigins(AccessToken)` → `checkAllowedOrigins()`, and
+  0.57 threw `NoSuchMethodError` on every magic-link REST call (seen on the
+  dev deploy). 0.72 is the first compatible release.
 ### Added
 - Keycloak user + admin event logging is now enabled on every tenant realm
   (`docs/keycloak-realm-config.json.tpl`: `eventsEnabled`, `adminEventsEnabled`,

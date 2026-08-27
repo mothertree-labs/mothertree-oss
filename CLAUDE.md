@@ -259,7 +259,7 @@ To cut a release: update `VERSION`, add a `CHANGELOG.md` entry, commit, tag `v<v
 - Kubeconfig files: `kubeconfig.prod.yaml`, `kubeconfig.dev.yaml` (at repo root)
 - Secrets files are gitignored — use `.example` files as templates
 - Postfix image: `boky/postfix:v5.1.0` (inbound MX dispatch only; OpenDKIM sidecar was removed in step 2 PR-4, outbound DKIM signing is delegated to AWS SES Easy DKIM)
-- Keycloak image: `quay.io/keycloak/keycloak:26.5.1`
+- Keycloak image: `quay.io/keycloak/keycloak:26.7.2`
 - DKIM selector: `default` (e.g., `default._domainkey.example.com`)
 - Stalwart ports are unique per tenant (hostPort mapping): SMTPS 465xx, Submission 587xx, IMAPS 993x
 - PostgreSQL runs on a dedicated external Linode VM per environment, connected to the K8s cluster via the Headscale/Tailscale WireGuard mesh. K8s pods connect through PgBouncer (in `infra-db` namespace) which has a Tailscale sidecar. `PG_HOST` points to `pgbouncer.infra-db.svc.cluster.local`.
