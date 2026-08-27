@@ -16,6 +16,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   26.6.6 are Red Hat-only tags). All tenant realms have "Forgot password"
   enabled, so this platform was exploitable. Crosses the 26.6 and 26.7 minor
   lines; see the upgrade notes in the PR for what was checked.
+- phasetwo `keycloak-magic-link` provider `0.57` → `0.75`, now pinned by
+  SHA-256 in the init container. Required by the Keycloak bump: KC ≥ 26.6.3
+  renamed `Cors.allowedOrigins(AccessToken)` → `checkAllowedOrigins()`, and
+  0.57 threw `NoSuchMethodError` on every magic-link REST call (seen on the
+  dev deploy). 0.72 is the first compatible release.
 
 ### Changed
 - On-demand dev cluster grows to 4 nodes (`phase1-dev` pool count 3 → 4):

@@ -102,14 +102,26 @@ extraInitContainers: |
       - sh
       - -c
       - |
-        echo "Downloading keycloak-magic-link provider v0.57..."
+        # 0.72+ is required on Keycloak >= 26.6.3: KC renamed
+        # Cors.allowedOrigins(AccessToken) -> checkAllowedOrigins(), and older
+        # provider builds throw NoSuchMethodError on every magic-link REST call.
+        # The JAR is loaded into the auth server, so pin it by SHA-256 (computed
+        # from the Maven Central artifact and cross-checked against its .sha1).
+        ML_VERSION="0.75"
+        ML_SHA256="cf39e6b2c7f640af09d4a983554f1bd38aec3283313be25af40f58fe078fd5b7"
+        echo "Downloading keycloak-magic-link provider v${ML_VERSION}..."
         wget -O /providers/keycloak-magic-link.jar \
-          "https://repo1.maven.org/maven2/io/phasetwo/keycloak/keycloak-magic-link/0.57/keycloak-magic-link-0.57.jar"
+          "https://repo1.maven.org/maven2/io/phasetwo/keycloak/keycloak-magic-link/${ML_VERSION}/keycloak-magic-link-${ML_VERSION}.jar"
         if [ $? -ne 0 ]; then
           echo "ERROR: Failed to download magic-link provider"
           exit 1
         fi
-        echo "Provider downloaded successfully"
+        if ! echo "${ML_SHA256}  /providers/keycloak-magic-link.jar" | sha256sum -c -; then
+          echo "ERROR: magic-link provider checksum mismatch — refusing to load it"
+          rm -f /providers/keycloak-magic-link.jar
+          exit 1
+        fi
+        echo "Provider downloaded and verified successfully"
         ls -la /providers/
     volumeMounts:
       - name: custom-providers
