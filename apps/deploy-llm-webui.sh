@@ -387,7 +387,44 @@ kubectl run -n "$NS_LLM" --rm -i --restart=Never llm-oidc-check \
 mt_restart_if_changed deployment/open-webui -n "$NS_LLM"
 
 # ---------------------------------------------------------------------------
-# 10. Web-search functional gate
+# 10. Ensure legacy function calling (web search wiring)
+#
+# Open WebUI 0.11 defaults to native function calling, which routes web
+# search through the injected search_web tool — unreliable for the pinned
+# small model (see the DEFAULT_MODEL_PARAMS comment in
+# apps/manifests/llm/open-webui-tenant.yaml.tpl). Force the legacy path so
+# the BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL forced-RAG handler runs.
+#
+# The DEFAULT_MODEL_PARAMS env in the template only seeds a FRESH webui.db.
+# On PVC-backed databases the row already exists (e.g. seeded as "{}" on an
+# earlier version) and shadows the env, so upsert it here idempotently.
+# ---------------------------------------------------------------------------
+print_status "Ensuring legacy function calling for web search in Open WebUI..."
+if kubectl get deployment open-webui -n "$NS_LLM" >/dev/null 2>&1; then
+    kubectl exec -i -n "$NS_LLM" deploy/open-webui -- sh -c 'python3 -' <<'PYEOF'
+import sqlite3, time, json
+db = sqlite3.connect("/app/backend/data/webui.db")
+cur = db.execute("SELECT value FROM config WHERE key = 'models.default_params'")
+row = cur.fetchone()
+current = json.loads(row[0]) if row and row[0] else {}
+if current.get("function_calling") != "legacy":
+    current["function_calling"] = "legacy"
+    db.execute(
+        "INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, ?)",
+        ("models.default_params", json.dumps(current), int(time.time() * 1000)),
+    )
+    db.commit()
+    print("models.default_params upserted:", json.dumps(current))
+else:
+    print("models.default_params already legacy — no change")
+PYEOF
+    print_success "Legacy function calling enabled (models.default_params.function_calling=legacy)"
+else
+    print_warning "open-webui Deployment not found in $NS_LLM — skipped config upsert (run deploy-llm-webui.sh after the app exists)"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. Web-search functional gate
 #
 # Image upgrades can break web search without breaking the deployment: the
 # pod comes up healthy, OIDC works, the model list renders, but search

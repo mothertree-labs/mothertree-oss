@@ -21,6 +21,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   renamed `Cors.allowedOrigins(AccessToken)` → `checkAllowedOrigins()`, and
   0.57 threw `NoSuchMethodError` on every magic-link REST call (seen on the
   dev deploy). 0.72 is the first compatible release.
+### Added
+- Keycloak user + admin event logging is now enabled on every tenant realm
+  (`docs/keycloak-realm-config.json.tpl`: `eventsEnabled`, `adminEventsEnabled`,
+  90-day `eventsExpiration`, 90-day `adminEventsExpiration` realm attribute,
+  `jboss-logging` listener), with a read-back drift
+  gate in `docs/import-keycloak-realm.sh` that fails the deploy if the setting
+  did not apply. Until now only one realm had events on, so an incident such as
+  CVE-2026-18963 could not be hunted after the fact (no SEND_RESET_PASSWORD /
+  UPDATE_PASSWORD trail). Applies to existing realms on the next `create_env`.
 
 ### Changed
 - On-demand dev cluster grows to 4 nodes (`phase1-dev` pool count 3 → 4):
@@ -34,7 +43,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`provision-ci.sh --ansible-only`, reaper threshold).
 
 ### Added
-- Web-search functional gate in `deploy-llm-webui.sh` (step 10,
+- Open WebUI upgraded to 0.11.0 and the web-search wiring adjusted for it:
+  the 0.11 forced-RAG handler only runs under legacy function calling, so
+  `DEFAULT_MODEL_PARAMS={"function_calling":"legacy"}` is set in the tenant
+  template (fresh DBs) and `deploy-llm-webui.sh` upserts
+  `models.default_params` into webui.db for existing installs. The
+  feature permission (`features.web_search`)
+  defaults to enabled on 0.11.0, so no per-user grants are needed. Verified
+  live on dev as a role=user JWT: search triggers, sources + citations
+  returned, answer cites the fetched 2026 population figure.
+- Web-search functional gate in `deploy-llm-webui.sh` (step 11,
   `apps/websearch-gate/websearch-gate.py`): after every Open WebUI deploy,
   the gate runs inside the pod as a provisioned role=`user` account and
   verifies the feature end to end — SearXNG JSON canary, then a chat

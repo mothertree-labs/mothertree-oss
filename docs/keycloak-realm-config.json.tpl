@@ -331,12 +331,18 @@
     "frontendUrl": "https://${AUTH_HOST}",
     "mt.login.passkey": "${LOGIN_PASSKEY_ENABLED}",
     "mt.login.magic_link": "${LOGIN_MAGIC_LINK_ENABLED}",
-    "mt.login.google_sso": "${LOGIN_GOOGLE_SSO_ENABLED}"
+    "mt.login.google_sso": "${LOGIN_GOOGLE_SSO_ENABLED}",
+    "adminEventsExpiration": "7776000"
   },
   "browserSecurityHeaders": {
     "contentSecurityPolicy": "frame-ancestors 'self' https://${HOME_HOST} https://${DOCS_HOST}; frame-src 'self'; object-src 'none';",
     "xFrameOptions": ""
   },
   "loginTheme": "platform",
-  "emailTheme": "platform"
+  "emailTheme": "platform",
+  "eventsEnabled": true,
+  "eventsExpiration": 7776000,
+  "eventsListeners": ["jboss-logging"],
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": false
 }
