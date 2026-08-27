@@ -617,7 +617,7 @@ turn_shared_secret: <from tenant secrets>
 ### Architecture
 
 - Shared multi-tenant instance in `infra-auth` namespace
-- Image: `quay.io/keycloak/keycloak:26.5.1`
+- Image: `quay.io/keycloak/keycloak:26.7.2`
 - Per-tenant realms with isolated user bases
 - Per-tenant auth ingress (e.g., `auth.dev.example.com`)
 - Database: Shared PostgreSQL (`keycloak` database)

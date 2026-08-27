@@ -211,10 +211,13 @@ releases:
       - values/keycloak-codecentric.yaml
       - environments/{{ .Environment.Name }}/keycloak.yaml.gotmpl
     createNamespace: false  # Created by create_env
-    # Ensure Infinispan has time to replicate sessions to the new pod before the
-    # next pod in the rolling update is killed. Without this delay, user sessions
-    # can be lost during rolling restarts. KC 26+ supports persistent-user-sessions
-    # (DB-backed), but it's not enabled here — sessions live only in Infinispan.
+    # Ensure Infinispan has time to replicate caches to the new pod before the
+    # next pod in the rolling update is killed. User sessions themselves are
+    # DB-backed (persistent-user-sessions is a default-on feature in KC 26+),
+    # so a rolling restart does not log users out. Keycloak only supports
+    # rolling across PATCH releases; for a minor/major image bump scale the
+    # StatefulSet to 1 replica first (and back up the keycloak DB) so the
+    # Liquibase migration never runs beside an old-version pod.
     jsonPatches:
       - target:
           group: apps

@@ -9,7 +9,7 @@ podDisruptionBudget:
 
 image:
   repository: quay.io/keycloak/keycloak
-  tag: "26.5.1"
+  tag: "26.7.2"
   pullPolicy: IfNotPresent
  
 # HTTP settings – use root context so health/checks and realms are under /
