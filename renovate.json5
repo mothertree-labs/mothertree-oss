@@ -1,0 +1,246 @@
+// Renovate configuration — covers everything Dependabot cannot see.
+//
+// Division of labour (avoid duplicate PRs):
+//   Dependabot (.github/dependabot.yml) owns: npm (portals, calendar-automation),
+//     terraform (phase1, infra, ci/terraform), and the three Dockerfiles it
+//     already tracks (admin-portal, account-portal, docker/roundcube — these
+//     also feed .github/workflows/dependabot-version-bump.yml).
+//   Renovate owns: container image tags embedded in Helm values, helmfile
+//     chart versions, raw K8s manifests (*.yaml / *.yaml.tpl / *.yaml.gotmpl),
+//     inline manifests in deploy-*.sh, Docs (root docs/), Ansible version pins,
+//     Keycloak extension jars, and GitHub Actions.
+//
+// Why: CVE-2026-18963 (Keycloak) sat unnoticed because the tag lives in
+// apps/values/keycloak-codecentric.yaml, which no Dependabot ecosystem parses.
+//
+// Policy: minor/patch bumps open PRs automatically (weekly). MAJOR bumps only
+// appear on the Dependency Dashboard issue and need a checkbox tick — infra
+// majors (Postgres client, kube-prometheus-stack, Ollama…) want a human.
+//
+// Validate locally:  npx --yes --package renovate -- renovate-config-validator --strict
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":dependencyDashboard"],
+  "timezone": "America/Los_Angeles",
+  "schedule": ["before 8am on wednesday"],
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 10,
+  "labels": ["dependencies", "renovate"],
+  "semanticCommits": "enabled",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
+  "rebaseWhen": "conflicted",
+  "ignorePaths": [
+    "**/node_modules/**",
+    ".claude/**",
+    "config/**",
+    "apps/values/loki.yaml.helm-backup",
+  ],
+
+  // Only the managers Dependabot does NOT already run.
+  "enabledManagers": ["custom.regex", "helmfile", "github-actions", "dockerfile"],
+
+  "helmfile": {
+    "managerFilePatterns": ["/(^|/)helmfile\\.ya?ml(?:\\.gotmpl)?$/"],
+  },
+
+  // Dockerfiles that Dependabot already owns stay with Dependabot.
+  "dockerfile": {
+    "ignorePaths": [
+      "apps/admin-portal/**",
+      "apps/account-portal/**",
+      "apps/docker/roundcube/**",
+    ],
+  },
+
+  "customManagers": [
+    // 1. Inline `image: repo/name:tag` lines in K8s manifests, Helm values,
+    //    Go-templated values, and heredoc manifests in deploy scripts.
+    //    Regex-based on purpose: the YAML parsers choke on {{ }} / ${VAR}.
+    //    `${PORTAL_IMAGE}`-style refs are skipped (no `$` allowed in depName).
+    {
+      "customType": "regex",
+      "description": "Container image tags in manifests / values / deploy scripts",
+      "managerFilePatterns": [
+        "/^apps/(manifests|values|environments|templates)/.+\\.ya?ml(?:\\.tpl|\\.gotmpl)?$/",
+        "/^apps/deploy-[^/]+\\.sh$/",
+        "/^apps/loki-manual\\.yaml$/",
+        "/^docs/.+\\.ya?ml(?:\\.tpl)?$/",
+        "/^ansible/.+\\.ya?ml$/",
+      ],
+      "matchStrings": [
+        "\\n[ \\t]*-?[ \\t]*image:[ \\t]*[\"']?(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?[\"']?[ \\t]*(?=\\n|$)",
+      ],
+      "datasourceTemplate": "docker",
+    },
+
+    // 2. Helm-values style `image: { repository: X, tag: Y }` blocks
+    //    (Keycloak: apps/values/keycloak-codecentric.yaml — the CVE-2026-18963 gap).
+    {
+      "customType": "regex",
+      "description": "Helm values image.repository + image.tag pairs",
+      "managerFilePatterns": ["/^apps/values/.+\\.ya?ml(?:\\.gotmpl)?$/"],
+      "matchStrings": [
+        "repository:\\s*[\"']?(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*)[\"']?\\s*\\n\\s*tag:\\s*[\"']?(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)[\"']?",
+      ],
+      "datasourceTemplate": "docker",
+    },
+
+    // 3. Keycloak extension jar pulled from Maven Central at startup.
+    //    The version appears twice in the URL, so rewrite the whole match.
+    {
+      "customType": "regex",
+      "description": "Keycloak magic-link extension (Maven Central)",
+      "managerFilePatterns": ["/^apps/values/keycloak-codecentric\\.yaml$/"],
+      "matchStrings": [
+        "keycloak-magic-link/(?<currentValue>\\d+(?:\\.\\d+)*)/keycloak-magic-link-\\d+(?:\\.\\d+)*\\.jar",
+      ],
+      "autoReplaceStringTemplate": "keycloak-magic-link/{{{newValue}}}/keycloak-magic-link-{{{newValue}}}.jar",
+      "depNameTemplate": "io.phasetwo.keycloak:keycloak-magic-link",
+      "datasourceTemplate": "maven",
+    },
+
+    // 4. Pandoc binary fetched by the Nextcloud install-pandoc init container.
+    //    Version appears three times across two lines; rewrite the whole match.
+    {
+      "customType": "regex",
+      "description": "Pandoc release tarball in Nextcloud init container",
+      "managerFilePatterns": ["/^apps/values/nextcloud\\.yaml\\.gotmpl$/"],
+      "matchStrings": [
+        "jgm/pandoc/releases/download/(?<currentValue>\\d+(?:\\.\\d+)*)/pandoc-\\d+(?:\\.\\d+)*-linux-amd64\\.tar\\.gz(?<between>[^\\n]*\\n[^\\n]*?)pandoc-\\d+(?:\\.\\d+)*/bin/pandoc",
+      ],
+      "autoReplaceStringTemplate": "jgm/pandoc/releases/download/{{{newValue}}}/pandoc-{{{newValue}}}-linux-amd64.tar.gz{{{between}}}pandoc-{{{newValue}}}/bin/pandoc",
+      "depNameTemplate": "jgm/pandoc",
+      "datasourceTemplate": "github-releases",
+    },
+
+    // 5. Ansible version pins (Headscale control plane, Woodpecker CI server).
+    {
+      "customType": "regex",
+      "description": "Headscale version in ansible/playbook.yml",
+      "managerFilePatterns": ["/^ansible/playbook\\.yml$/"],
+      "matchStrings": ["headscale_version:\\s*[\"'](?<currentValue>\\d+(?:\\.\\d+)*)[\"']"],
+      "depNameTemplate": "juanfont/headscale",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$",
+    },
+    {
+      "customType": "regex",
+      "description": "Woodpecker version in ci/ansible/playbook.yml",
+      "managerFilePatterns": ["/^ci/ansible/playbook\\.yml$/"],
+      "matchStrings": ["woodpecker_version_override \\| default\\('(?<currentValue>\\d+(?:\\.\\d+)*)'\\)"],
+      "depNameTemplate": "woodpecker-ci/woodpecker",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$",
+    },
+  ],
+
+  "packageRules": [
+    // ---- Global policy ------------------------------------------------------
+    {
+      "description": "Major bumps need a human: surface on the dashboard, don't auto-open PRs",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true,
+    },
+    {
+      // Belt-and-braces: these are normally referenced as ${..._IMAGE} (skipped by the
+      // regex), and the real registry org lives in private config — so match on the
+      // image name, not the org.
+      "description": "Internal CI-built images (mothertree-*) are versioned by image-versions.env, never by Renovate",
+      "matchPackageNames": ["/^ghcr\\.io\\/[^/]+\\/mothertree-/"],
+      "enabled": false,
+    },
+
+    // ---- Keycloak (CVE-2026-18963 class) --------------------------------------
+    // Keycloak image + codecentric chart + magic-link jar move together so an
+    // upgrade PR shows all three; scripts/localhost/lib-keycloak.sh reads the
+    // tag from keycloak-codecentric.yaml, so there is one source of truth.
+    {
+      "description": "Keycloak: image, chart and extension jar in one PR",
+      "matchPackageNames": ["quay.io/keycloak/keycloak", "keycloakx", "io.phasetwo.keycloak:keycloak-magic-link"],
+      "groupName": "keycloak",
+      "prPriority": 10,
+    },
+
+    // ---- Jitsi -------------------------------------------------------------------
+    // jitsi/{web,jicofo,prosody,jvb} use `stable-NNNNN` tags and must match.
+    {
+      "description": "Jitsi stable-NNNNN tags: single numeric stream, keep the four images in lock-step",
+      "matchPackageNames": ["jitsi/web", "jitsi/jicofo", "jitsi/prosody", "jitsi/jvb"],
+      "versioning": "regex:^stable-(?<major>\\d+)$",
+      "groupName": "jitsi",
+      "dependencyDashboardApproval": false,
+    },
+    {
+      "description": "nordeck jitsi-keycloak-adapter uses vYYYYMMDD tags",
+      "matchPackageNames": ["ghcr.io/nordeck/jitsi-keycloak-adapter"],
+      "versioning": "regex:^v(?<major>\\d{4})(?<minor>\\d{2})(?<patch>\\d{2})$",
+      "dependencyDashboardApproval": false,
+    },
+
+    // ---- Docs (La Suite Impress) ----------------------------------------------------
+    {
+      "description": "Impress backend/frontend/y-provider ship as one release",
+      "matchPackageNames": ["/^lasuite\\/impress-/"],
+      "groupName": "docs-impress",
+    },
+
+    // ---- Nextcloud -----------------------------------------------------------------
+    // The `nextcloud:X-apache` image in values/manifests MUST match the image the
+    // chart ships (see comment in apps/values/nextcloud.yaml.gotmpl). Bump the
+    // image only alongside the chart; never let the image jump a major on its own.
+    {
+      "description": "Nextcloud chart + seed/install image in one PR",
+      "matchPackageNames": ["nextcloud", "nextcloud/nextcloud", "icewind1991/notify_push"],
+      "groupName": "nextcloud",
+    },
+    {
+      "description": "Nextcloud image majors come from the chart, not from Docker Hub",
+      "matchPackageNames": ["nextcloud"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false,
+    },
+
+    // ---- LLM stack -------------------------------------------------------------------
+    {
+      "description": "Ollama + Open WebUI + SearXNG reviewed together (dev memory pressure, gate config)",
+      "matchPackageNames": ["ollama/ollama", "openwebui/open-webui", "searxng/searxng"],
+      "groupName": "llm",
+    },
+    {
+      "description": "SearXNG tags are YYYY.M.D-<sha>; treat the sha as build metadata",
+      "matchPackageNames": ["searxng/searxng"],
+      "versioning": "regex:^(?<major>\\d{4})\\.(?<minor>\\d+)\\.(?<patch>\\d+)-(?<build>[a-f0-9]+)$",
+      "dependencyDashboardApproval": false,
+    },
+
+    // ---- Calver-ish tags where a year rollover is not a real "major" ----------------
+    {
+      "description": "matrix-alertmanager-receiver uses YYYY.MM.DD tags",
+      "matchPackageNames": ["metio/matrix-alertmanager-receiver"],
+      "versioning": "regex:^(?<major>\\d{4})\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "dependencyDashboardApproval": false,
+    },
+
+    // ---- Mesh / CI infra --------------------------------------------------------------
+    {
+      "description": "Tailscale sidecars (pgbouncer, router, metrics bridges) share one dep — Renovate already merges them into one PR; flag it",
+      "matchPackageNames": ["tailscale/tailscale", "juanfont/headscale"],
+      "groupName": "tailscale-mesh",
+    },
+    {
+      "description": "Woodpecker upgrade is applied by ci/provision-ci.sh --ansible-only, not by merge",
+      "matchPackageNames": ["woodpecker-ci/woodpecker"],
+      "prBodyNotes": [
+        "Merging does NOT upgrade the CI VM. Apply with `ci/provision-ci.sh --ansible-only` while no pipelines are running (Valkey leases are recreated — see issue #547).",
+      ],
+    },
+
+    // ---- Helm charts --------------------------------------------------------------------
+    {
+      "description": "Helm chart bumps: one PR per chart (deploy independently)",
+      "matchManagers": ["helmfile"],
+      "additionalBranchPrefix": "helm-",
+    },
+  ],
+}

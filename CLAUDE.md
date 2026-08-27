@@ -254,6 +254,17 @@ The platform has a root `VERSION` file (semver, e.g. `0.8.0`) and a deploy-time 
 
 To cut a release: update `VERSION`, add a `CHANGELOG.md` entry, commit, tag `v<version>`.
 
+## Dependency Updates (Dependabot + Renovate)
+
+Two bots, split by what each can parse — never let them overlap or you get duplicate PRs:
+
+- **Dependabot** (`.github/dependabot.yml`): npm (portals, calendar-automation), Terraform, and the three portal/roundcube Dockerfiles (which feed `dependabot-version-bump.yml`).
+- **Renovate** (`renovate.json5`): everything Dependabot cannot see — image tags in `apps/values/`, `apps/manifests/**/*.yaml{,.tpl,.gotmpl}`, `docs/`, heredocs in `apps/deploy-*.sh`, helmfile chart versions, Ansible pins (Headscale, Woodpecker), the Keycloak magic-link jar, Pandoc, and GitHub Actions. Regex-based on purpose: the YAML parsers choke on `{{ }}` / `${VAR}`.
+
+Policy: minor/patch bumps open PRs weekly (Wednesday); **major bumps only appear on the Dependency Dashboard issue and need a checkbox** before a PR is created. Same-stream images are grouped (`keycloak`, `jitsi`, `docs-impress`, `nextcloud`, `llm`, `tailscale-mesh`).
+
+**When adding a pinned image or version anywhere**, keep it as a literal `image: repo/name:tag` line (or `repository:`/`tag:` pair) so Renovate sees it. If a new file lives outside the paths above, extend `managerFilePatterns`. Validate with `npx --yes --package renovate -- renovate-config-validator --strict`.
+
 ## Important Notes
 
 - Kubeconfig files: `kubeconfig.prod.yaml`, `kubeconfig.dev.yaml` (at repo root)
