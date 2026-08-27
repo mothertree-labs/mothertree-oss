@@ -18,7 +18,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`provision-ci.sh --ansible-only`, reaper threshold).
 
 ### Added
-- Web-search functional gate in `deploy-llm-webui.sh` (step 10,
+- Open WebUI upgraded to 0.11.0 and the web-search wiring adjusted for it:
+  the 0.11 forced-RAG handler only runs under legacy function calling, so
+  `DEFAULT_MODEL_PARAMS={"function_calling":"legacy"}` is set in the tenant
+  template (fresh DBs) and `deploy-llm-webui.sh` upserts
+  `models.default_params` into webui.db for existing installs. The
+  feature permission (`features.web_search`)
+  defaults to enabled on 0.11.0, so no per-user grants are needed. Verified
+  live on dev as a role=user JWT: search triggers, sources + citations
+  returned, answer cites the fetched 2026 population figure.
+- Web-search functional gate in `deploy-llm-webui.sh` (step 11,
   `apps/websearch-gate/websearch-gate.py`): after every Open WebUI deploy,
   the gate runs inside the pod as a provisioned role=`user` account and
   verifies the feature end to end — SearXNG JSON canary, then a chat
