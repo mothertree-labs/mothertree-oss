@@ -339,6 +339,51 @@ if [ "$LIVE_SSO_IDLE" -lt "$EXPECTED_SSO_IDLE" ] || [ "$LIVE_SSO_MAX" -lt "$EXPE
 fi
 print_success "Realm SSO session timeouts verified (idle=${LIVE_SSO_IDLE}s, max=${LIVE_SSO_MAX}s)"
 
+# Enable user + admin event logging explicitly. The realm PUT above carries the
+# same fields, but (like smtpServer) the events config is a separate sub-resource
+# and the realm-level update is not guaranteed to apply it on an existing realm,
+# so PUT /events/config directly. Values are read from the rendered template so
+# there is a single source of truth. enabledEventTypes is intentionally omitted
+# (empty = Keycloak's full default set).
+print_status "Enabling realm event logging (user + admin events)..."
+EVENTS_CONFIG=$(jq -c '{eventsEnabled, eventsExpiration, eventsListeners, adminEventsEnabled, adminEventsDetailsEnabled}' "$TEMP_CONFIG")
+EVENTS_PUT=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/events_config_update.json -X PUT \
+  "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/events/config" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$EVENTS_CONFIG")
+if [ "$EVENTS_PUT" != "204" ]; then
+    print_error "Failed to update realm events config (HTTP $EVENTS_PUT)"
+    [ -f /tmp/events_config_update.json ] && print_error "Details: $(cat /tmp/events_config_update.json)"
+    exit 1
+fi
+
+# ── Login/admin event logging drift gate ─────────────────────────────────────
+# User + admin events are the only audit trail Keycloak keeps. Without them an
+# incident such as CVE-2026-18963 (reset-credentials bypass, keycloak#51833)
+# cannot be hunted after the fact — there is nothing to correlate
+# SEND_RESET_PASSWORD / UPDATE_PASSWORD against. The template turns them on with
+# a 90-day retention; read the live config back and FAIL if it didn't apply, so
+# a silent regression cannot leave a realm blind again.
+print_status "Verifying realm event logging is enabled (drift gate)..."
+EXPECTED_EVENTS_EXP=$(jq -r '.eventsExpiration // empty' "$TEMP_CONFIG")
+case "$EXPECTED_EVENTS_EXP" in ''|*[!0-9]*) print_error "Template eventsExpiration is not numeric ('$EXPECTED_EVENTS_EXP') — cannot verify"; exit 1 ;; esac
+EVENTS_LIVE=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/events/config") || exit 1
+LIVE_EVENTS_ENABLED=$(echo "$EVENTS_LIVE" | jq -r '.eventsEnabled // false')
+LIVE_ADMIN_EVENTS_ENABLED=$(echo "$EVENTS_LIVE" | jq -r '.adminEventsEnabled // false')
+LIVE_EVENTS_EXP=$(echo "$EVENTS_LIVE" | jq -r '.eventsExpiration // empty')
+case "$LIVE_EVENTS_EXP" in ''|*[!0-9]*) LIVE_EVENTS_EXP=-1 ;; esac
+LIVE_HAS_LOG_LISTENER=$(echo "$EVENTS_LIVE" | jq -r '(.eventsListeners // []) | index("jboss-logging") != null')
+if [ "$LIVE_EVENTS_ENABLED" != "true" ] || [ "$LIVE_ADMIN_EVENTS_ENABLED" != "true" ] || [ "$LIVE_EVENTS_EXP" -lt "$EXPECTED_EVENTS_EXP" ] || [ "$LIVE_HAS_LOG_LISTENER" != "true" ]; then
+    print_error "Realm '$TENANT_KEYCLOAK_REALM' event logging did not apply as intended:"
+    print_error "  eventsEnabled=${LIVE_EVENTS_ENABLED} adminEventsEnabled=${LIVE_ADMIN_EVENTS_ENABLED} (want true/true)"
+    print_error "  eventsExpiration=${LIVE_EVENTS_EXP}s (want >= ${EXPECTED_EVENTS_EXP}s)"
+    print_error "  jboss-logging listener present=${LIVE_HAS_LOG_LISTENER} (want true)"
+    print_error "Without events the realm has no audit trail; aborting. See docs/keycloak-realm-config.json.tpl."
+    exit 1
+fi
+print_success "Realm event logging verified (user+admin events on, retention=${LIVE_EVENTS_EXP}s)"
+
 # Disable brute force protection in dev — CI runs 10 parallel E2E shards that
 # authenticate the same test user simultaneously, triggering Keycloak's quick
 # login check and temporarily disabling the account.
@@ -359,8 +404,12 @@ fi
 # Update realm attributes: frontendUrl (multi-domain support) + mt.login.* flags
 # (login flags are read by the platform login theme to render the right UI). All four
 # attributes are sent in a single PUT because Keycloak replaces the entire attributes
-# map with whatever this PUT sends — anything omitted is dropped. If you add a 5th
+# map with whatever this PUT sends — anything omitted is dropped. If you add a 6th
 # realm attribute elsewhere, also add it here, otherwise this PUT will silently drop it.
+# adminEventsExpiration (admin-event retention, seconds) is a realm attribute rather
+# than an events/config field, so it is read from the template and sent here.
+ADMIN_EVENTS_EXPIRATION=$(jq -r '.attributes.adminEventsExpiration // empty' "$TEMP_CONFIG")
+case "$ADMIN_EVENTS_EXPIRATION" in ''|*[!0-9]*) print_error "Template attributes.adminEventsExpiration is not numeric ('$ADMIN_EVENTS_EXPIRATION')"; exit 1 ;; esac
 print_status "Setting realm attributes (frontendUrl, login methods)..."
 REALM_ATTR_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/realm_attr_update.json -X PUT \
   "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM" \
@@ -370,7 +419,8 @@ REALM_ATTR_UPDATE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tm
         \"frontendUrl\": \"https://${AUTH_HOST}\",
         \"mt.login.passkey\": \"${LOGIN_PASSKEY_ENABLED}\",
         \"mt.login.magic_link\": \"${LOGIN_MAGIC_LINK_ENABLED}\",
-        \"mt.login.google_sso\": \"${LOGIN_GOOGLE_SSO_ENABLED}\"
+        \"mt.login.google_sso\": \"${LOGIN_GOOGLE_SSO_ENABLED}\",
+        \"adminEventsExpiration\": \"${ADMIN_EVENTS_EXPIRATION}\"
       }}")
 
 if [ "$REALM_ATTR_UPDATE" = "204" ]; then
@@ -381,6 +431,17 @@ else
         print_warning "Details: $(cat /tmp/realm_attr_update.json)"
     fi
 fi
+
+# Admin-event retention rides on the attributes PUT above, which only warns on
+# failure. Read it back and hard-fail if it is missing/short, so admin events can
+# never silently accumulate without expiry.
+LIVE_ADMIN_EVENTS_EXP=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM" | jq -r '.attributes.adminEventsExpiration // empty')
+case "$LIVE_ADMIN_EVENTS_EXP" in ''|*[!0-9]*) LIVE_ADMIN_EVENTS_EXP=-1 ;; esac
+if [ "$LIVE_ADMIN_EVENTS_EXP" -lt "$ADMIN_EVENTS_EXPIRATION" ]; then
+    print_error "Realm '$TENANT_KEYCLOAK_REALM' adminEventsExpiration=${LIVE_ADMIN_EVENTS_EXP}s (want >= ${ADMIN_EVENTS_EXPIRATION}s) — admin-event retention did not apply; aborting."
+    exit 1
+fi
+print_success "Realm admin-event retention verified (${LIVE_ADMIN_EVENTS_EXP}s)"
 
 # Update SMTP server configuration (realm PUT doesn't always update smtpServer).
 # This block runs during create_env PREP, which executes before Stalwart is

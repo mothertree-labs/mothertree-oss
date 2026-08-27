@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Keycloak user + admin event logging is now enabled on every tenant realm
+  (`docs/keycloak-realm-config.json.tpl`: `eventsEnabled`, `adminEventsEnabled`,
+  90-day `eventsExpiration`, 90-day `adminEventsExpiration` realm attribute,
+  `jboss-logging` listener), with a read-back drift
+  gate in `docs/import-keycloak-realm.sh` that fails the deploy if the setting
+  did not apply. Until now only one realm had events on, so an incident such as
+  CVE-2026-18963 could not be hunted after the fact (no SEND_RESET_PASSWORD /
+  UPDATE_PASSWORD trail). Applies to existing realms on the next `create_env`.
+
 ### Changed
 - On-demand dev cluster grows to 4 nodes (`phase1-dev` pool count 3 → 4):
   at 3 nodes the pool ran 85-99% memory-requested with no autoscaler, and
