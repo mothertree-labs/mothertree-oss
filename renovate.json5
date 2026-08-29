@@ -86,16 +86,16 @@
       "datasourceTemplate": "docker",
     },
 
-    // 3. Keycloak extension jar pulled from Maven Central at startup.
-    //    The version appears twice in the URL, so rewrite the whole match.
+    // 3. Keycloak magic-link extension jar (Maven Central), pinned as
+    //    ML_VERSION="x.y" + ML_SHA256="..." in the fetch init container.
+    //    Renovate bumps the version only; ML_SHA256 must be updated by hand
+    //    (see prBodyNotes in the keycloak rule) — the init container's checksum
+    //    gate refuses the jar and CI fails loudly until it is.
     {
       "customType": "regex",
-      "description": "Keycloak magic-link extension (Maven Central)",
+      "description": "Keycloak magic-link extension version (Maven Central)",
       "managerFilePatterns": ["/^apps/values/keycloak-codecentric\\.yaml$/"],
-      "matchStrings": [
-        "keycloak-magic-link/(?<currentValue>\\d+(?:\\.\\d+)*)/keycloak-magic-link-\\d+(?:\\.\\d+)*\\.jar",
-      ],
-      "autoReplaceStringTemplate": "keycloak-magic-link/{{{newValue}}}/keycloak-magic-link-{{{newValue}}}.jar",
+      "matchStrings": ["ML_VERSION=\"(?<currentValue>\\d+(?:\\.\\d+)*)\""],
       "depNameTemplate": "io.phasetwo.keycloak:keycloak-magic-link",
       "datasourceTemplate": "maven",
     },
@@ -160,6 +160,10 @@
       "matchPackageNames": ["quay.io/keycloak/keycloak", "keycloakx", "io.phasetwo.keycloak:keycloak-magic-link"],
       "groupName": "keycloak",
       "prPriority": 10,
+      "prBodyNotes": [
+        "If this bumps `keycloak-magic-link`, also update `ML_SHA256` in `apps/values/keycloak-codecentric.yaml` (`curl -sL https://repo1.maven.org/maven2/io/phasetwo/keycloak/keycloak-magic-link/<ver>/keycloak-magic-link-<ver>.jar | sha256sum`, cross-check against the artifact's `.sha1`). The init container refuses the jar on mismatch, so CI fails until this is done.",
+        "Check the magic-link release notes for the minimum Keycloak version (0.72+ is required on KC >= 26.6.3).",
+      ],
     },
 
     // ---- Jitsi -------------------------------------------------------------------
