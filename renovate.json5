@@ -69,7 +69,7 @@
         "/^ansible/.+\\.ya?ml$/",
       ],
       "matchStrings": [
-        "\\n[ \\t]*-?[ \\t]*image:[ \\t]*[\"']?(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?[\"']?[ \\t]*(?=\\n|$)",
+        "\\n[ \\t]*-?[ \\t]*image:[ \\t]*[\"']?(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?[\"']?",
       ],
       "datasourceTemplate": "docker",
     },
