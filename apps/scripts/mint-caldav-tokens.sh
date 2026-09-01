@@ -55,7 +55,15 @@ mt_mint_caldav_tokens() {
     mt_require_commands jq
 
     local NEXTCLOUD_POD
-    NEXTCLOUD_POD=$(kubectl get pods -n "$NS_FILES" -l app.kubernetes.io/name=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+    # Select only the Deployment's app pods, and only Running ones. The bare
+    # name=nextcloud selector also matches the Completed db-init/install Job
+    # pods, and items[0] is name-ordered — whenever the ReplicaSet hash sorts
+    # after "db-init" (~1 in 5 hashes), every `kubectl exec` below silently hit
+    # a Succeeded pod and ALL provisioning/minting failed (pipelines 1951/1952).
+    NEXTCLOUD_POD=$(kubectl get pods -n "$NS_FILES" \
+        -l app.kubernetes.io/name=nextcloud,app.kubernetes.io/component=app \
+        --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
     if [ -z "$NEXTCLOUD_POD" ]; then
         print_warning "Nextcloud pod not found in $NS_FILES, skipping CalDAV token creation"
         return 0
