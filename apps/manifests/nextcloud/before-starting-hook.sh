@@ -134,4 +134,34 @@ else
     echo "[before-starting] user_oidc not installed yet, skipping Login Flow v2 patch"
 fi
 
+# Patch user_oidc TokenInvalidatedListener: do NOT call the IdP end_session_endpoint
+# when Nextcloud invalidates a login token. Upstream user_oidc (unconditional as of
+# 8.6.1 and still on main) performs an RP-initiated logout at Keycloak whenever an
+# NC auth token is invalidated (~24h after login, since session_lifetime defaults to
+# 24h). That single call kills the user's ENTIRE Keycloak SSO session, logging them
+# out of every app (account portal, Docs, Matrix, webmail...). Root-caused 2026-08-31
+# via a Keycloak LOGOUT event (client=nextcloud-app) originating from an NC pod IP.
+# Upstream has no config switch to disable this, hence the patch.
+# Scope: only the server-side HTTP GET to end_session_endpoint is replaced with a
+# debug log line. The listener's other behavior (oidc session-row cleanup, logging),
+# user-clicked NC logout, and Keycloak->NC backchannel logout are all unchanged.
+# The grep guard makes this idempotent and fails VISIBLY (skip + log) if a future
+# user_oidc version changes the line — check upstream for an opt-out flag then.
+TOKEN_LISTENER="/var/www/html/custom_apps/user_oidc/lib/Listener/TokenInvalidatedListener.php"
+if [ -f "$TOKEN_LISTENER" ]; then
+    if grep -q 'httpClientHelper->get($endSessionEndpoint' "$TOKEN_LISTENER" 2>/dev/null; then
+        echo "[before-starting] Patching user_oidc TokenInvalidatedListener (no IdP logout on token invalidation)..."
+        sed -i "s|\$this->httpClientHelper->get(\$endSessionEndpoint, \[\], \['timeout' => 5\]);|\$this->logger->debug('[TokenInvalidatedListener] IdP end_session call disabled by mothertree patch');|" "$TOKEN_LISTENER"
+        if grep -q "disabled by mothertree patch" "$TOKEN_LISTENER" 2>/dev/null; then
+            echo "[before-starting] TokenInvalidatedListener patch applied"
+        else
+            echo "[before-starting] WARN: TokenInvalidatedListener patch did NOT apply — IdP logout on token invalidation is ACTIVE (daily SSO logout bug)"
+        fi
+    else
+        echo "[before-starting] TokenInvalidatedListener already patched or upstream changed — verify no IdP logout on token invalidation"
+    fi
+else
+    echo "[before-starting] user_oidc not installed yet, skipping TokenInvalidatedListener patch"
+fi
+
 echo "[before-starting] Done"
