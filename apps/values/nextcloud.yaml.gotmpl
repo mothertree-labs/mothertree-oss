@@ -194,7 +194,7 @@ nextcloud:
   #   2. seed-identity: populates emptyDir with Nextcloud files + identity from K8s Secret
   extraInitContainers:
     - name: install-pandoc
-      image: alpine:3.20
+      image: alpine:3.24
       command:
         - sh
         - -c
