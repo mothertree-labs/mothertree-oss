@@ -52,9 +52,13 @@ test.describe('Admin Portal — Quota Management', () => {
     await page.locator(quotaBtnSelector).click();
     await page.fill(ap.quotaInput, '500');
 
-    // Intercept the quota PUT to check if Stalwart accepted it
-    const quotaResponse = page.waitForResponse((r) => r.url().includes('/api/users/') && r.url().includes('/quota'));
-    const usersResponse = page.waitForResponse((r) => r.url().includes('/api/users') && !r.url().includes('/quota') && r.status() === 200);
+    // Intercept the quota PUT + the follow-up member-list refresh. Save is a
+    // two-hop Stalwart round-trip (PUT quota → loadUsers() GET); under the
+    // concurrent write load the shards put on one tenant's Stalwart, that chain
+    // can exceed Playwright's default 15s budget even though both hops succeed
+    // — hence the explicit 30s waits (#607).
+    const quotaResponse = page.waitForResponse((r) => r.url().includes('/api/users/') && r.url().includes('/quota'), { timeout: 30_000 });
+    const usersResponse = page.waitForResponse((r) => r.url().includes('/api/users') && !r.url().includes('/quota') && r.status() === 200, { timeout: 30_000 });
     await page.click(ap.quotaSaveBtn);
 
     // Modal should close regardless of Stalwart response
@@ -70,7 +74,7 @@ test.describe('Admin Portal — Quota Management', () => {
       // Quota persisted — verify and restore
       await expect(page.locator(quotaBtnSelector)).toContainText('500 MB');
 
-      const restoreResponse = page.waitForResponse((r) => r.url().includes('/api/users') && !r.url().includes('/quota') && r.status() === 200);
+      const restoreResponse = page.waitForResponse((r) => r.url().includes('/api/users') && !r.url().includes('/quota') && r.status() === 200, { timeout: 30_000 });
       await page.locator(quotaBtnSelector).click();
       await page.fill(ap.quotaInput, '0');
       await page.click(ap.quotaSaveBtn);

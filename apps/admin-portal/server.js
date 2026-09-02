@@ -418,17 +418,22 @@ app.post('/api/invite', verifyOrigin, requireAuth, requireTenantAdmin, async (re
 app.get('/api/users', requireAuth, requireTenantAdmin, async (req, res) => {
   try {
     const users = await keycloakApi.listUsers();
-    // Enrich with email quota from Stalwart
-    const enriched = await Promise.all(users.map(async (user) => {
-      try {
-        const { quota } = await stalwartApi.getUserQuota(user.email);
-        user.quotaMb = quota > 0 ? Math.round(quota / (1024 * 1024)) : 0;
-      } catch {
-        user.quotaMb = 0;
-      }
-      return user;
-    }));
-    res.json(enriched);
+    // Enrich with email quota from Stalwart using ONE list call instead of a
+    // per-user request (that concurrent herd saturated Stalwart under e2e load
+    // and pushed this endpoint past e2e's 15s waitForResponse — issue #607).
+    // Best-effort: if Stalwart is slow/unavailable the list still returns
+    // promptly, with quotaMb defaulted to 0.
+    let quotaByEmail = new Map();
+    try {
+      quotaByEmail = await stalwartApi.getAllQuotas();
+    } catch (err) {
+      console.warn('User quota enrichment failed (non-fatal):', err.message);
+    }
+    for (const user of users) {
+      const quota = quotaByEmail.get((user.email || '').toLowerCase()) || 0;
+      user.quotaMb = quota > 0 ? Math.round(quota / (1024 * 1024)) : 0;
+    }
+    res.json(users);
   } catch (error) {
     console.error('List users error:', error.message);
     res.status(500).json({ error: error.message });

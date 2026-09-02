@@ -109,16 +109,17 @@ function createTestApp({ authenticated = false, roles = [], user = null } = {}) 
   app.get('/api/users', requireAuth, requireTenantAdmin, async (req, res) => {
     try {
       const users = await keycloakApi.listUsers();
-      const enriched = await Promise.all(users.map(async (user) => {
-        try {
-          const { quota } = await stalwartApi.getUserQuota(user.email);
-          user.quotaMb = quota > 0 ? Math.round(quota / (1024 * 1024)) : 0;
-        } catch {
-          user.quotaMb = 0;
-        }
-        return user;
-      }));
-      res.json(enriched);
+      let quotaByEmail = new Map();
+      try {
+        quotaByEmail = await stalwartApi.getAllQuotas();
+      } catch (err) {
+        console.warn('User quota enrichment failed (non-fatal):', err.message);
+      }
+      for (const user of users) {
+        const quota = quotaByEmail.get((user.email || '').toLowerCase()) || 0;
+        user.quotaMb = quota > 0 ? Math.round(quota / (1024 * 1024)) : 0;
+      }
+      res.json(users);
     } catch (error) {
       res.status(500).json({ error: error.message });
     }
@@ -307,9 +308,11 @@ describe('GET /api/users', () => {
       { id: 'u1', email: 'alice@example.com', firstName: 'Alice' },
       { id: 'u2', email: 'bob@example.com', firstName: 'Bob' },
     ]);
-    stalwartApi.getUserQuota
-      .mockResolvedValueOnce({ quota: 5368709120 })  // ~5120 MB
-      .mockResolvedValueOnce({ quota: 0 });
+    // Enrichment is now a single list call returning an email->quotaBytes map
+    stalwartApi.getAllQuotas.mockResolvedValue(new Map([
+      ['alice@example.com', 5368709120],  // ~5120 MB
+      ['bob@example.com', 0],
+    ]));
 
     const res = await request(app).get('/api/users');
 
@@ -317,6 +320,7 @@ describe('GET /api/users', () => {
     expect(res.body).toHaveLength(2);
     expect(res.body[0].quotaMb).toBe(5120);
     expect(res.body[1].quotaMb).toBe(0);
+    expect(stalwartApi.getAllQuotas).toHaveBeenCalledTimes(1);
   });
 
   test('returns 500 on listUsers error', async () => {
@@ -336,7 +340,9 @@ describe('GET /api/users', () => {
     keycloakApi.listUsers.mockResolvedValue([
       { id: 'u1', email: 'alice@example.com' },
     ]);
-    stalwartApi.getUserQuota.mockRejectedValue(new Error('Stalwart down'));
+    // A failed Stalwart list must NOT fail the whole endpoint — the user list
+    // still returns, with quota defaulted to 0 (issue #607).
+    stalwartApi.getAllQuotas.mockRejectedValue(new Error('Stalwart down'));
 
     const res = await request(app).get('/api/users');
 
