@@ -1,5 +1,5 @@
 # Use official k6 image - no custom build needed
-ARG K6_IMAGE=grafana/k6:0.49.0
+ARG K6_IMAGE=grafana/k6:0.59.0
 FROM ${K6_IMAGE} AS base
 
 # Workdir where tests will live inside the image
