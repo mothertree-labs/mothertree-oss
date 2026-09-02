@@ -62,7 +62,7 @@ releases:
   - name: cert-manager
     namespace: {{ requiredEnv "NS_CERTMANAGER" }}
     chart: jetstack/cert-manager
-    version: v1.13.3
+    version: v1.21.1
     needs:
       - {{ requiredEnv "NS_MONITORING" }}/kube-prometheus-stack
     wait: true
