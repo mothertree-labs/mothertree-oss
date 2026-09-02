@@ -40,7 +40,7 @@ spec:
     spec:
       containers:
         - name: open-webui
-          image: openwebui/open-webui:0.11.0
+          image: openwebui/open-webui:0.11.3
           ports:
             - name: http
               containerPort: 8080

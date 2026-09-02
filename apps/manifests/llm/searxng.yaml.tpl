@@ -32,7 +32,7 @@ spec:
           # Date-stamped tag from Docker Hub (searxng/searxng). Bump by picking
           # the newest 2026.*-<sha> tag; verified working image from the dev
           # rollout (see docs/plans/llm/web-search.md).
-          image: searxng/searxng:2026.8.5-1689cb1b5
+          image: searxng/searxng:2026.9.2-fd29de6c5
           ports:
             - name: http
               containerPort: 8080
