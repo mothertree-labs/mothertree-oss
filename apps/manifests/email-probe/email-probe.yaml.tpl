@@ -50,7 +50,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: email-probe
-        image: python:3.12.9-alpine3.21
+        image: python:3.14.1-alpine3.21
         command: ["python3", "/app/email-probe.py"]
         securityContext:
           allowPrivilegeEscalation: false
