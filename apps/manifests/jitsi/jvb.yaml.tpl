@@ -84,7 +84,7 @@ spec:
       # Init container to discover node's external IP (cloud K8s returns internal IP for status.hostIP)
       initContainers:
       - name: discover-external-ip
-        image: alpine/kubectl:1.33.4
+        image: alpine/kubectl:1.37.0
         imagePullPolicy: IfNotPresent
         env:
         - name: POD_NAME
