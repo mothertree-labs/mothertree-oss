@@ -33,7 +33,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: lasuite/impress-backend:v4.4.0
+          image: lasuite/impress-backend:v4.8.6
           command: ["/bin/sh", "-c"]
           args:
             - |
