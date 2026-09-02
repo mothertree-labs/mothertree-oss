@@ -31,7 +31,7 @@ spec:
       containers:
         # Main y-provider container
         - name: docs
-          image: lasuite/impress-y-provider:v4.8.6
+          image: lasuite/impress-y-provider:v4.4.0
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:

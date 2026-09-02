@@ -30,7 +30,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: lasuite/impress-frontend:v4.8.6
+          image: lasuite/impress-frontend:v4.4.0
           ports:
             - containerPort: 8080
               name: http
