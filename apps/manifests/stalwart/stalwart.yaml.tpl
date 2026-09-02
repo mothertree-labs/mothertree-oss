@@ -318,7 +318,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: stalwart
-        image: stalwartlabs/stalwart:v0.16.20
+        image: stalwartlabs/stalwart:v0.15.5
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
