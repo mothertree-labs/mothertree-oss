@@ -23,7 +23,7 @@ spec:
       containers:
         # socat — TCP proxy forwarding metrics requests to PG VM's postgres_exporter
         - name: socat
-          image: alpine/socat:1.8.0.3
+          image: alpine/socat:1.8.1.3
           args:
             - TCP-LISTEN:9187,fork,reuseaddr
             - TCP:${PG_VM_TAILSCALE_IP}:9187

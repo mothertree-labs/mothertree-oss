@@ -27,7 +27,7 @@ spec:
         #   exposer  (prod-eu): forwards mesh -> in-cluster Prometheus ClusterIP:9090
         #   consumer (prod):    forwards in-cluster ClusterIP -> prod-eu bridge mesh IP:9090
         - name: socat
-          image: alpine/socat:1.8.0.3
+          image: alpine/socat:1.8.1.3
           args:
             - TCP-LISTEN:9090,fork,reuseaddr
             - TCP:${SOCAT_TARGET}
