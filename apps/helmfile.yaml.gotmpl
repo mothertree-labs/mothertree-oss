@@ -47,7 +47,7 @@ releases:
   - name: ingress-nginx
     namespace: {{ requiredEnv "NS_INGRESS" }}
     chart: ingress-nginx/ingress-nginx
-    version: 4.7.1
+    version: 4.15.1
     wait: true
     timeout: 600
     labels:
@@ -139,7 +139,7 @@ releases:
   - name: ingress-nginx-internal
     namespace: {{ requiredEnv "NS_INGRESS_INTERNAL" }}
     chart: ingress-nginx/ingress-nginx
-    version: 4.7.1
+    version: 4.15.1
     wait: true
     timeout: 600
     labels:
