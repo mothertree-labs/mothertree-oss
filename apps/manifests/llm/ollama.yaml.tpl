@@ -36,7 +36,7 @@ spec:
           # no --delete). No-op when the bucket is empty (first-ever deploy);
           # the main container then pulls the model directly (see below) while
           # the seed Job populates the bucket in the background.
-          image: amazon/aws-cli:2.22.35
+          image: amazon/aws-cli:2.36.37
           command:
             - /bin/sh
             - -c
