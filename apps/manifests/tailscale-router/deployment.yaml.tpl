@@ -22,7 +22,7 @@ spec:
       # sysctls, so we use a privileged init container to set it at runtime.
       initContainers:
         - name: enable-ip-forward
-          image: tailscale/tailscale:v1.94.2
+          image: tailscale/tailscale:v1.102.3
           command:
             - sh
             - -c
@@ -36,7 +36,7 @@ spec:
             privileged: true
         # Tailscale subnet router — native sidecar, starts after ip_forward is set.
         - name: tailscale
-          image: tailscale/tailscale:v1.94.2
+          image: tailscale/tailscale:v1.102.3
           restartPolicy: Always
           env:
             - name: TS_AUTHKEY

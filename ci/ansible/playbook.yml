@@ -20,7 +20,7 @@
     - "{{ vars_file | default('ansible-vars.yml') }}"
 
   vars:
-    woodpecker_version: "{{ woodpecker_version_override | default('3.17.0') }}"
+    woodpecker_version: "{{ woodpecker_version_override | default('3.18.0') }}"
     plugin_git_version: "{{ plugin_git_version_override | default('2.9.3') }}"
     # Path to tenant config submodule (relative to playbook)
     _tenants_dir: "{{ playbook_dir }}/../../config/tenants"

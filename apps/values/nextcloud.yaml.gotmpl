@@ -59,6 +59,13 @@ resources:
   limits:
     memory: 2Gi
 
+# Pin the main container image. Chart 8.9.1 defaults to its appVersion (32.0.6);
+# this MUST stay in lock-step with the seed-identity init container and the
+# install job below — a newer installed version than the runtime image causes
+# the app-version 503 crash-loop (Nextcloud refuses downgrades).
+image:
+  tag: 32.0.14-apache
+
 # No PVC — use chart-default emptyDir for /var/www/html
 # Identity values (instanceid, passwordsalt, secret) are persisted in a K8s Secret
 # and seeded by the seed-identity init container on every pod start.
@@ -194,7 +201,7 @@ nextcloud:
   #   2. seed-identity: populates emptyDir with Nextcloud files + identity from K8s Secret
   extraInitContainers:
     - name: install-pandoc
-      image: alpine:3.20
+      image: alpine:3.24
       command:
         - sh
         - -c
@@ -205,9 +212,9 @@ nextcloud:
         - name: pandoc-bin
           mountPath: /pandoc-bin
     - name: seed-identity
-      # IMPORTANT: Must match the Nextcloud image used by the chart (chart 8.9.0 = 32.0.5-apache).
-      # Update this when upgrading the Helm chart version.
-      image: nextcloud:32.0.5-apache
+      # IMPORTANT: Must match the chart's main container image (pinned via the
+      # top-level `image.tag` in this file) and the install-job image.
+      image: nextcloud:32.0.14-apache
       command: ["/bin/sh", "/scripts/identity-init.sh"]
       env:
         - name: NC_INSTANCE_ID

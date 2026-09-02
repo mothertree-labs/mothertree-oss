@@ -23,7 +23,7 @@ spec:
       containers:
         # socat — TCP proxy forwarding metrics requests to PG VM's postgres_exporter
         - name: socat
-          image: alpine/socat:1.8.0.3
+          image: alpine/socat:1.8.1.3
           args:
             - TCP-LISTEN:9187,fork,reuseaddr
             - TCP:${PG_VM_TAILSCALE_IP}:9187
@@ -52,9 +52,9 @@ spec:
       # any in-flight requests on shutdown.
       initContainers:
         - name: tailscale
-          # tailscale/tailscale:v1.94.2 — stable release, multi-arch
+          # tailscale/tailscale — stable release, multi-arch (version pinned on the image: line below)
           # https://hub.docker.com/r/tailscale/tailscale
-          image: tailscale/tailscale:v1.94.2
+          image: tailscale/tailscale:v1.102.3
           restartPolicy: Always
           env:
             - name: POD_NAME

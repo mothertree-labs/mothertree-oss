@@ -27,7 +27,7 @@ spec:
         #   exposer  (prod-eu): forwards mesh -> in-cluster Prometheus ClusterIP:9090
         #   consumer (prod):    forwards in-cluster ClusterIP -> prod-eu bridge mesh IP:9090
         - name: socat
-          image: alpine/socat:1.8.0.3
+          image: alpine/socat:1.8.1.3
           args:
             - TCP-LISTEN:9090,fork,reuseaddr
             - TCP:${SOCAT_TARGET}
@@ -56,9 +56,9 @@ spec:
       # any in-flight requests on shutdown.
       initContainers:
         - name: tailscale
-          # tailscale/tailscale:v1.94.2 — stable release, multi-arch
+          # tailscale/tailscale — stable release, multi-arch (version pinned on the image: line below)
           # https://hub.docker.com/r/tailscale/tailscale
-          image: tailscale/tailscale:v1.94.2
+          image: tailscale/tailscale:v1.102.3
           restartPolicy: Always
           env:
             - name: POD_NAME

@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: jicofo
-        image: jitsi/jicofo:stable-10741
+        image: jitsi/jicofo:stable-11031
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

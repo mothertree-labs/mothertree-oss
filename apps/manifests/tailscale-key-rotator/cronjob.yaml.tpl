@@ -26,7 +26,7 @@ spec:
             runAsUser: 1000
           containers:
             - name: rotator
-              image: alpine/k8s:1.34.0
+              image: alpine/k8s:1.37.0
               command: ["sh", "/config/rotate.sh"]
               env:
                 - name: HEADSCALE_API_KEY

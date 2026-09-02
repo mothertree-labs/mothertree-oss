@@ -15,6 +15,11 @@ controller:
     limits:
       memory: 256Mi
   config:
+    # Chart >= 4.8 disables snippet annotations by default and >= 4.12 rates them
+    # Critical risk; keep parity with the external controller so snippet-bearing
+    # ingresses render identically on both classes.
+    allow-snippet-annotations: "true"
+    annotations-risk-level: "Critical"
     # Basic nginx configuration for internal services
     use-proxy-protocol: "false"
     compute-full-forwarded-for: "true"

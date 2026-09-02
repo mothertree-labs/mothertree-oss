@@ -37,7 +37,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: synapse-admin
-          image: awesometechnologies/synapse-admin:0.11.1
+          image: awesometechnologies/synapse-admin:0.11.4
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
