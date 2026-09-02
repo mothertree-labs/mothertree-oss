@@ -86,7 +86,7 @@ spec:
         # Uses internal service URL (not external) to avoid PROXY protocol issue
         # (in-cluster traffic to external URL bypasses NodeBalancer → ECONNRESET)
         - name: health-sidecar
-          image: busybox:1.36
+          image: busybox:1.38
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/scripts/health-check.sh"]
           env:

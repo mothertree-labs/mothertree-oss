@@ -75,7 +75,7 @@ extraVolumes: |
 
 extraInitContainers: |
   - name: extract-theme
-    image: busybox:1.36
+    image: busybox:1.38
     command:
       - sh
       - -c
@@ -97,7 +97,7 @@ extraInitContainers: |
       - name: platform-theme-extracted
         mountPath: /themes-extracted
   - name: fetch-magic-link-provider
-    image: busybox:1.36
+    image: busybox:1.38
     command:
       - sh
       - -c
