@@ -37,7 +37,7 @@ spec:
         - name: pgbouncer
           # edoburu/pgbouncer:v1.25.1-p0 — actively maintained, multi-arch (amd64+arm64)
           # https://hub.docker.com/r/edoburu/pgbouncer
-          image: edoburu/pgbouncer:v1.25.1-p0
+          image: edoburu/pgbouncer:v1.25.2-p0
           ports:
             - containerPort: 5432
               name: postgresql
