@@ -112,7 +112,7 @@ releases:
   - name: vector
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: vector/vector
-    version: 0.46.0
+    version: 0.58.0
     needs:
       - {{ requiredEnv "NS_MONITORING" }}/kube-prometheus-stack
     labels:
