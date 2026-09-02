@@ -528,7 +528,7 @@
   hosts: headscale_servers
   become: yes
   vars:
-    headscale_version: "0.28.0"
+    headscale_version: "0.29.3"
     # headscale_base_domain: REQUIRED - e.g., ts.example.com (MagicDNS base domain)
     # headscale_domain: REQUIRED - e.g., hs-prod.example.com
     # tls_email: REQUIRED - for Let's Encrypt certificate
