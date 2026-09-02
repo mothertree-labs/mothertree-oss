@@ -18,6 +18,21 @@ const KEYCLOAK_REALM = process.env.KEYCLOAK_REALM;
 const CLIENT_ID = process.env.KEYCLOAK_CLIENT_ID;
 const CLIENT_SECRET = process.env.KEYCLOAK_CLIENT_SECRET;
 
+// Bounded timeouts so a slow/saturated Keycloak can never hang /api/users.
+// listUsers enriches every user with per-user passkey + magic-link credential
+// lookups (up to 3 KC calls per user via Promise.all); with plain unbounded
+// fetch, one hung call under peak e2e load left the whole request pending and
+// the members list stuck on "Loading members…". Essential calls (token, count,
+// user list) get the longer budget; the per-user enrichment gets a short one
+// and degrades best-effort (issue #609 — the Keycloak half of the /api/users
+// herd that the Stalwart-side fix in #608 did not cover).
+const KC_FETCH_TIMEOUT_MS = parseInt(process.env.KC_FETCH_TIMEOUT_MS, 10) || 8_000;
+const KC_ENRICH_TIMEOUT_MS = parseInt(process.env.KC_ENRICH_TIMEOUT_MS, 10) || 4_000;
+
+function kcFetch(url, options = {}, timeoutMs = KC_FETCH_TIMEOUT_MS) {
+  return fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+}
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function validateUserId(userId) {
   if (!userId || !UUID_REGEX.test(userId)) {
@@ -52,7 +67,7 @@ async function getServiceToken() {
 
   const tokenUrl = `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token`;
 
-  const response = await fetch(tokenUrl, {
+  const response = await kcFetch(tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -313,7 +328,7 @@ async function listUsers() {
 
   // Fetch actual user count first so we never silently truncate the list
   const countUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/count`;
-  const countResponse = await fetch(countUrl, {
+  const countResponse = await kcFetch(countUrl, {
     headers: { 'Authorization': `Bearer ${token}` },
   });
 
@@ -325,7 +340,7 @@ async function listUsers() {
   const max = Math.min(Number.isInteger(totalUsers) && totalUsers > 0 ? totalUsers : 100, 10000);
   const usersUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?max=${max}`;
 
-  const response = await fetch(usersUrl, {
+  const response = await kcFetch(usersUrl, {
     headers: { 'Authorization': `Bearer ${token}` },
   });
 
@@ -335,10 +350,21 @@ async function listUsers() {
 
   const users = await response.json();
 
-  // Enrich with passkey status and auth method
+  // Enrich with passkey status and auth method. Best-effort per user: the two
+  // credential lookups are bounded (KC_ENRICH_TIMEOUT_MS) and already return
+  // false on error, but a thrown timeout must not reject the whole Promise.all
+  // and hang /api/users — so any per-user failure defaults its flags to false
+  // (a just-invited user legitimately has neither yet) and the list still
+  // returns (issue #609).
   const enrichedUsers = await Promise.all(users.map(async (user) => {
-    const hasPasskey = await checkUserHasPasskey(user.id);
-    const hasMagicLink = await checkUserHasMagicLink(user.id);
+    let hasPasskey = false;
+    let hasMagicLink = false;
+    try {
+      hasPasskey = await checkUserHasPasskey(user.id);
+      hasMagicLink = await checkUserHasMagicLink(user.id);
+    } catch (err) {
+      console.warn(`listUsers: auth-method enrichment failed for ${user.id} (non-fatal): ${err.message}`);
+    }
     let authMethod = 'none';
     if (hasPasskey && hasMagicLink) authMethod = 'both';
     else if (hasPasskey) authMethod = 'passkey';
@@ -371,30 +397,36 @@ async function listUsers() {
  */
 async function checkUserHasMagicLink(userId) {
   validateUserId(userId);
-  const token = await getServiceToken();
-  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
+  try {
+    const token = await getServiceToken();
+    const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
 
-  const response = await fetch(userUrl, {
-    headers: { 'Authorization': `Bearer ${token}` },
-  });
+    const response = await kcFetch(userUrl, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    }, KC_ENRICH_TIMEOUT_MS);
 
-  if (!response.ok) return false;
+    if (!response.ok) return false;
 
-  const user = await response.json();
+    const user = await response.json();
 
-  // Check user attribute (set after magic-link onboarding)
-  if (user.attributes?.authMethod?.[0] === 'magic-link') return true;
+    // Check user attribute (set after magic-link onboarding)
+    if (user.attributes?.authMethod?.[0] === 'magic-link') return true;
 
-  // Check if ext-magic-link is a configured credential
-  const credentialsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/credentials`;
-  const credResponse = await fetch(credentialsUrl, {
-    headers: { 'Authorization': `Bearer ${token}` },
-  });
+    // Check if ext-magic-link is a configured credential
+    const credentialsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/credentials`;
+    const credResponse = await kcFetch(credentialsUrl, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    }, KC_ENRICH_TIMEOUT_MS);
 
-  if (!credResponse.ok) return false;
+    if (!credResponse.ok) return false;
 
-  const credentials = await credResponse.json();
-  return credentials.some(cred => cred.type === 'magic-link' || cred.type === 'ext-magic-link');
+    const credentials = await credResponse.json();
+    return credentials.some(cred => cred.type === 'magic-link' || cred.type === 'ext-magic-link');
+  } catch {
+    // Bounded-fetch timeout or transient KC error under load → best-effort
+    // "no magic-link" so the caller's user list cannot hang (issue #609).
+    return false;
+  }
 }
 
 /**
@@ -402,21 +434,27 @@ async function checkUserHasMagicLink(userId) {
  */
 async function checkUserHasPasskey(userId) {
   validateUserId(userId);
-  const token = await getServiceToken();
-  const credentialsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/credentials`;
+  try {
+    const token = await getServiceToken();
+    const credentialsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/credentials`;
 
-  const response = await fetch(credentialsUrl, {
-    headers: { 'Authorization': `Bearer ${token}` },
-  });
+    const response = await kcFetch(credentialsUrl, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    }, KC_ENRICH_TIMEOUT_MS);
 
-  if (!response.ok) {
+    if (!response.ok) {
+      return false;
+    }
+
+    const credentials = await response.json();
+    return credentials.some(cred =>
+      cred.type === 'webauthn-passwordless' || cred.type === 'webauthn'
+    );
+  } catch {
+    // Bounded-fetch timeout or transient KC error under load → best-effort
+    // "no passkey" so the caller's user list cannot hang (issue #609).
     return false;
   }
-
-  const credentials = await response.json();
-  return credentials.some(cred =>
-    cred.type === 'webauthn-passwordless' || cred.type === 'webauthn'
-  );
 }
 
 /**

@@ -412,6 +412,37 @@ describe('listUsers', () => {
     expect(users[1].authMethod).toBe('none');
     expect(users[1].userType).toBe('member'); // default
   });
+
+  test('still returns the user list when passkey/magic-link enrichment fails (best-effort, issue #609)', async () => {
+    const keycloak = getKeycloak();
+    const userId1 = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+    fetchMock.mockResolvedValueOnce(mockResponse({ access_token: 'tok', expires_in: 300 }));
+    fetchMock.mockResolvedValueOnce(mockResponse(1)); // count
+    fetchMock.mockResolvedValueOnce(mockResponse([   // users list
+      {
+        id: userId1,
+        email: 'alice@example.com',
+        firstName: 'Alice',
+        lastName: 'Smith',
+        enabled: true,
+        createdTimestamp: 1700000000000,
+        attributes: {},
+      },
+    ]));
+    // Every enrichment call rejects (simulates a bounded-fetch timeout under load).
+    fetchMock.mockRejectedValue(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }));
+
+    const users = await keycloak.listUsers();
+
+    // The list still comes back — the endpoint does not hang or 500 — with the
+    // auth-method flags defaulted rather than propagating the timeout.
+    expect(users).toHaveLength(1);
+    expect(users[0].email).toBe('alice@example.com');
+    expect(users[0].hasPasskey).toBe(false);
+    expect(users[0].hasMagicLink).toBe(false);
+    expect(users[0].authMethod).toBe('none');
+  });
 });
 
 // --- checkUserHasPasskey ---
