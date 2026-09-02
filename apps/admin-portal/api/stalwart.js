@@ -16,8 +16,20 @@ const STALWART_ADMIN_PASSWORD = process.env.STALWART_ADMIN_PASSWORD;
 // e2e run; 17/30 /api/principal/deploy calls never returned within 120s.
 const FETCH_TIMEOUT_MS = parseInt(process.env.STALWART_FETCH_TIMEOUT_MS, 10) || 8_000;
 
-function fetchWithTimeout(url, options = {}) {
-  return fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+// Dedicated, much shorter timeout for the post-create config reload. The reload
+// is a serialization point under concurrent invites, so it must NOT inherit the
+// 8s invite-critical timeout (that pileup was the "aborted due to timeout"
+// source, issue #607) — but a brief bounded await preserves the RCPT-cache
+// freshness a brand-new principal needs for inbound mail.
+const RELOAD_TIMEOUT_MS = parseInt(process.env.STALWART_RELOAD_TIMEOUT_MS, 10) || 2_000;
+
+// Best-effort timeout for the /api/users quota enrichment list call. Short and
+// NOT retried: the caller degrades to quota 0 on failure, so under Stalwart load
+// the members-list endpoint must give up fast rather than block e2e's 15s wait.
+const ENRICH_TIMEOUT_MS = parseInt(process.env.STALWART_ENRICH_TIMEOUT_MS, 10) || 3_000;
+
+function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  return fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
 }
 
 // Detect the error thrown by AbortSignal.timeout(N) — either AbortError/
@@ -54,18 +66,18 @@ function getAdminAuth() {
  * Reload Stalwart configuration and clear directory caches.
  * Called after principal changes to ensure RCPT TO reflects current state.
  *
- * Fire-and-forget: returns a promise but callers do NOT await it in the
- * request's critical path. Under concurrent invite load the reload endpoint
- * is a serialization point — awaiting it per-invite was compounding the
- * Stalwart contention that caused e2e's "aborted due to timeout" failures.
- * The negative RCPT cache has a short TTL, and e2e's IMAP polling already
- * buffers past that.
+ * Bounded by RELOAD_TIMEOUT_MS (not the 8s invite timeout) and terminates its
+ * own chain in .catch(), so an awaiting caller can never be blocked longer than
+ * that nor have the invite fail on a reload error. Awaiting it briefly keeps the
+ * directory cache fresh for a just-created principal (inbound RCPT) while the
+ * short bound avoids the per-invite serialization pileup that tripped e2e
+ * timeouts (issue #607).
  */
 function reloadConfig() {
   const adminAuth = getAdminAuth();
   return fetchWithTimeout(`${STALWART_API_URL}/api/reload`, {
     headers: { 'Authorization': adminAuth },
-  })
+  }, RELOAD_TIMEOUT_MS)
     .then((response) => {
       if (!response.ok) {
         console.warn(`Stalwart: config reload returned ${response.status}`);
@@ -147,7 +159,11 @@ async function ensureUserExists(email, name, quotaBytes) {
   // "security.unauthorized" / "This account is not authorized to receive email").
   await ensureRoles(email);
 
-  // Clear directory cache so RCPT TO picks up the new principal immediately
+  // Clear directory cache so RCPT TO picks up the new principal. Awaited, but
+  // bounded to RELOAD_TIMEOUT_MS (2s) rather than the 8s invite timeout: keeps
+  // inbound mail to the fresh address working without the per-invite reload
+  // pileup that tripped e2e timeouts (issue #607). Cannot fail the invite —
+  // reloadConfig() terminates in .catch().
   await reloadConfig();
 
   console.log(`Stalwart: principal ${email} created`);
@@ -213,6 +229,48 @@ async function getUserQuota(email) {
 
   const data = await response.json();
   return { quota: data.data?.quota || 0 };
+}
+
+/**
+ * Fetch quotas for every individual principal in a SINGLE list call and return
+ * a Map of email (lowercased) -> quotaBytes.
+ *
+ * Replaces the /api/users enrichment path's per-user getUserQuota() calls: that
+ * fired one Stalwart request per Keycloak user concurrently (Promise.all), a
+ * thundering herd that saturated Stalwart under e2e load and pushed the list
+ * endpoint past e2e's 15s waitForResponse (issue #607). One list call is O(1)
+ * Stalwart requests regardless of user count. `limit=0` returns all principals.
+ *
+ * Uses a short ENRICH_TIMEOUT_MS with NO retry: this is best-effort enrichment
+ * (the caller defaults quota to 0 on failure), so a slow Stalwart must degrade
+ * the list *quickly* rather than block the /api/users response. The default 8s
+ * FETCH_TIMEOUT_MS + withTimeoutRetry's retry could stack to ~16.5s and blow
+ * past e2e's 15s waitForResponse — the exact residual failure this closes.
+ */
+async function getAllQuotas() {
+  const adminAuth = getAdminAuth();
+
+  const response = await fetchWithTimeout(
+    `${STALWART_API_URL}/api/principal?types=individual&limit=0&fields=name,quota`,
+    { headers: { 'Authorization': adminAuth } },
+    ENRICH_TIMEOUT_MS,
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to list principals: ${response.status} ${error}`);
+  }
+
+  const data = await response.json();
+  const items = data.data?.items || [];
+  const quotaByEmail = new Map();
+  for (const item of items) {
+    const name = typeof item === 'string' ? item : item?.name;
+    if (name) {
+      quotaByEmail.set(name.toLowerCase(), (typeof item === 'object' && item.quota) || 0);
+    }
+  }
+  return quotaByEmail;
 }
 
 /**
@@ -430,6 +488,7 @@ module.exports = {
   createAppPassword,
   revokeAppPassword,
   getUserQuota,
+  getAllQuotas,
   setUserQuota,
   backfillQuotas,
 };

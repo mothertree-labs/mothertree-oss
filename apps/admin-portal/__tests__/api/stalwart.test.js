@@ -224,6 +224,55 @@ describe('getUserQuota', () => {
   });
 });
 
+// --- getAllQuotas ---
+
+describe('getAllQuotas', () => {
+  test('returns a lowercased email->quota map from a single list call', async () => {
+    const stalwart = getStalwart();
+
+    fetchMock.mockResolvedValueOnce(mockResponse({
+      data: {
+        items: [
+          { name: 'Alice@test.com', quota: 5368709120 },
+          { name: 'bob@test.com', quota: 0 },
+          { name: 'carol@test.com' }, // no quota field → 0
+        ],
+        total: 3,
+      },
+    }));
+
+    const map = await stalwart.getAllQuotas();
+
+    // Exactly one Stalwart call regardless of user count (no per-user herd)
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain('/api/principal?types=individual&limit=0');
+    expect(map.get('alice@test.com')).toBe(5368709120);
+    expect(map.get('bob@test.com')).toBe(0);
+    expect(map.get('carol@test.com')).toBe(0);
+  });
+
+  test('tolerates string items and missing data', async () => {
+    const stalwart = getStalwart();
+
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: { items: ['legacy@test.com'] } }));
+    let map = await stalwart.getAllQuotas();
+    expect(map.get('legacy@test.com')).toBe(0);
+
+    fetchMock.mockResolvedValueOnce(mockResponse({ data: {} }));
+    map = await stalwart.getAllQuotas();
+    expect(map.size).toBe(0);
+  });
+
+  test('throws when the list call fails', async () => {
+    const stalwart = getStalwart();
+
+    fetchMock.mockResolvedValue(mockResponse('Server Error', { status: 500 }));
+
+    await expect(stalwart.getAllQuotas())
+      .rejects.toThrow('Failed to list principals: 500');
+  });
+});
+
 // --- setUserQuota ---
 
 describe('setUserQuota', () => {
