@@ -17,7 +17,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: backend
-          image: lasuite/impress-backend:v4.4.0
+          image: lasuite/impress-backend:v4.8.6
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
