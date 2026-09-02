@@ -48,6 +48,11 @@ controller:
     limits:
       memory: 512Mi
   config:
+    # Chart >= 4.8 disables snippet annotations by default and >= 4.12 rates them
+    # Critical risk; our ingress manifests rely on configuration-snippet /
+    # server-snippet for per-app security headers (Keycloak CSP, Roundcube, Jitsi…).
+    allow-snippet-annotations: "true"
+    annotations-risk-level: "Critical"
     # Basic nginx configuration
     # Global security headers applied to all ingresses
     add-headers: "infra-ingress/nginx-custom-headers"

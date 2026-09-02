@@ -95,7 +95,7 @@ spec:
       # client connections on shutdown — no fixed sleep needed.
       initContainers:
         - name: tailscale
-          # tailscale/tailscale:v1.94.2 — stable release, multi-arch
+          # tailscale/tailscale — stable release, multi-arch (version pinned on the image: line below)
           # https://hub.docker.com/r/tailscale/tailscale
           image: tailscale/tailscale:v1.102.3
           restartPolicy: Always
