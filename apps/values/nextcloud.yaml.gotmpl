@@ -207,7 +207,7 @@ nextcloud:
     - name: seed-identity
       # IMPORTANT: Must match the Nextcloud image used by the chart (chart 8.9.0 = 32.0.5-apache).
       # Update this when upgrading the Helm chart version.
-      image: nextcloud:32.0.5-apache
+      image: nextcloud:32.0.14-apache
       command: ["/bin/sh", "/scripts/identity-init.sh"]
       env:
         - name: NC_INSTANCE_ID
