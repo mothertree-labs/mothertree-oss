@@ -3,23 +3,12 @@ set -euo pipefail
 
 echo "--- :helm: Helmfile Lint"
 
-cd apps
+# Dummy env vars for all requiredEnv references in helmfile.yaml.gotmpl.
+# Only needed for template rendering during lint — no real cluster access.
+# shellcheck source=ci/scripts/lib/helmfile-lint-env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/helmfile-lint-env.sh"
 
-# Export dummy env vars for all requiredEnv references in helmfile.yaml.gotmpl
-# These are only needed for template rendering during lint — no real cluster access
-export NS_INGRESS="infra-ingress"
-export NS_CERTMANAGER="infra-cert-manager"
-export NS_MONITORING="infra-monitoring"
-export NS_INGRESS_INTERNAL="infra-ingress-internal"
-export NS_AUTH="infra-auth"
-export NS_OFFICE="tn-lint-docs"
-export NS_MATRIX="tn-lint-matrix"
-export NS_FILES="tn-lint-files"
-export NS_JITSI="tn-lint-jitsi"
-export NEXTCLOUD_DB_NAME="lint_nextcloud"
-export TENANT_DB_USER="lint_user"
-export ALERTMANAGER_EMAIL_TO="lint@example.com"
-export SMTP_DOMAIN="example.com"
+cd apps
 
 helmfile -e dev lint
 echo "Helmfile lint passed"
