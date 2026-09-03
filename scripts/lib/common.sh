@@ -727,3 +727,134 @@ mt_wait_for_nextcloud_installed() {
     print_error "Nextcloud never reported installed=true in $namespace"
     return 1
 }
+
+# ---------------------------------------------------------------------------
+# mt_wait_for_daemonset — wait for a DaemonSet rollout to converge; fail fast
+# on pods that will never become ready (crash loop, unpullable image, ...).
+#
+# Converged means desired == current == updated == ready == available and the
+# controller has observed the latest generation. `updated == desired` is what
+# catches a STALLED rollout: with the default maxUnavailable=1 a broken pod
+# template leaves the old pods Ready on every other node, so a ready-only
+# check passes while the cluster is silently half-upgraded (issue #612:
+# Vector 0.58 rejected a stale config key, 3 of 4 nodes shipped no logs).
+#
+# Both regular and init containers are inspected — native sidecars
+# (initContainers with restartPolicy: Always) crash-loop as init containers.
+#
+# Pods on NotReady / unreachable nodes are excluded from the comparison (and
+# listed): the DaemonSet controller tolerates those taints, so the dead node's
+# pod stays in desiredNumberScheduled and would otherwise hold this gate —
+# and every prod deploy behind it — for the whole node outage.
+#
+# On failure the last 30 log lines of the failed container and the pod events
+# are printed into the deploy log. Treat everything printed here as public;
+# only point this at DaemonSets whose logs are safe to show.
+#
+# Usage: mt_wait_for_daemonset <namespace> <daemonset> [timeout=420] [interval=5]
+# Returns 0 on convergence, 1 on fail-fast or timeout (with diagnostics).
+# ---------------------------------------------------------------------------
+mt_wait_for_daemonset() {
+    local namespace="${1:?mt_wait_for_daemonset: namespace required}"
+    local ds="${2:?mt_wait_for_daemonset: daemonset name required}"
+    local timeout="${3:-420}"
+    local interval="${4:-5}"
+    local bad_reasons='CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError|CreateContainerError|InvalidImageName'
+
+    local start=$SECONDS elapsed=0
+    while true; do
+        local status
+        if ! status=$(kubectl get ds "$ds" -n "$namespace" -o jsonpath='{.metadata.generation}|{.status.observedGeneration}|{.status.desiredNumberScheduled}|{.status.currentNumberScheduled}|{.status.updatedNumberScheduled}|{.status.numberReady}|{.status.numberAvailable}' 2>/dev/null); then
+            print_error "mt_wait_for_daemonset: cannot read DaemonSet $namespace/$ds"
+            return 1
+        fi
+        local gen obs desired current updated ready available
+        IFS='|' read -r gen obs desired current updated ready available <<< "$status"
+        gen=${gen:-0}; obs=${obs:-0}; desired=${desired:-0}; current=${current:-0}
+        updated=${updated:-0}; ready=${ready:-0}; available=${available:-0}
+
+        if [ "$desired" -eq 0 ]; then
+            print_warning "DaemonSet $namespace/$ds has 0 desired pods — nothing to wait for"
+            return 0
+        fi
+
+        # Pods on NotReady nodes count against desired but can never become
+        # ready/updated until the node recovers — exclude them (see header).
+        # Credit one per distinct node (a node can briefly carry two pods).
+        local excluded_pods excluded excluded_json
+        excluded_pods=$(_mt_daemonset_pods_on_notready_nodes "$namespace" "$ds")
+        excluded=$(printf '%s\n' "$excluded_pods" | awk 'NF { print $NF }' | sort -u | grep -c . || true)
+        excluded_json=$(printf '%s\n' "$excluded_pods" | awk 'NF { print $1 }' | jq -R . | jq -s -c .)
+
+        if [ "$obs" -ge "$gen" ] && [ $((updated + excluded)) -ge "$desired" ] && [ $((current + excluded)) -ge "$desired" ] \
+           && [ $((ready + excluded)) -ge "$desired" ] && [ $((available + excluded)) -ge "$desired" ]; then
+            if [ "$excluded" -gt 0 ]; then
+                print_warning "DaemonSet $namespace/$ds: ignoring $excluded pod(s) on NotReady nodes:"
+                echo "$excluded_pods" | sed 's/^/    /'
+            fi
+            print_success "DaemonSet $namespace/$ds converged: $ready/$desired ready, $updated/$desired updated (${elapsed}s)"
+            return 0
+        fi
+
+        # Fail fast: a pod owned by this DaemonSet stuck in a crash/pull loop
+        # will not recover by waiting. Pods on NotReady nodes are skipped here
+        # too — their last reported state is frozen until the node returns.
+        local bad
+        bad=$(kubectl get pods -n "$namespace" -o json 2>/dev/null | jq -r --arg ds "$ds" --arg re "$bad_reasons" --argjson skip "$excluded_json" '
+            .items[]
+            | select((.metadata.ownerReferences // []) | any(.kind == "DaemonSet" and .name == $ds))
+            | select(.metadata.name as $n | ($skip | index($n)) == null)
+            | . as $p
+            | ((.status.containerStatuses // []) + (.status.initContainerStatuses // []))[]
+            | select((.state.waiting.reason // "") | test($re))
+            | "\($p.metadata.name)|\(.name)|\(.state.waiting.reason)|\(.restartCount)"' 2>/dev/null) || bad=""
+        if [ -n "$bad" ]; then
+            print_error "DaemonSet $namespace/$ds has pods that will never become ready:"
+            echo "$bad" | awk -F'|' '{ printf "    %s (container %s): %s, restarts=%s\n", $1, $2, $3, $4 }'
+            _mt_daemonset_diagnostics "$namespace" "$ds" \
+                "$(echo "$bad" | head -1 | cut -d'|' -f1)" "$(echo "$bad" | head -1 | cut -d'|' -f2)"
+            return 1
+        fi
+
+        if [ "$elapsed" -ge "$timeout" ]; then
+            print_error "Timeout after ${timeout}s waiting for DaemonSet $namespace/$ds: $ready/$desired ready, $updated/$desired updated, $available/$desired available"
+            _mt_daemonset_diagnostics "$namespace" "$ds" "" ""
+            return 1
+        fi
+        echo "  Waiting for DaemonSet $namespace/$ds: $ready/$desired ready, $updated/$desired updated, $available/$desired available (${elapsed}s/${timeout}s)"
+        sleep "$interval"
+        elapsed=$((SECONDS - start))   # wall-clock, so API round-trips count
+    done
+}
+
+# Pods of <daemonset> scheduled on nodes whose Ready condition is not True.
+# Prints one "pod on NotReady node <node>" line per pod; empty when none.
+_mt_daemonset_pods_on_notready_nodes() {
+    local namespace="$1" ds="$2" notready
+    notready=$(kubectl get nodes -o json 2>/dev/null | jq -r '
+        .items[]
+        | select((.status.conditions // []) | any(.type == "Ready" and .status != "True"))
+        | .metadata.name' 2>/dev/null) || notready=""
+    [ -z "$notready" ] && return 0
+    kubectl get pods -n "$namespace" -o json 2>/dev/null | jq -r --arg ds "$ds" \
+        --argjson nodes "$(printf '%s\n' "$notready" | jq -R . | jq -s .)" '
+        .items[]
+        | select((.metadata.ownerReferences // []) | any(.kind == "DaemonSet" and .name == $ds))
+        | select(.spec.nodeName as $n | $nodes | index($n))
+        | "\(.metadata.name) on NotReady node \(.spec.nodeName)"' 2>/dev/null || true
+}
+
+# Diagnostics for mt_wait_for_daemonset failures. Best effort, never fails.
+_mt_daemonset_diagnostics() {
+    local namespace="$1" ds="$2" pod="$3" container="$4"
+    kubectl get ds "$ds" -n "$namespace" -o wide 2>/dev/null || true
+    kubectl get pods -n "$namespace" -o wide 2>/dev/null | grep -E "^NAME|^${ds}-" || true
+    if [ -n "$pod" ]; then
+        echo ""
+        print_status "Diagnostics: last log lines of $namespace/$pod ($container)"
+        kubectl logs -n "$namespace" "$pod" -c "$container" --previous --tail=30 2>/dev/null \
+            || kubectl logs -n "$namespace" "$pod" -c "$container" --tail=30 2>/dev/null || true
+        echo ""
+        kubectl describe pod -n "$namespace" "$pod" 2>/dev/null | sed -n '/^Events:/,$p' | tail -15 || true
+    fi
+}

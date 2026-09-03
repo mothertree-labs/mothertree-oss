@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+#
+# Infra health gate — fail if shared infrastructure (infra-* namespaces) is
+# unhealthy according to Prometheus / kube-state-metrics.
+#
+# Purpose: a deploy can "succeed" while a system DaemonSet is half-rolled or an
+# infra pod crash-loops (issue #612: Vector 0.58 crash-looped on every node
+# that got a new pod, and the PR pipeline went green). The deployed alert rules
+# take 5–15 minutes (`for:`) to fire, so this gate asks Prometheus the RAW
+# questions instead, right after a deploy:
+#
+#   FAIL  pod containers (regular or init) in CrashLoopBackOff / image-pull
+#         errors within the last 3 minutes
+#   FAIL  DaemonSets with ready < desired, or updated < desired (stalled rollout)
+#   FAIL  Deployments with available < spec replicas
+#   WARN  scrape targets down (up == 0) — informational only for now; dev has
+#         known-down targets that are tracked separately (#613, probe modules)
+#
+# Rollouts that are simply still in progress clear on their own, so the gate
+# re-samples every 20s for up to INFRA_GATE_SETTLE_SECONDS (default 180) and
+# only the final sample decides.
+#
+# Scope: INFRA_GATE_NAMESPACES (a PromQL regex, default: the shared infra
+# namespaces deploy_infra owns; infra-llm is excluded on purpose — the LLM
+# stack on dev is memory-evicted independently of any PR and is tracked on
+# its own).
+#
+# Known, tracked breakage can be excluded with INFRA_GATE_IGNORE (an extended
+# regex matched against the pod / daemonset / deployment name). Matches are
+# printed as IGNORED so the exception stays visible in every run. Use it only
+# with an issue reference in the caller.
+#
+# Usage:
+#   ./scripts/infra-health-gate -e <env>        # uses $KUBECONFIG, or
+#                                               # <repo>/kubeconfig.<env>.yaml
+# Exit codes: 0 healthy, 1 unhealthy, 2 could not evaluate (Prometheus or
+# kube-state-metrics unreachable — the gate never passes silently).
+
+set -euo pipefail
+
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
+
+mt_usage() {
+  echo "Usage: $0 -e <env>"
+  echo ""
+  echo "Fail if shared infra namespaces have crash-looping pods, unconverged DaemonSets"
+  echo "or Deployments. Reads Prometheus in infra-monitoring via kubectl exec."
+  echo ""
+  echo "Environment:"
+  echo "  KUBECONFIG                  kubeconfig to use (default: <repo>/kubeconfig.<env>.yaml)"
+  echo "  INFRA_GATE_NAMESPACES       PromQL regex of namespaces to check"
+  echo "  INFRA_GATE_SETTLE_SECONDS   keep re-sampling this long while unhealthy (default 180)"
+  echo "  INFRA_GATE_IGNORE           extended regex of pod/daemonset/deployment names to"
+  echo "                              report as IGNORED instead of failing (known issues only)"
+}
+
+mt_parse_args "$@"
+mt_require_env
+
+if [ -z "${KUBECONFIG:-}" ]; then
+  if [ -f "${REPO_ROOT}/kubeconfig.${MT_ENV}.yaml" ]; then
+    export KUBECONFIG="${REPO_ROOT}/kubeconfig.${MT_ENV}.yaml"
+  else
+    print_error "KUBECONFIG is not set and ${REPO_ROOT}/kubeconfig.${MT_ENV}.yaml does not exist"
+    exit 2
+  fi
+fi
+mt_require_commands kubectl jq
+
+NS_MON="${NS_MONITORING:-infra-monitoring}"
+NS_RE="${INFRA_GATE_NAMESPACES:-infra-(ingress|ingress-internal|cert-manager|db|auth|monitoring|mail)}"
+SETTLE="${INFRA_GATE_SETTLE_SECONDS:-180}"
+IGNORE_RE="${INFRA_GATE_IGNORE:-}"
+BAD_REASONS='CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError|CreateContainerError|InvalidImageName'
+
+print_status "Infra health gate: env=${MT_ENV} namespaces=~${NS_RE} settle=${SETTLE}s"
+[ -n "$IGNORE_RE" ] && print_warning "INFRA_GATE_IGNORE='${IGNORE_RE}' — matching resources are reported, not failed"
+
+PROM_POD=$(kubectl get pods -n "$NS_MON" -l app.kubernetes.io/name=prometheus \
+  -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null | awk '{print $1}') || PROM_POD=""
+if [ -z "$PROM_POD" ]; then
+  print_error "No running Prometheus pod in ${NS_MON} — cannot evaluate infra health"
+  exit 2
+fi
+
+# _prom_query <promql> -> prints the JSON result array (.data.result) on stdout.
+# Errors go to stderr and return 1; callers `|| exit 2` so the gate can never
+# pass vacuously (this runs inside $(...), so stdout is captured).
+_prom_query() {
+  local promql="$1" encoded raw
+  encoded=$(printf '%s' "$promql" | jq -sRr @uri)
+  if ! raw=$(kubectl exec -n "$NS_MON" "$PROM_POD" -c prometheus -- \
+        wget -qO- "http://localhost:9090/api/v1/query?query=${encoded}" 2>/dev/null); then
+    print_error "Prometheus query failed (transport): ${promql}" >&2
+    return 1
+  fi
+  if [ "$(jq -r '.status // "error"' <<< "$raw" 2>/dev/null)" != "success" ]; then
+    print_error "Prometheus query failed: ${promql}" >&2
+    jq -r '.error // .' <<< "$raw" 2>/dev/null | head -3 >&2
+    return 1
+  fi
+  jq -c '.data.result' <<< "$raw"
+}
+
+# Preconditions — the gate must never pass vacuously:
+#  - the namespace regex is interpolated into PromQL: keep it to regex charset
+#  - kube-state-metrics must be scraped, or every check below is trivially empty
+#  - the regex must match at least one namespace
+# (pattern kept in a single-quoted variable: unquoted `$-` in [[ =~ ]] would
+# expand to the shell's option flags)
+ns_charset='^[A-Za-z0-9_.|()*+?^$-]+$'
+if ! [[ "$NS_RE" =~ $ns_charset ]]; then
+  print_error "INFRA_GATE_NAMESPACES contains characters outside the allowed regex charset: ${NS_RE}"
+  exit 2
+fi
+ksm=$(_prom_query 'up{job=~".*kube-state-metrics.*"} == 1') || exit 2
+if [ "$(jq 'length' <<< "$ksm")" -eq 0 ]; then
+  print_error "kube-state-metrics is not being scraped (up != 1) — cannot evaluate infra health"
+  exit 2
+fi
+nsmatch=$(_prom_query "count(kube_namespace_created{namespace=~\"${NS_RE}\"})") || exit 2
+if [ "$(jq 'length' <<< "$nsmatch")" -eq 0 ]; then
+  print_error "INFRA_GATE_NAMESPACES matches no namespace on this cluster: ${NS_RE}"
+  exit 2
+fi
+
+FAILURES=0
+IGNORED=0
+VERBOSE=1
+
+# _check <severity FAIL|WARN> <title> <promql> <name-label> [show-job]
+# Counts FAIL unless the name matches INFRA_GATE_IGNORE; prints details when
+# VERBOSE=1. show-job=1 appends the scrape job (useful for `up`, noise for
+# kube-state-metrics series).
+_check() {
+  local severity="$1" title="$2" promql="$3" name_label="$4" show_job="${5:-0}"
+  local result count
+  result=$(_prom_query "$promql") || exit 2
+  count=$(jq 'length' <<< "$result")
+  if [ "$count" -eq 0 ]; then
+    [ "$VERBOSE" = 1 ] && echo "  ok    ${title}"
+    return 0
+  fi
+  [ "$VERBOSE" = 1 ] && echo "  ${severity}  ${title}: ${count} series"
+  local line name desc
+  while IFS= read -r line; do
+    name=$(jq -r --arg l "$name_label" '.metric[$l] // "?"' <<< "$line")
+    # namespace, the resource this check is about, then context.
+    desc=$(jq -r --arg l "$name_label" --arg j "$show_job" '.metric as $m
+      | [ $m.namespace, ($m[$l] // "?"),
+          (if $l == "pod" then ($m.container // empty), ($m.reason // empty) else empty end),
+          (if $j == "1" then ("job=" + ($m.job // "?")) else empty end) ]
+      | join(" ")' <<< "$line")
+    if [ -n "$IGNORE_RE" ] && [[ "$name" =~ $IGNORE_RE ]]; then
+      [ "$VERBOSE" = 1 ] && echo "        IGNORED (known issue): ${desc}"
+      IGNORED=$((IGNORED + 1))
+    else
+      [ "$VERBOSE" = 1 ] && echo "        ${desc}"
+      [ "$severity" = "FAIL" ] && FAILURES=$((FAILURES + 1))
+    fi
+  done < <(jq -c '.[]' <<< "$result")
+  return 0
+}
+
+_run_checks() {
+  FAILURES=0
+  IGNORED=0
+  _check FAIL "containers in a crash/pull loop (last 3m)" \
+    "max_over_time(kube_pod_container_status_waiting_reason{namespace=~\"${NS_RE}\",reason=~\"${BAD_REASONS}\"}[3m]) == 1" pod
+  _check FAIL "init containers / native sidecars in a crash/pull loop (last 3m)" \
+    "max_over_time(kube_pod_init_container_status_waiting_reason{namespace=~\"${NS_RE}\",reason=~\"${BAD_REASONS}\"}[3m]) == 1" pod
+  _check FAIL "DaemonSets with ready < desired" \
+    "kube_daemonset_status_number_ready{namespace=~\"${NS_RE}\"} < kube_daemonset_status_desired_number_scheduled{namespace=~\"${NS_RE}\"}" daemonset
+  _check FAIL "DaemonSets with a stalled rollout (updated < desired)" \
+    "kube_daemonset_status_updated_number_scheduled{namespace=~\"${NS_RE}\"} < kube_daemonset_status_desired_number_scheduled{namespace=~\"${NS_RE}\"}" daemonset
+  _check FAIL "Deployments with available < spec replicas" \
+    "kube_deployment_status_replicas_available{namespace=~\"${NS_RE}\"} < kube_deployment_spec_replicas{namespace=~\"${NS_RE}\"}" deployment
+  _check WARN "scrape targets down (up == 0) — informational" \
+    "up{namespace=~\"${NS_RE}\"} == 0" pod 1
+}
+
+# Settle window: rollouts still in progress right after a deploy are not a
+# failure. Re-sample quietly until clean or out of time; the final sample is
+# printed in full and decides.
+deadline=$((SECONDS + SETTLE))
+attempt=1
+VERBOSE=0
+while true; do
+  _run_checks
+  if [ "$FAILURES" -eq 0 ] || [ "$SECONDS" -ge "$deadline" ]; then
+    break
+  fi
+  echo "  attempt ${attempt}: ${FAILURES} failing series — re-sampling in 20s while rollouts settle ($((deadline - SECONDS))s left)"
+  attempt=$((attempt + 1))
+  sleep 20
+done
+
+echo ""
+VERBOSE=1
+_run_checks
+
+echo ""
+if [ "$FAILURES" -gt 0 ]; then
+  print_error "Infra health gate FAILED: ${FAILURES} failing series after ${attempt} sample(s) (${IGNORED} ignored as known issues)"
+  exit 1
+fi
+if [ "$IGNORED" -gt 0 ]; then
+  print_warning "Infra health gate passed with ${IGNORED} IGNORED series — known issues, see INFRA_GATE_IGNORE"
+fi
+print_success "Infra health gate passed"

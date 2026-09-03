@@ -32,6 +32,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   UPDATE_PASSWORD trail). Applies to existing realms on the next `create_env`.
 
 ### Changed
+- `deploy_infra` now waits for every DaemonSet in the infra namespaces it
+  owns to converge after the tier=system helmfile sync, and aborts the deploy
+  on crash-looping / unpullable pods or a stalled rollout (new
+  `mt_wait_for_daemonset` in `scripts/lib/common.sh`). `helmfile sync`
+  returns as soon as the API objects are updated, so a broken pod template
+  used to leave a half-rolled DaemonSet behind while the deploy reported
+  success (#612). A broken system DaemonSet now stops the deploy before
+  tenant apps, on dev and on prod.
+- New post-deploy `infra-health-gate` step in the dev pipeline
+  (`scripts/infra-health-gate`, via `ci-deploy-app.sh dev infra-gate`): asks
+  Prometheus the raw questions the alert rules would answer 5–15 minutes
+  later — crash-looping containers (regular and init/sidecar), DaemonSets
+  with ready < desired or updated < desired, Deployments short of replicas —
+  scoped to the shared infra namespaces `deploy_infra` owns (`infra-llm`
+  excluded), re-sampled for up to 3 minutes while rollouts settle, and fails
+  the PR. Known tracked breakage is declared with `INFRA_GATE_IGNORE` next to
+  its issue number and printed as IGNORED rather than dropped (#612). The
+  DaemonSet gate excludes pods on NotReady nodes, caps its total wait at 10
+  minutes, and has an operator override (`MT_SKIP_DAEMONSET_GATE=1`).
 - On-demand dev cluster grows to 4 nodes (`phase1-dev` pool count 3 → 4):
   at 3 nodes the pool ran 85-99% memory-requested with no autoscaler, and
   the kubelet evicted LLM pods whenever inference ran (memory-pressure

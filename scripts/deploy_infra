@@ -384,6 +384,49 @@ pushd "$REPO_ROOT/apps" >/dev/null
   done
 popd >/dev/null
 
+# Gate: every DaemonSet in the namespaces the tier=system sync owns must
+# converge before anything else is deployed. `helmfile sync` returns 0 as soon
+# as the API objects are updated — it never waits for pods — so a broken pod
+# template (#612: Vector 0.58 rejected a stale config key) left a half-rolled
+# DaemonSet behind while the deploy reported success. Fail fast instead:
+# mt_wait_for_daemonset aborts immediately on crash-looping / unpullable pods
+# and treats a stalled rollout (old pods Ready, new ones never scheduled) as
+# a failure too.
+#
+# Pods on NotReady nodes are excluded by mt_wait_for_daemonset, so a node
+# outage does not block deploys. Total wall-clock is bounded (~600s across
+# all DaemonSets, plus API round-trips) so a wedged gate costs minutes, not
+# the pipeline timeout. Operator escape hatch for a known, accepted state:
+# MT_SKIP_DAEMONSET_GATE=1 from a local shell — refused under CI so it can
+# never be baked into a pipeline or a sourced env file.
+if [ "${MT_SKIP_DAEMONSET_GATE:-0}" = "1" ]; then
+  if [ "${CI:-}" = "true" ]; then
+    print_error "MT_SKIP_DAEMONSET_GATE=1 is not honored in CI — run deploy_infra locally to override the gate"
+    exit 1
+  fi
+  print_warning "MT_SKIP_DAEMONSET_GATE=1 — skipping the system DaemonSet convergence gate (operator override)"
+else
+  print_status "Waiting for system DaemonSets to converge (budget 600s)..."
+  _ds_gate_deadline=$((SECONDS + 600))
+  for _ns in "$NS_INGRESS" "$NS_INGRESS_INTERNAL" "$NS_CERTMANAGER" "$NS_MONITORING"; do
+    # Fail closed: an API error here must not read as "no DaemonSets".
+    if ! _ds_list=$(kubectl get ds -n "$_ns" -o jsonpath='{.items[*].metadata.name}'); then
+      print_error "Cannot list DaemonSets in $_ns — refusing to skip the convergence gate"
+      exit 1
+    fi
+    for _ds in $_ds_list; do
+      _ds_timeout=$((_ds_gate_deadline - SECONDS))
+      [ "$_ds_timeout" -gt 420 ] && _ds_timeout=420
+      [ "$_ds_timeout" -lt 60 ] && _ds_timeout=60
+      mt_wait_for_daemonset "$_ns" "$_ds" "$_ds_timeout" || {
+        print_error "System DaemonSet $_ns/$_ds did not converge — aborting deploy_infra"
+        print_error "If this state is known and accepted, re-run with MT_SKIP_DAEMONSET_GATE=1"
+        exit 1
+      }
+    done
+  done
+fi
+
 # Deploy matrix-alertmanager bridge (AlertManager -> Matrix room notifications)
 if [ -n "${MATRIX_ALERTMANAGER_ACCESS_TOKEN:-}" ]; then
   print_status "Deploying alerting (matrix-alertmanager)..."

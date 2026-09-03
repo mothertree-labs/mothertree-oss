@@ -46,6 +46,51 @@ steps:
     commands:
       - ci/scripts/ci-deploy-app.sh dev finalize
 
+  # Post-deploy infra health gate (#612). Everything above has deployed by
+  # now; ask Prometheus whether shared infra (infra-* namespaces) actually
+  # converged: no crash-looping pods (regular or init/sidecar containers), no
+  # DaemonSet with ready < desired or a stalled rollout, no Deployment short
+  # of replicas. The deployed alert rules need 5–15 min of `for:` before they
+  # fire, so this queries the raw metrics instead. Scoped to infra-* so a
+  # tenant flake cannot trip it. Runs on pull_request AND push:main like the
+  # steps around it (no step-level `when:`), so a broken main is caught before
+  # deploy-prod as well.
+  #
+  # Rollouts still settling right after the deploy are re-sampled for up to
+  # 3 minutes before the gate decides; only shared infra namespaces are in
+  # scope (infra-llm is excluded: dev's LLM stack is memory-evicted on its
+  # own schedule and must not gate deploy-prod).
+  #
+  # INFRA_GATE_IGNORE lists KNOWN, TRACKED breakage as an extended regex on
+  # the pod/daemonset/deployment name; matches are printed as IGNORED in the
+  # step log, never silently dropped. Remove entries when their issue closes.
+  # (`$$` is Woodpecker's escape for a literal `$`; the script echoes the
+  # effective regex at the top of its log.)
+  #   pg-metrics-bridge — Tailscale sidecar authkey expired on dev (#613)
+  - name: infra-health-gate
+    image: bash
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      DEPLOY_VAULT_PASSWORD:
+        from_secret: deploy_vault_password
+      GITHUB_PAT:
+        from_secret: github_pat
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+      INFRA_GATE_IGNORE: "^pg-metrics-bridge(-|$$)"
+    commands:
+      - ci/scripts/ci-deploy-app.sh dev infra-gate
+
   # Pipeline-scoped test users for E2E. Lives here so it runs AFTER the
   # tenant auth ingress is up (created in apps/deploy-matrix.sh, which
   # this workflow depends on). The step itself runs on both PR and push
