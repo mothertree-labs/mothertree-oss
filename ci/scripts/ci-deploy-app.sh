@@ -28,6 +28,9 @@ set -euo pipefail
 #   imaps-readiness — FATAL gate: prove an authenticated IMAPS session to the
 #                          EXTERNAL Stalwart endpoint the e2e tests use is
 #                          establishable before e2e runs (cold-start gap #20)
+#   infra-gate      — FATAL gate: scripts/infra-health-gate — no crash-looping
+#                          pods, unconverged DaemonSets or Deployments in
+#                          infra-* after the deploy (#612)
 #
 # Required environment variables:
 #   DEPLOY_VAULT_PASSWORD — Ansible Vault password
@@ -470,6 +473,13 @@ case "$MODE" in
       "$REPO_ROOT/apps/deploy-llm-webui.sh" -e "$MT_ENV" -t "$_tenant" --nesting-level=0
       echo "--- Finished LLM WebUI for tenant: $_tenant ---"
     done
+    ;;
+
+  infra-gate)
+    echo "=== Infra health gate (scripts/infra-health-gate) ==="
+    # INFRA_GATE_IGNORE (known, tracked breakage) is passed through from the
+    # pipeline step so the exception is declared next to its issue reference.
+    "$REPO_ROOT/scripts/infra-health-gate" -e "$MT_ENV"
     ;;
 
   imaps-readiness)
