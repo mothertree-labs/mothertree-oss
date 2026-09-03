@@ -27,7 +27,9 @@ customConfig:
   api:
     enabled: true
     address: 127.0.0.1:8686
-    playground: false
+    # No `playground:` here — Vector 0.55 removed api.playground/api.graphql and
+    # rejects configs that still set them (issue #612). CI runs
+    # ci/scripts/vector-validate.sh against the pinned image to catch this class.
   sources:
     kubernetes_logs:
       type: kubernetes_logs

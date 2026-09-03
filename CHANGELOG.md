@@ -43,6 +43,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`provision-ci.sh --ansible-only`, reaper threshold).
 
 ### Added
+- `vector-config-validate` CI step (`ci/scripts/vector-validate.sh`): renders
+  the Vector ConfigMap from the helmfile for every environment and runs
+  `vector validate` inside the exact image the DaemonSet will run, so a
+  config key the new Vector version no longer accepts fails the PR before any
+  cluster is touched. `helmfile lint` only checks chart templating and could
+  not see this class of breakage (#612). The dummy `requiredEnv` values the
+  lint steps need now live in `ci/scripts/lib/helmfile-lint-env.sh`.
 - Open WebUI upgraded to 0.11.0 and the web-search wiring adjusted for it:
   the 0.11 forced-RAG handler only runs under legacy function calling, so
   `DEFAULT_MODEL_PARAMS={"function_calling":"legacy"}` is set in the tenant
@@ -84,6 +91,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   WebUI retrieval → sources + cited answer; user-role JWT sees both models).
 
 ### Fixed
+- Vector log collection crash-looped on every node that received a new pod
+  after the `vector/vector` chart bump 0.46.0 → 0.58.0 (#600):
+  `apps/values/vector.yaml` still set `api.playground`, which Vector 0.55
+  removed, so the 0.58 binary exited with a configuration error before
+  starting. The DaemonSet rollout stalled at the first node and nodes that
+  did get a new pod shipped no logs. Dropped the key (#612).
 - LLM stack memory-pressure eviction storms on the fixed-size dev pool
   (autoscaling is disabled there): the web-search gate's inference left the
   model resident in Ollama for `OLLAMA_KEEP_ALIVE` (30m) — ~1.7Gi squatting

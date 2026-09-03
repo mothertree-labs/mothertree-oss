@@ -28,6 +28,15 @@ steps:
       - ci/scripts/helmfile-lint.sh
     depends_on: []
 
+  # Renders the Vector ConfigMap and runs `vector validate` inside the exact
+  # image the DaemonSet will run — catches config keys the new Vector version
+  # dropped (chart bumps), which helmfile lint cannot see. Issue #612.
+  - name: vector-config-validate
+    image: bash
+    commands:
+      - ci/scripts/vector-validate.sh
+    depends_on: []
+
   - name: version-check
     image: bash
     commands:
