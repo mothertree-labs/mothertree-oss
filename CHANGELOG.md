@@ -110,6 +110,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   WebUI retrieval → sources + cited answer; user-role JWT sees both models).
 
 ### Fixed
+- `mt_wait_for_daemonset` no longer fails fast on Terminating pods. When a
+  rollout replaces a crash-looping DaemonSet pod, the old pod keeps reporting
+  `CrashLoopBackOff` for a few seconds until it is gone; the gate could abort
+  `deploy_infra` on exactly the deploy that fixes the DaemonSet (#612).
 - Vector log collection crash-looped on every node that received a new pod
   after the `vector/vector` chart bump 0.46.0 → 0.58.0 (#600):
   `apps/values/vector.yaml` still set `api.playground`, which Vector 0.55

@@ -799,10 +799,15 @@ mt_wait_for_daemonset() {
         # Fail fast: a pod owned by this DaemonSet stuck in a crash/pull loop
         # will not recover by waiting. Pods on NotReady nodes are skipped here
         # too — their last reported state is frozen until the node returns.
+        # Terminating pods are skipped as well: when a rollout replaces a
+        # crash-looping pod, the old pod keeps reporting CrashLoopBackOff
+        # until it is gone, and aborting on it would fail the very deploy
+        # that fixes it.
         local bad
         bad=$(kubectl get pods -n "$namespace" -o json 2>/dev/null | jq -r --arg ds "$ds" --arg re "$bad_reasons" --argjson skip "$excluded_json" '
             .items[]
             | select((.metadata.ownerReferences // []) | any(.kind == "DaemonSet" and .name == $ds))
+            | select(.metadata.deletionTimestamp == null)
             | select(.metadata.name as $n | ($skip | index($n)) == null)
             | . as $p
             | ((.status.containerStatuses // []) + (.status.initContainerStatuses // []))[]
