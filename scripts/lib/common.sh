@@ -1150,7 +1150,10 @@ mt_probe_job() {
         spec: {backoffLimit: 0, activeDeadlineSeconds: $deadline, ttlSecondsAfterFinished: 900,
                template: {metadata: {labels: {"app.kubernetes.io/name": "mt-probe", "mothertree.org/probe": $prefix}},
                           spec: {restartPolicy: "Never",
-                                 containers: [{name: "probe", image: $image, command: $cmd, env: $env}]}}}}')
+                                 automountServiceAccountToken: false,
+                                 containers: [{name: "probe", image: $image, command: $cmd, env: $env,
+                                               resources: {requests: {cpu: "50m", memory: "64Mi"},
+                                                           limits: {cpu: "500m", memory: "256Mi"}}}]}}}}')
 
     # Create; a transport error here prints and yields no sentinel -> UNKNOWN.
     if ! printf '%s\n' "$manifest" | kubectl apply -f - 2>&1; then
