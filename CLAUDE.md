@@ -235,7 +235,8 @@ Never skip this step, even if the changes seem trivial.
 
 ## Troubleshooting
 
-- **Tailscale connectivity issues**: If K8s pods can't reach the PostgreSQL VM, check that the PgBouncer pod's Tailscale sidecar is connected to the Headscale mesh. Verify with `tailscale status` inside the sidecar. Ensure the pre-auth key hasn't expired.
+- **Tailscale connectivity issues**: If K8s pods can't reach the PostgreSQL VM, check that the PgBouncer pod's Tailscale sidecar is connected to the Headscale mesh. Verify with `tailscale status` inside the sidecar.
+- **Tailscale sidecar `authkey expired` / `machineAuthorized=false` / untagged node**: the sidecar's auth Secret holds a dead or untagged pre-auth key. Run `./scripts/check-tailscale-keys -e <env>` for a per-Secret verdict and `--rotate` to mint tagged keys through the Headscale API and restart the sidecars. Pod pre-auth keys are never stored in the vaults — the deploy scripts mint them (`tailscale.rotator_api_key` is the only Tailscale secret they need) and the `tailscale-key-rotator` CronJob re-verifies every Secret daily.
 - **PgBouncer SCRAM-SHA-256**: PgBouncer requires `auth_type = scram-sha-256` to match PostgreSQL's default. If auth fails, check that `userlist.txt` has the correct SCRAM hashes, not plaintext passwords.
 - **Stale SSH host keys**: If Ansible fails with SSH errors against a VM that was rebuilt, remove the old key: `ssh-keygen -R <ip>`, then re-run `manage_infra --ansible`.
 - **Stale kubeconfig after cluster rebuild**: CI redeploys the cluster with a new API endpoint. Refresh `kubeconfig.dev.yaml` from the Linode API. This command requires the dev vault password and is for **zsh on Linux**:

@@ -383,28 +383,23 @@ _mt_infra_load_shared_secrets() {
     echo "[INFO] AWS SES SMTP relay credentials loaded from infra tenant secrets"
   fi
 
-  # Tailscale pre-auth keys (generic + per-component tagged keys for ACL enforcement)
+  # Tailscale pre-auth keys consumed once by Ansible when provisioning VMs
+  # (tailscale.authkey for Headscale/PG/CI hosts, tailscale.turn_authkey for TURN).
   local _ts_authkey
   _ts_authkey=$(yq '.tailscale.authkey // ""' "$_infra_secrets")
   if [ -n "$_ts_authkey" ] && [ "$_ts_authkey" != "null" ]; then
     export TAILSCALE_AUTHKEY="$_ts_authkey"
     echo "[INFO] Tailscale auth key loaded from infra tenant secrets"
   fi
-  # Per-component keys: when ACLs are enabled, each component needs a key
-  # with the correct tag so new pods register with the right permissions.
-  # Falls back to generic TAILSCALE_AUTHKEY if not set.
-  local _ts_pgb_key _ts_postfix_key _ts_router_key _ts_metrics_key _ts_turn_key
-  _ts_pgb_key=$(yq '.tailscale.pgbouncer_authkey // ""' "$_infra_secrets")
-  _ts_postfix_key=$(yq '.tailscale.postfix_authkey // ""' "$_infra_secrets")
-  _ts_router_key=$(yq '.tailscale.router_authkey // ""' "$_infra_secrets")
-  _ts_metrics_key=$(yq '.tailscale.metrics_authkey // ""' "$_infra_secrets")
+  local _ts_turn_key
   _ts_turn_key=$(yq '.tailscale.turn_authkey // ""' "$_infra_secrets")
-  [ -n "$_ts_pgb_key" ] && [ "$_ts_pgb_key" != "null" ] && export TAILSCALE_AUTHKEY_PGBOUNCER="$_ts_pgb_key"
-  [ -n "$_ts_postfix_key" ] && [ "$_ts_postfix_key" != "null" ] && export TAILSCALE_AUTHKEY_POSTFIX="$_ts_postfix_key"
-  [ -n "$_ts_router_key" ] && [ "$_ts_router_key" != "null" ] && export TAILSCALE_AUTHKEY_ROUTER="$_ts_router_key"
-  [ -n "$_ts_metrics_key" ] && [ "$_ts_metrics_key" != "null" ] && export TAILSCALE_AUTHKEY_METRICS="$_ts_metrics_key"
   [ -n "$_ts_turn_key" ] && [ "$_ts_turn_key" != "null" ] && export TAILSCALE_AUTHKEY_TURN="$_ts_turn_key"
-  # Headscale API key for in-cluster key rotator CronJob
+  # Pod-side pre-auth keys (PgBouncer, pg-metrics-bridge, subnet router, metrics
+  # federation) are NOT read from the vault any more: the deploy scripts mint
+  # tagged keys through the Headscale API and the key-rotator CronJob verifies
+  # them daily (scripts/lib/tailscale-keys.sh, #613). A vault-stored pod key is
+  # how prod ended up with an untagged key that expired unnoticed.
+  # Headscale API key: deploy scripts (mint/verify) + key rotator CronJob.
   local _ts_rotator_api_key
   _ts_rotator_api_key=$(yq '.tailscale.rotator_api_key // ""' "$_infra_secrets")
   if [ -n "$_ts_rotator_api_key" ] && [ "$_ts_rotator_api_key" != "null" ]; then

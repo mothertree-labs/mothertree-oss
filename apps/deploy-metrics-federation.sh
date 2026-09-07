@@ -20,8 +20,9 @@
 #   (role unset)   -> feature disabled for this env; the script is a no-op.
 #
 # Bootstrap order (operator):
-#   1. Set metrics_federation.role: exposer in the prod-eu infra config; ensure a
-#      reusable tag:monitoring pre-auth key exists (tailscale.metrics_authkey).
+#   1. Set metrics_federation.role: exposer in the prod-eu infra config. The
+#      sidecar's tag:monitoring pre-auth key is minted via the Headscale API
+#      (tailscale.rotator_api_key) — nothing to pre-create.
 #   2. deploy_infra -e prod-eu  (deploys the exposer); read its assigned mesh IP:
 #        tailscale --socket=... status   (or: headscale nodes list | grep prom-mesh)
 #   3. Add an ACL rule allowing tag:monitoring -> tag:monitoring:9090 and redeploy
@@ -34,9 +35,9 @@
 #   metrics_federation:
 #     role: exposer | consumer
 #     source_mesh_ip: "100.64.x.x"   # consumer only
-# Required infra secret (config/platform/infra/<env>.secrets.yaml):
+# Required infra secret (infra tenant <env>.secrets.yaml):
 #   tailscale:
-#     metrics_authkey: "<reusable tag:monitoring pre-auth key>"
+#     rotator_api_key: "<Headscale API key>"   # mints/verifies the sidecar's key
 #
 # Called by: deploy_infra (after pg-metrics-bridge). Can also be run standalone.
 #
@@ -88,9 +89,13 @@ fi
 export HEADSCALE_URL
 export NS_MONITORING
 
-# Tailscale pre-auth key — only needed for first-time bootstrap.
-# After initial creation, the key-rotator CronJob manages this secret.
-TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY_METRICS:-${TAILSCALE_AUTHKEY:-}}"
+# Tailscale pre-auth keys are minted through the Headscale API (tag:monitoring, 90 days)
+# on first-time bootstrap and whenever the key in the Secret turns out to be
+# missing, untagged, single-use, expired or near expiry (#613). The in-cluster
+# key-rotator CronJob runs the same check daily. See scripts/lib/tailscale-keys.sh.
+: "${TAILSCALE_ROTATOR_API_KEY:?tailscale.rotator_api_key not set in infra secrets — required to mint/verify the metrics federation sidecar pre-auth key (headscale apikeys create --expiration 87600h)}"
+HEADSCALE_API_KEY="$TAILSCALE_ROTATOR_API_KEY"
+source "${REPO_ROOT}/scripts/lib/tailscale-keys.sh"
 
 # =============================================================================
 # Role selection
@@ -139,21 +144,11 @@ print_status "Applying metrics federation RBAC..."
 envsubst '${NS_MONITORING} ${FED_NAME}' < "$MANIFESTS_DIR/rbac.yaml.tpl" | mt_apply kubectl apply -f -
 
 # =============================================================================
-# Apply Secret (create only if missing — managed by key-rotator CronJob)
+# Apply Secret (verified against Headscale; minted when missing or unusable)
 # =============================================================================
 
-if ! kubectl get secret "${FED_NAME}-tailscale-auth" -n "$NS_MONITORING" >/dev/null 2>&1; then
-  if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
-    print_error "${FED_NAME}-tailscale-auth secret does not exist and no Tailscale auth key is set"
-    print_error "Bootstrap: create a reusable tag:monitoring pre-auth key and set tailscale.metrics_authkey in infra secrets"
-    exit 1
-  fi
-  print_status "Creating metrics federation Tailscale auth secret (first-time bootstrap)..."
-  envsubst '${NS_MONITORING} ${FED_NAME} ${TAILSCALE_AUTHKEY}' \
-    < "$MANIFESTS_DIR/secret.yaml.tpl" | mt_apply kubectl apply -f -
-else
-  print_status "Tailscale auth secret exists (managed by key-rotator CronJob)"
-fi
+print_status "Verifying metrics federation Tailscale auth key..."
+mt_ts_ensure_secret "$NS_MONITORING" "${FED_NAME}-tailscale-auth" tag:monitoring "$FED_NAME"
 
 # =============================================================================
 # Apply Deployment + Service

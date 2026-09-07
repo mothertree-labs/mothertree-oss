@@ -6,7 +6,7 @@
 #
 # Creates:
 #   - ServiceAccount + RBAC (for Tailscale state Secret management)
-#   - Secret (Tailscale auth key)
+#   - Secret (Tailscale auth key — minted/verified via the Headscale API)
 #   - Deployment (socat proxy + Tailscale sidecar, 1 replica)
 #   - Service (ClusterIP port 9187)
 #
@@ -54,9 +54,13 @@ export PG_VM_TAILSCALE_IP
 : "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
 export HEADSCALE_URL
 
-# Tailscale pre-auth key — only needed for first-time bootstrap.
-# After initial creation, the key-rotator CronJob manages this secret.
-TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY_METRICS:-${TAILSCALE_AUTHKEY:-}}"
+# Tailscale pre-auth keys are minted through the Headscale API (tag:monitoring, 90 days)
+# on first-time bootstrap and whenever the key in the Secret turns out to be
+# missing, untagged, single-use, expired or near expiry (#613). The in-cluster
+# key-rotator CronJob runs the same check daily. See scripts/lib/tailscale-keys.sh.
+: "${TAILSCALE_ROTATOR_API_KEY:?tailscale.rotator_api_key not set in infra secrets — required to mint/verify the PG metrics bridge sidecar pre-auth key (headscale apikeys create --expiration 87600h)}"
+HEADSCALE_API_KEY="$TAILSCALE_ROTATOR_API_KEY"
+source "${REPO_ROOT}/scripts/lib/tailscale-keys.sh"
 
 print_status "Deploying PG metrics bridge to $NS_DB (env: $MT_ENV)"
 print_status "  PG VM Tailscale IP: $PG_VM_TAILSCALE_IP"
@@ -74,19 +78,13 @@ envsubst '${NS_DB}' < "$MANIFESTS_DIR/rbac.yaml.tpl" | mt_apply kubectl apply -f
 # Apply Secret
 # =============================================================================
 
-# Tailscale auth secret: create only if missing (managed by key-rotator CronJob)
-if ! kubectl get secret pg-metrics-bridge-tailscale-auth -n "$NS_DB" >/dev/null 2>&1; then
-  if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
-    print_error "pg-metrics-bridge-tailscale-auth secret does not exist and no Tailscale auth key is set"
-    print_error "Bootstrap: create a tagged pre-auth key (tag:monitoring) and set tailscale.metrics_authkey in infra secrets"
-    exit 1
-  fi
-  print_status "Creating PG metrics bridge Tailscale auth secret (first-time bootstrap)..."
-  envsubst '${NS_DB} ${TAILSCALE_AUTHKEY}' \
-    < "$MANIFESTS_DIR/secret.yaml.tpl" | mt_apply kubectl apply -f -
-else
-  print_status "Tailscale auth secret exists (managed by key-rotator CronJob)"
-fi
+# Tailscale auth secret: verify the key it holds against Headscale; mint and
+# write a tag:monitoring key if the Secret is missing or its key is unusable
+# (this Secret held an untagged key that expired 2026-03-31 for five months
+# before a pod recreation surfaced it — #613). A write flags the change
+# tracker, so the restart below picks the key up.
+print_status "Verifying PG metrics bridge Tailscale auth key..."
+mt_ts_ensure_secret "$NS_DB" pg-metrics-bridge-tailscale-auth tag:monitoring pg-metrics-bridge
 
 # =============================================================================
 # Apply Deployment
