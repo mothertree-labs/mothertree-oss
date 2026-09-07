@@ -1,0 +1,95 @@
+#!/bin/bash
+
+# Check (and optionally rotate) the Tailscale pre-auth keys held by every
+# sidecar auth Secret in a cluster, using the Headscale REST API.
+#
+# Same implementation as the in-cluster tailscale-key-rotator CronJob and the
+# deploy scripts' bootstrap (scripts/lib/tailscale-keys.sh). Runs from any
+# machine with the env's kubeconfig + infra secrets; no SSH to the Headscale VM.
+#
+# Usage:
+#   ./scripts/check-tailscale-keys -e <env> [--rotate] [--force] [--component=<name>]
+#
+# Options:
+#   --rotate            Mint + write a tagged key, restart the Deployment and
+#                       prove the sidecar authenticated, for every Secret whose
+#                       key is missing / single-use / untagged / expired / near expiry.
+#   --force             With --rotate: rotate every component regardless of verdict.
+#   --component=<name>  Only this component (name column of components.conf:
+#                       pgbouncer, metrics, router, bridge, expose).
+#
+# Exit codes: 0 = all keys valid (or all rotations succeeded)
+#             2 = check only, and at least one Secret needs rotation
+#             1 = error (API unreachable, rollout/auth failure, ...)
+
+set -euo pipefail
+
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/args.sh"
+
+mt_usage() {
+  echo "Usage: $0 -e <env> [--rotate] [--force] [--component=<name>]"
+  echo ""
+  echo "Verify the key each Tailscale-sidecar auth Secret holds against Headscale;"
+  echo "with --rotate, replace bad keys and restart the affected Deployments."
+  echo ""
+  echo "Options:"
+  echo "  -e <env>              Environment (dev, prod, prod-eu)"
+  echo "  --rotate              Fix what needs fixing (default: report only)"
+  echo "  --force               With --rotate: rotate every component"
+  echo "  --component=<name>    pgbouncer | metrics | router | bridge | expose"
+  echo "  -h, --help            Show this help"
+}
+
+mt_parse_args "$@"
+mt_require_env
+
+ROTATE=false; mt_has_flag "--rotate" && ROTATE=true
+FORCE=false;  mt_has_flag "--force"  && FORCE=true
+COMPONENT=$(mt_get_flag_value "--component" || true)
+
+if [ "$FORCE" = true ] && [ "$ROTATE" != true ]; then
+  print_error "--force only makes sense together with --rotate"
+  exit 1
+fi
+case "${COMPONENT:-}" in
+  ""|pgbouncer|metrics|router|bridge|expose) ;;
+  *) print_error "Unknown component '$COMPONENT' (expected pgbouncer, metrics, router, bridge or expose)"; exit 1 ;;
+esac
+
+source "${REPO_ROOT}/scripts/lib/infra-config.sh"
+mt_load_infra_config
+
+mt_require_commands kubectl curl jq envsubst
+
+: "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
+: "${TAILSCALE_ROTATOR_API_KEY:?tailscale.rotator_api_key not set in infra secrets}"
+HEADSCALE_API_KEY="$TAILSCALE_ROTATOR_API_KEY"
+export NS_DB NS_INGRESS_INTERNAL NS_MONITORING
+
+source "${REPO_ROOT}/scripts/lib/tailscale-keys.sh"
+
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
+envsubst '${NS_DB} ${NS_INGRESS_INTERNAL} ${NS_MONITORING}' \
+  < "$REPO_ROOT/apps/manifests/tailscale-key-rotator/components.conf.tpl" > "$WORK_DIR/components.conf"
+
+if [ "$ROTATE" = true ]; then
+  MT_TS_CHECK_ONLY=0
+  [ "$FORCE" = true ] && export MT_TS_FORCE_ROTATE=1
+  print_status "Rotating Tailscale keys in $MT_ENV (${COMPONENT:-all components})..."
+else
+  MT_TS_CHECK_ONLY=1
+  print_status "Checking Tailscale keys in $MT_ENV (${COMPONENT:-all components}) — read-only..."
+fi
+export MT_TS_CHECK_ONLY
+
+if ! mt_ts_run_components "$WORK_DIR/components.conf" "${COMPONENT:-}"; then
+  exit 1
+fi
+if [ "$ROTATE" != true ] && [ "$MT_TS_RUN_NEEDS" -gt 0 ]; then
+  print_warning "$MT_TS_RUN_NEEDS Secret(s) need rotation — run: $0 -e $MT_ENV --rotate"
+  exit 2
+fi
+print_success "All Tailscale sidecar keys in $MT_ENV are valid"

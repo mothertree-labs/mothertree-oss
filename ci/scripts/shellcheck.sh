@@ -9,10 +9,12 @@ SCRIPTS=$(find scripts apps/scripts apps/deploy-*.sh ci/scripts -name '*.sh' \
   -not -path "*/submodules/*" \
   2>/dev/null || true)
 
-# Also check the create_env script (no .sh extension)
-if [ -f "scripts/create_env" ]; then
-  SCRIPTS="$SCRIPTS scripts/create_env"
-fi
+# Also check scripts outside the find paths / without a .sh extension
+for extra in scripts/create_env scripts/check-tailscale-keys apps/manifests/tailscale-key-rotator/rotate.sh; do
+  if [ -f "$extra" ]; then
+    SCRIPTS="$SCRIPTS $extra"
+  fi
+done
 
 if [ -z "$SCRIPTS" ]; then
   echo "No shell scripts found"

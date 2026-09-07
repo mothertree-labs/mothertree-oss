@@ -61,6 +61,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bring-up (node count) and the next CI provisioning run
   (`provision-ci.sh --ansible-only`, reaper threshold).
 
+- Tailscale sidecar pre-auth keys are now **verified against Headscale on
+  every deploy and daily**, and minted through the Headscale API instead of
+  being copied out of the vaults (`scripts/lib/tailscale-keys.sh`, shared by
+  the four sidecar deploy scripts, the `tailscale-key-rotator` CronJob and the
+  new `scripts/check-tailscale-keys` operator CLI). The rotator used to pick
+  the longest-lived Headscale key *for the tag* and never looked at the key the
+  Kubernetes Secret actually held; it now reads that key, matches it by its
+  redacted prefix and rotates when it is missing, single-use, untagged, expired
+  or within 30 days of expiry — then restarts the Deployment and requires the
+  sidecar to log a successful `tailscale up`. The two metrics-federation
+  sidecars are covered too. CronJob runs daily (was weekly), keeps one failed
+  Job, no in-Job retry, 48h TTL. `scripts/rotate-tailscale-keys.sh` (SSH to the
+  Headscale VM, wrote keys into the secrets YAML) is removed; the per-component
+  `tailscale.*_authkey` vault entries are no longer read (#613).
 ### Added
 - `vector-config-validate` CI step (`ci/scripts/vector-validate.sh`): renders
   the Vector ConfigMap from the helmfile for every environment and runs
@@ -197,6 +211,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `matrix-wellknown` ingress now references the `apex-tls-${TENANT_NAME}`
   secret.
 - deploy-stalwart: force CoreDNS rollout (and node-local-dns DaemonSet, when present) on rewrite change so all replicas converge before the SMTP smoke test runs. Closes the cold-start race where provision-smtp's smoke test resolved `mail.<domain>` to the public LB IP via a lagging CoreDNS replica or a stale node-local cache.
+- `pg-metrics-bridge` (both prod clusters) could not rejoin the mesh after
+  the #600 sidecar image bump: its auth Secret had held an untagged pre-auth
+  key that expired on 2026-03-31, masked by the rotator's tag-based check for
+  five months. The next `deploy_infra` mints a `tag:monitoring` key and
+  restarts the bridge; the subnet-router Secrets (same dead key, alive only
+  thanks to their fixed-name state Secret) are repaired the same way (#613).
 
 ## [0.9.3] - 2026-03-13
 

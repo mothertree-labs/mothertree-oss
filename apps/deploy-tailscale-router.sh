@@ -40,7 +40,14 @@ mt_require_commands kubectl envsubst shasum
 MANIFESTS_DIR="$REPO_ROOT/apps/manifests/tailscale-router"
 
 : "${HEADSCALE_URL:?HEADSCALE_URL not set}"
-# TAILSCALE_AUTHKEY only required for first-time bootstrap (key-rotator CronJob manages after)
+export HEADSCALE_URL
+# Tailscale pre-auth keys are minted through the Headscale API (tag:router, 90 days)
+# on first-time bootstrap and whenever the key in the Secret turns out to be
+# missing, untagged, single-use, expired or near expiry (#613). The in-cluster
+# key-rotator CronJob runs the same check daily. See scripts/lib/tailscale-keys.sh.
+: "${TAILSCALE_ROTATOR_API_KEY:?tailscale.rotator_api_key not set in infra secrets — required to mint/verify the subnet router sidecar pre-auth key (headscale apikeys create --expiration 87600h)}"
+HEADSCALE_API_KEY="$TAILSCALE_ROTATOR_API_KEY"
+source "${REPO_ROOT}/scripts/lib/tailscale-keys.sh"
 
 print_status "Deploying Tailscale router to $NS_INGRESS_INTERNAL (env: $MT_ENV)"
 
@@ -116,20 +123,13 @@ envsubst '${NS_INGRESS_INTERNAL}' \
 # Apply Tailscale auth secret
 # =============================================================================
 
-# Tailscale auth secret: create only if missing (managed by key-rotator CronJob)
-if ! kubectl get secret tailscale-router-auth -n "$NS_INGRESS_INTERNAL" >/dev/null 2>&1; then
-  if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
-    print_error "tailscale-router-auth secret does not exist and TAILSCALE_AUTHKEY is not set"
-    print_error "Bootstrap: create a tagged pre-auth key and set tailscale.authkey in infra secrets"
-    exit 1
-  fi
-  print_status "Creating Tailscale router auth secret (first-time bootstrap)..."
-  kubectl create secret generic tailscale-router-auth -n "$NS_INGRESS_INTERNAL" \
-    --from-literal=TS_AUTHKEY="$TAILSCALE_AUTHKEY" \
-    --dry-run=client -o yaml | mt_apply kubectl apply -f -
-else
-  print_status "Tailscale auth secret exists (managed by key-rotator CronJob)"
-fi
+# Tailscale auth secret: verify the key it holds against Headscale; mint and
+# write a tag:router key if the Secret is missing or its key is unusable. The
+# router keeps a fixed-name state Secret (tailscale-router-state), so a restart
+# re-registers the same node with the new key. A write flags the change
+# tracker, so the restart below picks the key up.
+print_status "Verifying Tailscale router auth key..."
+mt_ts_ensure_secret "$NS_INGRESS_INTERNAL" tailscale-router-auth tag:router
 
 # =============================================================================
 # Apply Unbound ConfigMap

@@ -37,7 +37,7 @@ Grafana itself never joins the mesh; only the two tiny bridge pods do.
 |---|---|---|
 | `deployment.yaml.tpl` | both | socat + native Tailscale sidecar, `Recreate`, 1 replica |
 | `service.yaml.tpl` | both | ClusterIP `:9090` (consumer side is what Grafana hits) |
-| `secret.yaml.tpl` | both | `${FED_NAME}-tailscale-auth` (bootstrap only; then key-rotator owns it) |
+| (deploy script) | both | `${FED_NAME}-tailscale-auth` — minted via the Headscale API by `scripts/lib/tailscale-keys.sh`, re-verified on every deploy and daily by the key rotator |
 | `rbac.yaml.tpl` | both | SA + Role for the sidecar's state Secret |
 | `grafana-datasource.configmap.yaml.tpl` | consumer | registers `Prometheus (prod-eu)` (uid `prometheus-eu`) |
 
@@ -60,25 +60,23 @@ metrics_federation:
   source_mesh_ip: "100.64.x.x"   # the prod-eu exposer's assigned mesh IP (step 2 below)
 ```
 
-`config/platform/infra/<env>.secrets.yaml` (both prod and prod-eu):
+Infra tenant `<env>.secrets.yaml` (both prod and prod-eu):
 
 ```yaml
 tailscale:
-  metrics_authkey: "<reusable tag:monitoring pre-auth key>"
+  rotator_api_key: "<Headscale API key>"   # headscale apikeys create --expiration 87600h
 ```
 
-prod already has `metrics_authkey` (pg-metrics-bridge). **prod-eu likely does not** —
-mint one (see step 1).
+The deploy script mints the sidecar's reusable `tag:monitoring` pre-auth key
+through the Headscale API on first deploy and re-verifies it on every deploy;
+the `tailscale-key-rotator` CronJob does the same daily. No pre-auth key is
+stored anywhere.
 
 ## Operator bootstrap (run in order)
 
-1. **prod-eu key**: mint a reusable `tag:monitoring` pre-auth key and set
-   `tailscale.metrics_authkey` in the prod-eu infra secrets:
-   ```bash
-   ./scripts/rotate-tailscale-keys.sh -e prod-eu   # or mint manually on the Headscale VM:
-   #   headscale preauthkeys create --user <infra-id> --reusable --expiration 8760h --tags tag:monitoring
-   ```
-   Set `metrics_federation.role: exposer` in the prod-eu infra config.
+1. **prod-eu config**: make sure `tailscale.rotator_api_key` is set in the
+   prod-eu infra secrets (it already is if the key rotator runs there), then set
+   `metrics_federation.role: exposer` in the prod-eu infra config.
 
 2. **Deploy the exposer + capture its mesh IP**:
    ```bash
@@ -124,11 +122,11 @@ switchable between clusters, add a `datasource` template variable (type
 `"uid": "prometheus"` with `"uid": "${datasource}"`. That retrofit is the
 dashboard-revamp follow-up, tracked separately.
 
-## Known follow-up
+## Key rotation
 
-`scripts/rotate-tailscale-keys.sh` / `scripts/lib/tailscale-keys.sh` only rotate
-the `pgbouncer` and `metrics` (pg-metrics-bridge) components today. The two bridge
-pods here reuse the shared `tag:monitoring` key and — because tagged Headscale
-nodes don't key-expire by default — run fine without per-component rotation. If you
-later want their bootstrap auth-key Secrets refreshed on rotation, add
-`prometheus-mesh-expose` / `prometheus-eu-bridge` entries to those scripts.
+Both sidecars are listed in `apps/manifests/tailscale-key-rotator/components.conf.tpl`
+(`bridge` = prometheus-eu-bridge, `expose` = prometheus-mesh-expose), so the daily
+`tailscale-key-rotator` CronJob and `./scripts/check-tailscale-keys -e <env>` verify
+their auth Secrets like every other sidecar. Note that the pods use a per-pod-name
+state Secret, so every pod recreation is a fresh registration that needs a live key —
+which is exactly what the verification guarantees (#613).

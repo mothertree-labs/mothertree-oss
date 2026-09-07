@@ -40,7 +40,7 @@ mt_usage() {
   echo ""
   echo "Options:"
   echo "  -e <env>              Environment (e.g., dev, prod)"
-  echo "  --rotate-all-keys     Force rotation of all Tailscale pre-auth keys"
+  echo "  --rotate-all-keys     Mint a fresh tagged pre-auth key for every Tailscale sidecar and restart it"
   echo "  -h, --help            Show this help"
   echo ""
   echo "Examples:"
@@ -60,8 +60,14 @@ mt_deploy_start "deploy_infra"
 
 mt_require_commands kubectl helm helmfile yq jq curl openssl
 
-# NOTE: Tailscale key rotation is handled by the in-cluster key-rotator CronJob.
-# For manual rotation, use: ./scripts/rotate-tailscale-keys.sh -e <env> --apply-now
+# Tailscale sidecar pre-auth keys are verified against Headscale (and replaced
+# when unusable) by each sidecar's deploy script and daily by the in-cluster
+# key-rotator CronJob — scripts/lib/tailscale-keys.sh, #613. --rotate-all-keys
+# forces a fresh key for every sidecar. Operator check: ./scripts/check-tailscale-keys -e <env>
+if mt_has_flag "--rotate-all-keys"; then
+  print_status "Forcing rotation of every Tailscale sidecar pre-auth key (--rotate-all-keys)"
+  export MT_TS_FORCE_ROTATE=1
+fi
 
 # Validate Cloudflare IP ranges before deploying (firewall rules depend on these)
 print_status "Validating Cloudflare IP ranges..."
