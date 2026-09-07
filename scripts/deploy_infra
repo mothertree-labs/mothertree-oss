@@ -55,6 +55,34 @@ mt_require_env
 source "${REPO_ROOT}/scripts/lib/infra-config.sh"
 mt_load_infra_config
 
+# Alert delivery is mandatory outside dev (Fail Fast — never silently skip).
+# The loader only [WARN]s when these keys are absent, and the Alertmanager
+# values then rendered template placeholders: prod-eu ran with an
+# undeliverable alert channel from cluster creation (2026-03) until 2026-09
+# and nothing failed. Keys live in the infra tenant's secrets file.
+if mt_is_prod_like; then
+  _alerting_secrets="${INFRA_TENANT_DIR:-config/tenants/${INFRA_TENANT_NAME}}/${MT_ENV}.secrets.yaml"
+  : "${MATRIX_ALERTMANAGER_ACCESS_TOKEN:?alertbot.access_token missing in ${_alerting_secrets} (required for every environment except dev)}"
+  : "${ALERTMANAGER_MATRIX_ROOM_ID:?alertbot.room_id missing in ${_alerting_secrets} (required for every environment except dev)}"
+  : "${HEALTHCHECKS_DEADMAN_URL:?healthchecks.deadman_url missing in ${_alerting_secrets} (required for every environment except dev)}"
+  case "$ALERTMANAGER_MATRIX_ROOM_ID" in
+    '!'*:*) ;;
+    *)
+      print_error "alertbot.room_id in ${_alerting_secrets} is not a Matrix room id (expected '!<opaque>:<server>')"
+      exit 1 ;;
+  esac
+  case "$HEALTHCHECKS_DEADMAN_URL" in
+    *REPLACE_WITH*)
+      print_error "healthchecks.deadman_url in ${_alerting_secrets} is still the template placeholder — create a check on healthchecks.io and paste its ping URL"
+      exit 1 ;;
+    https://*) ;;
+    *)
+      print_error "healthchecks.deadman_url in ${_alerting_secrets} is not an https:// URL"
+      exit 1 ;;
+  esac
+  unset _alerting_secrets
+fi
+
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy_infra"
 
@@ -433,20 +461,22 @@ else
   done
 fi
 
-# Deploy matrix-alertmanager bridge (AlertManager -> Matrix room notifications)
+# Deploy matrix-alertmanager bridge (AlertManager -> Matrix room notifications).
+# Prod-like environments cannot get here without the token (fail-fast above),
+# and a failed bridge deploy is fatal there: an undeliverable alert channel is
+# a broken deploy, not a warning. Dev keeps the optional, non-fatal behaviour.
 if [ -n "${MATRIX_ALERTMANAGER_ACCESS_TOKEN:-}" ]; then
   print_status "Deploying alerting (matrix-alertmanager)..."
-  if [ -f "$REPO_ROOT/apps/scripts/deploy-alerting.sh" ]; then
-    if "$REPO_ROOT/apps/scripts/deploy-alerting.sh" -e "$MT_ENV" -t "$INFRA_TENANT_NAME"; then
-      print_status "Alerting deployment complete"
-    else
-      print_warning "deploy-alerting.sh failed (non-fatal, continuing)"
-    fi
+  if "$REPO_ROOT/apps/scripts/deploy-alerting.sh" -e "$MT_ENV" -t "$INFRA_TENANT_NAME"; then
+    print_status "Alerting deployment complete"
+  elif mt_is_prod_like; then
+    print_error "deploy-alerting.sh failed — alert delivery is mandatory outside dev; aborting deploy_infra"
+    exit 1
   else
-    print_warning "deploy-alerting.sh not found, skipping alerting deployment"
+    print_warning "deploy-alerting.sh failed (non-fatal on dev, continuing)"
   fi
 else
-  print_warning "MATRIX_ALERTMANAGER_ACCESS_TOKEN not set — skipping matrix-alertmanager deployment"
+  print_warning "MATRIX_ALERTMANAGER_ACCESS_TOKEN not set — skipping matrix-alertmanager deployment (dev only)"
   print_warning "Set alertbot.access_token in $INFRA_TENANT_NAME/${MT_ENV}.secrets.yaml and re-run"
 fi
 

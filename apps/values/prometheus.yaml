@@ -126,8 +126,26 @@ grafana:
 
 alertmanager:
   alertmanagerSpec:
-    retention: 24h
-    # Storage disabled to reduce PVC count - alert state is ephemeral
+    # Persist the notification log and silences. On emptyDir every Alertmanager
+    # restart dropped all silences and re-sent every open alert. 10Gi is
+    # Linode's minimum block volume (usage is a few MB); the Delete-reclaim
+    # class is deliberate — this data is not worth an orphaned volume. Dev
+    # overrides back to emptyDir (clusters are created and reaped daily).
+    # Adding storage to a running Alertmanager is handled by the operator: it
+    # deletes and recreates the StatefulSet (volumeClaimTemplates are
+    # immutable), i.e. one pod restart, no manual step.
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          storageClassName: linode-block-storage
+          resources:
+            requests:
+              storage: 10Gi
+    # --data.retention also caps how long a notification-log entry lives,
+    # regardless of the route's repeat_interval: at the previous 24h the weekly
+    # AlertChannelHeartbeat would have repeated daily. 240h covers 168h.
+    retention: 240h
     resources:
       requests:
         cpu: 50m
@@ -717,6 +735,24 @@ additionalPrometheusRulesMap:
             for: 5m
             labels:
               severity: warning
+  alerting-heartbeat:
+    groups:
+      - name: alerting-heartbeat.rules
+        rules:
+          # Always firing; each environment's Alertmanager routes heartbeat="true"
+          # to Matrix with repeat_interval 168h, so the room sees one message a
+          # week per cluster. Silence becomes a signal: prod-eu's Alertmanager
+          # could not deliver a single notification for five months and nothing
+          # said so. The Watchdog → Healthchecks.io deadman covers "Alertmanager
+          # is down"; this covers "Alertmanager is up but the Matrix path is not".
+          - alert: AlertChannelHeartbeat
+            annotations:
+              summary: '{{ $externalLabels.cluster }} alerting heartbeat'
+              description: 'Weekly proof that Prometheus -> Alertmanager -> matrix-alertmanager -> Matrix works on {{ $externalLabels.cluster }}. If this is the only message from {{ $externalLabels.cluster }} in a week, check alertmanager_notifications_failed_total and the matrix-alertmanager pod.'
+            expr: vector(1)
+            labels:
+              severity: info
+              heartbeat: "true"
 
 # Node exporter subchart resources — kube-prometheus-stack passes these via the subchart key
 prometheus-node-exporter:

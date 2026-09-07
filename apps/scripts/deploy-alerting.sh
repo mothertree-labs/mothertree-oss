@@ -49,8 +49,14 @@ else
   ALERTBOT_USER_ID="@alertbot:$MATRIX_HOST"
 fi
 
-# Check for Matrix access token
+# Check for Matrix access token. Optional on dev only: everywhere else an
+# environment without alert delivery is a broken environment (Fail Fast).
 if [ -z "${MATRIX_ALERTMANAGER_ACCESS_TOKEN:-}" ]; then
+  if mt_is_prod_like; then
+    print_error "MATRIX_ALERTMANAGER_ACCESS_TOKEN is not set — alert delivery is mandatory outside dev"
+    print_error "Set alertbot.access_token in the infra tenant's ${MT_ENV}.secrets.yaml"
+    exit 1
+  fi
   print_warning "MATRIX_ALERTMANAGER_ACCESS_TOKEN is not set"
   print_warning "Matrix notifications will not work until you:"
   print_warning "  1. Create an alertbot user on Matrix"
@@ -65,7 +71,10 @@ print_status "Using Matrix homeserver: $MATRIX_HOMESERVER"
 print_status "Using Matrix user: $ALERTBOT_USER_ID"
 
 # Generate the config YAML
-# Note: Room IDs are specified in AlertManager webhook URLs, not here
+# Note: Room IDs are specified in AlertManager webhook URLs, not here.
+# The `cluster` label is Prometheus' external label (set per environment in
+# apps/environments/<env>/prometheus.yaml.gotmpl) — several clusters post
+# into the same room through the same bot.
 CONFIG_YAML=$(cat <<EOF
 # HTTP server configuration
 http:
@@ -87,6 +96,7 @@ templating:
     <p>
     <strong><font color="red">🔥 FIRING</font></strong><br/>
     <strong>Alert:</strong> {{ .Alert.Labels.alertname }}<br/>
+    {{ if .Alert.Labels.cluster }}<strong>Cluster:</strong> {{ .Alert.Labels.cluster }}<br/>{{ end }}
     <strong>Severity:</strong> {{ .Alert.Labels.severity }}<br/>
     {{ if .Alert.Annotations.summary }}<strong>Summary:</strong> {{ .Alert.Annotations.summary }}<br/>{{ end }}
     {{ if .Alert.Annotations.description }}<strong>Description:</strong> {{ .Alert.Annotations.description }}<br/>{{ end }}
@@ -96,6 +106,7 @@ templating:
     <p>
     <strong><font color="green">✅ RESOLVED</font></strong><br/>
     <strong>Alert:</strong> {{ .Alert.Labels.alertname }}<br/>
+    {{ if .Alert.Labels.cluster }}<strong>Cluster:</strong> {{ .Alert.Labels.cluster }}<br/>{{ end }}
     <strong>Severity:</strong> {{ .Alert.Labels.severity }}<br/>
     {{ if .Alert.Annotations.summary }}<strong>Summary:</strong> {{ .Alert.Annotations.summary }}{{ end }}
     </p>

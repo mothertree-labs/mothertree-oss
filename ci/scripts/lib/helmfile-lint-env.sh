@@ -20,4 +20,7 @@ export NS_JITSI="tn-lint-jitsi"
 export NEXTCLOUD_DB_NAME="lint_nextcloud"
 export TENANT_DB_USER="lint_user"
 export ALERTMANAGER_EMAIL_TO="lint@example.com"
+# requiredEnv in apps/environments/{prod,prod-eu}/prometheus.yaml.gotmpl
+export ALERTMANAGER_MATRIX_ROOM_ID="!lint:example.com"
+export HEALTHCHECKS_DEADMAN_URL="https://hc-ping.com/00000000-0000-0000-0000-000000000000"
 export SMTP_DOMAIN="example.com"
