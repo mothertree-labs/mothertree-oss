@@ -21,21 +21,24 @@ data:
     POD_PATTERNS="pgbouncer-|postfix-|pg-metrics-bridge-"
     # Sidecars with a FIXED-name state Secret keep one node across pod restarts
     # (metrics federation pair: prom-mesh-<env> / prom-eu-bridge-<env>). Their
-    # node is merely offline during a Recreate rollout, so it is only stale once
-    # it has been offline longer than PERSISTENT_STALE_HOURS — an identity
-    # abandoned by a deleted state Secret, a rebuilt cluster, or the pre-2026-09
-    # per-pod layout (which registered a new node on every pod recreation).
+    # node is merely offline during a Recreate rollout or a cluster outage, so
+    # it is only stale once it has been offline longer than
+    # PERSISTENT_STALE_HOURS (7 days) — an identity abandoned by a deleted state
+    # Secret, a rebuilt cluster, or the pre-2026-09 per-pod layout (which
+    # registered a new node on every pod recreation).
     PERSISTENT_PATTERNS="prom-eu-bridge-|prom-mesh-"
-    PERSISTENT_STALE_HOURS="${PERSISTENT_STALE_HOURS:-48}"
+    PERSISTENT_STALE_HOURS="${PERSISTENT_STALE_HOURS:-168}"
     # VM hostnames to never delete (even if offline during maintenance)
     VM_PATTERNS="postgres-|postfix-relay-|router-|ci-server"
 
     log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+    # The bearer token reaches curl through a config file on stdin, never argv
+    # (argv is readable by every process in the pod via /proc).
+    hs_curl() { printf 'header = "Authorization: Bearer %s"\n' "$HEADSCALE_API_KEY" | curl -sf --config - "$@"; }
+
     log "Fetching nodes from Headscale at ${HEADSCALE_URL}..."
-    NODES=$(curl -sf --max-time 30 \
-      -H "Authorization: Bearer $HEADSCALE_API_KEY" \
-      "${HEADSCALE_URL}/api/v1/node") || { log "ERROR: Failed to list nodes"; exit 1; }
+    NODES=$(hs_curl --max-time 30 "${HEADSCALE_URL}/api/v1/node") || { log "ERROR: Failed to list nodes"; exit 1; }
 
     NODE_COUNT=$(echo "$NODES" | jq '.nodes | length')
     log "Total nodes: $NODE_COUNT"
@@ -76,9 +79,7 @@ data:
     FAILED=0
     for nid in $STALE_IDS; do
       NAME=$(echo "$NODES" | jq -r --arg id "$nid" '.nodes[] | select(.id == ($id | tostring)) | .givenName // .name')
-      if curl -sf --max-time 15 -X DELETE \
-        -H "Authorization: Bearer $HEADSCALE_API_KEY" \
-        "${HEADSCALE_URL}/api/v1/node/${nid}" > /dev/null; then
+      if hs_curl --max-time 15 -X DELETE "${HEADSCALE_URL}/api/v1/node/${nid}" > /dev/null; then
         log "  Deleted: id=$nid $NAME"
         DELETED=$((DELETED + 1))
       else

@@ -557,16 +557,24 @@ mt_ts_resolve_node() {
 # change tracker when it wrote the Secret (the Deployment must restart to load it).
 # ---------------------------------------------------------------------------
 MT_TS_STATE_ADOPTED=false
+MT_TS_ADOPT_EXEC_RETRIES="${MT_TS_ADOPT_EXEC_RETRIES:-3}"
 mt_ts_adopt_pod_state_secret() {
-  local ns="$1" prefix="$2" sel="$3" fixed="$2-tailscale-state" state pod per_pod status ip
+  local ns="$1" prefix="$2" sel="$3" fixed="$2-tailscale-state" state pods pod per_pod ready status ip attempt=0
   MT_TS_STATE_ADOPTED=false
   state=$(_ts_exists secret "$fixed" "$ns") || return 1
   if [ "$state" = present ]; then
     _ts_log "  $ns/$fixed: fixed-name state Secret present — node identity is stable"
     return 0
   fi
-  pod=$(kubectl get pods -n "$ns" -l "$sel" -o json 2>/dev/null \
-    | jq -r '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")] | .[0].metadata.name // empty') || pod=""
+  # A LOST answer must never read as "no pod": that would register a fresh
+  # node (new mesh IP) on the strength of an API hiccup (#623). Only a
+  # definite answer from the API server decides; an error fails the deploy.
+  if ! pods=$(kubectl get pods -n "$ns" -l "$sel" -o json 2>&1); then
+    _ts_err "  $ns/$fixed: cannot list pods ($sel) — refusing to guess whether a node identity exists: $(printf '%s\n' "$pods" | tail -1)"
+    return 1
+  fi
+  pod=$(printf '%s' "$pods" | jq -r '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")] | .[0].metadata.name // empty' 2>/dev/null) \
+    || { _ts_err "  $ns/$fixed: pod list for $sel is not JSON — refusing to guess"; return 1; }
   if [ -z "$pod" ]; then
     _ts_log "  $ns/$fixed: absent and no running pod to adopt from — the sidecar will register a fresh node"
     return 0
@@ -577,9 +585,32 @@ mt_ts_adopt_pod_state_secret() {
     _ts_log "  $ns/$fixed: absent; $pod has no per-pod state Secret — the sidecar will register a fresh node"
     return 0
   fi
-  status=$(kubectl exec -n "$ns" "$pod" -c "$MT_TS_SIDECAR_CONTAINER" -- tailscale status --json 2>/dev/null) || status=""
+  # The API server's view of the sidecar container IS a definite answer: a
+  # sidecar that is not ready (crash-looping on a dead key, #613) has nothing
+  # worth adopting — a fresh registration is the repair, not a failure.
+  ready=$(printf '%s' "$pods" | jq -r --arg p "$pod" --arg c "$MT_TS_SIDECAR_CONTAINER" \
+    '.items[] | select(.metadata.name == $p) | [.status.initContainerStatuses[]?, .status.containerStatuses[]?] | map(select(.name == $c)) | .[0].ready // false')
+  if [ "$ready" != "true" ]; then
+    _ts_warn "  $ns/$fixed: not adopting $per_pod — $pod's $MT_TS_SIDECAR_CONTAINER container is not ready; the sidecar will register a fresh node"
+    return 0
+  fi
+  # tailscaled's own view. kubectl exec rides the cluster's konnectivity proxy,
+  # so a failure here is a LOST answer: retried, then fatal — never "offline".
+  while :; do
+    if status=$(kubectl exec -n "$ns" "$pod" -c "$MT_TS_SIDECAR_CONTAINER" -- tailscale status --json 2>&1); then break; fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge "$MT_TS_ADOPT_EXEC_RETRIES" ]; then
+      _ts_err "  $ns/$fixed: cannot query tailscaled in $pod ($attempt attempts) — refusing to register a fresh node on a lost answer: $(printf '%s\n' "$status" | tail -1)"
+      return 1
+    fi
+    sleep 5
+  done
+  if ! printf '%s' "$status" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    _ts_err "  $ns/$fixed: tailscale status in $pod returned no JSON — refusing to guess: $(printf '%s\n' "$status" | tail -1)"
+    return 1
+  fi
   if ! printf '%s' "$status" | jq -e '.BackendState == "Running" and (.Self.Online // false)' >/dev/null 2>&1; then
-    _ts_warn "  $ns/$fixed: not adopting $per_pod — $pod's sidecar is not Running+online; the sidecar will register a fresh node"
+    _ts_warn "  $ns/$fixed: not adopting $per_pod — $pod's tailscaled is $(printf '%s' "$status" | jq -r '.BackendState // "?"') / Online=$(printf '%s' "$status" | jq -r '.Self.Online // false'); the sidecar will register a fresh node"
     return 0
   fi
   ip=$(printf '%s' "$status" | jq -r '.Self.TailscaleIPs[0] // "?"')
@@ -609,9 +640,10 @@ mt_ts_adopt_pod_state_secret() {
 # ---------------------------------------------------------------------------
 mt_ts_prune_pod_state_secrets() {
   local ns="$1" prefix="$2" names name pod state deleted=0 kept=0
-  names=$(kubectl get secrets -n "$ns" -o json 2>/dev/null \
-    | jq -r --arg p "${prefix}-tailscale-state-" '.items[].metadata.name | select(startswith($p))') \
-    || { _ts_warn "  $ns: cannot list state Secrets of $prefix — nothing pruned"; return 0; }
+  # Names only (-o name): no Secret body ever passes through this pipeline.
+  names=$(kubectl get secrets -n "$ns" -o name 2>&1) \
+    || { _ts_warn "  $ns: cannot list Secrets — nothing pruned: $(printf '%s\n' "$names" | tail -1)"; return 0; }
+  names=$(printf '%s\n' "$names" | grep "^secret/${prefix}-tailscale-state-" | cut -d/ -f2- || true)
   [ -n "$names" ] || return 0
   for name in $names; do
     pod="${name#"${prefix}-tailscale-state-"}"

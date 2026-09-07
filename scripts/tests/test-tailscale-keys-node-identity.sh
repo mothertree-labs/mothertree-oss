@@ -20,15 +20,19 @@ cat > "$STUB_DIR/bin/kubectl" <<'STUB'
 printf '%s\n' "$*" >> "$STUB_DIR/kubectl.log"
 args="$*"
 case "$args" in
-  "get pods -n "*" -l "*" -o json")            cat "$STUB_DIR/fx/pods.json" ;;
-  "get secrets -n "*" -o json")                cat "$STUB_DIR/fx/secrets.json" ;;
+  "get pods -n "*" -l "*" -o json")
+    if [ -n "${STUB_PODS_FAIL:-}" ]; then echo "Error from server (ServiceUnavailable): the server is currently unable to handle the request" >&2; exit 1; fi
+    cat "$STUB_DIR/fx/pods.json" ;;
+  "get secrets -n "*" -o name")                 jq -r '.items[].metadata.name | "secret/" + .' "$STUB_DIR/fx/secrets.json" ;;
   "get secret "*" --ignore-not-found -o name")
     grep -qx -- "$3" "$STUB_DIR/fx/secrets.list" 2>/dev/null && echo "secret/$3"; exit 0 ;;
   "get secret "*" -o json")                     cat "$STUB_DIR/fx/secret-$3.json" ;;
   "get pod "*" --ignore-not-found -o name")
     case "$3" in *boom*) echo "Error from server: etcd timeout"; exit 1 ;; esac
     grep -qx -- "$3" "$STUB_DIR/fx/pods.list" 2>/dev/null && echo "pod/$3"; exit 0 ;;
-  "exec -n "*" -- tailscale status --json")    cat "$STUB_DIR/fx/status.json" ;;
+  "exec -n "*" -- tailscale status --json")
+    if [ -n "${STUB_EXEC_FAIL:-}" ]; then echo "error: unable to upgrade connection: error dialing backend: dial tcp 192.0.2.10:8090: connect: connection refused" >&2; exit 1; fi
+    cat "$STUB_DIR/fx/status.json" ;;
   "create -f -")                               cat > "$STUB_DIR/created.json"; echo "secret/stub created" ;;
   "delete secret "*)                            echo "$3" >> "$STUB_DIR/deleted.log"; echo "secret \"$3\" deleted" ;;
   *) echo "stub kubectl: unexpected args: $args" >&2; exit 99 ;;
@@ -128,7 +132,9 @@ assert_eq "API error → reason api" api "$MT_TS_RESOLVE_REASON"
 
 echo "# mt_ts_adopt_pod_state_secret"
 NS=infra-monitoring; PFX=prometheus-mesh-expose; POD="$PFX-5d9f8c7b6-abcde"
-PODS_RUNNING="{\"items\":[{\"metadata\":{\"name\":\"$POD\"},\"status\":{\"phase\":\"Running\"}}]}"
+# Native sidecar: the tailscale container reports under initContainerStatuses.
+PODS_RUNNING="{\"items\":[{\"metadata\":{\"name\":\"$POD\"},\"status\":{\"phase\":\"Running\",\"initContainerStatuses\":[{\"name\":\"tailscale\",\"ready\":true}],\"containerStatuses\":[{\"name\":\"socat\",\"ready\":true}]}}]}"
+PODS_SIDECAR_NOTREADY="{\"items\":[{\"metadata\":{\"name\":\"$POD\"},\"status\":{\"phase\":\"Running\",\"initContainerStatuses\":[{\"name\":\"tailscale\",\"ready\":false}],\"containerStatuses\":[{\"name\":\"socat\",\"ready\":true}]}}]}"
 STATE_JSON="{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"type\":\"Opaque\",\"metadata\":{\"name\":\"$PFX-tailscale-state-$POD\",\"namespace\":\"$NS\",\"uid\":\"u\",\"resourceVersion\":\"123\",\"creationTimestamp\":\"2026-01-01T00:00:00Z\",\"managedFields\":[{\"manager\":\"x\"}]},\"data\":{\"_current-profile\":\"cHJvZmlsZS0x\",\"profile-1\":\"c3RhdGU=\",\"_machinekey\":\"bWs=\"}}"
 reset_stubs
 echo "$PFX-tailscale-state" > "$STUB_DIR/fx/secrets.list"
@@ -151,6 +157,25 @@ assert_eq "sidecar Running but offline → not adopted (fresh registration inste
 echo '{"BackendState":"NeedsLogin","Self":{"Online":false}}' > "$STUB_DIR/fx/status.json"
 mt_ts_adopt_pod_state_secret "$NS" "$PFX" "app=$PFX" >/dev/null
 assert_eq "sidecar NeedsLogin → not adopted" "false" "$MT_TS_STATE_ADOPTED"
+# Lost answers must FAIL (return 1), never turn into a fresh registration.
+if STUB_PODS_FAIL=1 mt_ts_adopt_pod_state_secret "$NS" "$PFX" "app=$PFX" >/dev/null 2>&1; then
+  fail "pod list API error → returns 1"; else ok "pod list API error → returns 1"; fi
+assert_eq "  (and creates nothing)" "false|absent" "$MT_TS_STATE_ADOPTED|$([ -f "$STUB_DIR/created.json" ] && echo created || echo absent)"
+: > "$STUB_DIR/kubectl.log"
+echo '{"BackendState":"Running","Self":{"Online":true,"TailscaleIPs":["100.64.1.11"]}}' > "$STUB_DIR/fx/status.json"
+if STUB_EXEC_FAIL=1 mt_ts_adopt_pod_state_secret "$NS" "$PFX" "app=$PFX" >/dev/null 2>&1; then
+  fail "kubectl exec transport error → returns 1 (lost answer)"; else ok "kubectl exec transport error → returns 1 (lost answer)"; fi
+assert_eq "  (after the configured number of attempts, creating nothing)" "3|absent" \
+  "$(grep -c '^exec ' "$STUB_DIR/kubectl.log")|$([ -f "$STUB_DIR/created.json" ] && echo created || echo absent)"
+echo 'not json at all' > "$STUB_DIR/fx/status.json"
+if mt_ts_adopt_pod_state_secret "$NS" "$PFX" "app=$PFX" >/dev/null 2>&1; then
+  fail "tailscale status returns no JSON → returns 1"; else ok "tailscale status returns no JSON → returns 1"; fi
+printf '%s' "$PODS_SIDECAR_NOTREADY" > "$STUB_DIR/fx/pods.json"
+: > "$STUB_DIR/kubectl.log"
+mt_ts_adopt_pod_state_secret "$NS" "$PFX" "app=$PFX" >/dev/null
+assert_eq "sidecar container not ready per the API → not adopted, no exec, returns 0" "false|0|absent" \
+  "$MT_TS_STATE_ADOPTED|$(grep -c '^exec ' "$STUB_DIR/kubectl.log" || true)|$([ -f "$STUB_DIR/created.json" ] && echo created || echo absent)"
+printf '%s' "$PODS_RUNNING" > "$STUB_DIR/fx/pods.json"
 echo '{"BackendState":"Running","Self":{"Online":true,"TailscaleIPs":["100.64.1.11"]}}' > "$STUB_DIR/fx/status.json"
 # Not in a $(...): the function's globals must reach this shell.
 mt_ts_adopt_pod_state_secret "$NS" "$PFX" "app=$PFX" > "$STUB_DIR/adopt.out"
