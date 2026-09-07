@@ -67,6 +67,26 @@ prometheus:
           interval: 30s
       namespaceSelector:
         matchNames: [infra-db]
+    # Cross-cluster federation path probe (consumer cluster only — no targets
+    # where the prometheus-eu-bridge Service is absent). A scrape of the bridge
+    # is answered by the OTHER cluster's Prometheus through the mesh tunnel, so
+    # `up{job="prometheus-eu-bridge"}` is the tunnel. Only prometheus_build_info
+    # is kept: this is a probe, not a second copy of prod-eu's metrics (Grafana
+    # queries prod-eu live through the datasource). Feeds MetricsFederationDown.
+    - name: prometheus-eu-bridge
+      selector:
+        matchLabels:
+          app: prometheus-eu-bridge
+      endpoints:
+        - port: http
+          interval: 60s
+          scrapeTimeout: 30s
+          metricRelabelings:
+            - sourceLabels: [__name__]
+              regex: prometheus_build_info
+              action: keep
+      namespaceSelector:
+        matchNames: [infra-monitoring]
 
 grafana:
   adminPassword: "changeme"  # This should be set via environment variable
@@ -569,6 +589,21 @@ additionalPrometheusRulesMap:
               description: 'The Tailscale sidecar of {{ $labels.namespace }}/{{ $labels.pod }} has not been ready for 15m — the pod is off the mesh (PgBouncer: database path down; pg-metrics-bridge: PostgreSQL metrics blind; router: operator access down). Check: kubectl logs -n {{ $labels.namespace }} {{ $labels.pod }} -c tailscale'
             expr: |-
               kube_pod_init_container_status_ready{container="tailscale"} == 0
+            for: 15m
+            labels:
+              severity: warning
+          # Cross-cluster metrics federation: the consumer bridge's scrape is
+          # answered by the remote Prometheus through the mesh, so up==0 means the
+          # tunnel, the remote exposer, or the ACL is broken — the Grafana
+          # "Prometheus (prod-eu)" datasource is dead. Only fires where the
+          # bridge is deployed (no absent(): the scrape job has no targets elsewhere).
+          # Broke silently for 5 days in 2026-09 when the exposer pod was recreated.
+          - alert: MetricsFederationDown
+            annotations:
+              summary: 'Cross-cluster metrics federation is down'
+              description: 'The prometheus-eu-bridge scrape has failed for 15m: the remote Prometheus is unreachable through the mesh tunnel. Grafana''s "Prometheus (prod-eu)" datasource is down. Check: kubectl logs -n infra-monitoring -l app=prometheus-eu-bridge -c tailscale; the exposer pod on the remote cluster; then ./scripts/deploy_infra -e <env> re-discovers the exposer.'
+            expr: |-
+              up{job="prometheus-eu-bridge"} == 0
             for: 15m
             labels:
               severity: warning
