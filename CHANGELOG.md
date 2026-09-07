@@ -158,8 +158,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   SERVFAIL is retried with backoff, then against public resolvers, and if
   it persists the deploy aborts rather than dropping a live host from the
   certificate (which would re-issue a smaller cert and break that host until
-  the next deploy). Unit-tested in `scripts/tests/test-dns-helpers.sh` (new
-  `shell-unit-tests` validate step).
+  the next deploy). The answer section is integrity-checked against the
+  header's record count, so output dig could not fully parse (a `.digrc`
+  that reshapes columns, a truncated response, an unrecognised record) is an
+  error, never a negative; the admin-portal cold-start gate for external-DNS
+  tenants uses the same verdict; the check is IPv4-only. Unit-tested in
+  `scripts/tests/test-dns-helpers.sh` (new `shell-unit-tests` validate step).
 - Tenant public-endpoint probes on every environment except prod referenced
   the blackbox modules `http_2xx_ext` / `http_synapse_ext`, which do not exist
   in `apps/values/blackbox-exporter.yaml` (they belonged to the SOCKS egress

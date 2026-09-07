@@ -25,6 +25,9 @@
 #     check, and is left off even though HTTP-01 might validate through the CDN.
 #     The check fails closed: if a lookup errors (resolver timeout, SERVFAIL)
 #     rather than answering, create_env aborts instead of guessing.
+#     The check is IPv4-only (A records): an AAAA-only host is a definite
+#     negative and stays off the certificate. Tenants CNAME our LB alias,
+#     which carries both, so this never bites a correctly published record.
 #
 # Required environment variables:
 #   TENANT_NAME       - Tenant name

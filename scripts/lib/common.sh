@@ -13,8 +13,9 @@
 #   wait_for_dns        — wait for DNS resolution inside a namespace
 #   read_k8s_secret     — read a secret key from a K8s Secret
 #   mt_require_commands — verify required CLI tools are available
-#   mt_host_resolves / mt_host_resolves_to / mt_partition_hosts_by_target
-#                       — public DNS checks (does a host point at our ingress?)
+#   mt_resolve_ipv4_verdict / mt_host_resolves_to / mt_partition_hosts_by_target
+#                       — fail-closed public DNS checks (does a host point at
+#                         our ingress?)
 
 # Guard against double-sourcing
 if [ "${_MT_COMMON_LOADED:-}" = "1" ]; then
@@ -676,23 +677,8 @@ mt_wait_for_admin_portal() {
     return 1
 }
 
-# Returns 0 if $1 currently resolves in DNS, 1 if it does not (e.g. NXDOMAIN).
-# If no resolver tool is available, returns 0 (assume resolvable) so callers
-# never skip a real check merely because resolution could not be tested.
-# Usage: mt_host_resolves <hostname>
-mt_host_resolves() {
-    local host="$1"
-    [ -z "$host" ] && return 1
-    if command -v getent >/dev/null 2>&1; then
-        getent hosts "$host" >/dev/null 2>&1
-    elif command -v nslookup >/dev/null 2>&1; then
-        nslookup "$host" >/dev/null 2>&1
-    elif command -v host >/dev/null 2>&1; then
-        host "$host" >/dev/null 2>&1
-    else
-        return 0
-    fi
-}
+# (mt_host_resolves — a yes/no getent check — was removed: it read a resolver
+# timeout as "does not resolve". Use mt_resolve_ipv4_verdict, below.)
 
 # ---------------------------------------------------------------------------
 # DNS helpers: "does this public host point at OUR ingress?"
@@ -755,7 +741,7 @@ _mt_resolver_backend() {
 # MT_RESOLVE_IPS (newline-separated IPv4s, RESOLVED only) and
 # MT_RESOLVE_REASON (NEGATIVE/ERROR detail). Always returns 0.
 _mt_resolve_attempt() {
-    local host="$1" server="${2:-}" backend out="" rc=0 ips="" status="" via=""
+    local host="$1" server="${2:-}" backend out="" rc=0 ips="" status="" via="" flags="" answer_count="" parsed_a=0 parsed_cname=0
     MT_RESOLVE_VERDICT="ERROR"
     MT_RESOLVE_IPS=""
     MT_RESOLVE_REASON=""
@@ -763,13 +749,18 @@ _mt_resolve_attempt() {
     [ -n "$server" ] && via=" via ${server}"
     case "$backend" in
         dig)
-            # +noall +comments +answer: the ->>HEADER<<- status line plus the
-            # answer records (CNAME chain + A), nothing else. +tries=1 because
-            # the retry policy lives in mt_resolve_ipv4_verdict.
+            # +noall +comments +answer: the ->>HEADER<<- status line, the
+            # ";; flags: ...; QUERY: 1, ANSWER: N, ..." line and the answer
+            # records, nothing else. +ttlid +cl +noshort +nodnssec pin the
+            # record layout (name ttl IN type rdata) — command-line options
+            # override a ~/.digrc, which could otherwise drop columns and turn
+            # a live answer into "no A record". +tries=1 because the retry
+            # policy lives in mt_resolve_ipv4_verdict. (No `-r`: dig 9.10 on
+            # macOS does not have it.)
             if [ -n "$server" ]; then
-                out=$(dig +noall +comments +answer +time=3 +tries=1 A "$host" "@${server}" 2>&1) || rc=$?
+                out=$(dig +noall +comments +answer +ttlid +cl +noshort +nodnssec +time=3 +tries=1 A "$host" "@${server}" 2>&1) || rc=$?
             else
-                out=$(dig +noall +comments +answer +time=3 +tries=1 A "$host" 2>&1) || rc=$?
+                out=$(dig +noall +comments +answer +ttlid +cl +noshort +nodnssec +time=3 +tries=1 A "$host" 2>&1) || rc=$?
             fi
             if [ "$rc" -ne 0 ]; then
                 # rc 9 = no servers could be reached (timeout), 8 = usage, 10 = internal
@@ -778,23 +769,52 @@ _mt_resolve_attempt() {
             fi
             status=$(printf '%s\n' "$out" | sed -nE 's/^;; ->>HEADER<<-.*status: ([A-Z]+).*/\1/p' | head -1)
             case "$status" in
-                NOERROR)
-                    ips=$(printf '%s\n' "$out" | awk '$1 !~ /^;/ && $4 == "A" {print $5}' | grep -E "$_MT_IPV4_RE" | sort -u || true)
-                    if [ -n "$ips" ]; then
-                        MT_RESOLVE_VERDICT="RESOLVED"
-                        MT_RESOLVE_IPS="$ips"
-                    else
-                        MT_RESOLVE_VERDICT="NEGATIVE"
-                        MT_RESOLVE_REASON="no A record (NODATA)${via}"
-                    fi ;;
-                NXDOMAIN)
-                    MT_RESOLVE_VERDICT="NEGATIVE"
-                    MT_RESOLVE_REASON="NXDOMAIN${via}" ;;
+                NOERROR|NXDOMAIN) ;;
                 "")
-                    MT_RESOLVE_REASON="unparsable dig output${via}: $(printf '%s\n' "$out" | grep -v '^$' | head -1)" ;;
+                    MT_RESOLVE_REASON="unparsable dig output${via}: $(printf '%s\n' "$out" | grep -v '^$' | head -1)"
+                    return 0 ;;
                 *)
-                    MT_RESOLVE_REASON="dig status ${status}${via}" ;;
+                    MT_RESOLVE_REASON="dig status ${status}${via}"
+                    return 0 ;;
             esac
+            # Answer-section integrity: the flags line says how many records
+            # came back, and every one of them must have been understood (an
+            # A row carrying an IPv4, or a CNAME row) before RESOLVED or
+            # NEGATIVE is allowed. A record we cannot read — reshaped columns,
+            # an RRSIG, a truncated (tc) response — is ERROR: otherwise a live
+            # answer would be read as "no A record", the failure this helper
+            # exists to prevent.
+            flags=$(printf '%s\n' "$out" | sed -nE 's/^;; flags:([^;]*);.*/\1/p' | head -1)
+            answer_count=$(printf '%s\n' "$out" | sed -nE 's/^;; flags:.*ANSWER: ([0-9]+).*/\1/p' | head -1)
+            if [ -z "$answer_count" ]; then
+                MT_RESOLVE_REASON="unparsable dig output${via}: no ANSWER count in the flags line"
+                return 0
+            fi
+            case " $flags " in
+                *" tc "*)
+                    MT_RESOLVE_REASON="truncated response (tc flag)${via}"
+                    return 0 ;;
+            esac
+            ips=$(printf '%s\n' "$out" | awk '$1 !~ /^;/ && NF >= 5 && $3 == "IN" && $4 == "A" {print $5}' | grep -E "$_MT_IPV4_RE" || true)
+            parsed_a=$(printf '%s\n' "$ips" | grep -cE "$_MT_IPV4_RE" || true)
+            parsed_cname=$(printf '%s\n' "$out" | awk '$1 !~ /^;/ && NF >= 5 && $3 == "IN" && $4 == "CNAME" {n++} END {print n+0}')
+            if [ $((parsed_a + parsed_cname)) -ne "$answer_count" ]; then
+                MT_RESOLVE_REASON="unparsable answer section${via} (resolver returned ${answer_count} records, parsed $((parsed_a + parsed_cname)))"
+                return 0
+            fi
+            if [ "$status" = "NXDOMAIN" ]; then
+                MT_RESOLVE_VERDICT="NEGATIVE"
+                MT_RESOLVE_REASON="NXDOMAIN${via}"
+                return 0
+            fi
+            ips=$(printf '%s\n' "$ips" | grep -E "$_MT_IPV4_RE" | sort -u || true)
+            if [ -n "$ips" ]; then
+                MT_RESOLVE_VERDICT="RESOLVED"
+                MT_RESOLVE_IPS="$ips"
+            else
+                MT_RESOLVE_VERDICT="NEGATIVE"
+                MT_RESOLVE_REASON="no A record (NODATA)${via}"
+            fi
             return 0 ;;
         getent)   out=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' || true) ;;
         host)     out=$(host -t A "$host" 2>/dev/null | awk '/has address/ {print $NF}' || true) ;;

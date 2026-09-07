@@ -78,10 +78,35 @@ for a; do
   esac
 done
 printf '%s %s\n' "$name" "$server" >> "${FAKE_DIG_LOG:?}"
+# hdr <status> <answer-count> [<flags>]
 hdr() {
-  printf ';; Got answer:\n;; ->>HEADER<<- opcode: QUERY, status: %s, id: 4242\n;; flags: qr rd ra; QUERY: 1, ANSWER: %s, AUTHORITY: 0, ADDITIONAL: 1\n\n' "$1" "$2"
+  printf ';; Got answer:\n;; ->>HEADER<<- opcode: QUERY, status: %s, id: 4242\n;; flags: %s; QUERY: 1, ANSWER: %s, AUTHORITY: 0, ADDITIONAL: 1\n\n' "$1" "${3:-qr rd ra}" "$2"
 }
 case "$name" in
+  shifted.tenant.example.com)
+    # what a ~/.digrc with +nottlid produces: no TTL column
+    hdr NOERROR 2
+    printf 'shifted.tenant.example.com.\tIN\tCNAME\tlb.infra.example.net.\nlb.infra.example.net.\tIN\tA\t203.0.113.10\n' ;;
+  noclass.tenant.example.com)
+    # ~/.digrc with +noclass: no IN column
+    hdr NOERROR 1
+    printf 'noclass.tenant.example.com.\t60\tA\t203.0.113.10\n' ;;
+  truncated.tenant.example.com)
+    hdr NOERROR 1 "qr tc rd ra"
+    printf 'truncated.tenant.example.com.\t60\tIN\tA\t203.0.113.10\n' ;;
+  mismatch.tenant.example.com)
+    # header says 3 records, we understand only the CNAME and the A (RRSIG is not ours to parse)
+    hdr NOERROR 3
+    printf 'mismatch.tenant.example.com.\t60\tIN\tCNAME\tlb.infra.example.net.\nlb.infra.example.net.\t60\tIN\tA\t203.0.113.10\nlb.infra.example.net.\t60\tIN\tRRSIG\tA 13 3 60 20990101000000 20990101000000 12345 example.net. abc=\n' ;;
+  nxdomain-cname.tenant.example.com)
+    # CNAME to a name that does not exist: status NXDOMAIN with the CNAME in the answer
+    hdr NXDOMAIN 1
+    printf 'nxdomain-cname.tenant.example.com.\t60\tIN\tCNAME\tgone.example.net.\n' ;;
+  nxdomain-garbled.tenant.example.com)
+    hdr NXDOMAIN 1
+    printf 'nxdomain-garbled.tenant.example.com.\tIN\tCNAME\tgone.example.net.\n' ;;
+  noflags.tenant.example.com)
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 4242\nnoflags.tenant.example.com.\t60\tIN\tA\t203.0.113.10\n' ;;
   chain.tenant.example.com)
     hdr NOERROR 4
     printf ';; ANSWER SECTION:\n'
@@ -183,6 +208,20 @@ assert_contains "NXDOMAIN reason says so" "NXDOMAIN" "$(real_reason missing.tena
 : > "$FAKE_DIG_LOG"
 real_verdict missing.tenant.example.com >/dev/null
 assert_eq "a definite NEGATIVE is not retried" "1" "$(calls_for missing.tenant.example.com)"
+
+echo "answer-section integrity (a record we cannot read is ERROR, never NEGATIVE)"
+assert_eq "chain: header count 4 == 2 CNAME + 2 A parsed -> still RESOLVED" "0 RESOLVED 203.0.113.10" "$(real_verdict chain.tenant.example.com)"
+assert_eq "digrc +nottlid (columns shifted) -> ERROR, not NODATA" "2 ERROR " "$(real_verdict shifted.tenant.example.com)"
+assert_contains "shifted reason reports the count mismatch" "unparsable answer section (resolver returned 2 records, parsed 0)" "$(real_reason shifted.tenant.example.com)"
+assert_eq "digrc +noclass (no IN column) -> ERROR" "2 ERROR " "$(real_verdict noclass.tenant.example.com)"
+assert_eq "tc flag -> ERROR" "2 ERROR " "$(real_verdict truncated.tenant.example.com)"
+assert_contains "tc reason says truncated" "truncated response (tc flag)" "$(real_reason truncated.tenant.example.com)"
+assert_eq "ANSWER count > parsed rows (RRSIG present) -> ERROR" "2 ERROR " "$(real_verdict mismatch.tenant.example.com)"
+assert_contains "mismatch reason reports returned vs parsed" "resolver returned 3 records, parsed 2" "$(real_reason mismatch.tenant.example.com)"
+assert_eq "NXDOMAIN with an understood CNAME in the answer -> NEGATIVE" "1 NEGATIVE " "$(real_verdict nxdomain-cname.tenant.example.com)"
+assert_eq "NXDOMAIN with a record we cannot read -> ERROR (NEGATIVE needs every record understood)" "2 ERROR " "$(real_verdict nxdomain-garbled.tenant.example.com)"
+assert_eq "no flags line (no ANSWER count) -> ERROR" "2 ERROR " "$(real_verdict noflags.tenant.example.com)"
+assert_contains "no-flags reason says so" "no ANSWER count" "$(real_reason noflags.tenant.example.com)"
 
 : > "$FAKE_DIG_LOG"
 assert_eq "SERVFAIL -> ERROR, rc 2 (never NEGATIVE)" "2 ERROR " "$(real_verdict servfail.tenant.example.com)"
