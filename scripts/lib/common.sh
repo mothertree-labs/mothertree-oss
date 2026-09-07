@@ -16,6 +16,9 @@
 #   mt_resolve_ipv4_verdict / mt_host_resolves_to / mt_partition_hosts_by_target
 #                       — fail-closed public DNS checks (does a host point at
 #                         our ingress?)
+#   mt_kubectl_probe    — in-cluster probe with an explicit OK/MISSING/UNKNOWN
+#                         verdict (issue #623); transports mt_probe_exec /
+#                         mt_probe_job; mt_kubectl_logs = retried log fetch
 
 # Guard against double-sourcing
 if [ "${_MT_COMMON_LOADED:-}" = "1" ]; then
@@ -143,7 +146,7 @@ poll_job_complete() {
         # Only fail when the Job itself is marked Failed (all retries exhausted per backoffLimit)
         if echo "$job_status" | grep -q "Failed"; then
             print_error "Job $job_name failed (all retries exhausted)"
-            kubectl logs -n "$namespace" "job/$job_name" --tail=50 || true
+            mt_kubectl_logs -- -n "$namespace" "job/$job_name" --tail=50 || true
             return 1
         fi
 
@@ -167,7 +170,7 @@ poll_job_complete() {
     done
 
     print_error "Timeout waiting for job $job_name after ${timeout}s"
-    kubectl logs -n "$namespace" "job/$job_name" --tail=50 || true
+    mt_kubectl_logs -- -n "$namespace" "job/$job_name" --tail=50 || true
     return 1
 }
 
@@ -1379,4 +1382,242 @@ mt_tailscale_sidecar_tcp_check() {
         fi
         sleep 5
     done
+}
+
+# ===========================================================================
+# In-cluster probes with an EXPLICIT verdict (issue #623)
+#
+# Background: `kubectl run --rm -i` decides by attaching to a throwaway pod.
+# On LKE the attach path (konnectivity) flakes under parallel deploys --
+# "couldn't attach to pod ... falling back to streaming logs", "unable to
+# upgrade connection", "dial tcp <cp>:8090: connection refused" -- and the
+# fallback can lose the output entirely (exit 0, empty stdout). A probe that
+# greps for a positive token then reads "no answer" as "no", and a repair
+# path keyed on that answer acts on a HEALTHY system (pipeline 2076 dropped
+# the public schema of an intact Roundcube DB).
+#
+# Contract: the probe SCRIPT prints exactly one verdict line
+#     MT_PROBE_VERDICT=OK        the thing is there / the check passed
+#     MT_PROBE_VERDICT=MISSING   definite negative (what was looked for is absent)
+#     MT_PROBE_VERDICT=FAIL      definite negative (a check ran and failed)
+# and may print one free-form detail line `MT_PROBE_DETAIL=...`. Anything
+# else -- empty output, a transport error, a pod that never ran, a timeout,
+# contradictory verdict lines -- is UNKNOWN. UNKNOWN is retried a bounded
+# number of times and then reported as UNKNOWN; it is NEVER a negative.
+# Callers must fail CLOSED on UNKNOWN: abort without touching anything.
+#
+# Transports (both print the probe's stdout+stderr and never parse it):
+#   mt_probe_exec <namespace> <pod> <container> -- <cmd...>
+#       `kubectl exec` into an already-running pod. Nothing to schedule and
+#       no attach race; a lost stream yields a kubectl error line and no
+#       sentinel -> UNKNOWN.
+#   mt_probe_job  <namespace> <name-prefix> <image> [opts...] -- <cmd...>
+#       A Job (backoffLimit 0, restartPolicy Never), polled to a terminal
+#       condition, then `kubectl logs` AFTER completion (no attach involved;
+#       the log fetch itself is retried on transport errors). Cleaned up on
+#       return; ttlSecondsAfterFinished is the backstop.
+#       opts: --env K=V                        literal env var
+#             --env-from-secret VAR=secret/key  env var from a Secret key
+#             --timeout N                      seconds to wait for a terminal
+#                                              condition (default 180)
+#
+# Driver:
+#   mt_kubectl_probe <label> <attempts> <transport-fn> [args...]
+#       Sets MT_PROBE_VERDICT (OK|MISSING|FAIL|UNKNOWN), MT_PROBE_DETAIL and
+#       MT_PROBE_OUTPUT (last attempt's raw output).
+#       Returns 0 = OK, 1 = MISSING or FAIL, 2 = UNKNOWN after all attempts.
+#       Backoff between attempts is attempt*MT_PROBE_BACKOFF_BASE seconds
+#       (default 5; tests set 0). mt_probe_job polls every
+#       MT_PROBE_POLL_INTERVAL seconds (default 3).
+# ===========================================================================
+
+mt_probe_exec() {
+    local namespace="${1:?mt_probe_exec: namespace}" pod="${2:?mt_probe_exec: pod}" container="${3:?mt_probe_exec: container}"
+    shift 3
+    [ "${1:-}" = "--" ] && shift
+    # stderr merged on purpose: a transport error must show up in the excerpt
+    # instead of reading as an empty answer. The exit code is irrelevant to the
+    # verdict (the sentinel decides), so it is deliberately not propagated.
+    kubectl exec -n "$namespace" "$pod" -c "$container" -- "$@" 2>&1 || true
+}
+
+# Fetch `kubectl logs` with retries on transport errors. Prints the logs on
+# success; on failure prints an explicit marker line (so a lost fetch is never
+# mistaken for "the pod printed nothing") and returns 1.
+# Usage: mt_kubectl_logs [attempts] -- <kubectl logs args...>
+mt_kubectl_logs() {
+    local attempts=3
+    if [ "${1:-}" != "--" ]; then attempts="$1"; shift; fi
+    [ "${1:-}" = "--" ] && shift
+    local attempt out=""
+    for attempt in $(seq 1 "$attempts"); do
+        if out=$(kubectl logs "$@" 2>&1); then
+            printf '%s\n' "$out"
+            return 0
+        fi
+        [ "$attempt" -lt "$attempts" ] && sleep $((attempt * ${MT_PROBE_BACKOFF_BASE:-5}))
+    done
+    printf '[mt_kubectl_logs: fetch FAILED after %s attempts: %s]\n' "$attempts" "$(printf '%s' "$out" | tail -1)"
+    return 1
+}
+
+mt_probe_job() {
+    local namespace="${1:?mt_probe_job: namespace}" prefix="${2:?mt_probe_job: name-prefix}" image="${3:?mt_probe_job: image}"
+    shift 3
+    local timeout=180 env_json='[]' k v s
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --env)
+                k="${2%%=*}"; v="${2#*=}"
+                env_json=$(printf '%s' "$env_json" | jq -c --arg n "$k" --arg v "$v" '. + [{name:$n, value:$v}]')
+                shift 2 ;;
+            --env-from-secret)
+                k="${2%%=*}"; s="${2#*=}"
+                env_json=$(printf '%s' "$env_json" | jq -c --arg n "$k" --arg s "${s%%/*}" --arg key "${s#*/}" \
+                    '. + [{name:$n, valueFrom:{secretKeyRef:{name:$s, key:$key}}}]')
+                shift 2 ;;
+            --timeout) timeout="$2"; shift 2 ;;
+            --) shift; break ;;
+            *) echo "mt_probe_job: unknown option $1"; return 2 ;;
+        esac
+    done
+    [ $# -gt 0 ] || { echo "mt_probe_job: no command given"; return 2; }
+
+    local name="${prefix}-$$-${RANDOM}"
+    local cmd_json
+    cmd_json=$(jq -nc '$ARGS.positional' --args -- "$@")
+    local manifest
+    manifest=$(jq -nc --arg ns "$namespace" --arg name "$name" --arg image "$image" --arg prefix "$prefix" \
+        --argjson cmd "$cmd_json" --argjson env "$env_json" --argjson deadline "$timeout" '{
+        apiVersion: "batch/v1", kind: "Job",
+        metadata: {name: $name, namespace: $ns,
+                   labels: {"app.kubernetes.io/name": "mt-probe", "mothertree.org/probe": $prefix}},
+        spec: {backoffLimit: 0, activeDeadlineSeconds: $deadline, ttlSecondsAfterFinished: 900,
+               template: {metadata: {labels: {"app.kubernetes.io/name": "mt-probe", "mothertree.org/probe": $prefix}},
+                          spec: {restartPolicy: "Never",
+                                 automountServiceAccountToken: false,
+                                 containers: [{name: "probe", image: $image, command: $cmd, env: $env,
+                                               resources: {requests: {cpu: "50m", memory: "64Mi"},
+                                                           limits: {cpu: "500m", memory: "256Mi"}}}]}}}}')
+
+    # Create; a transport error here prints and yields no sentinel -> UNKNOWN.
+    if ! printf '%s\n' "$manifest" | kubectl apply -f - 2>&1; then
+        echo "[mt_probe_job: could not create job/$name in $namespace]"
+        return 0
+    fi
+
+    # Poll to a terminal condition. Complete OR Failed both mean "the script
+    # ran to an exit" and the logs carry the verdict; only no-terminal-condition
+    # within the timeout (unschedulable, image pull, deadline) is a non-answer.
+    local start=$SECONDS conds terminal=""
+    while :; do
+        conds=$(kubectl get job "$name" -n "$namespace" -o jsonpath='{range .status.conditions[?(@.status=="True")]}{.type}{" "}{end}' 2>/dev/null || true)
+        case " $conds " in
+            *" Complete "*|*" SuccessCriteriaMet "*) terminal="Complete"; break ;;
+            *" Failed "*|*" FailureTarget "*)        terminal="Failed"; break ;;
+        esac
+        if [ $((SECONDS - start)) -ge "$timeout" ]; then break; fi
+        sleep "${MT_PROBE_POLL_INTERVAL:-3}"
+    done
+    if [ -z "$terminal" ]; then
+        echo "[mt_probe_job: job/$name in $namespace reached no terminal condition within ${timeout}s]"
+        kubectl get pods -n "$namespace" -l "job-name=$name" -o wide 2>&1 | sed 's/^/    /' || true
+    else
+        echo "[mt_probe_job: job/$name $terminal after $((SECONDS - start))s]"
+        mt_kubectl_logs -- -n "$namespace" "job/$name" --all-containers=true || true
+    fi
+    kubectl delete job "$name" -n "$namespace" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    return 0
+}
+
+mt_kubectl_probe() {
+    local label="${1:?mt_kubectl_probe: label}" attempts="${2:?mt_kubectl_probe: attempts}"
+    shift 2
+    [ $# -gt 0 ] || { print_error "mt_kubectl_probe: no transport command given"; return 2; }
+    local attempt verdicts
+    MT_PROBE_VERDICT="UNKNOWN"; MT_PROBE_DETAIL=""; MT_PROBE_OUTPUT=""
+    for attempt in $(seq 1 "$attempts"); do
+        MT_PROBE_OUTPUT=$("$@" 2>&1) || true
+        # Sentinel lines only, exact match, whole line -- stray chatter can never
+        # be read as a verdict, and two different verdicts is a probe bug, not an answer.
+        verdicts=$(printf '%s\n' "$MT_PROBE_OUTPUT" | grep -E '^MT_PROBE_VERDICT=(OK|MISSING|FAIL)$' | sort -u | sed 's/^MT_PROBE_VERDICT=//' || true)
+        # shellcheck disable=SC2034  # read by callers
+        MT_PROBE_DETAIL=$(printf '%s\n' "$MT_PROBE_OUTPUT" | grep -E '^MT_PROBE_DETAIL=' | tail -1 | sed 's/^MT_PROBE_DETAIL=//' || true)
+        case "$verdicts" in
+            OK|MISSING|FAIL)
+                MT_PROBE_VERDICT="$verdicts"
+                [ "$attempt" -gt 1 ] && print_status "probe [$label]: $MT_PROBE_VERDICT on attempt $attempt"
+                [ "$MT_PROBE_VERDICT" = "OK" ] && return 0
+                return 1 ;;
+            "") ;;
+            *)  print_warning "probe [$label]: contradictory verdict lines ($(printf '%s' "$verdicts" | tr '\n' ',')) -- treating as UNKNOWN" ;;
+        esac
+        print_warning "probe [$label]: no verdict on attempt $attempt/$attempts (transport lost, pod never ran, or timed out)"
+        printf '%s\n' "$MT_PROBE_OUTPUT" | grep -v '^[[:space:]]*$' | tail -3 | sed 's/^/    /'
+        [ "$attempt" -lt "$attempts" ] && sleep $((attempt * ${MT_PROBE_BACKOFF_BASE:-5}))
+    done
+    MT_PROBE_VERDICT="UNKNOWN"
+    return 2
+}
+
+# ---------------------------------------------------------------------------
+# mt_coredns_rewrite_verify -- prove a CoreDNS rewrite is live on EVERY replica
+# Usage: mt_coredns_rewrite_verify <namespace> <host> <want-ip> [attempts=2]
+#
+# Runs busybox nslookup against each Running CoreDNS pod IP from a Job in
+# <namespace>, polling up to 90s for all replicas to answer <want-ip>.
+# Returns 0 (converged), 1 (definitely not converged), 2 (could not determine --
+# the probe itself never delivered a verdict). Callers abort on both 1 and 2.
+# ---------------------------------------------------------------------------
+mt_coredns_rewrite_verify() {
+    local namespace="${1:?}" host="${2:?}" want="${3:?}" attempts="${4:-2}"
+    local pod_ips
+    pod_ips=$(kubectl -n kube-system get pods -l k8s-app=kube-dns -o json 2>/dev/null \
+        | jq -r '.items[] | select(.status.phase == "Running") | select(.metadata.deletionTimestamp == null) | .status.podIP' \
+        | tr '\n' ' ') || pod_ips=""
+    if [ -z "${pod_ips// /}" ]; then
+        print_error "mt_coredns_rewrite_verify: no Running CoreDNS pods found (label k8s-app=kube-dns in kube-system)"
+        return 2
+    fi
+    print_status "Expecting $host -> $want from CoreDNS pods: $pod_ips"
+    # Note: busybox `nslookup` prints the DNS server's own address line first
+    # ("Address: <server>#53") and only then the answer addresses after "Name:"
+    # -- the awk filter skips lines until "Name:" appears. The script always
+    # exits 0: the verdict travels in the sentinel line, never in the exit code.
+    local script
+    read -r -d '' script <<'PROBE' || true
+for i in $(seq 1 18); do
+    all_ok=1
+    last_state=
+    for ip in $PROBE_POD_IPS; do
+        got=$(nslookup "$PROBE_HOST" "$ip" 2>/dev/null | awk '/^Name:/{f=1; next} f && /^Address/{print $2; exit}')
+        if [ "$got" != "$PROBE_WANT" ]; then
+            all_ok=0
+            last_state="replica $ip returned '$got'"
+        fi
+    done
+    if [ "$all_ok" = 1 ]; then
+        echo "OK: all CoreDNS replicas return $PROBE_WANT for $PROBE_HOST"
+        echo "MT_PROBE_VERDICT=OK"
+        exit 0
+    fi
+    echo "  attempt $i: $last_state (want $PROBE_WANT), retrying in 5s"
+    sleep 5
+done
+echo "FAIL: not all CoreDNS replicas converged on $PROBE_WANT for $PROBE_HOST within 90s ($last_state)"
+echo "MT_PROBE_VERDICT=FAIL"
+exit 0
+PROBE
+    local rc=0
+    mt_kubectl_probe "coredns rewrite $host" "$attempts" \
+        mt_probe_job "$namespace" "dns-probe" "busybox:1.36" \
+            --env "PROBE_POD_IPS=$pod_ips" --env "PROBE_HOST=$host" --env "PROBE_WANT=$want" --timeout 180 \
+            -- sh -c "$script" || rc=$?
+    case "$rc" in
+        0) print_success "CoreDNS rewrite verified across all replicas: $host -> $want" ;;
+        1) print_error "CoreDNS rewrite for $host did not propagate to all replicas within 90s"
+           printf '%s\n' "$MT_PROBE_OUTPUT" | grep -E '^(FAIL|  attempt)' | tail -3 | sed 's/^/    /' ;;
+        *) print_error "Could not determine whether the CoreDNS rewrite for $host propagated (probe returned no verdict after $attempts attempts)" ;;
+    esac
+    return "$rc"
 }
