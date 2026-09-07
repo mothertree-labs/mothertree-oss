@@ -146,6 +146,23 @@ assert_eq "renders one 4-space-indented quoted list item per host" \
 assert_eq "single host" '    - "auth.tenant.example.com"' "$(mt_http01_san_lines "auth.tenant.example.com")"
 assert_eq "empty list renders nothing" "" "$(mt_http01_san_lines "")"
 
+# ---------------------------------------------------------------------------
+# 4. Probe-target filtering for external-DNS tenants (ENDPOINT_PROBE_TARGETS
+#    is a block of `        - https://host/path` lines built by create_env).
+# ---------------------------------------------------------------------------
+echo "mt_probe_target_hosts / mt_filter_probe_targets_by_hosts"
+TARGETS=$'        - https://matrix.tenant.example.com/\n        - https://files.tenant.example.com/status.php\n        - https://admin.tenant.example.com/\n        - https://files.tenant.example.com/\n'
+assert_eq "unique hosts, sorted, space-separated" \
+  "admin.tenant.example.com files.tenant.example.com matrix.tenant.example.com" \
+  "$(mt_probe_target_hosts "$TARGETS")"
+assert_eq "keeps every line whose host is allowed, in original order, and drops the rest" \
+  $'        - https://matrix.tenant.example.com/\n        - https://files.tenant.example.com/status.php\n        - https://files.tenant.example.com/' \
+  "$(mt_filter_probe_targets_by_hosts "$TARGETS" "matrix.tenant.example.com files.tenant.example.com")"
+assert_eq "no allowed hosts -> nothing kept" "" "$(mt_filter_probe_targets_by_hosts "$TARGETS" "")"
+assert_eq "empty block -> nothing" "" "$(mt_filter_probe_targets_by_hosts "" "matrix.tenant.example.com")"
+assert_eq "host match is exact (no prefix/suffix matching)" "" \
+  "$(mt_filter_probe_targets_by_hosts "$TARGETS" "tenant.example.com files.tenant.example.com.evil")"
+
 echo ""
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

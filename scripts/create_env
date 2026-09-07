@@ -165,6 +165,18 @@ if [ "$LLM_ENABLED" = "true" ]; then
 fi
 print_status "Tenant namespaces created/verified"
 
+# Are this tenant's public DNS records Cloudflare-proxied (orange cloud)?
+# In-zone prod-style tenants (no env_dns_label) are proxied; labelled envs
+# (dev) stay DNS-only because Universal SSL covers *.domain but not
+# *.dev.domain. External-DNS tenants CNAME to our DNS-only LB alias (a
+# foreign-zone CNAME cannot be proxied). Decided once here; used by the
+# tenant DNS records below and by the endpoint-probe decision at the end.
+if [ "${DNS_EXTERNAL:-false}" != "true" ] && { [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; }; then
+  TENANT_DNS_CF_PROXIED="true"
+else
+  TENANT_DNS_CF_PROXIED="false"
+fi
+
 # =============================================================================
 # Deploy per-tenant wildcard TLS certificate (DNS-01 via Cloudflare)
 # =============================================================================
@@ -436,12 +448,8 @@ else
   else
     LB1_RECORD="lb2.prod.${TENANT_DOMAIN}"
   fi
-  # Cloudflare proxy: prod only (Universal SSL covers *.domain but not *.dev.domain)
-  if [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; then
-    CF_PROXIED="true"
-  else
-    CF_PROXIED="false"
-  fi
+  # Cloudflare proxy: prod only — decided once up top (TENANT_DNS_CF_PROXIED).
+  CF_PROXIED="$TENANT_DNS_CF_PROXIED"
 
   create_dns_record "$LB1_RECORD" "A" "$INGRESS_IP" "$CF_PROXIED"
   print_status "Created LB A record: $LB1_RECORD -> $INGRESS_IP (proxied=$CF_PROXIED)"
@@ -1044,19 +1052,84 @@ if [ "${LLM_ENABLED:-false}" = "true" ]; then
 fi
 export ENDPOINT_PROBE_TARGETS
 
-# Select probe module names: dev uses SOCKS-proxied _ext variants to bypass
-# kube-proxy short-circuit (no PROXY header); prod uses direct modules.
-if [ "$MT_ENV" = "prod" ]; then
-  export PROBE_MODULE_HTTP="http_2xx"
-  export PROBE_MODULE_SYNAPSE="http_synapse"
-else
-  export PROBE_MODULE_HTTP="http_2xx_ext"
-  export PROBE_MODULE_SYNAPSE="http_synapse_ext"
+if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
+  # External-DNS tenant: probe only the public hosts whose CNAME currently
+  # points at our ingress — the same rule as the HTTP-01 SAN list above. A host
+  # the tenant has not published yet is its DNS to-do, not an outage, and would
+  # otherwise raise EndpointDown per host until it does. Re-resolved here rather
+  # than reusing the cert step's result because under --finalize-only this
+  # phase runs as its own process. Hosts join the probes on the first deploy
+  # after their CNAME resolves to us.
+  INGRESS_LB_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  if [ -z "$INGRESS_LB_IP" ]; then
+    print_error "Cluster ingress LB IP not available — cannot tell which ${TENANT_DOMAIN} probe targets point at us"
+    exit 1
+  fi
+  if ! mt_have_dns_resolver; then
+    print_error "No DNS resolver CLI (dig/getent/host/nslookup) — cannot verify which probe targets point at ${INGRESS_LB_IP}"
+    exit 1
+  fi
+  # shellcheck disable=SC2046  # word-splitting the space-separated host list is intended
+  mt_partition_hosts_by_target "$INGRESS_LB_IP" $(mt_probe_target_hosts "$ENDPOINT_PROBE_TARGETS")
+  if [ -z "$MT_HOSTS_AT_TARGET" ]; then
+    print_error "None of ${TENANT_NAME}'s probe targets resolve to our ingress LB ${INGRESS_LB_IP}:"
+    printf '%s' "$MT_HOSTS_NOT_AT_TARGET_DETAIL" | sed 's/^/  - /' >&2
+    exit 1
+  fi
+  if [ -n "$MT_HOSTS_NOT_AT_TARGET" ]; then
+    print_warning "Endpoint probes: skipping targets whose host does not (yet) resolve to our ingress LB ${INGRESS_LB_IP} — EXPECTED for dns_external until the tenant adds its remaining CNAMEs:"
+    printf '%s' "$MT_HOSTS_NOT_AT_TARGET_DETAIL" | sed 's/^/  - /'
+    ENDPOINT_PROBE_TARGETS="$(mt_filter_probe_targets_by_hosts "$ENDPOINT_PROBE_TARGETS" "$MT_HOSTS_AT_TARGET")"$'\n'
+    export ENDPOINT_PROBE_TARGETS
+  fi
 fi
 
-envsubst < "$REPO_ROOT/apps/manifests/monitoring/endpoint-probes.yaml.tpl" | kubectl apply -f - && \
-  print_status "Endpoint probes deployed for tenant $TENANT" || \
-  print_warning "Could not deploy endpoint probes (blackbox-exporter may not be installed yet)"
+# =============================================================================
+# Endpoint probes (Blackbox Exporter Probe CRDs)
+# =============================================================================
+# Internal probes target ClusterIP services and work everywhere. The PUBLIC
+# probes fetch the tenant's external hostnames from inside the cluster, which
+# only gives a real signal when the request reaches ingress-nginx the way a
+# client's does — see mt_public_hosts_probeable_from_cluster in common.sh.
+# Dev (PROXY protocol on, DNS-only records) has no working path: the SOCKS5
+# egress proxy that bridged it (microsocks on the VPN server; blackbox modules
+# http_2xx_ext / http_synapse_ext) went away with the VPN server in #281, and
+# those modules never existed in apps/values/blackbox-exporter.yaml. A Probe
+# naming them gets HTTP 400 from blackbox and fires TargetDown forever — which
+# is what every env except prod did until now (the choice was `MT_ENV = prod`,
+# so prod-eu got the dead dev modules). Decided from the live ingress ConfigMap
+# and the tenant's DNS config instead, never from the environment name.
+_ingress_cm_json=$(kubectl get configmap ingress-nginx-controller -n "$NS_INGRESS" -o json 2>/dev/null) || {
+  print_error "Cannot read ConfigMap ingress-nginx-controller in ${NS_INGRESS} — needed to decide whether the tenant's public hosts are probe-able from inside the cluster"
+  exit 1
+}
+INGRESS_USE_PROXY_PROTOCOL=$(printf '%s' "$_ingress_cm_json" | jq -r '.data["use-proxy-protocol"] // "false"')
+
+# Direct modules everywhere (no proxy exists any more). Guard: a module that is
+# not in the blackbox values file is a permanent 400, so refuse to deploy one.
+export PROBE_MODULE_HTTP="http_2xx"
+export PROBE_MODULE_SYNAPSE="http_synapse"
+for _probe_module in "$PROBE_MODULE_HTTP" "$PROBE_MODULE_SYNAPSE"; do
+  if [ "$(yq ".config.modules | has(\"${_probe_module}\")" "$REPO_ROOT/apps/values/blackbox-exporter.yaml")" != "true" ]; then
+    print_error "Blackbox module '${_probe_module}' is not defined in apps/values/blackbox-exporter.yaml — a Probe referencing it returns HTTP 400 and fires TargetDown permanently"
+    exit 1
+  fi
+done
+
+envsubst < "$REPO_ROOT/apps/manifests/monitoring/internal-probes.yaml.tpl" | kubectl apply -f - && \
+  print_status "Internal probes deployed for tenant $TENANT" || \
+  print_warning "Could not deploy internal probes (blackbox-exporter may not be installed yet)"
+
+if mt_public_hosts_probeable_from_cluster "$INGRESS_USE_PROXY_PROTOCOL" "$TENANT_DNS_CF_PROXIED"; then
+  envsubst < "$REPO_ROOT/apps/manifests/monitoring/endpoint-probes.yaml.tpl" | kubectl apply -f - && \
+    print_status "Endpoint probes deployed for tenant $TENANT (modules ${PROBE_MODULE_HTTP} / ${PROBE_MODULE_SYNAPSE}; ingress use-proxy-protocol=${INGRESS_USE_PROXY_PROTOCOL}, tenant DNS cloudflare-proxied=${TENANT_DNS_CF_PROXIED})" || \
+    print_warning "Could not deploy endpoint probes (blackbox-exporter may not be installed yet)"
+else
+  print_warning "Endpoint probes SKIPPED for tenant $TENANT: ingress use-proxy-protocol=${INGRESS_USE_PROXY_PROTOCOL} and the tenant's DNS records are not Cloudflare-proxied, so a pod's request to its public hosts is short-circuited past the NodeBalancer and rejected by ingress-nginx. No in-cluster path exists for this since the SOCKS egress proxy was removed (#281). Internal probes are deployed; public reachability is checked by scripts/verify-endpoints below."
+  # Drop any public Probes a previous deploy left behind (they were 400/TargetDown).
+  kubectl delete probe "${TENANT}-endpoints" "${TENANT}-synapse-api" -n "$NS_MONITORING" --ignore-not-found 2>/dev/null || true
+fi
 
 echo ""
 print_success "Tenant $TENANT deployed for $MT_ENV environment!"

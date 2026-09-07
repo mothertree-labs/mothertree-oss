@@ -1,11 +1,17 @@
-# Per-tenant endpoint Probe CRD — monitors external and internal tenant services
-# External endpoints are probed via external FQDNs (full path: DNS -> Cloudflare -> LB -> ingress)
-# Internal endpoints are probed via K8s ClusterIP services
-# Deployed per tenant by create_env. Feature-flag targets are injected by the deploy script.
+# Per-tenant PUBLIC endpoint Probe CRDs — the tenant's external FQDNs, fetched
+# from inside the cluster over the full client path (DNS -> [Cloudflare] ->
+# NodeBalancer -> ingress). Deployed per tenant by create_env ONLY where that
+# path works from a pod: PROXY protocol off on this env's ingress, or
+# Cloudflare-proxied tenant DNS. Where neither holds (dev), kube-proxy
+# short-circuits the LB IP straight to ingress-nginx, which then rejects the
+# PROXY-header-less connection — see the endpoint-probes section of create_env.
+# Internal ClusterIP probes live in internal-probes.yaml.tpl (unconditional).
 #
 # Variables substituted by envsubst:
-#   TENANT, NS_MONITORING, TENANT_KEYCLOAK_REALM, AUTH_HOST, NS_MATRIX
-#   PROBE_MODULE_HTTP, PROBE_MODULE_SYNAPSE (env-specific: _ext for dev SOCKS proxy)
+#   TENANT, NS_MONITORING, MATRIX_HOST
+#   PROBE_MODULE_HTTP, PROBE_MODULE_SYNAPSE — must exist in
+#     apps/values/blackbox-exporter.yaml (create_env guards this: an unknown
+#     module is an HTTP 400 from blackbox, i.e. TargetDown forever)
 #   ENDPOINT_PROBE_TARGETS (built dynamically by create_env based on feature flags)
 apiVersion: monitoring.coreos.com/v1
 kind: Probe
@@ -51,26 +57,3 @@ spec:
         tenant: ${TENANT}
       static:
         - https://${MATRIX_HOST}/_matrix/client/versions
----
-# Internal service probes (K8s ClusterIP, no external DNS needed)
-apiVersion: monitoring.coreos.com/v1
-kind: Probe
-metadata:
-  name: ${TENANT}-internal
-  namespace: ${NS_MONITORING}
-  labels:
-    release: kube-prometheus-stack
-    tenant: ${TENANT}
-spec:
-  jobName: ${TENANT}-internal
-  interval: 60s
-  module: http_2xx_internal
-  prober:
-    url: prometheus-blackbox-exporter.${NS_MONITORING}.svc.cluster.local:9115
-  targets:
-    staticConfig:
-      labels:
-        probe_type: tenant-internal
-        tenant: ${TENANT}
-      static:
-        - http://synapse-admin.${NS_MATRIX}.svc.cluster.local/

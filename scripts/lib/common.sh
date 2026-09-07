@@ -787,6 +787,42 @@ mt_partition_hosts_by_target() {
     return 0
 }
 
+# Print the unique URL hosts of an ENDPOINT_PROBE_TARGETS block (lines shaped
+# `        - https://host/path`), space-separated.
+# Usage: mt_probe_target_hosts "<targets-block>"
+mt_probe_target_hosts() {
+    printf '%s\n' "$1" | sed -nE 's#^ *- *https?://([^/]+).*#\1#p' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+# Keep only the lines of an ENDPOINT_PROBE_TARGETS block whose URL host is in
+# the space-separated <hosts> list; prints them in their original order.
+# Usage: mt_filter_probe_targets_by_hosts "<targets-block>" "<host> <host> ..."
+mt_filter_probe_targets_by_hosts() {
+    local block="$1" hosts="$2" line host
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        host=$(printf '%s' "$line" | sed -E 's#^ *- *https?://([^/]+).*#\1#')
+        case " $hosts " in
+            *" $host "*) printf '%s\n' "$line" ;;
+        esac
+    done <<< "$block"
+}
+
+# Can a pod in this cluster reach a tenant's PUBLIC hosts the way a client does?
+# kube-proxy short-circuits pod -> LoadBalancer-IP traffic straight to the
+# ingress-nginx pod (the NodeBalancer is not in the path). When the controller
+# runs with use-proxy-protocol=true it then rejects the PROXY-header-less
+# connection. The path works only if PROXY protocol is off for this env's
+# ingress (prod-eu), or the tenant's DNS is Cloudflare-proxied so the request
+# leaves the cluster and re-enters through the NodeBalancer (prod). Dev has
+# neither. Inputs are the live ingress-nginx ConfigMap value and the tenant's
+# Cloudflare-proxy flag — never the environment name.
+# Usage: mt_public_hosts_probeable_from_cluster <use-proxy-protocol true|false> <cf-proxied true|false>
+mt_public_hosts_probeable_from_cluster() {
+    local use_proxy_protocol="$1" cf_proxied="$2"
+    [ "$use_proxy_protocol" != "true" ] || [ "$cf_proxied" = "true" ]
+}
+
 # Render the CERT_SAN_LINES block of certificate-http01.yaml.tpl (YAML list
 # items, 4-space indent) from a space-separated host list.
 # Usage: mt_http01_san_lines "<host> <host> ..."
