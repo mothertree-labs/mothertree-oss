@@ -12,18 +12,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Secret (`<name>-tailscale-state`, like the subnet router) so a recreation
   re-registers the same Headscale node and keeps its mesh IP; the consumer
   discovers the exposer's current IP from the Headscale node list at deploy
-  time (`metrics_federation.source_mesh_ip` is now only a fallback, with an
-  optional `metrics_federation.source_env` to pin the exposer's environment);
-  the consumer's mesh positive control is fatal. The first deploy adopts the
-  running pod's per-pod state under the fixed name, so the live node identity
-  is preserved. Prometheus on the consumer scrapes the bridge (one series
-  through the tunnel) and a `MetricsFederationDown` alert covers the path.
+  time — **`metrics_federation.source_env` is now required for
+  `role: consumer`** (the exposer's environment) and
+  `metrics_federation.source_mesh_ip` is only a fallback for when no exposer
+  is online. The consumer's mesh positive control is fatal when Headscale
+  listed the exposer online and it still does not answer (our defect), and a
+  loud non-fatal warning when the fallback address was used (the other
+  cluster is down; `MetricsFederationDown` covers it). The first deploy adopts
+  the running pod's per-pod state under the fixed name, so the live node
+  identity is preserved; a lost API/exec answer during that adoption fails
+  the deploy instead of silently registering a fresh node. Prometheus on the
+  consumer scrapes the bridge (one series through the tunnel) and a
+  `MetricsFederationDown` alert covers the path.
 - Per-pod Tailscale state Secrets left behind by pod churn (pgbouncer,
   pg-metrics-bridge, the federation pair) are pruned by their deploy scripts
-  once the pod is gone, and the `headscale-cleanup` CronJob now also removes
-  federation nodes that have been offline for 48h+ (never online ones).
+  once the pod is gone (listing Secret names only), and the `headscale-cleanup`
+  CronJob now also removes federation nodes that have been offline for 7 days
+  or more (never online ones).
 
 ### Security
+- The Tailscale sidecars of the metrics federation pair and of the subnet
+  router can no longer read every Secret in their namespace: `get/update/patch`
+  on Secrets is now restricted to their own fixed-name state Secret
+  (`create` stays namespace-wide — RBAC cannot restrict it by name and the
+  sidecar needs it on first start). Until now the federation ServiceAccount
+  could read the Grafana and Alertmanager Secrets in `infra-monitoring`.
+- The `headscale-cleanup` CronJob hands its Headscale API key to curl through
+  a config file on stdin instead of `-H` on argv (argv is readable by every
+  process in the pod).
 - Keycloak `26.5.1` → `26.7.2` (`apps/values/keycloak-codecentric.yaml`).
   Fixes CVE-2026-18963 (keycloak/keycloak#51833, severity critical): an
   unauthenticated attacker who knows a username could complete the built-in
