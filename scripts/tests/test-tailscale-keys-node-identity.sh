@@ -22,6 +22,7 @@ args="$*"
 case "$args" in
   "get pods -n "*" -l "*" -o json")
     if [ -n "${STUB_PODS_FAIL:-}" ]; then echo "Error from server (ServiceUnavailable): the server is currently unable to handle the request" >&2; exit 1; fi
+    if [ -n "${STUB_WARN_STDERR:-}" ]; then echo "Warning: version difference between client (1.37) and server (1.34) exceeds the supported minor version skew of +/-1" >&2; fi
     cat "$STUB_DIR/fx/pods.json" ;;
   "get secrets -n "*" -o name")                 jq -r '.items[].metadata.name | "secret/" + .' "$STUB_DIR/fx/secrets.json" ;;
   "get secret "*" --ignore-not-found -o name")
@@ -32,6 +33,7 @@ case "$args" in
     grep -qx -- "$3" "$STUB_DIR/fx/pods.list" 2>/dev/null && echo "pod/$3"; exit 0 ;;
   "exec -n "*" -- tailscale status --json")
     if [ -n "${STUB_EXEC_FAIL:-}" ]; then echo "error: unable to upgrade connection: error dialing backend: dial tcp 192.0.2.10:8090: connect: connection refused" >&2; exit 1; fi
+    if [ -n "${STUB_WARN_STDERR:-}" ]; then echo "Warning: version difference between client (1.37) and server (1.34) exceeds the supported minor version skew of +/-1" >&2; fi
     cat "$STUB_DIR/fx/status.json" ;;
   "create -f -")                               cat > "$STUB_DIR/created.json"; echo "secret/stub created" ;;
   "delete secret "*)                            echo "$3" >> "$STUB_DIR/deleted.log"; echo "secret \"$3\" deleted" ;;
@@ -189,6 +191,12 @@ assert_eq "  server-set metadata is dropped" "null null null null" \
   "$(jq -r '"\(.metadata.uid) \(.metadata.resourceVersion) \(.metadata.creationTimestamp) \(.metadata.managedFields)"' "$STUB_DIR/created.json")"
 assert_eq "  log names the pod and its mesh IP" 1 "$(printf '%s\n' "$out" | grep -c "adopted the node identity of $POD (mesh IP 100.64.1.11)")"
 assert_eq "  the node key never appears on a kubectl command line" 0 "$(grep -c 'c3RhdGU=' "$STUB_DIR/kubectl.log" || true)"
+# Exit-0 stderr noise (version-skew / deprecation warnings) with valid JSON on
+# stdout must not be mistaken for a lost or non-JSON answer.
+rm -f "$STUB_DIR/created.json"; _mt_deploy_changed=false
+STUB_WARN_STDERR=1 mt_ts_adopt_pod_state_secret "$NS" "$PFX" "app=$PFX" > "$STUB_DIR/adopt.out" 2>&1
+assert_eq "kubectl warnings on stderr + valid JSON on stdout → adoption still proceeds" "true|true|$PFX-tailscale-state" \
+  "$MT_TS_STATE_ADOPTED|$_mt_deploy_changed|$(jq -r '.metadata.name' "$STUB_DIR/created.json" 2>/dev/null)"
 
 echo "# mt_ts_prune_pod_state_secrets"
 reset_stubs

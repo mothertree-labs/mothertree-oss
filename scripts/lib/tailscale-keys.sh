@@ -569,10 +569,16 @@ mt_ts_adopt_pod_state_secret() {
   # A LOST answer must never read as "no pod": that would register a fresh
   # node (new mesh IP) on the strength of an API hiccup (#623). Only a
   # definite answer from the API server decides; an error fails the deploy.
-  if ! pods=$(kubectl get pods -n "$ns" -l "$sel" -o json 2>&1); then
-    _ts_err "  $ns/$fixed: cannot list pods ($sel) — refusing to guess whether a node identity exists: $(printf '%s\n' "$pods" | tail -1)"
+  # stderr is captured on its own (as _ts_exists does): kubectl prints exit-0
+  # notices there (deprecation "Warning:" headers, client/server version
+  # skew) that must not turn a valid JSON answer into "not JSON".
+  local errf="${TMPDIR:-/tmp}/mt-ts-adopt-$$.err"
+  if ! pods=$(kubectl get pods -n "$ns" -l "$sel" -o json 2>"$errf"); then
+    _ts_err "  $ns/$fixed: cannot list pods ($sel) — refusing to guess whether a node identity exists: $(tail -1 "$errf" 2>/dev/null)"
+    rm -f "$errf"
     return 1
   fi
+  rm -f "$errf"
   pod=$(printf '%s' "$pods" | jq -r '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")] | .[0].metadata.name // empty' 2>/dev/null) \
     || { _ts_err "  $ns/$fixed: pod list for $sel is not JSON — refusing to guess"; return 1; }
   if [ -z "$pod" ]; then
@@ -597,10 +603,11 @@ mt_ts_adopt_pod_state_secret() {
   # tailscaled's own view. kubectl exec rides the cluster's konnectivity proxy,
   # so a failure here is a LOST answer: retried, then fatal — never "offline".
   while :; do
-    if status=$(kubectl exec -n "$ns" "$pod" -c "$MT_TS_SIDECAR_CONTAINER" -- tailscale status --json 2>&1); then break; fi
+    if status=$(kubectl exec -n "$ns" "$pod" -c "$MT_TS_SIDECAR_CONTAINER" -- tailscale status --json 2>"$errf"); then rm -f "$errf"; break; fi
     attempt=$((attempt + 1))
     if [ "$attempt" -ge "$MT_TS_ADOPT_EXEC_RETRIES" ]; then
-      _ts_err "  $ns/$fixed: cannot query tailscaled in $pod ($attempt attempts) — refusing to register a fresh node on a lost answer: $(printf '%s\n' "$status" | tail -1)"
+      _ts_err "  $ns/$fixed: cannot query tailscaled in $pod ($attempt attempts) — refusing to register a fresh node on a lost answer: $(tail -1 "$errf" 2>/dev/null)"
+      rm -f "$errf"
       return 1
     fi
     sleep 5
