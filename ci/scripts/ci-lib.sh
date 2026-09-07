@@ -62,14 +62,21 @@ _ci_linode_reason() {
   local status="$1" body="$2" hdrs="$3" reason=""
   if [ "$status" = "000" ]; then
     reason=$(tr '\n' ' ' <"${hdrs}.err" 2>/dev/null | cut -c1-200)
-    printf '%s' "${reason:-transport failure (no curl stderr)}"
-    return 0
+    reason="${reason:-transport failure (no curl stderr)}"
+  else
+    reason=$(jq -r '[.errors[]? | (.field // "" | if . == "" then "" else . + ": " end) + .reason] | join("; ")' "$body" 2>/dev/null || true)
+    if [ -z "$reason" ]; then
+      reason=$(tr '\n' ' ' <"$body" 2>/dev/null | cut -c1-200)
+    fi
+    reason="${reason:-(empty body)}"
   fi
-  reason=$(jq -r '[.errors[]? | (.field // "" | if . == "" then "" else . + ": " end) + .reason] | join("; ")' "$body" 2>/dev/null || true)
-  if [ -z "$reason" ]; then
-    reason=$(tr '\n' ' ' <"$body" 2>/dev/null | cut -c1-200)
+  # Belt and braces: Linode's error envelope never reflects request headers,
+  # but an intermediary's error page might. The token must never reach a
+  # Woodpecker log, whatever produced the text.
+  if [ -n "${LINODE_CLI_TOKEN:-}" ]; then
+    reason="${reason//"$LINODE_CLI_TOKEN"/[REDACTED]}"
   fi
-  printf '%s' "${reason:-(empty body)}"
+  printf '%s' "$reason"
 }
 
 # Fetch a fresh kubeconfig for the live dev LKE cluster and write it to
@@ -91,6 +98,16 @@ _ci_linode_reason() {
 ci_fetch_dev_kubeconfig() {
   local target="${1:?ci_fetch_dev_kubeconfig: target path required}"
   : "${LINODE_CLI_TOKEN:?LINODE_CLI_TOKEN required for kubeconfig fetch}"
+  # The bearer token goes wherever CI_LINODE_API points: refuse anything but
+  # https so a stray override cannot ship it in clear text.
+  case "$CI_LINODE_API" in
+    https://*) ;;
+    *)
+      CI_KCFG_FETCH_LAST_ERROR="CI_LINODE_API must be an https:// URL (got '$CI_LINODE_API')"
+      echo "ci_fetch_dev_kubeconfig: $CI_KCFG_FETCH_LAST_ERROR" >&2
+      return 1
+      ;;
+  esac
   local cluster_label="${CLUSTER_LABEL:-matrix-cluster-dev}"
   local tmp body hdrs
   tmp=$(mktemp -d)

@@ -68,7 +68,8 @@ curl() {
   printf '%s' "$body" > "$out"
   if [ "$status" = "000" ]; then
     : > "$hdr"
-    echo "curl: (7) Failed to connect to linode.invalid port 443: Connection refused" >&2
+    # A scenario body, when given, plays the role of curl's stderr text.
+    echo "${body:-curl: (7) Failed to connect to linode.invalid port 443: Connection refused}" >&2
     printf '000'
     return 7
   fi
@@ -151,6 +152,12 @@ run_case "Retry-After above the cap is clamped to 60" 0 "60" "" \
 
 run_case "curl transport failure ×2 then success" 0 "10 20" "Connection refused" \
   "000||" "000||" "200|$LIST_OK|" "200|$KCFG_OK|"
+
+run_case "error body that reflects the token is redacted before logging" 0 "10" "[REDACTED]" \
+  "503|{\"errors\":[{\"reason\":\"upstream said: Bearer $LINODE_CLI_TOKEN\"}]}|" "200|$LIST_OK|" "200|$KCFG_OK|"
+
+run_case "curl stderr that reflects the token is redacted before logging" 0 "10" "[REDACTED]" \
+  "000|curl: (56) proxy replied with Bearer $LINODE_CLI_TOKEN|" "200|$LIST_OK|" "200|$KCFG_OK|"
 
 run_case "401 is not retried" 1 "" "not retryable" \
   "401|{\"errors\":[{\"reason\":\"Invalid Token\"}]}|"
