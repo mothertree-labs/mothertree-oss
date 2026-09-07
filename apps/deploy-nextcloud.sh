@@ -234,40 +234,44 @@ if [ -n "$IDENTITY_SECRET_EXISTS_PRE_SB" ]; then
     # Only the emptyDir architecture auto-recovers; never auto-wipe a legacy PVC install.
     _nc_pvc=$(kubectl get pvc nextcloud-nextcloud -n "$NS_FILES" -o name 2>/dev/null || true)
     if [ -z "$_nc_pvc" ]; then
-        # Probe robustly, on two axes:
-        #  1. EXIT STATUS, not empty stdout: a connection flake (PgBouncer/mesh
-        #     blip) must resolve to "unknown" -> proceed, NOT "schema_absent" ->
-        #     which would wipe/abort a HEALTHY tenant on every warm redeploy.
-        #  2. grep the expected token out of stdout, don't string-compare it:
-        #     `mt_psql` (kubectl run --rm) appends a `pod "..." deleted` line to
-        #     STDOUT (not stderr), so a healthy DB returns "1\npod ... deleted".
-        #     A `tr`+`!= "1"` compare would misread that as schema_absent.
-        DB_PRESENT=0
-        _nc_state="unknown"
-        if _nc_q1=$(printf "SELECT 1 FROM pg_database WHERE datname='%s'" "$NEXTCLOUD_DB_NAME" \
-                | mt_psql -d postgres -tA 2>/dev/null); then
-            # Stage 1: a line that is exactly "1" means the DB is in the catalog.
-            if printf '%s\n' "$_nc_q1" | grep -Fxq '1'; then DB_PRESENT=1; fi
-            if [ "$DB_PRESENT" != "1" ]; then
-                _nc_state="schema_absent"    # DB genuinely absent from the catalog
-            else
-                # Stage 2: DB exists -> does the Nextcloud schema (oc_appconfig) exist?
-                if _nc_q2=$(printf "SELECT to_regclass('public.oc_appconfig')" \
-                        | mt_psql -d "$NEXTCLOUD_DB_NAME" -tA 2>/dev/null); then
-                    if printf '%s\n' "$_nc_q2" | grep -q 'oc_appconfig'; then
-                        _nc_state="schema_present"
-                    else
-                        _nc_state="schema_absent"
-                    fi
-                else
-                    _nc_state="unknown"    # DB exists but schema probe couldn't run
-                fi
-            fi
-        else
-            _nc_state="unknown"    # stage-1 probe could not connect -> do NOT act
-        fi
+        # Probe with an EXPLICIT verdict (issue #623). The old two-stage
+        # `mt_psql` probe (kubectl run --rm -i) read a LOST attach result —
+        # exit 0, empty stdout — as "DB absent" and then deleted the identity
+        # Secret of a HEALTHY dev tenant. Now a single Job in NS_DB (the
+        # postgres image, credentials from the Secret, never on a command line)
+        # answers with MT_PROBE_VERDICT=OK|MISSING and a detail line; anything
+        # else is UNKNOWN, retried, and then FAILS CLOSED — nothing is acted on.
+        #   MISSING = the DB is not in the catalog (db=0), or it is but has no
+        #             Nextcloud schema (db=1 schema=0); both confirmed by the
+        #             query itself. A query that cannot connect prints no verdict.
+        read -r -d '' _nc_probe_script <<'PROBE' || true
+present=$(psql -h pgbouncer -U postgres -d postgres -tAc "SELECT count(*) FROM pg_database WHERE datname='$NC_DB'") || { echo "nc-schema-probe: catalog query failed"; exit 0; }
+case "$present" in
+    0) echo "MT_PROBE_DETAIL=db=0 schema=0"; echo "MT_PROBE_VERDICT=MISSING"; exit 0 ;;
+    1) ;;
+    *) echo "nc-schema-probe: unexpected catalog answer '$present'"; exit 0 ;;
+esac
+schema=$(psql -h pgbouncer -U postgres -d "$NC_DB" -tAc "SELECT (to_regclass('public.oc_appconfig') IS NOT NULL)::int") || { echo "nc-schema-probe: tenant DB query failed"; exit 0; }
+case "$schema" in
+    1) echo "MT_PROBE_DETAIL=db=1 schema=1"; echo "MT_PROBE_VERDICT=OK" ;;
+    0) echo "MT_PROBE_DETAIL=db=1 schema=0"; echo "MT_PROBE_VERDICT=MISSING" ;;
+    *) echo "nc-schema-probe: unexpected schema answer '$schema'" ;;
+esac
+exit 0
+PROBE
+        _nc_rc=0
+        mt_kubectl_probe "nextcloud schema ${NEXTCLOUD_DB_NAME}" 3 \
+            mt_probe_job "$NS_DB" "nc-schema-probe" "postgres:17-alpine" \
+                --env-from-secret "PGPASSWORD=postgres-credentials/postgres-password" \
+                --env "PGCONNECT_TIMEOUT=5" --env "NC_DB=$NEXTCLOUD_DB_NAME" --timeout 180 \
+                -- sh -c "$_nc_probe_script" || _nc_rc=$?
+        case "$_nc_rc" in
+            0) _nc_state="schema_present" ;;
+            1) _nc_state="schema_absent" ;;
+            *) _nc_state="unknown" ;;
+        esac
         if [ "$_nc_state" = "schema_absent" ]; then
-            print_warning "SPLIT-BRAIN: nextcloud-identity Secret exists but ${NEXTCLOUD_DB_NAME} has no Nextcloud schema (DB_PRESENT=${DB_PRESENT:-0})"
+            print_warning "SPLIT-BRAIN: nextcloud-identity Secret exists but ${NEXTCLOUD_DB_NAME} has no Nextcloud schema (${MT_PROBE_DETAIL})"
             if [ "$MT_ENV" = "dev" ]; then
                 print_warning "dev pool tenant: auto-recovering via clean cold-start reinstall (dev data loss acceptable)"
                 kubectl delete secret nextcloud-identity -n "$NS_FILES" --ignore-not-found
@@ -278,7 +282,12 @@ if [ -n "$IDENTITY_SECRET_EXISTS_PRE_SB" ]; then
                 exit 1
             fi
         elif [ "$_nc_state" = "unknown" ]; then
-            print_warning "Could not introspect ${NEXTCLOUD_DB_NAME} schema (transient?); proceeding with normal flow."
+            # Fail CLOSED (issue #623): three attempts produced no answer, so the
+            # DB path itself is broken and every later gate would fail anyway —
+            # say so here, without touching the tenant.
+            print_error "Could not determine whether ${NEXTCLOUD_DB_NAME} has a Nextcloud schema (no probe verdict after 3 attempts) — aborting WITHOUT touching the tenant"
+            printf '%s\n' "$MT_PROBE_OUTPUT" | grep -v '^[[:space:]]*$' | tail -5 | sed 's/^/    /'
+            exit 1
         fi
     fi
 fi
@@ -410,7 +419,9 @@ if [ -z "$IDENTITY_SECRET_EXISTS_PRE" ]; then
 
     if ! poll_job_complete "$NS_FILES" "nextcloud-install" 300 5; then
         print_error "Nextcloud install Job failed; dumping pod logs..."
-        kubectl -n "$NS_FILES" logs -l app.kubernetes.io/component=install --tail=200 --all-containers=true 2>/dev/null || true
+        # Retried fetch (issue #623): a lost log stream prints an explicit
+        # "[fetch FAILED …]" marker instead of silently looking like an empty log.
+        mt_kubectl_logs -- -n "$NS_FILES" -l app.kubernetes.io/component=install --tail=200 --all-containers=true || true
         kubectl -n "$NS_FILES" describe job/nextcloud-install 2>/dev/null || true
         exit 1
     fi

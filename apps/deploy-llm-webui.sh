@@ -259,51 +259,15 @@ if [ -z "$_auth_cluster_ip" ]; then
     print_warning "Could not read internal ingress ClusterIP — skipping per-replica verification"
     print_warning "  (the rewrite rule is applied; CoreDNS reloaded; DNS will converge)"
 else
-    _coredns_pod_ips=$(kubectl -n kube-system get pods -l k8s-app=kube-dns -o json \
-        | jq -r '.items[]
-            | select(.status.phase == "Running")
-            | select(.metadata.deletionTimestamp == null)
-            | .status.podIP' \
-        | tr '\n' ' ')
-    if [ -z "${_coredns_pod_ips// /}" ]; then
-        print_warning "No running CoreDNS pods found — skipping per-replica verification"
-    else
-        print_status "Expecting $AUTH_HOST → $_auth_cluster_ip from CoreDNS pods: $_coredns_pod_ips"
-        _dns_probe_pod="auth-dns-probe-$$"
-        if kubectl run "$_dns_probe_pod" -n "$NS_LLM" \
-            --rm -i --restart=Never --image=busybox:1.36 --quiet \
-            --command -- sh -c "
-                pod_ips='${_coredns_pod_ips}'
-                want='${_auth_cluster_ip}'
-                host='${AUTH_HOST}'
-                for i in \$(seq 1 18); do
-                    all_ok=1
-                    last_state=
-                    for ip in \$pod_ips; do
-                        got=\$(nslookup \"\$host\" \"\$ip\" 2>/dev/null | awk '/^Name:/{f=1; next} f && /^Address/{print \$2; exit}')
-                        if [ \"\$got\" != \"\$want\" ]; then
-                            all_ok=0
-                            last_state=\"replica \$ip returned '\$got'\"
-                        fi
-                    done
-                    if [ \"\$all_ok\" = '1' ]; then
-                        echo \"OK: all CoreDNS replicas return \$want for \$host\"
-                        exit 0
-                    fi
-                    echo \"  attempt \$i: \$last_state (want \$want), retrying in 5s\"
-                    sleep 5
-                done
-                echo \"FAIL: not all CoreDNS replicas converged on \$want for \$host within 90s (\$last_state)\"
-                exit 1
-            "; then
-            print_success "CoreDNS rewrite verified across all replicas: $AUTH_HOST → $_auth_cluster_ip"
-        else
-            print_error "CoreDNS rewrite for $AUTH_HOST did not propagate to all replicas within 90s"
-            print_error "Check kube-system/coredns-custom ConfigMap and CoreDNS pod logs:"
-            print_error "  kubectl -n kube-system get configmap coredns-custom -o yaml"
-            print_error "  kubectl -n kube-system logs -l k8s-app=kube-dns --tail=100"
-            exit 1
-        fi
+    # Explicit-verdict probe via a Job + post-completion logs (issue #623): the
+    # old `kubectl run --rm -i` read a lost attach as "did not propagate" and
+    # failed healthy deploys (pipeline 2077). Returns 1 = definitely not
+    # converged, 2 = no answer; both abort — never claim success on silence.
+    if ! mt_coredns_rewrite_verify "$NS_LLM" "$AUTH_HOST" "$_auth_cluster_ip"; then
+        print_error "Check kube-system/coredns-custom ConfigMap and CoreDNS pod logs:"
+        print_error "  kubectl -n kube-system get configmap coredns-custom -o yaml"
+        print_error "  kubectl -n kube-system logs -l k8s-app=kube-dns --tail=100"
+        exit 1
     fi
 fi
 

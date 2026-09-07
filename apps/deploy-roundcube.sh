@@ -291,10 +291,9 @@ print_status "Verifying Roundcube DB schema is initialized..."
 # We deliberately do NOT wait for Ready here: the rc-readiness probe 42P01's on an
 # empty schema, so the Ready gate must come AFTER this repair (moved below).
 
-# Returns 0 iff the schema is usably initialized, probed over the SAME path the
-# app uses: as the roundcube DB user, through PgBouncer, into the tenant DB. A
-# throwaway psql pod keeps this independent of whether the roundcube image
-# ships a psql client.
+# The schema is "usably initialized" iff probed OK over the SAME path the app
+# uses: as the roundcube DB user, through PgBouncer, into the tenant DB, with
+# the PDO pgsql driver the app itself ships.
 #
 # "Usably initialized" is TWO conditions, both required (pipeline #1746 showed
 # the marker alone is not enough — the deploy sailed past this check and then
@@ -303,45 +302,69 @@ print_status "Verifying Roundcube DB schema is initialized..."
 #   2. the session table exists — the exact relation the rc-readiness probe
 #      checks (SQLSTATE 42P01), so this gate can never pass a schema the probe
 #      will then reject.
-# The query emits an explicit RC_SCHEMA_OK token and we grep for it, so stray
-# kubectl chatter on stdout can never be mistaken for a healthy result.
+# The probe prints an explicit verdict line (MT_PROBE_VERDICT=OK|MISSING) plus
+# a detail line (system table / version marker / session table presence), so
+# stray chatter can never be mistaken for a healthy result — and, crucially,
+# NO answer is never mistaken for "missing". Issue #623: the previous
+# `kubectl run --rm -i` probe lost its output on a konnectivity attach flake
+# (exit 0, empty stdout), read that as "schema missing", and pipeline 2076
+# DROPPED the public schema of an intact database.
 #
-# Retries up to 3x: a transient throwaway-pod scheduling/PgBouncer hiccup returns
-# empty just like a genuinely-missing schema, so without retries a flaky query
-# could masquerade as "schema missing" and spuriously fail an otherwise-healthy
-# deploy. Returns 0 as soon as the token is read; only concludes "missing" after
-# all attempts come back empty. On a healthy DB the first attempt succeeds (no
-# added latency); the cost is paid only on the missing/transient path.
-_rc_schema_ok() {
-    local _out _attempt
-    for _attempt in 1 2 3; do
-        _out=$(kubectl run "rc-schema-verify-$$-${RANDOM}" --rm -i --restart=Never \
-            --image=postgres:15-alpine --quiet -n "$NS_WEBMAIL" --pod-running-timeout=120s \
-            --env "PGHOST=$PG_HOST" --env "PGUSER=$ROUNDCUBE_DB_USER" \
-            --env "PGPASSWORD=$ROUNDCUBE_DB_PASSWORD" --env "PGDATABASE=$ROUNDCUBE_DB_NAME" \
-            -- psql -tAc "SELECT 'RC_SCHEMA_OK' FROM system WHERE name='roundcube-version' AND to_regclass('public.session') IS NOT NULL;" 2>/dev/null || true)
-        printf '%s' "$_out" | grep -q 'RC_SCHEMA_OK' && return 0
-        [ "$_attempt" -lt 3 ] && sleep $((_attempt * 5))
-    done
-    return 1
+# Transport: `kubectl exec` into the live Roundcube pod (Running per the wait
+# above), running the SAME PDO driver, env and credentials as the app's own
+# rc-readiness probe — no throwaway pod, no attach race, no secret on a
+# command line. A connection failure or a query error prints NO verdict, so
+# mt_kubectl_probe retries it and then this deploy FAILS CLOSED (aborts without
+# touching the database). See mt_kubectl_probe in scripts/lib/common.sh.
+read -r -d '' _RC_SCHEMA_PROBE_PHP <<'PHP' || true
+$h=getenv('ROUNDCUBE_DB_HOST');$d=getenv('ROUNDCUBE_DB_NAME');
+$u=getenv('ROUNDCUBE_DB_USER');$p=getenv('ROUNDCUBE_DB_PASSWORD');
+try{$dbh=new PDO("pgsql:host=$h;dbname=$d;connect_timeout=5",$u,$p,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);}
+catch(PDOException $e){echo "rc-schema-probe: connect failed: SQLSTATE ".$e->getCode()."\n";exit(0);}
+try{
+  $q=function($sql)use($dbh){return (int)$dbh->query($sql)->fetchColumn();};
+  $sys=$q("SELECT (to_regclass('public.system') IS NOT NULL)::int");
+  $ses=$q("SELECT (to_regclass('public.session') IS NOT NULL)::int");
+  $mark=$sys?($q("SELECT count(*) FROM system WHERE name='roundcube-version'")>0?1:0):0;
+  echo "MT_PROBE_DETAIL=system=$sys marker=$mark session=$ses\n";
+  echo ($mark&&$ses)?"MT_PROBE_VERDICT=OK\n":"MT_PROBE_VERDICT=MISSING\n";
+}catch(PDOException $e){echo "rc-schema-probe: query failed: SQLSTATE ".$e->getCode()."\n";}
+PHP
+
+_rc_running_pod() {
+    kubectl get pod -n "$NS_WEBMAIL" -l app=roundcube \
+        -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null | awk '{print $1}'
 }
 
-if _rc_schema_ok; then
-    print_success "Roundcube DB schema present (version marker + session table) — OK"
-else
-    # Schema missing/partial: the entrypoint's one-shot initdb was swallowed or
-    # died mid-run. Re-run the SAME idempotent command in the live pod — the
-    # PgBouncer verify gate above guarantees the DB is reachable as the app
-    # user by now, so this builds the schema. No-op on an already-initialized DB.
-    print_warning "Roundcube DB schema MISSING/PARTIAL — entrypoint initdb was swallowed; repairing in-pod"
-    RC_POD=$(kubectl get pod -n "$NS_WEBMAIL" -l app=roundcube \
-        -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null | awk '{print $1}')
-    if [ -z "$RC_POD" ]; then
-        print_error "No Running Roundcube pod found — cannot repair DB schema"
-        set +e
-        dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
-        exit 1
+# Transport for mt_kubectl_probe: exec the PHP probe in the live pod. No
+# Running pod prints a note and no verdict (→ UNKNOWN), never a negative.
+_rc_schema_probe() {
+    local pod
+    pod=$(_rc_running_pod)
+    if [ -z "$pod" ]; then
+        echo "rc-schema-probe: no Running roundcube pod in $NS_WEBMAIL"
+        return 0
     fi
+    mt_probe_exec "$NS_WEBMAIL" "$pod" roundcube -- php -r "$_RC_SCHEMA_PROBE_PHP"
+}
+
+# Sets MT_PROBE_VERDICT / MT_PROBE_DETAIL / MT_PROBE_OUTPUT.
+# Returns 0 = OK, 1 = MISSING (definite), 2 = UNKNOWN (no answer after 3 attempts).
+_rc_schema_verdict() {
+    mt_kubectl_probe "roundcube schema" 3 _rc_schema_probe
+}
+
+# Fail CLOSED: the probe could not answer, so nothing below may act.
+_rc_schema_unknown_abort() {
+    print_error "Could not determine the Roundcube DB schema state ($1) — aborting WITHOUT touching the database"
+    print_error "(issue #623: no answer from the probe is not 'schema missing'; last probe output below)"
+    printf '%s\n' "$MT_PROBE_OUTPUT" | grep -v '^[[:space:]]*$' | tail -5 | sed 's/^/    /'
+    set +e
+    dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
+    exit 1
+}
+
+_rc_run_initdb() {
     print_status "Running bin/initdb.sh --update in pod $RC_POD..."
     set +e
     RC_INITDB_OUT=$(kubectl exec -n "$NS_WEBMAIL" "$RC_POD" -c roundcube -- \
@@ -350,9 +373,35 @@ else
     set -e
     printf '%s\n' "$RC_INITDB_OUT" | sed 's/^/    /'
     [ "$RC_INITDB_RC" -ne 0 ] && print_warning "initdb.sh exited $RC_INITDB_RC (verifying schema regardless)"
+    return 0
+}
 
-    if _rc_schema_ok; then
+_rc_rc=0; _rc_schema_verdict || _rc_rc=$?
+if [ "$_rc_rc" -eq 0 ]; then
+    print_success "Roundcube DB schema present (version marker + session table) — OK"
+elif [ "$_rc_rc" -eq 2 ]; then
+    _rc_schema_unknown_abort "no verdict after 3 attempts"
+else
+    # Definite MISSING/PARTIAL (the query ran and answered: $MT_PROBE_DETAIL).
+    # The entrypoint's one-shot initdb was swallowed or died mid-run. Re-run the
+    # SAME idempotent command in the live pod — the PgBouncer verify gate above
+    # guarantees the DB is reachable as the app user by now, so this builds the
+    # schema. No-op on an already-initialized DB.
+    print_warning "Roundcube DB schema MISSING/PARTIAL (${MT_PROBE_DETAIL}) — entrypoint initdb was swallowed; repairing in-pod"
+    RC_POD=$(_rc_running_pod)
+    if [ -z "$RC_POD" ]; then
+        print_error "No Running Roundcube pod found — cannot repair DB schema"
+        set +e
+        dump_pod_diagnostics "$NS_WEBMAIL" "app=roundcube"
+        exit 1
+    fi
+    _rc_run_initdb
+
+    _rc_rc=0; _rc_schema_verdict || _rc_rc=$?
+    if [ "$_rc_rc" -eq 0 ]; then
         print_success "Roundcube DB schema repaired and verified (version marker + session table)"
+    elif [ "$_rc_rc" -eq 2 ]; then
+        _rc_schema_unknown_abort "after initdb --update"
     else
         # initdb --update could not converge. The one state it cannot heal is a
         # PARTIAL schema: the version marker exists so its update path has
@@ -362,8 +411,12 @@ else
         # and is rebuilt constantly, so wipe the schema and re-run initdb from
         # scratch rather than wedging every subsequent pipeline on this tenant.
         # prod: never auto-wipe — fail loudly below (repo rule).
-        if [ "$MT_ENV" = "dev" ]; then
-            print_warning "dev pool tenant: initdb --update did not converge (partial schema?) — resetting public schema and re-running initdb"
+        #
+        # The wipe is gated on POSITIVE evidence: a definite MISSING verdict
+        # whose detail line proves the explicit query ran and answered. A lost
+        # answer never reaches this branch (it aborted above).
+        if [ "$MT_ENV" = "dev" ] && [ -n "$MT_PROBE_DETAIL" ]; then
+            print_warning "dev pool tenant: initdb --update did not converge (schema state: ${MT_PROBE_DETAIL}) — resetting public schema of ${ROUNDCUBE_DB_NAME} and re-running initdb"
             # Recreate the schema with the same grants roundcube-db-init sets
             # (REVOKE PUBLIC for cross-tenant isolation, ALL to the tenant user).
             if ! printf 'DROP SCHEMA public CASCADE; CREATE SCHEMA public; REVOKE ALL ON SCHEMA public FROM PUBLIC; GRANT ALL ON SCHEMA public TO "%s";' "$ROUNDCUBE_DB_USER" \
@@ -372,18 +425,15 @@ else
                 exit 1
             fi
             print_status "Re-running bin/initdb.sh in pod $RC_POD against the fresh schema..."
-            set +e
-            RC_INITDB_OUT=$(kubectl exec -n "$NS_WEBMAIL" "$RC_POD" -c roundcube -- \
-                bash -c 'cd /var/www/html && bin/initdb.sh --dir=/var/www/html/SQL --update' 2>&1)
-            RC_INITDB_RC=$?
-            set -e
-            printf '%s\n' "$RC_INITDB_OUT" | sed 's/^/    /'
-            [ "$RC_INITDB_RC" -ne 0 ] && print_warning "initdb.sh exited $RC_INITDB_RC (verifying schema regardless)"
+            _rc_run_initdb
         fi
-        if ! _rc_schema_ok; then
+        _rc_rc=0; _rc_schema_verdict || _rc_rc=$?
+        if [ "$_rc_rc" -eq 2 ]; then
+            _rc_schema_unknown_abort "after schema reset"
+        elif [ "$_rc_rc" -ne 0 ]; then
             # Fail loudly per CLAUDE.md — a schema-less Roundcube means webmail OIDC
             # login hangs; never report a broken deploy as success.
-            print_error "Roundcube DB schema STILL missing after initdb — webmail OIDC login would hang"
+            print_error "Roundcube DB schema STILL missing after initdb (${MT_PROBE_DETAIL}) — webmail OIDC login would hang"
             print_error "(relation \"session\" does not exist family — see memory project_shard5_10_roundcube_login_root_cause)"
             echo ""
             print_error "=== bin/initdb.sh output ==="
