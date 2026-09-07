@@ -25,6 +25,20 @@ fi
 # ---------------------------------------------------------------------------
 # mt_load_infra_config — main entry point
 # ---------------------------------------------------------------------------
+# mt_require_mesh_ip <var-name> <value> <config-key> — fail fast unless <value>
+# is a Tailscale CGNAT address (100.64.0.0/10). Mesh IPs reach socat args and
+# `kubectl exec -- nc/wget` argv; a hostname, a list or a public IP there must
+# be a config error at load time, not a 60 s probe failure at deploy time.
+# ---------------------------------------------------------------------------
+mt_require_mesh_ip() {
+  local name="${1:?}" value="${2:?}" key="${3:-$1}"
+  if ! [[ "$value" =~ ^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    echo "[ERROR] $key ('$value') is not a Tailscale mesh IP (expected 100.64.0.0/10, e.g. 100.64.0.x) — set \$$name correctly in the infra config" >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
 mt_load_infra_config() {
   if [ "${_MT_INFRA_CONFIG_LOADED:-}" = "1" ]; then
     return 0
@@ -126,6 +140,9 @@ _mt_infra_load_env_config() {
     # PgBouncer + Tailscale sidecar (external PG VM connectivity)
     PGBOUNCER_ENABLED=$(yq '.pgbouncer.enabled // false' "$infra_config")
     PG_VM_TAILSCALE_IP=$(yq '.pgbouncer.pg_vm_tailscale_ip // ""' "$infra_config")
+    # Flows straight into socat args and into `kubectl exec -- nc/wget` argv —
+    # must be a Tailscale CGNAT address, never a hostname or a YAML list.
+    [ -z "$PG_VM_TAILSCALE_IP" ] || mt_require_mesh_ip PG_VM_TAILSCALE_IP "$PG_VM_TAILSCALE_IP" "pgbouncer.pg_vm_tailscale_ip"
     PGBOUNCER_MAX_CLIENT_CONN=$(yq '.pgbouncer.max_client_conn // 400' "$infra_config")
     PGBOUNCER_DEFAULT_POOL_SIZE=$(yq '.pgbouncer.default_pool_size // 15' "$infra_config")
     PGBOUNCER_MIN_POOL_SIZE=$(yq '.pgbouncer.min_pool_size // 2' "$infra_config")

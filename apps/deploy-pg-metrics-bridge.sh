@@ -116,4 +116,15 @@ if mt_has_changes; then
   kubectl rollout status deployment/pg-metrics-bridge -n "$NS_DB" --timeout=120s
 fi
 
+# =============================================================================
+# Mesh gate — unconditional (a Ready pod says nothing about the tunnel, #613)
+# =============================================================================
+
+# socat's readiness probe is a TCP check on its own listener: the bridge stayed
+# "Ready" for months with a dead tunnel behind it. Prove the mesh, then prove
+# the real target — postgres_exporter on the PG VM answers through the sidecar.
+mt_wait_for_tailscale_sidecar "$NS_DB" app=pg-metrics-bridge tag:monitoring
+mt_tailscale_sidecar_fetch "$NS_DB" app=pg-metrics-bridge "http://${PG_VM_TAILSCALE_IP}:9187/metrics" '^pg_' 60 \
+  || { print_error "PG metrics bridge cannot fetch postgres_exporter metrics from ${PG_VM_TAILSCALE_IP}:9187 over the mesh"; exit 1; }
+
 print_success "PG metrics bridge deployed to $NS_DB"

@@ -31,6 +31,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   CVE-2026-18963 could not be hunted after the fact (no SEND_RESET_PASSWORD /
   UPDATE_PASSWORD trail). Applies to existing realms on the next `create_env`.
 
+- Every Tailscale-sidecar deploy script (`deploy-pgbouncer.sh`,
+  `deploy-pg-metrics-bridge.sh`, `deploy-tailscale-router.sh`,
+  `deploy-metrics-federation.sh`) now proves the mesh before reporting success:
+  `mt_wait_for_tailscale_sidecar` (new in `scripts/lib/common.sh`) requires
+  every pod's sidecar to report `BackendState=Running`, online, and carrying the
+  component's ACL tag — failing fast on `authkey expired` / an untagged node
+  with the repair command in the message — and a positive control hits the real
+  target through the tunnel (`mt_tailscale_sidecar_fetch`: postgres_exporter on
+  the PG VM for the bridge, the exposer's `/-/ready` for the federation consumer;
+  `mt_tailscale_sidecar_tcp_check`: PostgreSQL :5432 for PgBouncer). A Ready pod
+  used to say nothing about the tunnel — socat's readiness probe is a TCP check
+  on its own listener — so the bridge sat "Ready" with a dead tunnel on prod for
+  four days and on dev after every cold start since March (#613).
+- `tailscale.rules` alert group (`TailscaleSidecarAuthFailing`,
+  `TailscaleSidecarNotReady`) on `kube_pod_init_container_status_*{container="tailscale"}`:
+  the sidecars are native (restartable init) containers, which the stock
+  `KubePodCrashLooping` / `KubeContainerHighRestartRate` rules never see because
+  those read `kube_pod_container_*`. Both expressions fire on the live prod
+  outage and nowhere else (#613).
 ### Changed
 - `deploy_infra` now waits for every DaemonSet in the infra namespaces it
   owns to converge after the tier=system helmfile sync, and aborts the deploy

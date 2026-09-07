@@ -169,7 +169,7 @@ _ts_exists() {
   # Decide on the "<kind>/<name>" line itself: stderr is merged in for the
   # error message above, and kubectl can print exit-0 warnings there (client/
   # server version skew) that must not read as "present".
-  if printf '%s\n' "$out" | grep -qxE "[a-z0-9.]+/$name"; then echo present; else echo absent; fi
+  if printf '%s\n' "$out" | grep -cxE "[a-z0-9.]+/$name" >/dev/null; then echo present; else echo absent; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -386,12 +386,14 @@ mt_ts_verify_sidecar() {
       all_ok=true
       for pod in $pods; do
         logs=$(kubectl logs -n "$ns" "$pod" -c "$MT_TS_SIDECAR_CONTAINER" --tail=2000 2>/dev/null) || logs=""
-        if printf '%s\n' "$logs" | grep -qE "$MT_TS_FAILURE_RE"; then
+        # grep -c, not -q: -q exits on the first match and printf then dies of
+        # SIGPIPE, which `pipefail` reports as a failed pipeline (false negative).
+        if printf '%s\n' "$logs" | grep -cE "$MT_TS_FAILURE_RE" >/dev/null; then
           _ts_err "  $ns/$pod: Tailscale sidecar failed to authenticate:"
           printf '%s\n' "$logs" | grep -E "$MT_TS_FAILURE_RE" | tail -3 | sed 's/^/      /'
           return 1
         fi
-        printf '%s\n' "$logs" | grep -qE "$MT_TS_SUCCESS_RE" || all_ok=false
+        printf '%s\n' "$logs" | grep -cE "$MT_TS_SUCCESS_RE" >/dev/null || all_ok=false
       done
       if [ "$all_ok" = true ]; then
         count=$(printf '%s\n' "$pods" | grep -c .)
