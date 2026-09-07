@@ -19,6 +19,12 @@
 #     against the LB IP at deploy time and lists only the ones that point at us.
 #     A host joins spec.dnsNames on the first deploy after its CNAME lands, and
 #     cert-manager re-issues on that change — no operator step.
+#     Consequently the tenant must publish DNS-ONLY records (no CDN / orange
+#     cloud) for every host it wants on this certificate: a host fronted by the
+#     tenant's own CDN resolves to the CDN's addresses, is not "ours" to the
+#     check, and is left off even though HTTP-01 might validate through the CDN.
+#     The check fails closed: if a lookup errors (resolver timeout, SERVFAIL)
+#     rather than answering, create_env aborts instead of guessing.
 #
 # Required environment variables:
 #   TENANT_NAME       - Tenant name

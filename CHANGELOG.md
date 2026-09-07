@@ -152,8 +152,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   resolves each candidate (`mt_partition_hosts_by_target` in
   `scripts/lib/common.sh`), lists the excluded ones with the reason, fails
   fast if none point at us, and cert-manager re-issues automatically on the
-  first deploy after a missing CNAME lands. Unit-tested in
-  `scripts/tests/test-dns-helpers.sh` (new `shell-unit-tests` validate step).
+  first deploy after a missing CNAME lands. The lookup is fail-closed and
+  tri-state (resolved / definite negative / resolver error): only an
+  NXDOMAIN or NODATA answer from `dig` may exclude a host; a timeout or
+  SERVFAIL is retried with backoff, then against public resolvers, and if
+  it persists the deploy aborts rather than dropping a live host from the
+  certificate (which would re-issue a smaller cert and break that host until
+  the next deploy). Unit-tested in `scripts/tests/test-dns-helpers.sh` (new
+  `shell-unit-tests` validate step).
 - Tenant public-endpoint probes on every environment except prod referenced
   the blackbox modules `http_2xx_ext` / `http_synapse_ext`, which do not exist
   in `apps/values/blackbox-exporter.yaml` (they belonged to the SOCKS egress

@@ -168,9 +168,12 @@ print_status "Tenant namespaces created/verified"
 # Are this tenant's public DNS records Cloudflare-proxied (orange cloud)?
 # In-zone prod-style tenants (no env_dns_label) are proxied; labelled envs
 # (dev) stay DNS-only because Universal SSL covers *.domain but not
-# *.dev.domain. External-DNS tenants CNAME to our DNS-only LB alias (a
-# foreign-zone CNAME cannot be proxied). Decided once here; used by the
-# tenant DNS records below and by the endpoint-probe decision at the end.
+# *.dev.domain. External-DNS tenants are told to publish DNS-only records to
+# our LB alias; if a tenant fronts a host with its own CDN instead, that host
+# resolves to CDN addresses, is not "ours" for the checks below, and stays off
+# the certificate and probes (see certificate-http01.yaml.tpl). Decided once
+# here; used by the tenant DNS records below and by the endpoint-probe
+# decision at the end.
 if [ "${DNS_EXTERNAL:-false}" != "true" ] && { [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; }; then
   TENANT_DNS_CF_PROXIED="true"
 else
@@ -252,9 +255,12 @@ if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
   [ "$ADMIN_PORTAL_ENABLED" = "true" ]   && CERT_CANDIDATE_HOSTS+=" ${ADMIN_HOST}"
   [ "$ACCOUNT_PORTAL_ENABLED" = "true" ] && CERT_CANDIDATE_HOSTS+=" ${ACCOUNT_HOST}"
 
-  # Keep only the hosts whose CNAME chain ends at our LB right now.
+  # Keep only the hosts whose CNAME chain ends at our LB right now. A lookup
+  # that FAILS (resolver error, not a negative answer) aborts the deploy: a live
+  # host must never be dropped from the SAN list on a guess.
   # shellcheck disable=SC2086  # word-splitting the space-separated host list is intended
   mt_partition_hosts_by_target "$INGRESS_LB_IP" $CERT_CANDIDATE_HOSTS
+  mt_require_hosts_resolvable "${TENANT_NAME}'s service hosts (HTTP-01 SAN candidates)" || exit 1
   if [ -z "$MT_HOSTS_AT_TARGET" ]; then
     print_error "None of ${TENANT_NAME}'s service hosts resolve to our ingress LB ${INGRESS_LB_IP} — nothing to issue an HTTP-01 certificate for:"
     printf '%s' "$MT_HOSTS_NOT_AT_TARGET_DETAIL" | sed 's/^/  - /' >&2
@@ -1072,6 +1078,7 @@ if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
   fi
   # shellcheck disable=SC2046  # word-splitting the space-separated host list is intended
   mt_partition_hosts_by_target "$INGRESS_LB_IP" $(mt_probe_target_hosts "$ENDPOINT_PROBE_TARGETS")
+  mt_require_hosts_resolvable "${TENANT_NAME}'s public probe targets" || exit 1
   if [ -z "$MT_HOSTS_AT_TARGET" ]; then
     print_error "None of ${TENANT_NAME}'s probe targets resolve to our ingress LB ${INGRESS_LB_IP}:"
     printf '%s' "$MT_HOSTS_NOT_AT_TARGET_DETAIL" | sed 's/^/  - /' >&2
@@ -1128,7 +1135,9 @@ if mt_public_hosts_probeable_from_cluster "$INGRESS_USE_PROXY_PROTOCOL" "$TENANT
 else
   print_warning "Endpoint probes SKIPPED for tenant $TENANT: ingress use-proxy-protocol=${INGRESS_USE_PROXY_PROTOCOL} and the tenant's DNS records are not Cloudflare-proxied, so a pod's request to its public hosts is short-circuited past the NodeBalancer and rejected by ingress-nginx. No in-cluster path exists for this since the SOCKS egress proxy was removed (#281). Internal probes are deployed; public reachability is checked by scripts/verify-endpoints below."
   # Drop any public Probes a previous deploy left behind (they were 400/TargetDown).
-  kubectl delete probe "${TENANT}-endpoints" "${TENANT}-synapse-api" -n "$NS_MONITORING" --ignore-not-found 2>/dev/null || true
+  if ! _probe_delete_out=$(kubectl delete probe "${TENANT}-endpoints" "${TENANT}-synapse-api" -n "$NS_MONITORING" --ignore-not-found 2>&1); then
+    print_warning "Could not delete stale public Probes ${TENANT}-endpoints / ${TENANT}-synapse-api in ${NS_MONITORING}: ${_probe_delete_out}"
+  fi
 fi
 
 echo ""
