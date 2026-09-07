@@ -176,12 +176,22 @@ _mt_infra_load_env_config() {
     LLM_S3_PREFIX=$(yq '.llm.s3_prefix // "ollama"' "$infra_config")
     export LLM_S3_BUCKET LLM_S3_ENDPOINT LLM_S3_REGION LLM_S3_PREFIX
 
-    # Cross-cluster metrics federation
+    # Cross-cluster metrics federation. The consumer discovers the exposer's
+    # mesh IP from Headscale at deploy time; source_env narrows the lookup to
+    # the exposer of one environment (hostname prom-mesh-<source_env>) and
+    # source_mesh_ip is only a fallback for when no exposer is online.
     MT_METRICS_FED_ROLE=$(yq '.metrics_federation.role // ""' "$infra_config")
     MT_METRICS_FED_SOURCE_IP=$(yq '.metrics_federation.source_mesh_ip // ""' "$infra_config")
+    MT_METRICS_FED_SOURCE_ENV=$(yq '.metrics_federation.source_env // ""' "$infra_config")
     [ "$MT_METRICS_FED_ROLE" = "null" ] && MT_METRICS_FED_ROLE=""
     [ "$MT_METRICS_FED_SOURCE_IP" = "null" ] && MT_METRICS_FED_SOURCE_IP=""
-    export MT_METRICS_FED_ROLE MT_METRICS_FED_SOURCE_IP
+    [ "$MT_METRICS_FED_SOURCE_ENV" = "null" ] && MT_METRICS_FED_SOURCE_ENV=""
+    # source_env becomes part of a hostname regex — keep it a plain env label.
+    if [ -n "$MT_METRICS_FED_SOURCE_ENV" ] && ! [[ "$MT_METRICS_FED_SOURCE_ENV" =~ ^[a-z0-9-]+$ ]]; then
+      echo "[ERROR] metrics_federation.source_env ('$MT_METRICS_FED_SOURCE_ENV') must be an environment label ([a-z0-9-]+)" >&2
+      exit 1
+    fi
+    export MT_METRICS_FED_ROLE MT_METRICS_FED_SOURCE_IP MT_METRICS_FED_SOURCE_ENV
   else
     echo "[WARNING] Infrastructure config not found: $infra_config"
     echo "[WARNING] Using defaults: PG_READ_REPLICAS=1, KEYCLOAK_REPLICAS=2"

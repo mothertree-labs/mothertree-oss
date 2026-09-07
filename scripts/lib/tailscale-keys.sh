@@ -42,11 +42,13 @@
 # them (scripts/check-tailscale-keys -e <env> on every cluster reports what does).
 #
 # The sidecar-log proof after a restart is real for pods with a per-pod state Secret
-# (pgbouncer, pg-metrics-bridge, federation): a new pod is a fresh registration and
-# Headscale validates the key. The subnet router keeps a fixed-name state Secret and
-# re-registers an existing node, for which Headscale does not re-validate the auth
-# key (its pod restarted fine on 2026-09-02 with an expired key in the Secret) — so
-# for the router the proof only shows the restart worked, not the new key.
+# (pgbouncer, pg-metrics-bridge): a new pod is a fresh registration and Headscale
+# validates the key. The subnet router and the metrics federation pair keep a
+# fixed-name state Secret (stable node identity and mesh IP — see the node
+# identity helpers at the end of this file) and re-register an existing node,
+# for which Headscale does not re-validate the auth key (the router pod restarted
+# fine on 2026-09-02 with an expired key in the Secret) — so for those the proof
+# only shows the restart worked, not the new key.
 #
 # Requirements: bash 3.2+, curl, jq, kubectl. Env: HEADSCALE_URL, HEADSCALE_API_KEY.
 # Portability: no GNU-only flags — runs on busybox (CronJob) and macOS (operators).
@@ -481,4 +483,150 @@ mt_ts_run_components() {
     _ts_log "=== Rotation complete: $MT_TS_RUN_ROTATED rotated, $MT_TS_RUN_ERRORS error(s) ==="
   fi
   [ "$MT_TS_RUN_ERRORS" -eq 0 ]
+}
+
+# ===========================================================================
+# Node identity helpers — for sidecars that keep ONE Headscale node across pod
+# recreations via a fixed-name state Secret (subnet router, metrics federation).
+# Also used for the one-time migration away from per-pod state Secrets and for
+# pruning the per-pod ones that pod churn leaves behind.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# mt_ts_find_online_nodes <name-regex> <tag>
+# One line per ONLINE Headscale node whose advertised hostname (.name — the
+# sidecar's TS_HOSTNAME, unlike .givenName which Headscale suffixes on a
+# collision) matches <name-regex> and whose tags include <tag>:
+#     <givenName>\t<ipv4>
+# Prints nothing when none match; returns 1 only on an API error.
+# ---------------------------------------------------------------------------
+mt_ts_find_online_nodes() {
+  local re="$1" tag="$2" nodes
+  nodes=$(_ts_api GET /api/v1/node) || { _ts_err "Headscale API: cannot list nodes at ${HEADSCALE_URL:-<unset>}"; return 1; }
+  printf '%s' "$nodes" | jq -r --arg re "$re" --arg t "$tag" '
+    .nodes[]
+    | select(.online == true)
+    | select((.name // "") | test($re))
+    | select(((.tags // []) + (.validTags // []) + (.forcedTags // [])) | any(. == $t))
+    | "\(.givenName // .name)\t\([.ipAddresses[]? | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"))] | .[0] // "")"'
+}
+
+# ---------------------------------------------------------------------------
+# mt_ts_resolve_node <name-regex> <tag> [timeout] — exactly ONE online node.
+# Prints "<givenName>\t<ipv4>" and returns 0. Zero or several matches are
+# retried until the timeout (right after a re-registration Headscale can show
+# the superseded node online for a few seconds next to the new one), then
+# return 1 with MT_TS_RESOLVE_REASON = none | ambiguous and the candidates in
+# MT_TS_RESOLVE_CANDIDATES. An API error returns 1 immediately (reason: api).
+# ---------------------------------------------------------------------------
+MT_TS_RESOLVE_REASON=""
+MT_TS_RESOLVE_CANDIDATES=""
+MT_TS_RESOLVE_INTERVAL="${MT_TS_RESOLVE_INTERVAL:-5}"
+mt_ts_resolve_node() {
+  local re="$1" tag="$2" timeout="${3:-60}" start=$SECONDS found n
+  MT_TS_RESOLVE_REASON=""; MT_TS_RESOLVE_CANDIDATES=""
+  while :; do
+    # On an API error the captured text is the error line (print_error writes
+    # to stdout when common.sh is loaded) — hand it back so the caller can show it.
+    found=$(mt_ts_find_online_nodes "$re" "$tag") || { MT_TS_RESOLVE_REASON=api; printf '%s\n' "$found"; return 1; }
+    n=$(printf '%s\n' "$found" | grep -c . || true)
+    if [ "$n" -eq 1 ] && [ -n "$(printf '%s' "$found" | cut -f2)" ]; then
+      printf '%s\n' "$found"
+      return 0
+    fi
+    if [ $((SECONDS - start)) -ge "$timeout" ]; then
+      # shellcheck disable=SC2034  # read by the calling deploy script
+      MT_TS_RESOLVE_CANDIDATES="$found"
+      # shellcheck disable=SC2034
+      if [ "$n" -eq 0 ]; then MT_TS_RESOLVE_REASON=none; else MT_TS_RESOLVE_REASON=ambiguous; fi
+      return 1
+    fi
+    sleep "$MT_TS_RESOLVE_INTERVAL"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# mt_ts_adopt_pod_state_secret <ns> <prefix> <pod-selector>
+# One-time migration from a per-pod state Secret ("<prefix>-tailscale-state-<pod>")
+# to the fixed-name one ("<prefix>-tailscale-state") that keeps the sidecar's
+# Headscale node — and therefore its mesh IP — across pod recreations. The
+# running pod's state is copied only while that pod's tailscaled is Running and
+# online, so a dead registration (#613) is never carried over: the alternative
+# is a fresh node, which the discovery in the consumer handles. Returns 0 in
+# every non-error case; sets MT_TS_STATE_ADOPTED=true and flags common.sh's
+# change tracker when it wrote the Secret (the Deployment must restart to load it).
+# ---------------------------------------------------------------------------
+MT_TS_STATE_ADOPTED=false
+mt_ts_adopt_pod_state_secret() {
+  local ns="$1" prefix="$2" sel="$3" fixed="$2-tailscale-state" state pod per_pod status ip
+  MT_TS_STATE_ADOPTED=false
+  state=$(_ts_exists secret "$fixed" "$ns") || return 1
+  if [ "$state" = present ]; then
+    _ts_log "  $ns/$fixed: fixed-name state Secret present — node identity is stable"
+    return 0
+  fi
+  pod=$(kubectl get pods -n "$ns" -l "$sel" -o json 2>/dev/null \
+    | jq -r '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")] | .[0].metadata.name // empty') || pod=""
+  if [ -z "$pod" ]; then
+    _ts_log "  $ns/$fixed: absent and no running pod to adopt from — the sidecar will register a fresh node"
+    return 0
+  fi
+  per_pod="${prefix}-tailscale-state-${pod}"
+  state=$(_ts_exists secret "$per_pod" "$ns") || return 1
+  if [ "$state" = absent ]; then
+    _ts_log "  $ns/$fixed: absent; $pod has no per-pod state Secret — the sidecar will register a fresh node"
+    return 0
+  fi
+  status=$(kubectl exec -n "$ns" "$pod" -c "$MT_TS_SIDECAR_CONTAINER" -- tailscale status --json 2>/dev/null) || status=""
+  if ! printf '%s' "$status" | jq -e '.BackendState == "Running" and (.Self.Online // false)' >/dev/null 2>&1; then
+    _ts_warn "  $ns/$fixed: not adopting $per_pod — $pod's sidecar is not Running+online; the sidecar will register a fresh node"
+    return 0
+  fi
+  ip=$(printf '%s' "$status" | jq -r '.Self.TailscaleIPs[0] // "?"')
+  # Copy type + data under the fixed name, dropping server-set metadata. The
+  # node key travels kubectl -> jq -> kubectl over pipes, never through argv.
+  if kubectl get secret "$per_pod" -n "$ns" -o json \
+      | jq --arg n "$fixed" '{apiVersion, kind, type, data, metadata: {name: $n, namespace: .metadata.namespace, labels: (.metadata.labels // {})}}' \
+      | kubectl create -f - >/dev/null; then
+    _mt_deploy_changed=true   # common.sh change tracker (harmless when common.sh is not loaded)
+    # shellcheck disable=SC2034  # read by callers / tests
+    MT_TS_STATE_ADOPTED=true
+    _ts_log "  $ns/$fixed: adopted the node identity of $pod (mesh IP $ip) from $per_pod"
+  else
+    _ts_err "  $ns/$fixed: failed to create the fixed-name state Secret from $per_pod"
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# mt_ts_prune_pod_state_secrets <ns> <prefix>
+# Delete per-pod state Secrets "<prefix>-tailscale-state-<pod>" whose pod no
+# longer exists (every recreation of a per-pod-state sidecar leaves one behind;
+# each also backs an offline Headscale node the cleanup CronJob removes). The
+# fixed-name "<prefix>-tailscale-state" never matches (no "-<pod>" suffix), a
+# Secret whose pod still exists — Running or Terminating — is kept, and a
+# failed pod lookup keeps the Secret: deleting on a lost answer is the #623 trap.
+# ---------------------------------------------------------------------------
+mt_ts_prune_pod_state_secrets() {
+  local ns="$1" prefix="$2" names name pod state deleted=0 kept=0
+  names=$(kubectl get secrets -n "$ns" -o json 2>/dev/null \
+    | jq -r --arg p "${prefix}-tailscale-state-" '.items[].metadata.name | select(startswith($p))') \
+    || { _ts_warn "  $ns: cannot list state Secrets of $prefix — nothing pruned"; return 0; }
+  [ -n "$names" ] || return 0
+  for name in $names; do
+    pod="${name#"${prefix}-tailscale-state-"}"
+    # Only pod-shaped suffixes: <deployment>-<replicaset hash>-<5 chars>
+    case "$pod" in
+      "${prefix}"-*-[a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]) ;;
+      *) kept=$((kept + 1)); continue ;;
+    esac
+    if ! state=$(_ts_exists pod "$pod" "$ns"); then kept=$((kept + 1)); continue; fi
+    if [ "$state" = present ]; then kept=$((kept + 1)); continue; fi
+    if kubectl delete secret "$name" -n "$ns" --ignore-not-found >/dev/null 2>&1; then
+      _ts_log "  $ns/$name: pruned (pod $pod is gone)"; deleted=$((deleted + 1))
+    else
+      _ts_warn "  $ns/$name: could not delete"; kept=$((kept + 1))
+    fi
+  done
+  _ts_log "  $ns: per-pod state Secrets of $prefix — $deleted pruned, $kept kept"
 }

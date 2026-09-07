@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Cross-cluster metrics federation no longer breaks when the prod-eu exposer
+  pod is recreated. Both federation pods now keep a fixed-name Tailscale state
+  Secret (`<name>-tailscale-state`, like the subnet router) so a recreation
+  re-registers the same Headscale node and keeps its mesh IP; the consumer
+  discovers the exposer's current IP from the Headscale node list at deploy
+  time (`metrics_federation.source_mesh_ip` is now only a fallback, with an
+  optional `metrics_federation.source_env` to pin the exposer's environment);
+  the consumer's mesh positive control is fatal. The first deploy adopts the
+  running pod's per-pod state under the fixed name, so the live node identity
+  is preserved. Prometheus on the consumer scrapes the bridge (one series
+  through the tunnel) and a `MetricsFederationDown` alert covers the path.
+- Per-pod Tailscale state Secrets left behind by pod churn (pgbouncer,
+  pg-metrics-bridge, the federation pair) are pruned by their deploy scripts
+  once the pod is gone, and the `headscale-cleanup` CronJob now also removes
+  federation nodes that have been offline for 48h+ (never online ones).
+
 ### Security
 - Keycloak `26.5.1` → `26.7.2` (`apps/values/keycloak-codecentric.yaml`).
   Fixes CVE-2026-18963 (keycloak/keycloak#51833, severity critical): an

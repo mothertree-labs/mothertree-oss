@@ -9,6 +9,9 @@ metadata:
     component: metrics-federation
 ---
 # Role granting the Tailscale sidecar permission to manage its state Secret
+# (${FED_NAME}-tailscale-state, fixed name). `create` cannot be name-restricted
+# in RBAC and the sidecar creates the Secret on first start, so the rule stays
+# namespace-wide like the subnet router's.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
