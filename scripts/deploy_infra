@@ -71,6 +71,10 @@ if mt_is_prod_like; then
       print_error "alertbot.room_id in ${_alerting_secrets} is not a Matrix room id (expected '!<opaque>:<server>')"
       exit 1 ;;
   esac
+  # One Healthchecks check PER ENVIRONMENT: a URL copied from another env keeps
+  # that env's Watchdog pinging the check green while this one is dead — the
+  # blind spot this gate exists to close. The gate cannot tell a copied URL
+  # from a fresh one; the operator has to.
   case "$HEALTHCHECKS_DEADMAN_URL" in
     *REPLACE_WITH*)
       print_error "healthchecks.deadman_url in ${_alerting_secrets} is still the template placeholder — create a check on healthchecks.io and paste its ping URL"

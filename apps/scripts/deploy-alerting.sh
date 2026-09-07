@@ -144,8 +144,14 @@ kubectl rollout restart deployment/matrix-alertmanager -n "$NS_MONITORING" 2>/de
 print_status "Waiting for matrix-alertmanager to be ready..."
 if kubectl rollout status deployment/matrix-alertmanager -n "$NS_MONITORING" --timeout=120s; then
   print_success "matrix-alertmanager deployed successfully"
+elif mt_is_prod_like; then
+  # A bridge that never becomes Ready is an undeliverable alert channel — the
+  # exact state deploy_infra's fail-fast exists to rule out. Fatal outside dev.
+  print_error "matrix-alertmanager did not become Ready within 120s — alert delivery is mandatory outside dev"
+  print_error "Check: kubectl logs -n $NS_MONITORING -l app=matrix-alertmanager ; kubectl describe deployment/matrix-alertmanager -n $NS_MONITORING"
+  exit 1
 else
-  print_warning "matrix-alertmanager deployment may not be ready yet"
+  print_warning "matrix-alertmanager deployment may not be ready yet (non-fatal on dev)"
   print_status "Check logs: kubectl logs -n $NS_MONITORING -l app=matrix-alertmanager"
 fi
 
@@ -157,7 +163,7 @@ print_success "Alerting deployment complete for $MT_ENV"
 echo ""
 print_status "Next steps:"
 echo "  1. Ensure the alertbot user ($ALERTBOT_USER_ID) is invited to the alerts room AND the deploy room"
-echo "  2. Alerts room ID is configured in apps/environments/$MT_ENV/prometheus.yaml"
-echo "     Deploy room ID is configured in tenant secrets (alertbot.deploy_room_id)"
-echo "  3. Run 'helmfile -e $MT_ENV -l name=kube-prometheus-stack apply' to update AlertManager config"
+echo "  2. Alerts room ID and deploy room ID come from the infra tenant's secrets"
+echo "     (alertbot.room_id / alertbot.deploy_room_id); deploy_infra renders them into Alertmanager"
+echo "  3. Re-run deploy_infra -e $MT_ENV after changing either (it syncs kube-prometheus-stack)"
 echo "  4. Monitor logs: kubectl logs -n $NS_MONITORING -l app=matrix-alertmanager"
