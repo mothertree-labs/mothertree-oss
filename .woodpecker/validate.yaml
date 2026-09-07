@@ -16,6 +16,14 @@ steps:
       - ci/scripts/shellcheck.sh
     depends_on: []
 
+  # Unit tests for the pure-bash helpers in scripts/lib (stubbed resolvers,
+  # no cluster, no network). Add new scripts/tests/test-*.sh files here.
+  - name: shell-unit-tests
+    image: bash
+    commands:
+      - scripts/tests/test-dns-helpers.sh
+    depends_on: []
+
   - name: terraform-validate
     image: bash
     commands:

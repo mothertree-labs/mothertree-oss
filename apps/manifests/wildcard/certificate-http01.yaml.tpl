@@ -13,13 +13,20 @@
 #   - internal/operator-only hosts (e.g. synapse-admin) — not publicly reachable,
 #     so HTTP-01 (which needs LE to fetch /.well-known/acme-challenge over :80)
 #     cannot validate them, and HTTP-01 is all-or-nothing across SANs.
+#   - enabled hosts whose CNAME does not (yet) resolve to our ingress LB — the
+#     tenant owns its zone and adds records on its own schedule. Because one
+#     unresolvable SAN fails the whole order, create_env checks every candidate
+#     against the LB IP at deploy time and lists only the ones that point at us.
+#     A host joins spec.dnsNames on the first deploy after its CNAME lands, and
+#     cert-manager re-issues on that change — no operator step.
 #
 # Required environment variables:
 #   TENANT_NAME       - Tenant name
 #   NS_MATRIX         - Namespace where the Certificate + secret live
 #   TENANT_NAMESPACES - Comma-separated target namespaces for reflector mirroring
 #   CERT_SAN_LINES    - Pre-rendered YAML list items (one `    - "host"` per line),
-#                       built by create_env from the enabled public service hosts.
+#                       built by create_env from the enabled public service hosts
+#                       that currently resolve to our ingress LB (see above).
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate

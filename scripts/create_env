@@ -204,23 +204,60 @@ if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
   # reference (wildcard-tls-${TENANT_NAME}, reflected) -> no ingress changes.
   # Internal/operator hosts and the bare apex are excluded by design (they are
   # not publicly reachable for HTTP-01 / the apex is the tenant's own website).
+  #
+  # HTTP-01 is ALL-OR-NOTHING across SANs: one host whose CNAME the tenant has
+  # not created yet (or that points elsewhere) fails the whole order, and the
+  # Secret keeps whatever it held before — which is how a tenant's live hosts
+  # ended up serving an expired, mismatched cert for months while its remaining
+  # CNAMEs were "coming soon". So the SAN list is built from the enabled hosts
+  # that CURRENTLY resolve to our ingress LB IP; the rest are reported and left
+  # out. cert-manager re-issues whenever spec.dnsNames changes, so a host joins
+  # the certificate automatically on the first deploy after its CNAME lands —
+  # no operator step, no config change.
   print_status "Deploying HTTP-01 multi-SAN TLS certificate for $TENANT_NAME (dns_external=true)..."
 
-  # Build the SAN list from enabled, publicly-reachable services. HTTP-01 is
-  # all-or-nothing across SANs, so every included host's CNAME must resolve to us.
-  CERT_SAN_LINES=""
-  [ "$MATRIX_ENABLED" = "true" ]         && CERT_SAN_LINES+="    - \"${MATRIX_HOST}\""$'\n'
-  CERT_SAN_LINES+="    - \"${AUTH_HOST}\""$'\n'
-  [ "$JITSI_ENABLED" = "true" ]          && CERT_SAN_LINES+="    - \"${JITSI_HOST}\""$'\n'
-  [ "$DOCS_ENABLED" = "true" ]           && CERT_SAN_LINES+="    - \"${DOCS_HOST}\""$'\n'
-  [ "$FILES_ENABLED" = "true" ]          && CERT_SAN_LINES+="    - \"${FILES_HOST}\""$'\n'
-  [ "$CALENDAR_ENABLED" = "true" ]       && CERT_SAN_LINES+="    - \"${CALENDAR_HOST}\""$'\n'
-  [ "$OFFICE_ENABLED" = "true" ]         && CERT_SAN_LINES+="    - \"${OFFICE_HOST}\""$'\n'
-  [ "$ADMIN_PORTAL_ENABLED" = "true" ]   && CERT_SAN_LINES+="    - \"${ADMIN_HOST}\""$'\n'
-  [ "$ACCOUNT_PORTAL_ENABLED" = "true" ] && CERT_SAN_LINES+="    - \"${ACCOUNT_HOST}\""$'\n'
+  INGRESS_LB_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  if [ -z "$INGRESS_LB_IP" ]; then
+    print_error "Cluster ingress LB IP not available — cannot tell which ${TENANT_DOMAIN} hosts point at us"
+    print_error "Check: kubectl get svc ingress-nginx-controller -n ${NS_INGRESS}"
+    exit 1
+  fi
+  if ! mt_have_dns_resolver; then
+    print_error "No DNS resolver CLI (dig/getent/host/nslookup) — cannot verify which SAN hosts point at ${INGRESS_LB_IP}"
+    exit 1
+  fi
+
+  # Candidate SANs: the enabled, publicly served service hosts.
+  CERT_CANDIDATE_HOSTS=""
+  [ "$MATRIX_ENABLED" = "true" ]         && CERT_CANDIDATE_HOSTS+=" ${MATRIX_HOST}"
+  CERT_CANDIDATE_HOSTS+=" ${AUTH_HOST}"
+  [ "$JITSI_ENABLED" = "true" ]          && CERT_CANDIDATE_HOSTS+=" ${JITSI_HOST}"
+  [ "$DOCS_ENABLED" = "true" ]           && CERT_CANDIDATE_HOSTS+=" ${DOCS_HOST}"
+  [ "$FILES_ENABLED" = "true" ]          && CERT_CANDIDATE_HOSTS+=" ${FILES_HOST}"
+  [ "$CALENDAR_ENABLED" = "true" ]       && CERT_CANDIDATE_HOSTS+=" ${CALENDAR_HOST}"
+  [ "$OFFICE_ENABLED" = "true" ]         && CERT_CANDIDATE_HOSTS+=" ${OFFICE_HOST}"
+  [ "$ADMIN_PORTAL_ENABLED" = "true" ]   && CERT_CANDIDATE_HOSTS+=" ${ADMIN_HOST}"
+  [ "$ACCOUNT_PORTAL_ENABLED" = "true" ] && CERT_CANDIDATE_HOSTS+=" ${ACCOUNT_HOST}"
+
+  # Keep only the hosts whose CNAME chain ends at our LB right now.
+  # shellcheck disable=SC2086  # word-splitting the space-separated host list is intended
+  mt_partition_hosts_by_target "$INGRESS_LB_IP" $CERT_CANDIDATE_HOSTS
+  if [ -z "$MT_HOSTS_AT_TARGET" ]; then
+    print_error "None of ${TENANT_NAME}'s service hosts resolve to our ingress LB ${INGRESS_LB_IP} — nothing to issue an HTTP-01 certificate for:"
+    printf '%s' "$MT_HOSTS_NOT_AT_TARGET_DETAIL" | sed 's/^/  - /' >&2
+    print_error "dns_external=true: the tenant must CNAME each service host (chain ending at ${INGRESS_LB_IP}). Nothing was changed."
+    exit 1
+  fi
+  if [ -n "$MT_HOSTS_NOT_AT_TARGET" ]; then
+    print_warning "HTTP-01 certificate: leaving out hosts that do not (yet) resolve to our ingress LB ${INGRESS_LB_IP} — EXPECTED for dns_external until the tenant adds its remaining CNAMEs:"
+    printf '%s' "$MT_HOSTS_NOT_AT_TARGET_DETAIL" | sed 's/^/  - /'
+    print_warning "They join the certificate automatically on the first deploy after their CNAME resolves to us; until then their ingresses serve the controller's fake cert."
+  fi
+  CERT_SAN_LINES=$(mt_http01_san_lines "$MT_HOSTS_AT_TARGET")
   export CERT_SAN_LINES
-  print_status "HTTP-01 certificate SANs:"
-  printf '%s' "$CERT_SAN_LINES"
+  print_status "HTTP-01 certificate SANs (resolving to ${INGRESS_LB_IP}):"
+  printf '%s\n' "$CERT_SAN_LINES"
 
   # Remove any pre-existing DNS-01 wildcard/apex Certificates so they don't fight
   # over the shared wildcard-tls-${TENANT_NAME} secret (e.g. a tenant that moved
@@ -233,7 +270,7 @@ if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
     print_success "wildcard-tls (HTTP-01 multi-SAN) is ready"
   else
     print_warning "wildcard-tls (HTTP-01) not ready after 300s"
-    print_warning "  HTTP-01 is all-or-nothing: confirm every SAN host's CNAME resolves to our ingress."
+    print_warning "  HTTP-01 is all-or-nothing: every SAN above resolved to ${INGRESS_LB_IP} at deploy time, so look at the challenges (port 80 reachability, solver ingress, ACME rate limits)."
     print_warning "  Debug: kubectl describe certificate wildcard-tls -n $NS_MATRIX ; kubectl get challenge -n $NS_MATRIX"
     print_warning "Continuing — ingresses will serve the cert once issued."
   fi

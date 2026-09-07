@@ -13,6 +13,8 @@
 #   wait_for_dns        — wait for DNS resolution inside a namespace
 #   read_k8s_secret     — read a secret key from a K8s Secret
 #   mt_require_commands — verify required CLI tools are available
+#   mt_host_resolves / mt_host_resolves_to / mt_partition_hosts_by_target
+#                       — public DNS checks (does a host point at our ingress?)
 
 # Guard against double-sourcing
 if [ "${_MT_COMMON_LOADED:-}" = "1" ]; then
@@ -690,6 +692,109 @@ mt_host_resolves() {
     else
         return 0
     fi
+}
+
+# ---------------------------------------------------------------------------
+# DNS helpers: "does this public host point at OUR ingress?"
+# ---------------------------------------------------------------------------
+# Used by create_env for external-DNS tenants (dns_external=true). An HTTP-01
+# multi-SAN certificate is all-or-nothing, so a host may only be included once
+# its CNAME chain actually ends at our ingress LB. "Resolves" is not enough —
+# a name that resolves somewhere else fails the challenge for every SAN.
+# Kept bash-3.2 friendly (space-separated strings, no arrays): create_env is
+# also run from macOS /bin/bash.
+
+# Returns 0 if a DNS resolver CLI is available (dig, getent, host, nslookup).
+# Usage: mt_have_dns_resolver
+mt_have_dns_resolver() {
+    command -v dig >/dev/null 2>&1 || command -v getent >/dev/null 2>&1 \
+        || command -v host >/dev/null 2>&1 || command -v nslookup >/dev/null 2>&1
+}
+
+# Print the IPv4 addresses <host> currently resolves to, one per line, CNAME
+# chains followed. Returns 1 if the name does not resolve (NXDOMAIN, no A
+# records, or resolver timeout), 2 if no resolver CLI is available. Prints
+# nothing but IPv4 literals, whatever the tool's chatter.
+# Usage: mt_resolve_ipv4 <hostname>
+mt_resolve_ipv4() {
+    local host="$1" raw="" ips=""
+    [ -z "$host" ] && return 1
+    if command -v dig >/dev/null 2>&1; then
+        raw=$(dig +short +time=3 +tries=2 A "$host" 2>/dev/null || true)
+    elif command -v getent >/dev/null 2>&1; then
+        raw=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' || true)
+    elif command -v host >/dev/null 2>&1; then
+        raw=$(host -t A "$host" 2>/dev/null | awk '/has address/ {print $NF}' || true)
+    elif command -v nslookup >/dev/null 2>&1; then
+        raw=$(nslookup -type=A "$host" 2>/dev/null | awk '/^Address:/ {print $2}' || true)
+    else
+        return 2
+    fi
+    ips=$(printf '%s\n' "$raw" | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | sort -u || true)
+    [ -n "$ips" ] || return 1
+    printf '%s\n' "$ips"
+}
+
+# Internal: returns 0 if any line of <resolved> (newline-separated IPv4s) is in
+# <ips> (comma- or space-separated).
+_mt_any_ip_in_list() {
+    local resolved="$1" ips="$2" ip
+    for ip in ${ips//,/ }; do
+        if printf '%s\n' "$resolved" | grep -qxF "$ip"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Returns 0 when <host> currently resolves to at least one IPv4 in <ips>
+# (comma- or space-separated). Distinguishes "points at us" from "resolves".
+# Usage: mt_host_resolves_to <hostname> <ip>[,<ip>...]
+mt_host_resolves_to() {
+    local host="$1" ips="$2" resolved
+    resolved=$(mt_resolve_ipv4 "$host") || return 1
+    _mt_any_ip_in_list "$resolved" "$ips"
+}
+
+# Partition <host>... by whether each currently resolves to one of <ips>.
+# Sets three globals (strings, so callers work under bash 3.2 + set -u):
+#   MT_HOSTS_AT_TARGET            space-separated hosts that point at <ips>
+#   MT_HOSTS_NOT_AT_TARGET        space-separated hosts that do not
+#   MT_HOSTS_NOT_AT_TARGET_DETAIL one "host: <why>" line per excluded host
+#                                 (what it resolves to, or "does not resolve")
+# Each host is resolved exactly once. Always returns 0; the caller decides what
+# an empty MT_HOSTS_AT_TARGET means.
+# Usage: mt_partition_hosts_by_target "<ip>[,<ip>...]" <host>...
+mt_partition_hosts_by_target() {
+    local ips="$1"
+    shift
+    MT_HOSTS_AT_TARGET=""
+    MT_HOSTS_NOT_AT_TARGET=""
+    MT_HOSTS_NOT_AT_TARGET_DETAIL=""
+    local host resolved
+    for host in "$@"; do
+        if resolved=$(mt_resolve_ipv4 "$host"); then
+            if _mt_any_ip_in_list "$resolved" "$ips"; then
+                MT_HOSTS_AT_TARGET="${MT_HOSTS_AT_TARGET:+$MT_HOSTS_AT_TARGET }$host"
+                continue
+            fi
+            MT_HOSTS_NOT_AT_TARGET_DETAIL+="${host}: resolves to $(printf '%s\n' "$resolved" | tr '\n' ' ' | sed 's/ $//') (not our ingress)"$'\n'
+        else
+            MT_HOSTS_NOT_AT_TARGET_DETAIL+="${host}: does not resolve"$'\n'
+        fi
+        MT_HOSTS_NOT_AT_TARGET="${MT_HOSTS_NOT_AT_TARGET:+$MT_HOSTS_NOT_AT_TARGET }$host"
+    done
+    return 0
+}
+
+# Render the CERT_SAN_LINES block of certificate-http01.yaml.tpl (YAML list
+# items, 4-space indent) from a space-separated host list.
+# Usage: mt_http01_san_lines "<host> <host> ..."
+mt_http01_san_lines() {
+    local host
+    for host in $1; do
+        printf '    - "%s"\n' "$host"
+    done
 }
 
 # Wait for Nextcloud's occ status to report installed=true.

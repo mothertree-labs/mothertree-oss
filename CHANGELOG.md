@@ -143,6 +143,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   WebUI retrieval → sources + cited answer; user-role JWT sees both models).
 
 ### Fixed
+- External-DNS tenants (`dns_external: true`): the HTTP-01 multi-SAN
+  certificate is now issued over the enabled service hosts that currently
+  resolve to our ingress LB, instead of over all of them. HTTP-01 is
+  all-or-nothing, so one host whose CNAME the tenant had not created yet kept
+  the whole order pending and left the live hosts serving an expired,
+  mismatched cert (ingress-nginx's fake cert) for months. `create_env` now
+  resolves each candidate (`mt_partition_hosts_by_target` in
+  `scripts/lib/common.sh`), lists the excluded ones with the reason, fails
+  fast if none point at us, and cert-manager re-issues automatically on the
+  first deploy after a missing CNAME lands. Unit-tested in
+  `scripts/tests/test-dns-helpers.sh` (new `shell-unit-tests` validate step).
 - `mt_wait_for_daemonset` no longer fails fast on Terminating pods. When a
   rollout replaces a crash-looping DaemonSet pod, the old pod keeps reporting
   `CrashLoopBackOff` for a few seconds until it is gone; the gate could abort
