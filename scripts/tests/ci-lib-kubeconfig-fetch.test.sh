@@ -89,7 +89,7 @@ sleep() {
 PASS=0
 FAIL=0
 KCFG_B64=$(printf 'apiVersion: v1\nkind: Config\n' | base64 | tr -d '\n')
-LIST_OK='{"data":[{"id":651432,"label":"matrix-cluster-dev"},{"id":1,"label":"matrix-cluster-prod"}]}'
+LIST_OK='{"data":[{"id":12345,"label":"matrix-cluster-dev"},{"id":1,"label":"matrix-cluster-prod"}]}'
 KCFG_OK="{\"kubeconfig\":\"$KCFG_B64\"}"
 NOT_YET='{"errors":[{"field":"","reason":"Cluster kubeconfig is not yet available. Please try again later."}]}'
 
@@ -119,7 +119,7 @@ run_case() {
       echo "  target content wrong"; ok=0
     fi
     local mode
-    mode=$(stat -f '%Lp' "$target" 2>/dev/null || stat -c '%a' "$target")
+    mode=$(stat -c '%a' "$target" 2>/dev/null || stat -f '%Lp' "$target")
     [ "$mode" = "600" ] || { echo "  target mode: want 600 got $mode"; ok=0; }
   else
     [ ! -s "$target" ] || { echo "  target written on failure"; ok=0; }

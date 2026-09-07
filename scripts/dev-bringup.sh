@@ -53,7 +53,9 @@ _linode_cli_retry() {
     local waited=0 attempt=0 rc=1 parsed hint
     while :; do
         attempt=$((attempt + 1))
-        linode-cli "$@" >"$_LC_RAW" 2>"$_LC_STDERR" && rc=0 || rc=$?
+        # Subshell umask so the recreated scratch files (they hold the kubeconfig
+        # JSON on the warm path) are 0600 even after the first cleanup below.
+        ( umask 077; exec linode-cli "$@" >"$_LC_RAW" 2>"$_LC_STDERR" ) && rc=0 || rc=$?
         if [ "$rc" -eq 0 ]; then
             parsed=$(jq -r "$jq_check" "$_LC_RAW" 2>/dev/null || true)
             [ -n "$parsed" ] && return 0
