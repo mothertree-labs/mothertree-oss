@@ -461,12 +461,18 @@
         dest: /usr/local/bin/kubectl
         mode: "0755"
 
-    - name: Install jq, envsubst, ansible-core, python3-pip
+    - name: Install jq, envsubst, ansible-core, python3-pip, dig
       ansible.builtin.apt:
         name:
           - jq
           - gettext-base
           - ansible-core
+          # dig: scripts/lib/common.sh resolves external-DNS tenant hosts with
+          # a tri-state verdict (create_env HTTP-01 SAN list + probe targets).
+          # Only dig exposes the response status, so without it every negative
+          # answer is an unknown and those deploys fail closed. Ships in the
+          # Ubuntu base image today; declared so a rebuild cannot lose it.
+          - bind9-dnsutils
           # pip is used to install awscli + linode-cli below; the apt-packaged
           # awscli was removed from the default repos starting in Ubuntu 24.04
           # / Debian 13, so we install both via pip instead.

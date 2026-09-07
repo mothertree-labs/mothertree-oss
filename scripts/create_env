@@ -99,6 +99,23 @@ print_status "Hosts: llm=$LLM_HOST"
 print_status "S3 bucket (files): $S3_FILES_BUCKET"
 print_status "Scaling: docs_backend=$DOCS_BACKEND_MIN_REPLICAS-$DOCS_BACKEND_MAX_REPLICAS, jvb=$JVB_MIN_REPLICAS-$JVB_MAX_REPLICAS, redis=$REDIS_REPLICAS"
 
+# Are this tenant's public DNS records Cloudflare-proxied (orange cloud)?
+# In-zone prod-style tenants (no env_dns_label) are proxied; labelled envs
+# (dev) stay DNS-only because Universal SSL covers *.domain but not
+# *.dev.domain. External-DNS tenants are told to publish DNS-only records to
+# our LB alias; if a tenant fronts a host with its own CDN instead, that host
+# resolves to CDN addresses, is not "ours" for the checks below, and stays off
+# the certificate and probes (see certificate-http01.yaml.tpl).
+# Decided once here, BEFORE the --finalize-only split: the tenant DNS records
+# (prep phase) and the endpoint-probe decision (finalize phase) both read it,
+# and under CI's split run each phase is a separate process (pipeline 2094
+# died on an unbound variable when this lived inside the prep-only block).
+if [ "${DNS_EXTERNAL:-false}" != "true" ] && { [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; }; then
+  TENANT_DNS_CF_PROXIED="true"
+else
+  TENANT_DNS_CF_PROXIED="false"
+fi
+
 # When --finalize-only, skip infra verification and helm setup (already done in prep)
 if [ "$FINALIZE_ONLY" = "true" ]; then
   print_status "Running finalize-only mode — skipping to cleanup and health checks"
@@ -204,23 +221,63 @@ if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
   # reference (wildcard-tls-${TENANT_NAME}, reflected) -> no ingress changes.
   # Internal/operator hosts and the bare apex are excluded by design (they are
   # not publicly reachable for HTTP-01 / the apex is the tenant's own website).
+  #
+  # HTTP-01 is ALL-OR-NOTHING across SANs: one host whose CNAME the tenant has
+  # not created yet (or that points elsewhere) fails the whole order, and the
+  # Secret keeps whatever it held before — which is how a tenant's live hosts
+  # ended up serving an expired, mismatched cert for months while its remaining
+  # CNAMEs were "coming soon". So the SAN list is built from the enabled hosts
+  # that CURRENTLY resolve to our ingress LB IP; the rest are reported and left
+  # out. cert-manager re-issues whenever spec.dnsNames changes, so a host joins
+  # the certificate automatically on the first deploy after its CNAME lands —
+  # no operator step, no config change.
   print_status "Deploying HTTP-01 multi-SAN TLS certificate for $TENANT_NAME (dns_external=true)..."
 
-  # Build the SAN list from enabled, publicly-reachable services. HTTP-01 is
-  # all-or-nothing across SANs, so every included host's CNAME must resolve to us.
-  CERT_SAN_LINES=""
-  [ "$MATRIX_ENABLED" = "true" ]         && CERT_SAN_LINES+="    - \"${MATRIX_HOST}\""$'\n'
-  CERT_SAN_LINES+="    - \"${AUTH_HOST}\""$'\n'
-  [ "$JITSI_ENABLED" = "true" ]          && CERT_SAN_LINES+="    - \"${JITSI_HOST}\""$'\n'
-  [ "$DOCS_ENABLED" = "true" ]           && CERT_SAN_LINES+="    - \"${DOCS_HOST}\""$'\n'
-  [ "$FILES_ENABLED" = "true" ]          && CERT_SAN_LINES+="    - \"${FILES_HOST}\""$'\n'
-  [ "$CALENDAR_ENABLED" = "true" ]       && CERT_SAN_LINES+="    - \"${CALENDAR_HOST}\""$'\n'
-  [ "$OFFICE_ENABLED" = "true" ]         && CERT_SAN_LINES+="    - \"${OFFICE_HOST}\""$'\n'
-  [ "$ADMIN_PORTAL_ENABLED" = "true" ]   && CERT_SAN_LINES+="    - \"${ADMIN_HOST}\""$'\n'
-  [ "$ACCOUNT_PORTAL_ENABLED" = "true" ] && CERT_SAN_LINES+="    - \"${ACCOUNT_HOST}\""$'\n'
+  INGRESS_LB_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  if [ -z "$INGRESS_LB_IP" ]; then
+    print_error "Cluster ingress LB IP not available — cannot tell which ${TENANT_DOMAIN} hosts point at us"
+    print_error "Check: kubectl get svc ingress-nginx-controller -n ${NS_INGRESS}"
+    exit 1
+  fi
+  if ! mt_have_dns_resolver; then
+    print_error "No DNS resolver CLI (dig/getent/host/nslookup) — cannot verify which SAN hosts point at ${INGRESS_LB_IP}"
+    exit 1
+  fi
+
+  # Candidate SANs: the enabled, publicly served service hosts.
+  CERT_CANDIDATE_HOSTS=""
+  [ "$MATRIX_ENABLED" = "true" ]         && CERT_CANDIDATE_HOSTS+=" ${MATRIX_HOST}"
+  CERT_CANDIDATE_HOSTS+=" ${AUTH_HOST}"
+  [ "$JITSI_ENABLED" = "true" ]          && CERT_CANDIDATE_HOSTS+=" ${JITSI_HOST}"
+  [ "$DOCS_ENABLED" = "true" ]           && CERT_CANDIDATE_HOSTS+=" ${DOCS_HOST}"
+  [ "$FILES_ENABLED" = "true" ]          && CERT_CANDIDATE_HOSTS+=" ${FILES_HOST}"
+  [ "$CALENDAR_ENABLED" = "true" ]       && CERT_CANDIDATE_HOSTS+=" ${CALENDAR_HOST}"
+  [ "$OFFICE_ENABLED" = "true" ]         && CERT_CANDIDATE_HOSTS+=" ${OFFICE_HOST}"
+  [ "$ADMIN_PORTAL_ENABLED" = "true" ]   && CERT_CANDIDATE_HOSTS+=" ${ADMIN_HOST}"
+  [ "$ACCOUNT_PORTAL_ENABLED" = "true" ] && CERT_CANDIDATE_HOSTS+=" ${ACCOUNT_HOST}"
+
+  # Keep only the hosts whose CNAME chain ends at our LB right now. A lookup
+  # that FAILS (resolver error, not a negative answer) aborts the deploy: a live
+  # host must never be dropped from the SAN list on a guess.
+  # shellcheck disable=SC2086  # word-splitting the space-separated host list is intended
+  mt_partition_hosts_by_target "$INGRESS_LB_IP" $CERT_CANDIDATE_HOSTS
+  mt_require_hosts_resolvable "${TENANT_NAME}'s service hosts (HTTP-01 SAN candidates)" || exit 1
+  if [ -z "$MT_HOSTS_AT_TARGET" ]; then
+    print_error "None of ${TENANT_NAME}'s service hosts resolve to our ingress LB ${INGRESS_LB_IP} — nothing to issue an HTTP-01 certificate for:"
+    printf '%s' "$MT_HOSTS_NOT_AT_TARGET_DETAIL" | sed 's/^/  - /' >&2
+    print_error "dns_external=true: the tenant must CNAME each service host (chain ending at ${INGRESS_LB_IP}). Nothing was changed."
+    exit 1
+  fi
+  if [ -n "$MT_HOSTS_NOT_AT_TARGET" ]; then
+    print_warning "HTTP-01 certificate: leaving out hosts that do not (yet) resolve to our ingress LB ${INGRESS_LB_IP} — EXPECTED for dns_external until the tenant adds its remaining CNAMEs:"
+    printf '%s' "$MT_HOSTS_NOT_AT_TARGET_DETAIL" | sed 's/^/  - /'
+    print_warning "They join the certificate automatically on the first deploy after their CNAME resolves to us; until then their ingresses serve the controller's fake cert."
+  fi
+  CERT_SAN_LINES=$(mt_http01_san_lines "$MT_HOSTS_AT_TARGET")
   export CERT_SAN_LINES
-  print_status "HTTP-01 certificate SANs:"
-  printf '%s' "$CERT_SAN_LINES"
+  print_status "HTTP-01 certificate SANs (resolving to ${INGRESS_LB_IP}):"
+  printf '%s\n' "$CERT_SAN_LINES"
 
   # Remove any pre-existing DNS-01 wildcard/apex Certificates so they don't fight
   # over the shared wildcard-tls-${TENANT_NAME} secret (e.g. a tenant that moved
@@ -233,7 +290,7 @@ if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
     print_success "wildcard-tls (HTTP-01 multi-SAN) is ready"
   else
     print_warning "wildcard-tls (HTTP-01) not ready after 300s"
-    print_warning "  HTTP-01 is all-or-nothing: confirm every SAN host's CNAME resolves to our ingress."
+    print_warning "  HTTP-01 is all-or-nothing: every SAN above resolved to ${INGRESS_LB_IP} at deploy time, so look at the challenges (port 80 reachability, solver ingress, ACME rate limits)."
     print_warning "  Debug: kubectl describe certificate wildcard-tls -n $NS_MATRIX ; kubectl get challenge -n $NS_MATRIX"
     print_warning "Continuing — ingresses will serve the cert once issued."
   fi
@@ -399,12 +456,8 @@ else
   else
     LB1_RECORD="lb2.prod.${TENANT_DOMAIN}"
   fi
-  # Cloudflare proxy: prod only (Universal SSL covers *.domain but not *.dev.domain)
-  if [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; then
-    CF_PROXIED="true"
-  else
-    CF_PROXIED="false"
-  fi
+  # Cloudflare proxy: prod only — decided once up top (TENANT_DNS_CF_PROXIED).
+  CF_PROXIED="$TENANT_DNS_CF_PROXIED"
 
   create_dns_record "$LB1_RECORD" "A" "$INGRESS_IP" "$CF_PROXIED"
   print_status "Created LB A record: $LB1_RECORD -> $INGRESS_IP (proxied=$CF_PROXIED)"
@@ -893,17 +946,28 @@ fi
 # (ingress + wildcard TLS + portal pod). Final "everything's up" assertion
 # before the cleanup/probe phase. Skipped when admin-portal isn't enabled.
 if [ "$ADMIN_PORTAL_ENABLED" = "true" ]; then
-  if [ "${DNS_EXTERNAL:-false}" = "true" ] && ! mt_host_resolves "$ADMIN_HOST"; then
+  if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
     # For dns_external tenants the admin host only resolves (and serves valid TLS)
-    # once the TENANT adds its service CNAMEs and the all-or-nothing HTTP-01 cert
-    # issues over them. While the host is still unresolved this end-to-end check
-    # legitimately cannot pass — it is gated on DNS we do not control — so failing
-    # the deploy on it would keep deploy-prod-eu red for the entire pre-cutover
-    # window (potentially weeks). Skip-with-warning ONLY while the host does not
-    # resolve; the moment it does (post-cutover) the normal fatal gate below runs,
-    # so a real admin-portal regression is still caught. NOT a silent skip — the
-    # warning states exactly what is pending and why.
-    print_warning "admin-portal /version check skipped: ${ADMIN_HOST} does not resolve yet — EXPECTED for dns_external until the tenant adds its remaining CNAMEs. Deploy is applied; this gate re-arms (fatal) automatically once the host resolves."
+    # once the TENANT adds its CNAME. While it DEFINITELY does not resolve
+    # (NXDOMAIN / NODATA) this end-to-end check legitimately cannot pass — it is
+    # gated on DNS we do not control — so failing the deploy on it would keep
+    # deploy-prod-eu red for the entire pre-cutover window (potentially weeks).
+    # Skip-with-warning ONLY on that definite negative; the moment the host
+    # resolves the normal fatal gate runs, so a real admin-portal regression is
+    # still caught. A resolver ERROR (timeout, SERVFAIL) is neither answer: fail
+    # closed rather than skip a gate on a guess. NOT a silent skip — the warning
+    # states exactly what is pending and why.
+    _admin_host_rc=0
+    mt_resolve_ipv4_verdict "$ADMIN_HOST" || _admin_host_rc=$?
+    case "$_admin_host_rc" in
+      0)
+        mt_wait_for_admin_portal ;;
+      1)
+        print_warning "admin-portal /version check skipped: ${ADMIN_HOST} does not resolve yet (${MT_RESOLVE_REASON}) — EXPECTED for dns_external until the tenant adds its remaining CNAMEs. Deploy is applied; this gate re-arms (fatal) automatically once the host resolves." ;;
+      *)
+        print_error "Cannot resolve ${ADMIN_HOST} (${MT_RESOLVE_REASON}) — refusing to skip the admin-portal /version gate on a resolver error (fail closed)."
+        exit 1 ;;
+    esac
   else
     mt_wait_for_admin_portal
   fi
@@ -1007,19 +1071,87 @@ if [ "${LLM_ENABLED:-false}" = "true" ]; then
 fi
 export ENDPOINT_PROBE_TARGETS
 
-# Select probe module names: dev uses SOCKS-proxied _ext variants to bypass
-# kube-proxy short-circuit (no PROXY header); prod uses direct modules.
-if [ "$MT_ENV" = "prod" ]; then
-  export PROBE_MODULE_HTTP="http_2xx"
-  export PROBE_MODULE_SYNAPSE="http_synapse"
-else
-  export PROBE_MODULE_HTTP="http_2xx_ext"
-  export PROBE_MODULE_SYNAPSE="http_synapse_ext"
+if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
+  # External-DNS tenant: probe only the public hosts whose CNAME currently
+  # points at our ingress — the same rule as the HTTP-01 SAN list above. A host
+  # the tenant has not published yet is its DNS to-do, not an outage, and would
+  # otherwise raise EndpointDown per host until it does. Re-resolved here rather
+  # than reusing the cert step's result because under --finalize-only this
+  # phase runs as its own process. Hosts join the probes on the first deploy
+  # after their CNAME resolves to us.
+  INGRESS_LB_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  if [ -z "$INGRESS_LB_IP" ]; then
+    print_error "Cluster ingress LB IP not available — cannot tell which ${TENANT_DOMAIN} probe targets point at us"
+    exit 1
+  fi
+  if ! mt_have_dns_resolver; then
+    print_error "No DNS resolver CLI (dig/getent/host/nslookup) — cannot verify which probe targets point at ${INGRESS_LB_IP}"
+    exit 1
+  fi
+  # shellcheck disable=SC2046  # word-splitting the space-separated host list is intended
+  mt_partition_hosts_by_target "$INGRESS_LB_IP" $(mt_probe_target_hosts "$ENDPOINT_PROBE_TARGETS")
+  mt_require_hosts_resolvable "${TENANT_NAME}'s public probe targets" || exit 1
+  if [ -z "$MT_HOSTS_AT_TARGET" ]; then
+    print_error "None of ${TENANT_NAME}'s probe targets resolve to our ingress LB ${INGRESS_LB_IP}:"
+    printf '%s' "$MT_HOSTS_NOT_AT_TARGET_DETAIL" | sed 's/^/  - /' >&2
+    exit 1
+  fi
+  if [ -n "$MT_HOSTS_NOT_AT_TARGET" ]; then
+    print_warning "Endpoint probes: skipping targets whose host does not (yet) resolve to our ingress LB ${INGRESS_LB_IP} — EXPECTED for dns_external until the tenant adds its remaining CNAMEs:"
+    printf '%s' "$MT_HOSTS_NOT_AT_TARGET_DETAIL" | sed 's/^/  - /'
+    ENDPOINT_PROBE_TARGETS="$(mt_filter_probe_targets_by_hosts "$ENDPOINT_PROBE_TARGETS" "$MT_HOSTS_AT_TARGET")"$'\n'
+    export ENDPOINT_PROBE_TARGETS
+  fi
 fi
 
-envsubst < "$REPO_ROOT/apps/manifests/monitoring/endpoint-probes.yaml.tpl" | kubectl apply -f - && \
-  print_status "Endpoint probes deployed for tenant $TENANT" || \
-  print_warning "Could not deploy endpoint probes (blackbox-exporter may not be installed yet)"
+# =============================================================================
+# Endpoint probes (Blackbox Exporter Probe CRDs)
+# =============================================================================
+# Internal probes target ClusterIP services and work everywhere. The PUBLIC
+# probes fetch the tenant's external hostnames from inside the cluster, which
+# only gives a real signal when the request reaches ingress-nginx the way a
+# client's does — see mt_public_hosts_probeable_from_cluster in common.sh.
+# Dev (PROXY protocol on, DNS-only records) has no working path: the SOCKS5
+# egress proxy that bridged it (microsocks on the VPN server; blackbox modules
+# http_2xx_ext / http_synapse_ext) went away with the VPN server in #281, and
+# those modules never existed in apps/values/blackbox-exporter.yaml. A Probe
+# naming them gets HTTP 400 from blackbox and fires TargetDown forever — which
+# is what every env except prod did until now (the choice was `MT_ENV = prod`,
+# so prod-eu got the dead dev modules). Decided from the live ingress ConfigMap
+# and the tenant's DNS config instead, never from the environment name.
+_ingress_cm_json=$(kubectl get configmap ingress-nginx-controller -n "$NS_INGRESS" -o json 2>/dev/null) || {
+  print_error "Cannot read ConfigMap ingress-nginx-controller in ${NS_INGRESS} — needed to decide whether the tenant's public hosts are probe-able from inside the cluster"
+  exit 1
+}
+INGRESS_USE_PROXY_PROTOCOL=$(printf '%s' "$_ingress_cm_json" | jq -r '.data["use-proxy-protocol"] // "false"')
+
+# Direct modules everywhere (no proxy exists any more). Guard: a module that is
+# not in the blackbox values file is a permanent 400, so refuse to deploy one.
+export PROBE_MODULE_HTTP="http_2xx"
+export PROBE_MODULE_SYNAPSE="http_synapse"
+for _probe_module in "$PROBE_MODULE_HTTP" "$PROBE_MODULE_SYNAPSE"; do
+  if [ "$(yq ".config.modules | has(\"${_probe_module}\")" "$REPO_ROOT/apps/values/blackbox-exporter.yaml")" != "true" ]; then
+    print_error "Blackbox module '${_probe_module}' is not defined in apps/values/blackbox-exporter.yaml — a Probe referencing it returns HTTP 400 and fires TargetDown permanently"
+    exit 1
+  fi
+done
+
+envsubst < "$REPO_ROOT/apps/manifests/monitoring/internal-probes.yaml.tpl" | kubectl apply -f - && \
+  print_status "Internal probes deployed for tenant $TENANT" || \
+  print_warning "Could not deploy internal probes (blackbox-exporter may not be installed yet)"
+
+if mt_public_hosts_probeable_from_cluster "$INGRESS_USE_PROXY_PROTOCOL" "$TENANT_DNS_CF_PROXIED"; then
+  envsubst < "$REPO_ROOT/apps/manifests/monitoring/endpoint-probes.yaml.tpl" | kubectl apply -f - && \
+    print_status "Endpoint probes deployed for tenant $TENANT (modules ${PROBE_MODULE_HTTP} / ${PROBE_MODULE_SYNAPSE}; ingress use-proxy-protocol=${INGRESS_USE_PROXY_PROTOCOL}, tenant DNS cloudflare-proxied=${TENANT_DNS_CF_PROXIED})" || \
+    print_warning "Could not deploy endpoint probes (blackbox-exporter may not be installed yet)"
+else
+  print_warning "Endpoint probes SKIPPED for tenant $TENANT: ingress use-proxy-protocol=${INGRESS_USE_PROXY_PROTOCOL} and the tenant's DNS records are not Cloudflare-proxied, so a pod's request to its public hosts is short-circuited past the NodeBalancer and rejected by ingress-nginx. No in-cluster path exists for this since the SOCKS egress proxy was removed (#281). Internal probes are deployed; public reachability is checked by scripts/verify-endpoints below."
+  # Drop any public Probes a previous deploy left behind (they were 400/TargetDown).
+  if ! _probe_delete_out=$(kubectl delete probe "${TENANT}-endpoints" "${TENANT}-synapse-api" -n "$NS_MONITORING" --ignore-not-found 2>&1); then
+    print_warning "Could not delete stale public Probes ${TENANT}-endpoints / ${TENANT}-synapse-api in ${NS_MONITORING}: ${_probe_delete_out}"
+  fi
+fi
 
 echo ""
 print_success "Tenant $TENANT deployed for $MT_ENV environment!"

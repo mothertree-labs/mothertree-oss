@@ -143,6 +143,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   WebUI retrieval → sources + cited answer; user-role JWT sees both models).
 
 ### Fixed
+- External-DNS tenants (`dns_external: true`): the HTTP-01 multi-SAN
+  certificate is now issued over the enabled service hosts that currently
+  resolve to our ingress LB, instead of over all of them. HTTP-01 is
+  all-or-nothing, so one host whose CNAME the tenant had not created yet kept
+  the whole order pending and left the live hosts serving an expired,
+  mismatched cert (ingress-nginx's fake cert) for months. `create_env` now
+  resolves each candidate (`mt_partition_hosts_by_target` in
+  `scripts/lib/common.sh`), lists the excluded ones with the reason, fails
+  fast if none point at us, and cert-manager re-issues automatically on the
+  first deploy after a missing CNAME lands. The lookup is fail-closed and
+  tri-state (resolved / definite negative / resolver error): only an
+  NXDOMAIN or NODATA answer from `dig` may exclude a host; a timeout or
+  SERVFAIL is retried with backoff, then against public resolvers, and if
+  it persists the deploy aborts rather than dropping a live host from the
+  certificate (which would re-issue a smaller cert and break that host until
+  the next deploy). The answer section is integrity-checked against the
+  header's record count, so output dig could not fully parse (a `.digrc`
+  that reshapes columns, a truncated response, an unrecognised record) is an
+  error, never a negative; the admin-portal cold-start gate for external-DNS
+  tenants uses the same verdict; the check is IPv4-only. Unit-tested in
+  `scripts/tests/test-dns-helpers.sh` (new `shell-unit-tests` validate step).
+- Tenant public-endpoint probes on every environment except prod referenced
+  the blackbox modules `http_2xx_ext` / `http_synapse_ext`, which do not exist
+  in `apps/values/blackbox-exporter.yaml` (they belonged to the SOCKS egress
+  proxy removed with the VPN server in #281): blackbox answered HTTP 400 and
+  `TargetDown` fired permanently for `<tenant>-endpoints` and
+  `<tenant>-synapse-api` on prod-eu. `create_env` now uses the direct modules
+  everywhere, refuses a module missing from the values file, and decides from
+  the live ingress-nginx `use-proxy-protocol` setting plus the tenant's
+  Cloudflare-proxy state (`mt_public_hosts_probeable_from_cluster`, not
+  `MT_ENV`) whether a pod can reach the public hosts at all. Where it cannot
+  (dev: PROXY protocol on, DNS-only records, and no egress proxy left) the
+  public Probes are skipped with a warning and stale ones deleted; the
+  internal probe is always deployed
+  (`apps/manifests/monitoring/internal-probes.yaml.tpl`). For external-DNS
+  tenants the public probe targets are also limited to the hosts that
+  currently resolve to our ingress (same rule as the certificate), so a
+  CNAME the tenant has not published yet does not raise `EndpointDown`.
 - `mt_wait_for_daemonset` no longer fails fast on Terminating pods. When a
   rollout replaces a crash-looping DaemonSet pod, the old pod keeps reporting
   `CrashLoopBackOff` for a few seconds until it is gone; the gate could abort

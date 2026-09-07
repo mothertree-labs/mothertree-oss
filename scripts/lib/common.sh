@@ -13,6 +13,9 @@
 #   wait_for_dns        — wait for DNS resolution inside a namespace
 #   read_k8s_secret     — read a secret key from a K8s Secret
 #   mt_require_commands — verify required CLI tools are available
+#   mt_resolve_ipv4_verdict / mt_host_resolves_to / mt_partition_hosts_by_target
+#                       — fail-closed public DNS checks (does a host point at
+#                         our ingress?)
 
 # Guard against double-sourcing
 if [ "${_MT_COMMON_LOADED:-}" = "1" ]; then
@@ -674,22 +677,364 @@ mt_wait_for_admin_portal() {
     return 1
 }
 
-# Returns 0 if $1 currently resolves in DNS, 1 if it does not (e.g. NXDOMAIN).
-# If no resolver tool is available, returns 0 (assume resolvable) so callers
-# never skip a real check merely because resolution could not be tested.
-# Usage: mt_host_resolves <hostname>
-mt_host_resolves() {
-    local host="$1"
-    [ -z "$host" ] && return 1
-    if command -v getent >/dev/null 2>&1; then
-        getent hosts "$host" >/dev/null 2>&1
-    elif command -v nslookup >/dev/null 2>&1; then
-        nslookup "$host" >/dev/null 2>&1
-    elif command -v host >/dev/null 2>&1; then
-        host "$host" >/dev/null 2>&1
+# (mt_host_resolves — a yes/no getent check — was removed: it read a resolver
+# timeout as "does not resolve". Use mt_resolve_ipv4_verdict, below.)
+
+# ---------------------------------------------------------------------------
+# DNS helpers: "does this public host point at OUR ingress?"
+# ---------------------------------------------------------------------------
+# Used by create_env for external-DNS tenants (dns_external=true). An HTTP-01
+# multi-SAN certificate is all-or-nothing, so a host may only be included once
+# its CNAME chain actually ends at our ingress LB. "Resolves" is not enough —
+# a name that resolves somewhere else fails the challenge for every SAN.
+#
+# FAIL CLOSED. Every lookup has a tri-state verdict:
+#   RESOLVED  IPv4 answer(s)
+#   NEGATIVE  a definite "no": NXDOMAIN, or NOERROR with no A record (NODATA)
+#   ERROR     the resolver could not answer (timeout, SERVFAIL/REFUSED, tool
+#             error, unparsable output) — UNKNOWN, never "does not exist"
+# Only dig can produce NEGATIVE (it exposes the response status); a non-answer
+# from the getent/host/nslookup fallbacks is ERROR because they cannot tell a
+# timeout from NXDOMAIN. ERROR is retried with backoff, and with dig the retries
+# also ask explicit public resolvers, because a wedged local stub resolver has
+# been seen to time out on our own LB alias. A host that is still ERROR after
+# that is UNRESOLVABLE and the caller must abort: treating it as "not ours"
+# would drop a LIVE host from spec.dnsNames, re-issue a smaller certificate,
+# flip that host to the ingress fake cert until the next deploy, and burn a
+# Let's Encrypt order (duplicate-certificate limit: 5 per week).
+# Kept bash-3.2 friendly (space-separated strings, no arrays): create_env is
+# also run from macOS /bin/bash.
+#
+# Tunables (mainly for tests): MT_RESOLVER_BACKEND=auto|dig|getent|host|nslookup,
+# MT_RESOLVE_PUBLIC_RESOLVERS (default "1.1.1.1 8.8.8.8"; dig only),
+# MT_RESOLVE_RETRY_BACKOFF (seconds × attempt number, default 2).
+
+_MT_IPV4_RE='^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+
+# Returns 0 if a DNS resolver CLI is available (dig, getent, host, nslookup).
+# Usage: mt_have_dns_resolver
+mt_have_dns_resolver() {
+    [ "$(_mt_resolver_backend)" != "none" ]
+}
+
+# Internal: which resolver CLI to use. dig first — it is the only one that
+# reports the response status. Note the backends are not byte-identical: dig
+# queries the nameserver directly and bypasses /etc/hosts and the resolver
+# search list, while getent honours both and host/nslookup honour the search
+# list — so a bare label or an /etc/hosts entry can differ between them. All
+# hosts we check are fully qualified public names, where they agree.
+_mt_resolver_backend() {
+    case "${MT_RESOLVER_BACKEND:-auto}" in
+        auto)
+            if command -v dig >/dev/null 2>&1; then echo dig
+            elif command -v getent >/dev/null 2>&1; then echo getent
+            elif command -v host >/dev/null 2>&1; then echo host
+            elif command -v nslookup >/dev/null 2>&1; then echo nslookup
+            else echo none
+            fi ;;
+        *) echo "${MT_RESOLVER_BACKEND}" ;;
+    esac
+}
+
+# Internal: ONE lookup of <host>'s A records, optionally via an explicit
+# <server> (dig only). Sets MT_RESOLVE_VERDICT (RESOLVED|NEGATIVE|ERROR),
+# MT_RESOLVE_IPS (newline-separated IPv4s, RESOLVED only) and
+# MT_RESOLVE_REASON (NEGATIVE/ERROR detail). Always returns 0.
+_mt_resolve_attempt() {
+    local host="$1" server="${2:-}" backend out="" rc=0 ips="" status="" via="" flags="" answer_count="" parsed_a=0 parsed_cname=0
+    MT_RESOLVE_VERDICT="ERROR"
+    MT_RESOLVE_IPS=""
+    MT_RESOLVE_REASON=""
+    backend=$(_mt_resolver_backend)
+    [ -n "$server" ] && via=" via ${server}"
+    case "$backend" in
+        dig)
+            # +noall +comments +answer: the ->>HEADER<<- status line, the
+            # ";; flags: ...; QUERY: 1, ANSWER: N, ..." line and the answer
+            # records, nothing else. +ttlid +cl +noshort +nodnssec pin the
+            # record layout (name ttl IN type rdata) — command-line options
+            # override a ~/.digrc, which could otherwise drop columns and turn
+            # a live answer into "no A record". +tries=1 because the retry
+            # policy lives in mt_resolve_ipv4_verdict. (No `-r`: dig 9.10 on
+            # macOS does not have it.)
+            if [ -n "$server" ]; then
+                out=$(dig +noall +comments +answer +ttlid +cl +noshort +nodnssec +time=3 +tries=1 A "$host" "@${server}" 2>&1) || rc=$?
+            else
+                out=$(dig +noall +comments +answer +ttlid +cl +noshort +nodnssec +time=3 +tries=1 A "$host" 2>&1) || rc=$?
+            fi
+            if [ "$rc" -ne 0 ]; then
+                # rc 9 = no servers could be reached (timeout), 8 = usage, 10 = internal
+                MT_RESOLVE_REASON="dig exit ${rc}${via}: $(printf '%s\n' "$out" | grep -v '^$' | head -1 | sed 's/^;; //')"
+                return 0
+            fi
+            status=$(printf '%s\n' "$out" | sed -nE 's/^;; ->>HEADER<<-.*status: ([A-Z]+).*/\1/p' | head -1)
+            case "$status" in
+                NOERROR|NXDOMAIN) ;;
+                "")
+                    MT_RESOLVE_REASON="unparsable dig output${via}: $(printf '%s\n' "$out" | grep -v '^$' | head -1)"
+                    return 0 ;;
+                *)
+                    MT_RESOLVE_REASON="dig status ${status}${via}"
+                    return 0 ;;
+            esac
+            # Answer-section integrity: the flags line says how many records
+            # came back, and every one of them must have been understood (an
+            # A row carrying an IPv4, or a CNAME row) before RESOLVED or
+            # NEGATIVE is allowed. A record we cannot read — reshaped columns,
+            # an RRSIG, a truncated (tc) response — is ERROR: otherwise a live
+            # answer would be read as "no A record", the failure this helper
+            # exists to prevent.
+            flags=$(printf '%s\n' "$out" | sed -nE 's/^;; flags:([^;]*);.*/\1/p' | head -1)
+            answer_count=$(printf '%s\n' "$out" | sed -nE 's/^;; flags:.*ANSWER: ([0-9]+).*/\1/p' | head -1)
+            if [ -z "$answer_count" ]; then
+                MT_RESOLVE_REASON="unparsable dig output${via}: no ANSWER count in the flags line"
+                return 0
+            fi
+            case " $flags " in
+                *" tc "*)
+                    MT_RESOLVE_REASON="truncated response (tc flag)${via}"
+                    return 0 ;;
+            esac
+            ips=$(printf '%s\n' "$out" | awk '$1 !~ /^;/ && NF >= 5 && $3 == "IN" && $4 == "A" {print $5}' | grep -E "$_MT_IPV4_RE" || true)
+            parsed_a=$(printf '%s\n' "$ips" | grep -cE "$_MT_IPV4_RE" || true)
+            parsed_cname=$(printf '%s\n' "$out" | awk '$1 !~ /^;/ && NF >= 5 && $3 == "IN" && $4 == "CNAME" {n++} END {print n+0}')
+            if [ $((parsed_a + parsed_cname)) -ne "$answer_count" ]; then
+                MT_RESOLVE_REASON="unparsable answer section${via} (resolver returned ${answer_count} records, parsed $((parsed_a + parsed_cname)))"
+                return 0
+            fi
+            if [ "$status" = "NXDOMAIN" ]; then
+                MT_RESOLVE_VERDICT="NEGATIVE"
+                MT_RESOLVE_REASON="NXDOMAIN${via}"
+                return 0
+            fi
+            ips=$(printf '%s\n' "$ips" | grep -E "$_MT_IPV4_RE" | sort -u || true)
+            if [ -n "$ips" ]; then
+                MT_RESOLVE_VERDICT="RESOLVED"
+                MT_RESOLVE_IPS="$ips"
+            else
+                MT_RESOLVE_VERDICT="NEGATIVE"
+                MT_RESOLVE_REASON="no A record (NODATA)${via}"
+            fi
+            return 0 ;;
+        getent)   out=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' || true) ;;
+        host)     out=$(host -t A "$host" 2>/dev/null | awk '/has address/ {print $NF}' || true) ;;
+        nslookup) out=$(nslookup -type=A "$host" 2>/dev/null | awk '/^Address:/ {print $2}' || true) ;;
+        none)
+            MT_RESOLVE_REASON="no DNS resolver CLI (dig/getent/host/nslookup)"
+            return 0 ;;
+        *)
+            MT_RESOLVE_REASON="unknown resolver backend '${backend}'"
+            return 0 ;;
+    esac
+    # Fallback backends: an answer is RESOLVED; no answer is ERROR (they do not
+    # distinguish a timeout from NXDOMAIN reliably), never NEGATIVE.
+    ips=$(printf '%s\n' "$out" | grep -E "$_MT_IPV4_RE" | sort -u || true)
+    if [ -n "$ips" ]; then
+        MT_RESOLVE_VERDICT="RESOLVED"
+        MT_RESOLVE_IPS="$ips"
     else
+        MT_RESOLVE_REASON="no answer from ${backend} (cannot tell NXDOMAIN from a resolver failure)"
+    fi
+    return 0
+}
+
+# Resolve <host> to its IPv4 addresses, fail closed. Sets MT_RESOLVE_VERDICT
+# (RESOLVED|NEGATIVE|ERROR), MT_RESOLVE_IPS and MT_RESOLVE_REASON.
+# Returns 0 RESOLVED, 1 NEGATIVE, 2 ERROR — so under `set -e` call it as
+# `rc=0; mt_resolve_ipv4_verdict h || rc=$?`, never bare.
+# ERROR is retried up to 3 times with backoff (MT_RESOLVE_RETRY_BACKOFF ×
+# attempt seconds): with dig the retries go to the public resolvers in
+# MT_RESOLVE_PUBLIC_RESOLVERS first and the system resolver once more last;
+# other backends just retry. The first RESOLVED or NEGATIVE answer wins.
+# Usage: mt_resolve_ipv4_verdict <hostname>
+mt_resolve_ipv4_verdict() {
+    local host="$1" server plan="" reasons="" attempt=1 backoff
+    MT_RESOLVE_VERDICT="ERROR"
+    MT_RESOLVE_IPS=""
+    MT_RESOLVE_REASON=""
+    if [ -z "$host" ]; then
+        MT_RESOLVE_REASON="empty hostname"
+        return 2
+    fi
+    # Attempt plan ("-" = system resolver), always 4 attempts: with dig
+    # "- <public resolvers> -" (padded with "-" if fewer than two are
+    # configured), otherwise "- - - -".
+    plan="-"
+    if [ "$(_mt_resolver_backend)" = "dig" ]; then
+        for server in ${MT_RESOLVE_PUBLIC_RESOLVERS-1.1.1.1 8.8.8.8}; do
+            plan="$plan $server"
+        done
+        plan="$plan -"
+    fi
+    # shellcheck disable=SC2086  # counting words of the plan is the point
+    set -- $plan
+    while [ "$#" -lt 4 ]; do
+        plan="$plan -"
+        set -- $plan
+    done
+    for server in $plan; do
+        [ "$server" = "-" ] && server=""
+        if [ "$attempt" -gt 1 ]; then
+            backoff=$(( ${MT_RESOLVE_RETRY_BACKOFF:-2} * (attempt - 1) ))
+            if [ "$backoff" -gt 0 ]; then
+                sleep "$backoff"
+            fi
+        fi
+        _mt_resolve_attempt "$host" "$server"
+        case "$MT_RESOLVE_VERDICT" in
+            RESOLVED) return 0 ;;
+            NEGATIVE) return 1 ;;
+        esac
+        reasons="${reasons:+$reasons; }attempt ${attempt}: ${MT_RESOLVE_REASON}"
+        attempt=$((attempt + 1))
+    done
+    MT_RESOLVE_VERDICT="ERROR"
+    MT_RESOLVE_REASON="giving up after $((attempt - 1)) attempts — ${reasons}"
+    return 2
+}
+
+# Print the IPv4 addresses <host> resolves to, one per line (RESOLVED only).
+# Returns 0 RESOLVED, 1 NEGATIVE (definitely no address), 2 ERROR (resolver
+# failure after retries — unknown, NOT "does not exist").
+# Usage: mt_resolve_ipv4 <hostname>
+mt_resolve_ipv4() {
+    local rc=0
+    mt_resolve_ipv4_verdict "$1" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf '%s\n' "$MT_RESOLVE_IPS"
+    fi
+    return "$rc"
+}
+
+# Internal: returns 0 if any line of <resolved> (newline-separated IPv4s) is in
+# <ips> (comma- or space-separated).
+_mt_any_ip_in_list() {
+    local resolved="$1" ips="$2" ip
+    for ip in ${ips//,/ }; do
+        if printf '%s\n' "$resolved" | grep -qxF "$ip"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Does <host> currently resolve to at least one IPv4 in <ips> (comma- or
+# space-separated)? Returns 0 yes; 1 definitely not (NXDOMAIN/NODATA, or it
+# resolves to other addresses); 2 unknown (resolver error after retries) —
+# callers must never read 2 as "not ours".
+# Usage: mt_host_resolves_to <hostname> <ip>[,<ip>...]
+mt_host_resolves_to() {
+    local host="$1" ips="$2" rc=0
+    mt_resolve_ipv4_verdict "$host" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        return "$rc"
+    fi
+    _mt_any_ip_in_list "$MT_RESOLVE_IPS" "$ips"
+}
+
+# Partition <host>... by whether each currently resolves to one of <ips>.
+# Sets five globals (strings, so callers work under bash 3.2 + set -u):
+#   MT_HOSTS_AT_TARGET             hosts that point at <ips>
+#   MT_HOSTS_NOT_AT_TARGET         hosts that definitely do not (NEGATIVE, or
+#                                  they resolve to other addresses)
+#   MT_HOSTS_NOT_AT_TARGET_DETAIL  one "host: <why>" line each
+#   MT_HOSTS_UNRESOLVABLE          hosts whose lookup FAILED after retries
+#                                  (verdict unknown — the caller MUST abort,
+#                                  see mt_require_hosts_resolvable)
+#   MT_HOSTS_UNRESOLVABLE_DETAIL   one "host: <why>" line each
+# Each host is resolved once (plus retries on error). Always returns 0.
+# Usage: mt_partition_hosts_by_target "<ip>[,<ip>...]" <host>...
+mt_partition_hosts_by_target() {
+    local ips="$1"
+    shift
+    MT_HOSTS_AT_TARGET=""
+    MT_HOSTS_NOT_AT_TARGET=""
+    MT_HOSTS_NOT_AT_TARGET_DETAIL=""
+    MT_HOSTS_UNRESOLVABLE=""
+    MT_HOSTS_UNRESOLVABLE_DETAIL=""
+    local host rc
+    for host in "$@"; do
+        rc=0
+        mt_resolve_ipv4_verdict "$host" || rc=$?
+        case "$rc" in
+            0)
+                if _mt_any_ip_in_list "$MT_RESOLVE_IPS" "$ips"; then
+                    MT_HOSTS_AT_TARGET="${MT_HOSTS_AT_TARGET:+$MT_HOSTS_AT_TARGET }$host"
+                else
+                    MT_HOSTS_NOT_AT_TARGET="${MT_HOSTS_NOT_AT_TARGET:+$MT_HOSTS_NOT_AT_TARGET }$host"
+                    MT_HOSTS_NOT_AT_TARGET_DETAIL+="${host}: resolves to $(printf '%s\n' "$MT_RESOLVE_IPS" | tr '\n' ' ' | sed 's/ $//') (not our ingress)"$'\n'
+                fi ;;
+            1)
+                MT_HOSTS_NOT_AT_TARGET="${MT_HOSTS_NOT_AT_TARGET:+$MT_HOSTS_NOT_AT_TARGET }$host"
+                MT_HOSTS_NOT_AT_TARGET_DETAIL+="${host}: does not resolve (${MT_RESOLVE_REASON})"$'\n' ;;
+            *)
+                MT_HOSTS_UNRESOLVABLE="${MT_HOSTS_UNRESOLVABLE:+$MT_HOSTS_UNRESOLVABLE }$host"
+                MT_HOSTS_UNRESOLVABLE_DETAIL+="${host}: could not be resolved (${MT_RESOLVE_REASON})"$'\n' ;;
+        esac
+    done
+    return 0
+}
+
+# Fail closed after mt_partition_hosts_by_target: if any host could not be
+# resolved (resolver ERROR, not a negative answer), print them and return 1 so
+# the caller aborts before changing anything. Returns 0 when all verdicts are
+# definite.
+# Usage: mt_require_hosts_resolvable "<what the hosts are>" || exit 1
+mt_require_hosts_resolvable() {
+    local what="$1"
+    if [ -z "${MT_HOSTS_UNRESOLVABLE:-}" ]; then
         return 0
     fi
+    print_error "DNS resolution FAILED for ${what} — refusing to guess which hosts point at us (fail closed; nothing was changed):"
+    printf '%s' "$MT_HOSTS_UNRESOLVABLE_DETAIL" | sed 's/^/  - /' >&2
+    print_error "This is a resolver problem on this machine/runner (or upstream), not the tenant's DNS state. Fix it and re-run — excluding a live host here would re-issue a smaller certificate and break that host."
+    return 1
+}
+
+# Print the unique URL hosts of an ENDPOINT_PROBE_TARGETS block (lines shaped
+# `        - https://host/path`), space-separated.
+# Usage: mt_probe_target_hosts "<targets-block>"
+mt_probe_target_hosts() {
+    printf '%s\n' "$1" | sed -nE 's#^ *- *https?://([^/]+).*#\1#p' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+# Keep only the lines of an ENDPOINT_PROBE_TARGETS block whose URL host is in
+# the space-separated <hosts> list; prints them in their original order.
+# Usage: mt_filter_probe_targets_by_hosts "<targets-block>" "<host> <host> ..."
+mt_filter_probe_targets_by_hosts() {
+    local block="$1" hosts="$2" line host
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        host=$(printf '%s' "$line" | sed -E 's#^ *- *https?://([^/]+).*#\1#')
+        case " $hosts " in
+            *" $host "*) printf '%s\n' "$line" ;;
+        esac
+    done <<< "$block"
+}
+
+# Can a pod in this cluster reach a tenant's PUBLIC hosts the way a client does?
+# kube-proxy short-circuits pod -> LoadBalancer-IP traffic straight to the
+# ingress-nginx pod (the NodeBalancer is not in the path). When the controller
+# runs with use-proxy-protocol=true it then rejects the PROXY-header-less
+# connection. The path works only if PROXY protocol is off for this env's
+# ingress (prod-eu), or the tenant's DNS is Cloudflare-proxied so the request
+# leaves the cluster and re-enters through the NodeBalancer (prod). Dev has
+# neither. Inputs are the live ingress-nginx ConfigMap value and the tenant's
+# Cloudflare-proxy flag — never the environment name.
+# Usage: mt_public_hosts_probeable_from_cluster <use-proxy-protocol true|false> <cf-proxied true|false>
+mt_public_hosts_probeable_from_cluster() {
+    local use_proxy_protocol="$1" cf_proxied="$2"
+    [ "$use_proxy_protocol" != "true" ] || [ "$cf_proxied" = "true" ]
+}
+
+# Render the CERT_SAN_LINES block of certificate-http01.yaml.tpl (YAML list
+# items, 4-space indent) from a space-separated host list.
+# Usage: mt_http01_san_lines "<host> <host> ..."
+mt_http01_san_lines() {
+    local host
+    for host in $1; do
+        printf '    - "%s"\n' "$host"
+    done
 }
 
 # Wait for Nextcloud's occ status to report installed=true.
