@@ -43,6 +43,13 @@ steps:
       - ci/scripts/version-check.sh
     depends_on: []
 
+  # Cluster-free unit tests for scripts/lib helpers (fake kubectl). Issue #623.
+  - name: shell-unit-tests
+    image: bash
+    commands:
+      - ci/scripts/shell-unit-tests.sh
+    depends_on: []
+
   # npm steps must be sequential — they share the workspace and
   # concurrent npm ci in the same directory corrupts node_modules.
   - name: npm-check
