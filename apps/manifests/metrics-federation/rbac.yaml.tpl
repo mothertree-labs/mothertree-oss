@@ -9,9 +9,12 @@ metadata:
     component: metrics-federation
 ---
 # Role granting the Tailscale sidecar permission to manage its state Secret
-# (${FED_NAME}-tailscale-state, fixed name). `create` cannot be name-restricted
-# in RBAC and the sidecar creates the Secret on first start, so the rule stays
-# namespace-wide like the subnet router's.
+# (${FED_NAME}-tailscale-state, fixed name) and nothing else in the namespace:
+# get/update/patch are name-restricted to that one Secret (containerboot only
+# ever touches TS_KUBE_SECRET — the auth key arrives via a secretKeyRef env),
+# so the sidecar's ServiceAccount cannot read the Grafana / Alertmanager
+# Secrets that share infra-monitoring. `create` cannot be name-restricted in
+# RBAC (the request carries no name) and is needed on first start.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -23,7 +26,11 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "get", "update", "patch"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["${FED_NAME}-tailscale-state"]
+    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
