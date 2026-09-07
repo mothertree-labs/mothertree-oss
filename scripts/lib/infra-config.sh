@@ -177,8 +177,9 @@ _mt_infra_load_env_config() {
     export LLM_S3_BUCKET LLM_S3_ENDPOINT LLM_S3_REGION LLM_S3_PREFIX
 
     # Cross-cluster metrics federation. The consumer discovers the exposer's
-    # mesh IP from Headscale at deploy time; source_env narrows the lookup to
-    # the exposer of one environment (hostname prom-mesh-<source_env>) and
+    # mesh IP from Headscale at deploy time: source_env (required for
+    # role=consumer, enforced by deploy-metrics-federation.sh) names the
+    # environment whose exposer to dial (hostname prom-mesh-<source_env>);
     # source_mesh_ip is only a fallback for when no exposer is online.
     MT_METRICS_FED_ROLE=$(yq '.metrics_federation.role // ""' "$infra_config")
     MT_METRICS_FED_SOURCE_IP=$(yq '.metrics_federation.source_mesh_ip // ""' "$infra_config")

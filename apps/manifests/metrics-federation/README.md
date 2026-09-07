@@ -57,16 +57,36 @@ metrics_federation:
 # prod
 metrics_federation:
   role: consumer
-  source_env: "prod-eu"          # optional: only match the exposer of this env (prom-mesh-prod-eu)
+  source_env: "prod-eu"          # REQUIRED: the exposer's environment (its node advertises prom-mesh-prod-eu)
   source_mesh_ip: "100.64.x.x"   # optional FALLBACK, used only when no exposer is online
 ```
 
 The consumer does **not** need the exposer's IP in config: at deploy time it
 looks up the online `tag:monitoring` node advertising hostname
-`prom-mesh-<source_env>` (any `prom-mesh-*` node when `source_env` is unset)
-through the Headscale API and renders that address into socat. A stale
-`source_mesh_ip` only produces a warning; two online exposers or none (with no
-fallback) fail the deploy.
+`prom-mesh-<source_env>` through the Headscale API and renders that address
+into socat. A stale `source_mesh_ip` only produces a warning; two online
+exposers, or none with no fallback, fail the deploy. A consumer without
+`source_env` fails fast.
+
+**Trust model.** The node *name* is client-advertised — any mesh node can call
+itself `prom-mesh-prod-eu` — so the name is only a selector. The real gate is
+the `tag:monitoring` ACL tag, which a node can only obtain by registering with
+a tagged pre-auth key minted through the Headscale API (`tailscale.rotator_api_key`),
+and the ACL rule `tag:monitoring -> tag:monitoring:9090`. Note that everything
+carrying `tag:monitoring` (pg-metrics-bridge, both federation pods) can reach
+the exposed Prometheus API in full, including its lifecycle endpoints
+(`/-/reload`, `/-/quit`, enabled by the kube-prometheus-stack operator) — the
+tag is the boundary, keep it on infrastructure sidecars only. Pinning the
+exposer's Headscale node id on first use (TOFU) is a follow-up.
+
+**Positive control, two branches.** After the mesh gate the consumer fetches
+the exposer's `/-/ready` through the tunnel. When Headscale had just listed the
+exposer *online* (discovered path) a miss is a defect on our side — ACL,
+tunnel, socat — and the deploy **fails**. When no exposer was online and the
+configured `source_mesh_ip` fallback was used, a miss is the other cluster
+being down: the script prints an ERROR + WARNING and **continues**, so a
+prod-eu outage never blocks unrelated prod deploys; `MetricsFederationDown`
+covers the path from there.
 
 ## Node identity (why the mesh IP is stable)
 
@@ -80,9 +100,15 @@ federation silently died on 2026-09-02 (audit cause 7).
 Migration is automatic: on the first deploy with this layout the script copies
 the running pod's per-pod state Secret under the fixed name *before* rolling
 the Deployment (only if that pod's sidecar is Running and online — a dead
-registration is never adopted). The superseded per-pod Secrets are pruned once
+registration is never adopted; a lost API/exec answer fails the deploy rather
+than registering a fresh node). The superseded per-pod Secrets are pruned once
 their pod is gone, and the `headscale-cleanup` CronJob removes federation nodes
-that have been offline for 48h+.
+that have been offline for 7 days or more.
+
+The sidecar's RBAC is name-restricted: `get/update/patch` only on
+`<name>-tailscale-state` (plus namespace-wide `create`, which RBAC cannot
+restrict by name), so the pod's ServiceAccount cannot read the other Secrets
+in `infra-monitoring`.
 
 Infra tenant `<env>.secrets.yaml` (both prod and prod-eu):
 
@@ -115,17 +141,19 @@ stored anywhere.
    ./ci/scripts/provision-ci.sh --ansible-only   # or the headscale playbook tag that runs "Deploy ACL policy"
    ```
 
-4. **prod config**: set `metrics_federation.role: consumer` (and, recommended,
-   `metrics_federation.source_env: prod-eu`) in the prod infra config.
+4. **prod config**: set `metrics_federation.role: consumer` **and**
+   `metrics_federation.source_env: prod-eu` in the prod infra config.
 
 5. **Deploy the consumer + datasource**:
    ```bash
    ./scripts/deploy_infra -e prod
    ```
-   The deploy fails if the exposer's Prometheus does not answer through the
-   tunnel (`/-/ready`), and `MetricsFederationDown` fires on the consumer
-   cluster if the path breaks later (Prometheus scrapes the bridge, which is
-   answered by the remote Prometheus through the tunnel; only one series is kept).
+   The deploy fails if Headscale lists the exposer online but its Prometheus
+   does not answer through the tunnel (`/-/ready`); see "Positive control,
+   two branches" above for the fallback case. `MetricsFederationDown` fires on
+   the consumer cluster if the path breaks later (Prometheus scrapes the
+   bridge, which is answered by the remote Prometheus through the tunnel; only
+   one series is kept).
 
 ## Verify
 
