@@ -173,4 +173,15 @@ mt_restart_if_changed deployment/pgbouncer -n "$NS_DB"
 print_status "Waiting for PgBouncer deployment rollout..."
 kubectl rollout status deployment/pgbouncer -n "$NS_DB" --timeout=120s
 
+# =============================================================================
+# Mesh gate — unconditional (a Ready pod says nothing about the tunnel, #613)
+# =============================================================================
+
+mt_wait_for_tailscale_sidecar "$NS_DB" app=pgbouncer tag:pgbouncer
+# Positive control on the real target: a TCP handshake with PostgreSQL on the
+# PG VM through the tunnel and the ACL (tag:pgbouncer -> tag:postgres:5432).
+# The SQL path itself is verified by the DB checks that follow in deploy_infra.
+mt_tailscale_sidecar_tcp_check "$NS_DB" app=pgbouncer "$PG_VM_TAILSCALE_IP" 5432 60 \
+  || { print_error "PgBouncer sidecar cannot reach PostgreSQL at ${PG_VM_TAILSCALE_IP}:5432 over the mesh"; exit 1; }
+
 print_success "PgBouncer deployed to $NS_DB"

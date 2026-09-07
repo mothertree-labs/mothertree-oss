@@ -863,3 +863,175 @@ _mt_daemonset_diagnostics() {
         kubectl describe pod -n "$namespace" "$pod" 2>/dev/null | sed -n '/^Events:/,$p' | tail -15 || true
     fi
 }
+
+# ---------------------------------------------------------------------------
+# mt_wait_for_tailscale_sidecar — prove a Tailscale sidecar is on the mesh
+# Usage: mt_wait_for_tailscale_sidecar <namespace> <label-selector> <expected-tag> [timeout=180] [remedy-hint]
+#
+# `kubectl rollout status` is satisfied by the main container's readiness probe
+# (socat/pgbouncer listening on their own port), which says nothing about the
+# WireGuard tunnel behind it: pg-metrics-bridge reported Ready for months on
+# dev while its sidecar was registered without a tag and the ACL dropped every
+# packet (#613). This waits until every non-terminating pod matching the
+# selector has a `tailscale` sidecar whose `tailscale status --json` reports
+# BackendState=Running and <expected-tag> among Self.Tags. Self.Online is
+# reported but NOT required: it only means "inside a control-server map poll",
+# so a Headscale outage would flip it to false on every healthy sidecar while
+# the WireGuard tunnels keep working on the cached netmap — the data plane is
+# proven by the positive control the callers run right after this gate.
+# Fails fast — no point waiting — when the sidecar log shows an auth failure
+# (expired / already-used key, machineAuthorized=false) or the node registered
+# without the tag (tags come from the pre-auth key at registration; only a new
+# key fixes that: ./scripts/check-tailscale-keys -e <env> --rotate — pass a
+# <remedy-hint> for components where that is not the fix, e.g. the router's
+# fixed-name state Secret). Dumps diagnostics on failure. Returns 0/1.
+# ---------------------------------------------------------------------------
+mt_wait_for_tailscale_sidecar() {
+    local namespace="${1:?mt_wait_for_tailscale_sidecar: namespace required}"
+    local selector="${2:?mt_wait_for_tailscale_sidecar: selector required}"
+    local tag="${3:?mt_wait_for_tailscale_sidecar: expected tag required}"
+    local timeout="${4:-180}"
+    local remedy="${5:-run: ./scripts/check-tailscale-keys -e ${MT_ENV:-<env>} --rotate}"
+    local interval=5 start=$SECONDS
+    # Same failure signatures as the key library's post-rotation proof — one
+    # definition (tailscale-keys.sh must stay standalone for the CronJob).
+    local failure_re="${MT_TS_FAILURE_RE:-authkey expired|authkey already used|invalid auth ?key|machineAuthorized=false|tailscale up failed|failed to auth tailscale}"
+    # Bound the LocalAPI call: a wedged tailscaled would otherwise hang the deploy.
+    local tmo=""; command -v timeout >/dev/null 2>&1 && tmo="timeout 20"; [ -z "$tmo" ] && command -v gtimeout >/dev/null 2>&1 && tmo="gtimeout 20"
+    local pods pod status state online tags all_ok pending count online_warned="" xerr last_xerr=""
+    # kubectl exec/logs go through the cluster's konnectivity proxy; a transport
+    # error there is not a sidecar failure. It is retried like any other
+    # transient, but reported at timeout so nobody chases the wrong cause.
+    local transport_re='error dialing backend|unable to upgrade connection|proxy error|connection refused|timed out|TLS handshake'
+
+    print_status "Waiting for the Tailscale sidecar(s) of '$selector' in $namespace to join the mesh as $tag..."
+    while :; do
+        pods=$(kubectl get pods -n "$namespace" -l "$selector" -o json 2>/dev/null \
+            | jq -r '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name') || pods=""
+        all_ok=true; pending=""
+        for pod in $pods; do
+            # Fail fast on an auth failure in the sidecar log
+            # grep -c (not -q): -q exits on the first match and the writer then dies
+            # of SIGPIPE, which `pipefail` reports as failure — a false "no match".
+            if kubectl logs -n "$namespace" "$pod" -c tailscale --tail=200 2>/dev/null | grep -cE "$failure_re" >/dev/null; then
+                print_error "Tailscale sidecar of $namespace/$pod failed to authenticate:"
+                kubectl logs -n "$namespace" "$pod" -c tailscale --tail=200 2>/dev/null | grep -E "$failure_re" | tail -3 | sed 's/^/    /'
+                print_error "The pod's auth Secret holds a dead or untagged pre-auth key — $remedy"
+                dump_pod_diagnostics "$namespace" "$selector"
+                return 1
+            fi
+            # shellcheck disable=SC2086  # $tmo is intentionally word-split ("timeout 20" or empty)
+            xerr=""
+            status=$($tmo kubectl exec -n "$namespace" "$pod" -c tailscale -- tailscale status --json 2>"${TMPDIR:-/tmp}/mt-ts-exec-$$.err") || {
+                xerr=$(tail -1 "${TMPDIR:-/tmp}/mt-ts-exec-$$.err" 2>/dev/null); rm -f "${TMPDIR:-/tmp}/mt-ts-exec-$$.err"
+                all_ok=false
+                if printf '%s' "$xerr" | grep -qE "$transport_re"; then
+                    last_xerr="$xerr"; pending="$pod: kubectl exec transport error (cluster proxy), retrying"
+                else
+                    pending="$pod: sidecar not answering yet"
+                fi
+                continue
+            }
+            rm -f "${TMPDIR:-/tmp}/mt-ts-exec-$$.err"
+            state=$(printf '%s' "$status" | jq -r '.BackendState // "unknown"')
+            online=$(printf '%s' "$status" | jq -r '.Self.Online // false')
+            if [ "$state" != "Running" ]; then
+                all_ok=false; pending="$pod: BackendState=$state"; continue
+            fi
+            if [ "$online" != "true" ] && [ -z "$online_warned" ]; then
+                print_warning "$namespace/$pod: tailscaled is Running but not inside a Headscale map poll (Self.Online=false) — control plane unreachable? The tunnel keeps working on the cached netmap; the positive control decides."
+                online_warned=1
+            fi
+            tags=$(printf '%s' "$status" | jq -c '.Self.Tags // []')
+            if ! printf '%s' "$status" | jq -e --arg t "$tag" '(.Self.Tags // []) | any(. == $t)' >/dev/null; then
+                print_error "Tailscale sidecar of $namespace/$pod is on the mesh WITHOUT $tag (tags: $tags) — the ACL will drop its traffic"
+                print_error "Tags come from the pre-auth key at registration — $remedy"
+                dump_pod_diagnostics "$namespace" "$selector"
+                return 1
+            fi
+        done
+        if [ -n "$pods" ] && [ "$all_ok" = true ]; then
+            count=$(printf '%s\n' "$pods" | grep -c .)
+            print_success "Tailscale sidecar on the mesh as $tag: $count pod(s) of '$selector' in $namespace ($((SECONDS - start))s)"
+            return 0
+        fi
+        if [ $((SECONDS - start)) -ge "$timeout" ]; then
+            print_error "Tailscale sidecar(s) of '$selector' in $namespace did not reach the mesh within ${timeout}s (${pending:-no pods found})"
+            if [ -n "$last_xerr" ]; then
+                print_error "Last kubectl exec transport error (control-plane proxy to the node, NOT the sidecar): $last_xerr"
+            fi
+            for pod in $pods; do
+                echo "    --- $pod (tailscale, last 20 lines) ---"
+                kubectl logs -n "$namespace" "$pod" -c tailscale --tail=20 2>&1 | sed 's/^/      /' || true
+            done
+            dump_pod_diagnostics "$namespace" "$selector"
+            return 1
+        fi
+        echo "  Waiting for Tailscale sidecar... ${pending:-no pods yet} ($((SECONDS - start))s/${timeout}s)"
+        sleep "$interval"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# mt_tailscale_sidecar_fetch — positive control through a sidecar: the real target
+# Usage: mt_tailscale_sidecar_fetch <namespace> <label-selector> <url> <expect-regex> [timeout=60]
+#
+# Runs `wget -qO- <url>` inside the first non-terminating pod's `tailscale`
+# container (the mesh interface lives in that container's netns, so the fetch
+# traverses the tunnel and the ACL exactly like the workload's traffic) and
+# requires the body to match <expect-regex>. Retries until the timeout.
+# ---------------------------------------------------------------------------
+mt_tailscale_sidecar_fetch() {
+    local namespace="${1:?}" selector="${2:?}" url="${3:?}" expect="${4:?}" timeout="${5:-60}"
+    local start=$SECONDS pod body
+    while :; do
+        pod=$(kubectl get pods -n "$namespace" -l "$selector" -o json 2>/dev/null \
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | .[0].metadata.name // empty') || pod=""
+        if [ -n "$pod" ]; then
+            body=$(kubectl exec -n "$namespace" "$pod" -c tailscale -- wget -qO- -T 5 "$url" 2>&1) || body="${body:-<no response>}"
+            # (stderr is merged on purpose: a kubectl transport error then shows up
+            # in the failure excerpt instead of reading as an empty response)
+            # grep -c, not -q: a metrics body is ~100 KB and -q would SIGPIPE printf.
+            if printf '%s\n' "$body" | grep -cE "$expect" >/dev/null; then
+                print_success "Mesh positive control OK: $url reachable from $namespace/$pod ($((SECONDS - start))s)"
+                return 0
+            fi
+        fi
+        if [ $((SECONDS - start)) -ge "$timeout" ]; then
+            print_error "Mesh positive control FAILED: $url from ${pod:-<no pod>} did not return /$expect/ within ${timeout}s"
+            printf '%s\n' "${body:-}" | head -5 | sed 's/^/    /'
+            return 1
+        fi
+        sleep 5
+    done
+}
+
+# ---------------------------------------------------------------------------
+# mt_tailscale_sidecar_tcp_check — positive control for a non-HTTP target
+# Usage: mt_tailscale_sidecar_tcp_check <namespace> <label-selector> <host> <port> [timeout=60]
+#
+# `nc -z` from inside the sidecar's netns: exit 0 means the TCP handshake
+# completed through the tunnel AND the Headscale ACL (a port the ACL does not
+# open never answers the SYN and times out). Retries until the timeout.
+# ---------------------------------------------------------------------------
+mt_tailscale_sidecar_tcp_check() {
+    local namespace="${1:?}" selector="${2:?}" host="${3:?}" port="${4:?}" timeout="${5:-60}"
+    local start=$SECONDS pod
+    while :; do
+        pod=$(kubectl get pods -n "$namespace" -l "$selector" -o json 2>/dev/null \
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | .[0].metadata.name // empty') || pod=""
+        local nc_err=""
+        if [ -n "$pod" ]; then
+            if nc_err=$(kubectl exec -n "$namespace" "$pod" -c tailscale -- nc -z -w 5 "$host" "$port" 2>&1 >/dev/null); then
+                print_success "Mesh positive control OK: ${host}:${port} reachable from $namespace/$pod ($((SECONDS - start))s)"
+                return 0
+            fi
+        fi
+        if [ $((SECONDS - start)) -ge "$timeout" ]; then
+            print_error "Mesh positive control FAILED: ${host}:${port} not reachable from ${pod:-<no pod>} within ${timeout}s (tunnel down, or the ACL does not open this port to the sidecar's tag)"
+            [ -n "$nc_err" ] && printf '%s\n' "$nc_err" | tail -1 | sed 's/^/    last error: /'
+            return 1
+        fi
+        sleep 5
+    done
+}

@@ -544,6 +544,34 @@ additionalPrometheusRulesMap:
             for: 10m
             labels:
               severity: critical
+  tailscale-alerts:
+    groups:
+      - name: tailscale.rules
+        rules:
+          # The Tailscale sidecars are NATIVE sidecars (restartable init
+          # containers), so the stock KubePodCrashLooping /
+          # KubeContainerHighRestartRate rules never see them: those read
+          # kube_pod_container_* series, and a crash-looping sidecar only shows
+          # up in kube_pod_init_container_*. pg-metrics-bridge crash-looped on
+          # "authkey expired" for days in prod without a single crash-loop alert (#613).
+          - alert: TailscaleSidecarAuthFailing
+            annotations:
+              summary: 'Tailscale sidecar restarting in {{ $labels.namespace }}/{{ $labels.pod }}'
+              description: 'The native Tailscale sidecar of {{ $labels.namespace }}/{{ $labels.pod }} restarted {{ $value | humanize }} times in 30m — usually "authkey expired" or an untagged pre-auth key in its auth Secret. Check: kubectl logs -n {{ $labels.namespace }} {{ $labels.pod }} -c tailscale. Repair: ./scripts/check-tailscale-keys -e <env> --rotate'
+            expr: |-
+              increase(kube_pod_init_container_status_restarts_total{container="tailscale"}[30m]) > 3
+            for: 10m
+            labels:
+              severity: warning
+          - alert: TailscaleSidecarNotReady
+            annotations:
+              summary: 'Tailscale sidecar not ready in {{ $labels.namespace }}/{{ $labels.pod }}'
+              description: 'The Tailscale sidecar of {{ $labels.namespace }}/{{ $labels.pod }} has not been ready for 15m — the pod is off the mesh (PgBouncer: database path down; pg-metrics-bridge: PostgreSQL metrics blind; router: operator access down). Check: kubectl logs -n {{ $labels.namespace }} {{ $labels.pod }} -c tailscale'
+            expr: |-
+              kube_pod_init_container_status_ready{container="tailscale"} == 0
+            for: 15m
+            labels:
+              severity: warning
   jitsi-signaling-alerts:
     groups:
       - name: jitsi-signaling.rules

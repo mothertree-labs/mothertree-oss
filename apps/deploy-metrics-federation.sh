@@ -112,12 +112,9 @@ case "$ROLE" in
   consumer)
     # prod: forward an in-cluster ClusterIP to the prod-eu exposer's mesh IP.
     : "${MT_METRICS_FED_SOURCE_IP:?metrics_federation.source_mesh_ip is required when role=consumer (the prod-eu exposer's 100.64.x.x mesh IP — see bootstrap steps in this script's header).}"
-    # Defence-in-depth: this value flows straight into socat args, so reject anything
-    # that is not a Tailscale CGNAT mesh IP (100.64.0.0/10 → second octet 64-127).
-    if ! [[ "$MT_METRICS_FED_SOURCE_IP" =~ ^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-      print_error "metrics_federation.source_mesh_ip ('$MT_METRICS_FED_SOURCE_IP') is not a Tailscale mesh IP (expected 100.64.0.0/10, e.g. 100.64.0.x)"
-      exit 1
-    fi
+    # Defence-in-depth: this value flows straight into socat args and the mesh
+    # probe's argv, so it must be a Tailscale CGNAT mesh IP (100.64.0.0/10).
+    mt_require_mesh_ip MT_METRICS_FED_SOURCE_IP "$MT_METRICS_FED_SOURCE_IP" "metrics_federation.source_mesh_ip"
     export FED_NAME="prometheus-eu-bridge"
     export SOCAT_TARGET="${MT_METRICS_FED_SOURCE_IP}:9090"
     export TS_HOSTNAME="prom-eu-bridge-${MT_ENV}"
@@ -179,6 +176,25 @@ mt_restart_if_changed "deployment/${FED_NAME}" -n "$NS_MONITORING"
 if mt_has_changes; then
   print_status "Waiting for metrics federation rollout..."
   kubectl rollout status "deployment/${FED_NAME}" -n "$NS_MONITORING" --timeout=120s
+fi
+
+# =============================================================================
+# Mesh gate — unconditional (a Ready pod says nothing about the tunnel, #613)
+# =============================================================================
+
+# The mesh gate is fatal on purpose: a federation sidecar with a dead or
+# untagged key is exactly the #613 failure class, and prod-eu has no alert
+# delivery yet, so a blocked deploy is the only signal that would be seen.
+mt_wait_for_tailscale_sidecar "$NS_MONITORING" "app=${FED_NAME}" tag:monitoring
+if [ "$ROLE" = consumer ]; then
+  # Positive control: the exposer's Prometheus answers through the tunnel.
+  # This one is a WARNING, not a failure: the exposer's per-pod node identity
+  # means its mesh IP changes whenever its pod is recreated, while
+  # metrics_federation.source_mesh_ip is a static config value (audit cause 7,
+  # tracked separately). A miss here is the Grafana "Prometheus (prod-eu)"
+  # datasource being dead — loud, but not worth blocking deploy_infra on.
+  mt_tailscale_sidecar_fetch "$NS_MONITORING" "app=${FED_NAME}" "http://${MT_METRICS_FED_SOURCE_IP}:9090/-/ready" 'Ready' 60 \
+    || print_warning "Federation consumer cannot reach the exposer at ${MT_METRICS_FED_SOURCE_IP}:9090 — check metrics_federation.source_mesh_ip against the exposer's current mesh IP"
 fi
 
 print_success "Metrics federation ($ROLE) deployed to $NS_MONITORING"

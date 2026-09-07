@@ -157,6 +157,14 @@ mt_restart_if_changed deployment/tailscale-router -n "$NS_INGRESS_INTERNAL"
 print_status "Waiting for Tailscale router rollout..."
 kubectl rollout status deployment/tailscale-router -n "$NS_INGRESS_INTERNAL" --timeout=120s
 
+# Mesh gate — unconditional: the router must be on the mesh as tag:router
+# (the ACL grants tag:router *:*; an untagged router node forwards nothing).
+# The router keeps a fixed-name state Secret, so its node identity survives
+# pod restarts and Headscale does not re-validate the key: a wrong tag is fixed
+# by re-registering, not by rotating the key.
+mt_wait_for_tailscale_sidecar "$NS_INGRESS_INTERNAL" app=tailscale-router tag:router 180 \
+  "re-register the router: kubectl delete secret tailscale-router-state -n $NS_INGRESS_INTERNAL && kubectl rollout restart deployment/tailscale-router -n $NS_INGRESS_INTERNAL (then remove the stale node in Headscale)"
+
 # =============================================================================
 # Approve routes in Headscale (if not auto-approved by ACL policy)
 # =============================================================================
