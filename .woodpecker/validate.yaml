@@ -16,6 +16,15 @@ steps:
       - ci/scripts/shellcheck.sh
     depends_on: []
 
+  # Unit tests for the shared CI shell library (stubbed curl/sleep, no
+  # network, no cluster). Currently covers the Linode kubeconfig fetch retry
+  # logic that pipelines #2089/#2090 fell over.
+  - name: ci-lib-tests
+    image: bash
+    commands:
+      - scripts/tests/ci-lib-kubeconfig-fetch.test.sh
+    depends_on: []
+
   - name: terraform-validate
     image: bash
     commands:
