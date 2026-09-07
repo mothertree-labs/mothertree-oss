@@ -19,6 +19,14 @@ data:
 
     # K8s pod name patterns (ephemeral, create new Tailscale registrations on restart)
     POD_PATTERNS="pgbouncer-|postfix-|pg-metrics-bridge-"
+    # Sidecars with a FIXED-name state Secret keep one node across pod restarts
+    # (metrics federation pair: prom-mesh-<env> / prom-eu-bridge-<env>). Their
+    # node is merely offline during a Recreate rollout, so it is only stale once
+    # it has been offline longer than PERSISTENT_STALE_HOURS — an identity
+    # abandoned by a deleted state Secret, a rebuilt cluster, or the pre-2026-09
+    # per-pod layout (which registered a new node on every pod recreation).
+    PERSISTENT_PATTERNS="prom-eu-bridge-|prom-mesh-"
+    PERSISTENT_STALE_HOURS="${PERSISTENT_STALE_HOURS:-48}"
     # VM hostnames to never delete (even if offline during maintenance)
     VM_PATTERNS="postgres-|postfix-relay-|router-|ci-server"
 
@@ -32,12 +40,22 @@ data:
     NODE_COUNT=$(echo "$NODES" | jq '.nodes | length')
     log "Total nodes: $NODE_COUNT"
 
-    # Find stale nodes: offline + matching pod patterns + not matching VM patterns
-    STALE_IDS=$(echo "$NODES" | jq -r --arg pods "$POD_PATTERNS" --arg vms "$VM_PATTERNS" '
+    # Find stale nodes: offline + not a VM + (ephemeral pod pattern, or a
+    # persistent pattern that has been offline for PERSISTENT_STALE_HOURS).
+    # lastSeen carries fractional seconds, which jq's fromdateiso8601 rejects.
+    NOW=$(date -u +%s)
+    STALE_IDS=$(echo "$NODES" | jq -r --arg pods "$POD_PATTERNS" --arg vms "$VM_PATTERNS" \
+      --arg persist "$PERSISTENT_PATTERNS" --argjson cutoff "$((NOW - PERSISTENT_STALE_HOURS * 3600))" '
       .nodes[]
       | select(.online == false)
-      | select(.givenName // .name | test($pods))
       | select(.givenName // .name | test($vms) | not)
+      | select(
+          (.givenName // .name | test($pods))
+          or (
+            (.givenName // .name | test($persist))
+            and (((.lastSeen // "1970-01-01T00:00:00Z") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) < $cutoff)
+          )
+        )
       | .id
     ')
 

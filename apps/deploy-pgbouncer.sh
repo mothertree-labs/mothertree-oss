@@ -184,4 +184,7 @@ mt_wait_for_tailscale_sidecar "$NS_DB" app=pgbouncer tag:pgbouncer
 mt_tailscale_sidecar_tcp_check "$NS_DB" app=pgbouncer "$PG_VM_TAILSCALE_IP" 5432 60 \
   || { print_error "PgBouncer sidecar cannot reach PostgreSQL at ${PG_VM_TAILSCALE_IP}:5432 over the mesh"; exit 1; }
 
+# Per-pod state Secrets: every rolling replacement leaves the old pods' behind.
+mt_ts_prune_pod_state_secrets "$NS_DB" pgbouncer
+
 print_success "PgBouncer deployed to $NS_DB"
