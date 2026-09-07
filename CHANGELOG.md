@@ -6,30 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed
-- Cross-cluster metrics federation no longer breaks when the prod-eu exposer
-  pod is recreated. Both federation pods now keep a fixed-name Tailscale state
-  Secret (`<name>-tailscale-state`, like the subnet router) so a recreation
-  re-registers the same Headscale node and keeps its mesh IP; the consumer
-  discovers the exposer's current IP from the Headscale node list at deploy
-  time — **`metrics_federation.source_env` is now required for
-  `role: consumer`** (the exposer's environment) and
-  `metrics_federation.source_mesh_ip` is only a fallback for when no exposer
-  is online. The consumer's mesh positive control is fatal when Headscale
-  listed the exposer online and it still does not answer (our defect), and a
-  loud non-fatal warning when the fallback address was used (the other
-  cluster is down; `MetricsFederationDown` covers it). The first deploy adopts
-  the running pod's per-pod state under the fixed name, so the live node
-  identity is preserved; a lost API/exec answer during that adoption fails
-  the deploy instead of silently registering a fresh node. Prometheus on the
-  consumer scrapes the bridge (one series through the tunnel) and a
-  `MetricsFederationDown` alert covers the path.
-- Per-pod Tailscale state Secrets left behind by pod churn (pgbouncer,
-  pg-metrics-bridge, the federation pair) are pruned by their deploy scripts
-  once the pod is gone (listing Secret names only), and the `headscale-cleanup`
-  CronJob now also removes federation nodes that have been offline for 7 days
-  or more (never online ones).
-
 ### Security
 - The Tailscale sidecars of the metrics federation pair and of the subnet
   router can no longer read every Secret in their namespace: `get/update/patch`
@@ -176,6 +152,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   WebUI retrieval → sources + cited answer; user-role JWT sees both models).
 
 ### Fixed
+- Cross-cluster metrics federation no longer breaks when the prod-eu exposer
+  pod is recreated. Both federation pods now keep a fixed-name Tailscale state
+  Secret (`<name>-tailscale-state`, like the subnet router) so a recreation
+  re-registers the same Headscale node and keeps its mesh IP; the consumer
+  discovers the exposer's current IP from the Headscale node list at deploy
+  time — **`metrics_federation.source_env` is now required for
+  `role: consumer`** (the exposer's environment) and
+  `metrics_federation.source_mesh_ip` is only a fallback for when no exposer
+  is online. The consumer's mesh positive control is fatal when Headscale
+  listed the exposer online and it still does not answer (our defect), and a
+  loud non-fatal warning when the fallback address was used (the other
+  cluster is down; `MetricsFederationDown` covers it). The first deploy adopts
+  the running pod's per-pod state under the fixed name, so the live node
+  identity is preserved; a lost API/exec answer during that adoption fails
+  the deploy instead of silently registering a fresh node. Prometheus on the
+  consumer scrapes the bridge (one series through the tunnel) and a
+  `MetricsFederationDown` alert covers the path.
+- Per-pod Tailscale state Secrets left behind by pod churn (pgbouncer,
+  pg-metrics-bridge, the federation pair) are pruned by their deploy scripts
+  once the pod is gone (listing Secret names only), and the `headscale-cleanup`
+  CronJob now also removes federation nodes that have been offline for 7 days
+  or more (never online ones).
 - External-DNS tenants (`dns_external: true`): the HTTP-01 multi-SAN
   certificate is now issued over the enabled service hosts that currently
   resolve to our ingress LB, instead of over all of them. HTTP-01 is
