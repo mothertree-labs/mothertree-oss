@@ -13,13 +13,29 @@
 #   - internal/operator-only hosts (e.g. synapse-admin) — not publicly reachable,
 #     so HTTP-01 (which needs LE to fetch /.well-known/acme-challenge over :80)
 #     cannot validate them, and HTTP-01 is all-or-nothing across SANs.
+#   - enabled hosts whose CNAME does not (yet) resolve to our ingress LB — the
+#     tenant owns its zone and adds records on its own schedule. Because one
+#     unresolvable SAN fails the whole order, create_env checks every candidate
+#     against the LB IP at deploy time and lists only the ones that point at us.
+#     A host joins spec.dnsNames on the first deploy after its CNAME lands, and
+#     cert-manager re-issues on that change — no operator step.
+#     Consequently the tenant must publish DNS-ONLY records (no CDN / orange
+#     cloud) for every host it wants on this certificate: a host fronted by the
+#     tenant's own CDN resolves to the CDN's addresses, is not "ours" to the
+#     check, and is left off even though HTTP-01 might validate through the CDN.
+#     The check fails closed: if a lookup errors (resolver timeout, SERVFAIL)
+#     rather than answering, create_env aborts instead of guessing.
+#     The check is IPv4-only (A records): an AAAA-only host is a definite
+#     negative and stays off the certificate. Tenants CNAME our LB alias,
+#     which carries both, so this never bites a correctly published record.
 #
 # Required environment variables:
 #   TENANT_NAME       - Tenant name
 #   NS_MATRIX         - Namespace where the Certificate + secret live
 #   TENANT_NAMESPACES - Comma-separated target namespaces for reflector mirroring
 #   CERT_SAN_LINES    - Pre-rendered YAML list items (one `    - "host"` per line),
-#                       built by create_env from the enabled public service hosts.
+#                       built by create_env from the enabled public service hosts
+#                       that currently resolve to our ingress LB (see above).
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate

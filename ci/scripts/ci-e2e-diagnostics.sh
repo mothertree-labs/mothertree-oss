@@ -92,6 +92,9 @@ if [[ -z "${LINODE_CLI_TOKEN:-}" ]]; then
 fi
 KCFG="$(mktemp -t ci-e2e-diag-kcfg-XXXXXX)"
 trap 'rm -f "$KCFG"' EXIT
+# Best-effort diagnostics step: don't spend the full 5-minute retry budget
+# on a Linode hiccup here (a reaped cluster returns immediately regardless).
+export CI_KCFG_FETCH_MAX_WAIT=60
 if ! ci_fetch_dev_kubeconfig "$KCFG"; then
   echo "WARNING: could not fetch dev kubeconfig (cluster reaped, or Linode API"
   echo "         issue) — no pod logs available."

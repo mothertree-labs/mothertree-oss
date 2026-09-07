@@ -16,6 +16,16 @@ steps:
       - ci/scripts/shellcheck.sh
     depends_on: []
 
+  # Cluster-free unit tests for the shell libraries (stubbed kubectl / curl /
+  # resolvers; no network). ci/scripts/shell-unit-tests.sh runs every
+  # scripts/lib/tests/*.test.sh, scripts/tests/*.test.sh and
+  # scripts/tests/test-*.sh — drop a new test file in and it is picked up.
+  - name: shell-unit-tests
+    image: bash
+    commands:
+      - ci/scripts/shell-unit-tests.sh
+    depends_on: []
+
   - name: terraform-validate
     image: bash
     commands:

@@ -76,21 +76,28 @@ tar xzf "$WORK_DIR/secrets.tar.gz" -C "$WORK_DIR"
 rm -f "$WORK_DIR/secrets.tar.gz"
 
 # ── Set up environment ───────────────────────────────────────────
-# For dev, refetch the kubeconfig from the Linode API so we hit the live
-# cluster. Each Woodpecker workflow has its own workspace; the
-# kubeconfig the bringup writes is not visible here. See ci-deploy.sh
-# for details.
-if [[ "$MT_ENV" == "dev" ]] && [[ -n "${LINODE_CLI_TOKEN:-}" ]]; then
+# For dev, fetch the kubeconfig from the Linode API so we hit the live
+# cluster. Each Woodpecker workflow has its own workspace; the kubeconfig the
+# bringup writes is not visible here. The dev vault carries NO kubeconfig by
+# design (on-demand clusters), so the API is the only source and a failed
+# fetch is fatal — with its reason. The old "fall back to the vault copy"
+# path was dead for dev and turned every transient Linode error into an
+# unexplained "kubeconfig.yaml not found in vault" (pipeline #2089, 3 of 9
+# parallel app steps). ci_fetch_dev_kubeconfig retries 429/5xx itself.
+if [[ "$MT_ENV" == "dev" ]]; then
+  : "${LINODE_CLI_TOKEN:?LINODE_CLI_TOKEN is required for env=dev (wire linode_token into the step secrets)}"
   if ci_fetch_dev_kubeconfig "$WORK_DIR/kubeconfig.yaml"; then
     echo "Fetched fresh kubeconfig from Linode API for env=dev"
   else
-    echo "WARNING: Linode kubeconfig fetch failed; falling back to vault copy"
+    echo "ERROR: could not fetch the dev kubeconfig from the Linode API: ${CI_KCFG_FETCH_LAST_ERROR:-unknown error}" >&2
+    exit 1
   fi
 fi
 export KUBECONFIG="$WORK_DIR/kubeconfig.yaml"
 export MT_TERRAFORM_OUTPUTS_FILE="$WORK_DIR/terraform-outputs.env"
 
-[[ -f "$KUBECONFIG" ]] || { echo "ERROR: kubeconfig.yaml not found in vault"; exit 1; }
+# prod / prod-eu: the kubeconfig comes from the vault.
+[[ -f "$KUBECONFIG" ]] || { echo "ERROR: kubeconfig.yaml not found in vault (env=$MT_ENV)"; exit 1; }
 [[ -f "$MT_TERRAFORM_OUTPUTS_FILE" ]] || { echo "ERROR: terraform-outputs.env not found in vault"; exit 1; }
 
 # Source the terraform outputs so child scripts (dev-heartbeat.sh) see

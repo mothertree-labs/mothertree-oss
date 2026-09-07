@@ -19,38 +19,168 @@ vcli() {
   $_CI_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"
 }
 
+# ── Linode API: dev kubeconfig fetch ────────────────────────────
+# Tunables (env-overridable; scripts/tests/ci-lib-kubeconfig-fetch.test.sh
+# shrinks them):
+#   CI_KCFG_FETCH_MAX_WAIT      total seconds of back-off budget before giving
+#                               up (default 300 — an LKE cluster answers 503
+#                               "kubeconfig is not yet available" for minutes
+#                               after creation, pipeline #2090)
+#   CI_KCFG_FETCH_BACKOFF       first back-off in seconds, doubles per retry
+#   CI_KCFG_FETCH_MAX_BACKOFF   cap on one back-off / an honoured Retry-After
+#   CI_KCFG_FETCH_MAX_ATTEMPTS  hard cap on attempts (belt and braces when a
+#                               Retry-After of 0 would otherwise spin)
+#   CI_LINODE_API               API base (tests point it at a stub)
+CI_KCFG_FETCH_MAX_WAIT="${CI_KCFG_FETCH_MAX_WAIT:-300}"
+CI_KCFG_FETCH_BACKOFF="${CI_KCFG_FETCH_BACKOFF:-10}"
+CI_KCFG_FETCH_MAX_BACKOFF="${CI_KCFG_FETCH_MAX_BACKOFF:-60}"
+CI_KCFG_FETCH_MAX_ATTEMPTS="${CI_KCFG_FETCH_MAX_ATTEMPTS:-40}"
+CI_LINODE_API="${CI_LINODE_API:-https://api.linode.com/v4}"
+# Set by ci_fetch_dev_kubeconfig on failure: one line the caller can print.
+CI_KCFG_FETCH_LAST_ERROR=""
+
+# _ci_linode_get <url> <body_out> <headers_out>
+# One authenticated GET. Prints the HTTP status ("000" when curl itself
+# failed) and returns curl's exit code. Response body and headers land in the
+# two files; curl's own stderr in <headers_out>.err so a transport failure
+# carries a reason too. The token travels only in the -H argument — it is
+# never echoed and curl is never run with -v.
+_ci_linode_get() {
+  local url="$1" body="$2" hdrs="$3" status rc=0
+  status=$(curl -sS --connect-timeout 10 --max-time 30 \
+    -H "Authorization: Bearer $LINODE_CLI_TOKEN" \
+    -o "$body" -D "$hdrs" -w '%{http_code}' "$url" 2>"${hdrs}.err") || rc=$?
+  printf '%s' "${status:-000}"
+  return "$rc"
+}
+
+# _ci_linode_reason <status> <body> <headers>
+# One-line, secret-free explanation of a failed call: Linode's JSON error
+# reasons when present, else the first 200 bytes of the body, else curl's
+# stderr for a transport failure.
+_ci_linode_reason() {
+  local status="$1" body="$2" hdrs="$3" reason=""
+  if [ "$status" = "000" ]; then
+    reason=$(tr '\n' ' ' <"${hdrs}.err" 2>/dev/null | cut -c1-200)
+    reason="${reason:-transport failure (no curl stderr)}"
+  else
+    reason=$(jq -r '[.errors[]? | (.field // "" | if . == "" then "" else . + ": " end) + .reason] | join("; ")' "$body" 2>/dev/null || true)
+    if [ -z "$reason" ]; then
+      reason=$(tr '\n' ' ' <"$body" 2>/dev/null | cut -c1-200)
+    fi
+    reason="${reason:-(empty body)}"
+  fi
+  # Belt and braces: Linode's error envelope never reflects request headers,
+  # but an intermediary's error page might. The token must never reach a
+  # Woodpecker log, whatever produced the text.
+  if [ -n "${LINODE_CLI_TOKEN:-}" ]; then
+    reason="${reason//"$LINODE_CLI_TOKEN"/[REDACTED]}"
+  fi
+  printf '%s' "$reason"
+}
+
 # Fetch a fresh kubeconfig for the live dev LKE cluster and write it to
 # $1 (path). Each Woodpecker workflow gets its own workspace, so the
 # fresh kubeconfig written by dev-bringup in ensure-dev-cluster doesn't
-# propagate to deploy-dev-prep, deploy-dev-matrix, etc. — they would
-# otherwise inherit whatever stale copy lives in the deploy vault.
-# Returns 0 on success, non-zero on failure. Caller is expected to fall
-# back to the vault's copy on failure (e.g. for prod where this isn't
-# applicable).
+# propagate to deploy-dev-prep, deploy-dev-matrix, etc. — and the dev vault
+# deliberately carries NO kubeconfig (on-demand clusters make any copy stale
+# by a reaper cycle). The Linode API is therefore the only source, so this
+# retries instead of giving up on the first hiccup:
+#   429            → wait Retry-After (capped), retry
+#   5xx / curl err → back off (exponential, capped), retry
+#   other 4xx      → not retryable: fail now with the reason (401/403 = token,
+#                    404 = cluster vanished)
+# Returns 0 on success, 2 when no cluster carries the label (dev reaped or
+# ensure-dev-cluster has not run — a state, not a transport error, so no
+# retry), 1 on any other failure. Every failure is explained on stderr and in
+# CI_KCFG_FETCH_LAST_ERROR. Pipeline #2089 lost 3 of 9 parallel app steps to
+# the old single-shot, stderr-swallowing version of this function.
 ci_fetch_dev_kubeconfig() {
   local target="${1:?ci_fetch_dev_kubeconfig: target path required}"
   : "${LINODE_CLI_TOKEN:?LINODE_CLI_TOKEN required for kubeconfig fetch}"
+  # The bearer token goes wherever CI_LINODE_API points: refuse anything but
+  # https so a stray override cannot ship it in clear text.
+  case "$CI_LINODE_API" in
+    https://*) ;;
+    *)
+      CI_KCFG_FETCH_LAST_ERROR="CI_LINODE_API must be an https:// URL (got '$CI_LINODE_API')"
+      echo "ci_fetch_dev_kubeconfig: $CI_KCFG_FETCH_LAST_ERROR" >&2
+      return 1
+      ;;
+  esac
   local cluster_label="${CLUSTER_LABEL:-matrix-cluster-dev}"
-  local cluster_id
-  cluster_id=$(curl -sf --connect-timeout 10 --max-time 30 \
-    -H "Authorization: Bearer $LINODE_CLI_TOKEN" \
-    https://api.linode.com/v4/lke/clusters 2>/dev/null \
-    | jq -r --arg label "$cluster_label" '.data[] | select(.label==$label) | .id' \
-    | head -n1 || true)
-  if [ -z "$cluster_id" ] || [ "$cluster_id" = "null" ]; then
-    return 1
-  fi
-  local kcfg_b64
-  kcfg_b64=$(curl -sf --connect-timeout 10 --max-time 30 \
-    -H "Authorization: Bearer $LINODE_CLI_TOKEN" \
-    "https://api.linode.com/v4/lke/clusters/${cluster_id}/kubeconfig" 2>/dev/null \
-    | jq -r '.kubeconfig // empty' || true)
-  if [ -z "$kcfg_b64" ]; then
-    return 1
-  fi
-  umask 077
-  echo "$kcfg_b64" | base64 -d > "$target"
-  umask 022
+  local tmp body hdrs
+  tmp=$(mktemp -d)
+  body="$tmp/body"
+  hdrs="$tmp/hdrs"
+  local elapsed=0 attempt=0 backoff="$CI_KCFG_FETCH_BACKOFF"
+  local phase="list" cluster_id="" url status rc reason wait retry_after kcfg_b64 old_umask
+  CI_KCFG_FETCH_LAST_ERROR=""
+  while :; do
+    attempt=$((attempt + 1))
+    if [ "$phase" = "list" ]; then
+      url="$CI_LINODE_API/lke/clusters"
+    else
+      url="$CI_LINODE_API/lke/clusters/${cluster_id}/kubeconfig"
+    fi
+    rc=0
+    status=$(_ci_linode_get "$url" "$body" "$hdrs") || rc=$?
+    if [ "$rc" -eq 0 ] && [ "$status" = "200" ]; then
+      if [ "$phase" = "list" ]; then
+        cluster_id=$(jq -r --arg label "$cluster_label" '.data[]? | select(.label==$label) | .id' "$body" 2>/dev/null | head -n1 || true)
+        if [ -z "$cluster_id" ] || [ "$cluster_id" = "null" ]; then
+          CI_KCFG_FETCH_LAST_ERROR="no LKE cluster labelled '$cluster_label' (dev reaped, or ensure-dev-cluster has not run)"
+          echo "ci_fetch_dev_kubeconfig: $CI_KCFG_FETCH_LAST_ERROR" >&2
+          rm -rf "$tmp"
+          return 2
+        fi
+        phase="kubeconfig"
+        attempt=0   # attempt numbers in the log are per phase
+        continue
+      fi
+      kcfg_b64=$(jq -r '.kubeconfig // empty' "$body" 2>/dev/null || true)
+      if [ -n "$kcfg_b64" ]; then
+        old_umask=$(umask)
+        umask 077
+        printf '%s' "$kcfg_b64" | base64 -d > "$target"
+        umask "$old_umask"
+        rm -rf "$tmp"
+        return 0
+      fi
+      reason="HTTP 200 but no kubeconfig in the response"
+    else
+      reason="HTTP $status: $(_ci_linode_reason "$status" "$body" "$hdrs")"
+      case "$status" in
+        429|5[0-9][0-9]|000) ;;
+        4[0-9][0-9])
+          CI_KCFG_FETCH_LAST_ERROR="$phase call failed, not retryable — $reason"
+          echo "ci_fetch_dev_kubeconfig: $CI_KCFG_FETCH_LAST_ERROR" >&2
+          rm -rf "$tmp"
+          return 1
+          ;;
+      esac
+    fi
+    # Retryable. Honour Retry-After on 429, otherwise exponential back-off.
+    wait="$backoff"
+    if [ "$status" = "429" ]; then
+      retry_after=$(grep -i '^retry-after:' "$hdrs" 2>/dev/null | head -n1 | tr -d '\r' | awk '{print $2}')
+      if [[ "$retry_after" =~ ^[0-9]+$ ]]; then
+        wait="$retry_after"
+      fi
+    fi
+    [ "$wait" -gt "$CI_KCFG_FETCH_MAX_BACKOFF" ] && wait="$CI_KCFG_FETCH_MAX_BACKOFF"
+    if [ $((elapsed + wait)) -gt "$CI_KCFG_FETCH_MAX_WAIT" ] || [ "$attempt" -ge "$CI_KCFG_FETCH_MAX_ATTEMPTS" ]; then
+      CI_KCFG_FETCH_LAST_ERROR="gave up after $attempt attempt(s) and ${elapsed}s of back-off; last $phase call: $reason"
+      echo "ci_fetch_dev_kubeconfig: $CI_KCFG_FETCH_LAST_ERROR" >&2
+      rm -rf "$tmp"
+      return 1
+    fi
+    echo "ci_fetch_dev_kubeconfig: $phase attempt $attempt failed ($reason); retrying in ${wait}s (${elapsed}s/${CI_KCFG_FETCH_MAX_WAIT}s back-off used)" >&2
+    sleep "$wait"
+    elapsed=$((elapsed + wait))
+    backoff=$((backoff * 2))
+    [ "$backoff" -gt "$CI_KCFG_FETCH_MAX_BACKOFF" ] && backoff="$CI_KCFG_FETCH_MAX_BACKOFF"
+  done
 }
 
 # ── Deploy-vault decryption ─────────────────────────────────────

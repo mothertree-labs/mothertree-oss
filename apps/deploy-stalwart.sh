@@ -532,56 +532,13 @@ if [ -z "$_stalwart_cluster_ip" ]; then
     print_error "Could not read Stalwart ClusterIP from svc/stalwart in $NS_MAIL"
     exit 1
 fi
-# Filter out pods with deletionTimestamp set: rollout-status returns once the
-# new ReplicaSet is fully ready, but old pods can linger in `Running` phase
-# for a few seconds while their containers terminate. Probing those IPs
-# would burn the entire 90s budget on dead addresses. (kubectl jsonpath
-# doesn't support negation, so use jq.)
-_coredns_pod_ips=$(kubectl -n kube-system get pods -l k8s-app=kube-dns -o json \
-    | jq -r '.items[]
-        | select(.status.phase == "Running")
-        | select(.metadata.deletionTimestamp == null)
-        | .status.podIP' \
-    | tr '\n' ' ')
-if [ -z "${_coredns_pod_ips// /}" ]; then
-    print_error "No running CoreDNS pods found (label k8s-app=kube-dns in kube-system)"
-    exit 1
-fi
-print_status "Expecting $MAIL_HOST → $_stalwart_cluster_ip from CoreDNS pods: $_coredns_pod_ips"
-
-# Note: busybox `nslookup` prints the DNS server's own address line first
-# ("Address: <server>#53") and only then the answer addresses after "Name:"
-# — the awk filter below skips lines until "Name:" appears.
-_dns_probe_pod="smtp-dns-probe-$$"
-if kubectl run "$_dns_probe_pod" -n "$NS_MAIL" \
-    --rm -i --restart=Never --image=busybox:1.36 --quiet \
-    --command -- sh -c "
-        pod_ips='${_coredns_pod_ips}'
-        want='${_stalwart_cluster_ip}'
-        host='${MAIL_HOST}'
-        for i in \$(seq 1 18); do
-            all_ok=1
-            last_state=
-            for ip in \$pod_ips; do
-                got=\$(nslookup \"\$host\" \"\$ip\" 2>/dev/null | awk '/^Name:/{f=1; next} f && /^Address/{print \$2; exit}')
-                if [ \"\$got\" != \"\$want\" ]; then
-                    all_ok=0
-                    last_state=\"replica \$ip returned '\$got'\"
-                fi
-            done
-            if [ \"\$all_ok\" = '1' ]; then
-                echo \"OK: all CoreDNS replicas return \$want for \$host\"
-                exit 0
-            fi
-            echo \"  attempt \$i: \$last_state (want \$want), retrying in 5s\"
-            sleep 5
-        done
-        echo \"FAIL: not all CoreDNS replicas converged on \$want for \$host within 90s (\$last_state)\"
-        exit 1
-    "; then
-    print_success "CoreDNS rewrite verified across all replicas: $MAIL_HOST → $_stalwart_cluster_ip"
-else
-    print_error "CoreDNS rewrite for $MAIL_HOST did not propagate to all replicas within 90s"
+# Explicit-verdict probe via a Job + post-completion logs (issue #623; shared
+# with deploy-llm-webui.sh). The helper filters out Terminating CoreDNS pods
+# (rollout-status returns once the new ReplicaSet is ready, but old pods can
+# linger in `Running` for a few seconds — probing those IPs would burn the
+# whole 90s budget on dead addresses). Returns 1 = definitely not converged,
+# 2 = no answer; both abort — never claim success on silence.
+if ! mt_coredns_rewrite_verify "$NS_MAIL" "$MAIL_HOST" "$_stalwart_cluster_ip"; then
     print_error "Check kube-system/coredns-custom ConfigMap and CoreDNS pod logs:"
     print_error "  kubectl -n kube-system get configmap coredns-custom -o yaml"
     print_error "  kubectl -n kube-system logs -l k8s-app=kube-dns --tail=100"

@@ -57,8 +57,58 @@ metrics_federation:
 # prod
 metrics_federation:
   role: consumer
-  source_mesh_ip: "100.64.x.x"   # the prod-eu exposer's assigned mesh IP (step 2 below)
+  source_env: "prod-eu"          # REQUIRED: the exposer's environment (its node advertises prom-mesh-prod-eu)
+  source_mesh_ip: "100.64.x.x"   # optional FALLBACK, used only when no exposer is online
 ```
+
+The consumer does **not** need the exposer's IP in config: at deploy time it
+looks up the online `tag:monitoring` node advertising hostname
+`prom-mesh-<source_env>` through the Headscale API and renders that address
+into socat. A stale `source_mesh_ip` only produces a warning; two online
+exposers, or none with no fallback, fail the deploy. A consumer without
+`source_env` fails fast.
+
+**Trust model.** The node *name* is client-advertised — any mesh node can call
+itself `prom-mesh-prod-eu` — so the name is only a selector. The real gate is
+the `tag:monitoring` ACL tag, which a node can only obtain by registering with
+a tagged pre-auth key minted through the Headscale API (`tailscale.rotator_api_key`),
+and the ACL rule `tag:monitoring -> tag:monitoring:9090`. Note that everything
+carrying `tag:monitoring` (pg-metrics-bridge, both federation pods) can reach
+the exposed Prometheus API in full, including its lifecycle endpoints
+(`/-/reload`, `/-/quit`, enabled by the kube-prometheus-stack operator) — the
+tag is the boundary, keep it on infrastructure sidecars only. Pinning the
+exposer's Headscale node id on first use (TOFU) is a follow-up.
+
+**Positive control, two branches.** After the mesh gate the consumer fetches
+the exposer's `/-/ready` through the tunnel. When Headscale had just listed the
+exposer *online* (discovered path) a miss is a defect on our side — ACL,
+tunnel, socat — and the deploy **fails**. When no exposer was online and the
+configured `source_mesh_ip` fallback was used, a miss is the other cluster
+being down: the script prints an ERROR + WARNING and **continues**, so a
+prod-eu outage never blocks unrelated prod deploys; `MetricsFederationDown`
+covers the path from there.
+
+## Node identity (why the mesh IP is stable)
+
+Both pods run their Tailscale sidecar with a **fixed-name** state Secret
+(`<name>-tailscale-state`, like the subnet router), so a pod recreation
+re-registers the *same* Headscale node and keeps its mesh IP. Until 2026-09 the
+Secret was per pod name, and every recreation of the exposer produced a new
+node with a new IP that the consumer's static config never learned — the
+federation silently died on 2026-09-02 (audit cause 7).
+
+Migration is automatic: on the first deploy with this layout the script copies
+the running pod's per-pod state Secret under the fixed name *before* rolling
+the Deployment (only if that pod's sidecar is Running and online — a dead
+registration is never adopted; a lost API/exec answer fails the deploy rather
+than registering a fresh node). The superseded per-pod Secrets are pruned once
+their pod is gone, and the `headscale-cleanup` CronJob removes federation nodes
+that have been offline for 7 days or more.
+
+The sidecar's RBAC is name-restricted: `get/update/patch` only on
+`<name>-tailscale-state` (plus namespace-wide `create`, which RBAC cannot
+restrict by name), so the pod's ServiceAccount cannot read the other Secrets
+in `infra-monitoring`.
 
 Infra tenant `<env>.secrets.yaml` (both prod and prod-eu):
 
@@ -78,26 +128,32 @@ stored anywhere.
    prod-eu infra secrets (it already is if the key rotator runs there), then set
    `metrics_federation.role: exposer` in the prod-eu infra config.
 
-2. **Deploy the exposer + capture its mesh IP**:
+2. **Deploy the exposer**:
    ```bash
    ./scripts/deploy_infra -e prod-eu
-   # then read the assigned 100.64.x.x of node "prom-mesh-prod-eu":
-   ssh root@<headscale-vm> 'headscale nodes list' | grep prom-mesh-prod-eu
+   # the script ends by printing the exposer's Headscale node and mesh IP —
+   # informational only, the consumer discovers it itself.
    ```
 
-3. **ACL**: this PR adds `{"src":["tag:monitoring"],"dst":["tag:monitoring:9090"]}`
-   to `ansible/templates/headscale-acl-policy.json.j2`. Redeploy it:
+3. **ACL**: `{"src":["tag:monitoring"],"dst":["tag:monitoring:9090"]}` in
+   `ansible/templates/headscale-acl-policy.json.j2`. Redeploy it:
    ```bash
    ./ci/scripts/provision-ci.sh --ansible-only   # or the headscale playbook tag that runs "Deploy ACL policy"
    ```
 
 4. **prod config**: set `metrics_federation.role: consumer` **and**
-   `metrics_federation.source_mesh_ip: <ip from step 2>` in the prod infra config.
+   `metrics_federation.source_env: prod-eu` in the prod infra config.
 
 5. **Deploy the consumer + datasource**:
    ```bash
    ./scripts/deploy_infra -e prod
    ```
+   The deploy fails if Headscale lists the exposer online but its Prometheus
+   does not answer through the tunnel (`/-/ready`); see "Positive control,
+   two branches" above for the fallback case. `MetricsFederationDown` fires on
+   the consumer cluster if the path breaks later (Prometheus scrapes the
+   bridge, which is answered by the remote Prometheus through the tunnel; only
+   one series is kept).
 
 ## Verify
 
@@ -127,6 +183,7 @@ dashboard-revamp follow-up, tracked separately.
 Both sidecars are listed in `apps/manifests/tailscale-key-rotator/components.conf.tpl`
 (`bridge` = prometheus-eu-bridge, `expose` = prometheus-mesh-expose), so the daily
 `tailscale-key-rotator` CronJob and `./scripts/check-tailscale-keys -e <env>` verify
-their auth Secrets like every other sidecar. Note that the pods use a per-pod-name
-state Secret, so every pod recreation is a fresh registration that needs a live key —
-which is exactly what the verification guarantees (#613).
+their auth Secrets like every other sidecar. Because the pods keep a fixed-name
+state Secret, a restart re-registers the existing node and Headscale does not
+re-validate the pre-auth key (same as the subnet router) — the key still has to
+be live for the day the node identity is lost and a fresh registration happens.

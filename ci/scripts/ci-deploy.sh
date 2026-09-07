@@ -113,18 +113,28 @@ rm -f "$WORK_DIR/secrets.tar.gz"
 echo "Vault decrypted successfully"
 
 # ── Set up environment ───────────────────────────────────────────
-# For dev, refetch the kubeconfig directly from the Linode API so each
+# For dev, fetch the kubeconfig directly from the Linode API so each
 # workflow gets the live cluster's API endpoint — every Woodpecker
 # workflow has its own workspace, so the kubeconfig written by
-# ensure-dev-cluster's dev-bringup is NOT visible here. Vault copies
-# lag the real cluster id by a reaper cycle (operator rebuilds vault out
-# of band). Pipelines #1262/#1263 surfaced this. Falls through to the
-# vault's copy on prod or if the fetch fails.
-if [[ "$MT_ENV" == "dev" ]] && [[ -n "${LINODE_CLI_TOKEN:-}" ]]; then
-  if ci_fetch_dev_kubeconfig "$WORK_DIR/kubeconfig.yaml"; then
+# ensure-dev-cluster's dev-bringup is NOT visible here, and the dev vault
+# carries no kubeconfig at all (any copy would lag the real cluster id by a
+# reaper cycle; pipelines #1262/#1263). The API is the only source, so a
+# failed fetch is fatal with its reason instead of the old silent "fall
+# back to the vault copy" that could never succeed on dev (pipeline #2089).
+# ci_fetch_dev_kubeconfig retries 429/5xx itself.
+#
+# --bringup-only is the one exception: the cluster may not exist yet, and
+# dev-bringup.sh fetches its own kubeconfig (with a longer wait for the
+# "kubeconfig not yet available" window after creation), so skip it here.
+if [[ "$MT_ENV" == "dev" ]]; then
+  : "${LINODE_CLI_TOKEN:?LINODE_CLI_TOKEN is required for env=dev (wire linode_token into the step secrets)}"
+  if [[ "$BRINGUP_ONLY" == "true" ]]; then
+    echo "Bring-up only: dev-bringup.sh fetches the kubeconfig once the cluster exists"
+  elif ci_fetch_dev_kubeconfig "$WORK_DIR/kubeconfig.yaml"; then
     echo "Fetched fresh kubeconfig from Linode API for env=dev"
   else
-    echo "WARNING: Linode kubeconfig fetch failed; falling back to vault copy"
+    echo "ERROR: could not fetch the dev kubeconfig from the Linode API: ${CI_KCFG_FETCH_LAST_ERROR:-unknown error}" >&2
+    exit 1
   fi
 fi
 export KUBECONFIG="$WORK_DIR/kubeconfig.yaml"

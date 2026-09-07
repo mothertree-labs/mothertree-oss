@@ -1,5 +1,9 @@
-# Dev: no SOCKS proxy — VPN server removed, probes go direct.
-# The base values define http_2xx_ext and http_synapse_ext modules without proxy.
-# If probes fail due to kube-proxy short-circuiting (PROXY protocol mismatch),
-# consider routing through the Tailscale mesh or using internal ingress.
+# Dev: no SOCKS proxy. The VPN server and its microsocks egress proxy went away
+# in #281, and with them the proxied http_2xx_ext / http_synapse_ext modules —
+# only the direct modules in values/blackbox-exporter.yaml exist. Dev runs
+# ingress-nginx with PROXY protocol on and DNS-only tenant records, so a pod
+# probing a tenant's public host is short-circuited past the NodeBalancer and
+# rejected; create_env therefore skips the public-endpoint Probes on such envs
+# (loudly) and deploys the internal ones only. Public reachability on dev is
+# covered by scripts/verify-endpoints at the end of every deploy.
 {}
