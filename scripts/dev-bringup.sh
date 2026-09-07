@@ -30,11 +30,62 @@ CLUSTER_LABEL="${CLUSTER_LABEL:-matrix-cluster-dev}"
 
 print_status "dev-bringup: checking for existing LKE cluster '$CLUSTER_LABEL'..."
 
-# linode-cli reads token from LINODE_CLI_TOKEN env var (no config file needed).
+# ── linode-cli with retries ──────────────────────────────────────
+# linode-cli reads the token from LINODE_CLI_TOKEN (no config file needed);
 # `--json` output keeps the parse robust against UI string changes.
-EXISTING_ID=$(linode-cli lke clusters-list --json 2>/dev/null \
-    | jq -r --arg label "$CLUSTER_LABEL" '.[] | select(.label==$label) | .id' \
+#
+# _linode_cli_retry <max_wait_s> <backoff_s> <label> <jq_check> -- <args...>
+# Runs `linode-cli <args>` until it exits 0 AND `jq -r <jq_check>` over its
+# stdout is non-empty, sleeping <backoff_s> between attempts for at most
+# <max_wait_s> of total waiting. stdout lands in $_LC_RAW, stderr in
+# $_LC_STDERR. On exhaustion prints the full stderr and returns linode-cli's
+# last rc. Run linode-cli first and capture its rc directly rather than piping
+# into jq: inside a command substitution the pipe is a subshell, so PIPESTATUS
+# would lie about the rc (pipeline #1330 — stderr swallowed, script killed by
+# `set -e` before the error block ran).
+_LC_STDERR=$(mktemp)
+_LC_RAW=$(mktemp)
+trap 'rm -f "$_LC_STDERR" "$_LC_RAW"' EXIT
+_linode_cli_retry() {
+    local max_wait="$1" backoff="$2" label="$3" jq_check="$4"
+    shift 4
+    [ "${1:-}" = "--" ] && shift
+    local waited=0 attempt=0 rc=1 parsed hint
+    while :; do
+        attempt=$((attempt + 1))
+        # Subshell umask so the recreated scratch files (they hold the kubeconfig
+        # JSON on the warm path) are 0600 even after the first cleanup below.
+        ( umask 077; exec linode-cli "$@" >"$_LC_RAW" 2>"$_LC_STDERR" ) && rc=0 || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            parsed=$(jq -r "$jq_check" "$_LC_RAW" 2>/dev/null || true)
+            [ -n "$parsed" ] && return 0
+        fi
+        if [ $((waited + backoff)) -gt "$max_wait" ]; then
+            print_error "dev-bringup: $label failed after $attempt attempt(s) and ${waited}s of waiting (rc=$rc); linode-cli stderr was:"
+            sed 's/^/  /' "$_LC_STDERR" >&2 || true
+            return "$rc"
+        fi
+        # One-line hint per attempt: the last real error line, minus the CLI's
+        # "newer API version, please pip3 install --upgrade" nag.
+        hint=$(grep -v '^[[:space:]]*$' "$_LC_STDERR" 2>/dev/null \
+            | grep -iv 'newer than the CLI\|update the CLI\|pip3 install\|newest features' \
+            | tail -n 1 | cut -c1-200 || true)
+        print_warning "dev-bringup: $label attempt $attempt failed (rc=$rc${hint:+: $hint}); retrying in ${backoff}s (${waited}s/${max_wait}s waited)"
+        sleep "$backoff"
+        waited=$((waited + backoff))
+    done
+}
+
+# A Linode API failure must never read as "no cluster": an empty list from a
+# failed call would send us down the cold path (phase1-dev apply + full
+# deploy_infra) against a cluster that exists. Retry, then abort loudly.
+_linode_cli_retry 120 10 "linode-cli lke clusters-list" '.' -- lke clusters-list --json \
+    || { print_error "dev-bringup: cannot list LKE clusters; refusing to guess whether '$CLUSTER_LABEL' exists"; exit 1; }
+EXISTING_ID=$(jq -r --arg label "$CLUSTER_LABEL" '.[] | select(.label==$label) | .id' "$_LC_RAW" \
     | head -n1 || true)
+# Drop the scratch files now (the cold path never touches them again and its
+# infra-lock EXIT trap replaces ours); the warm path's next call recreates them.
+rm -f "$_LC_STDERR" "$_LC_RAW"
 
 DID_PROVISION=false
 CLUSTER_DEGRADED=false
@@ -49,46 +100,16 @@ if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
     # kubeconfig from Linode for the current cluster id and write it to
     # $REPO_ROOT — mirrors dev-reaper.sh's pattern for the destroy side.
     #
-    # Retry on transient API errors (pipeline #1330: `linode-cli` exited
-    # nonzero with stderr swallowed by `2>/dev/null`, killing the script
-    # under `set -euo pipefail` BEFORE the explicit error block ran). Now
-    # we capture stderr to a tempfile and surface it on final failure.
+    # A cluster that another pipeline is creating right now answers
+    # `503 Cluster kubeconfig is not yet available` for several minutes
+    # (pipeline #2090 gave up after 3 tries / 15s while #2089 was still
+    # creating it). Wait up to 10 minutes, 15s apart.
     print_status "dev-bringup: fetching fresh kubeconfig for cluster id=$EXISTING_ID"
-    KCFG_STDERR=$(mktemp)
-    KCFG_RAW=$(mktemp)
-    trap 'rm -f "$KCFG_STDERR" "$KCFG_RAW"' EXIT
-    KCFG_B64=""
-    KCFG_RC=1
-    for _attempt in 1 2 3; do
-        # Run linode-cli first and capture its rc directly. Don't pipe into jq
-        # here — command substitution would put the pipe in a subshell, after
-        # which PIPESTATUS in the parent shell reflects only the outer assign-
-        # ment (always 0) and the diagnostic "rc=$KCFG_RC" would lie. Using
-        # `&& KCFG_RC=0 || KCFG_RC=$?` keeps the test in a context where
-        # `set -e` does not fire, so KCFG_RC accurately reflects linode-cli's
-        # exit status.
-        linode-cli lke kubeconfig-view --json "$EXISTING_ID" \
-            >"$KCFG_RAW" 2>"$KCFG_STDERR" && KCFG_RC=0 || KCFG_RC=$?
-        if [ "$KCFG_RC" -eq 0 ]; then
-            KCFG_OUT=$(jq -r '.[0].kubeconfig // empty' "$KCFG_RAW" 2>/dev/null || true)
-            if [ -n "$KCFG_OUT" ]; then
-                KCFG_B64="$KCFG_OUT"
-                break
-            fi
-        fi
-        if [ "$_attempt" -lt 3 ]; then
-            _backoff=$((_attempt * 5))
-            print_warning "dev-bringup: linode-cli kubeconfig-view attempt $_attempt failed (rc=$KCFG_RC); retrying in ${_backoff}s"
-            sleep "$_backoff"
-        fi
-    done
-    if [ -z "$KCFG_B64" ]; then
-        print_error "dev-bringup: could not fetch kubeconfig from Linode API after 3 attempts (rc=$KCFG_RC); aborting"
-        print_error "dev-bringup: linode-cli stderr was:"
-        sed 's/^/  /' "$KCFG_STDERR" >&2 || true
-        exit 1
-    fi
-    rm -f "$KCFG_STDERR" "$KCFG_RAW"
+    _linode_cli_retry 600 15 "linode-cli lke kubeconfig-view (id=$EXISTING_ID)" '.[0].kubeconfig // empty' \
+        -- lke kubeconfig-view --json "$EXISTING_ID" \
+        || { print_error "dev-bringup: could not fetch kubeconfig from the Linode API; aborting"; exit 1; }
+    KCFG_B64=$(jq -r '.[0].kubeconfig // empty' "$_LC_RAW")
+    rm -f "$_LC_STDERR" "$_LC_RAW"
     trap - EXIT
     umask 077
     echo "$KCFG_B64" | base64 -d > "$REPO_ROOT/kubeconfig.${MT_ENV:-dev}.yaml"
