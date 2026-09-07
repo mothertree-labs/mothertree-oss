@@ -99,6 +99,23 @@ print_status "Hosts: llm=$LLM_HOST"
 print_status "S3 bucket (files): $S3_FILES_BUCKET"
 print_status "Scaling: docs_backend=$DOCS_BACKEND_MIN_REPLICAS-$DOCS_BACKEND_MAX_REPLICAS, jvb=$JVB_MIN_REPLICAS-$JVB_MAX_REPLICAS, redis=$REDIS_REPLICAS"
 
+# Are this tenant's public DNS records Cloudflare-proxied (orange cloud)?
+# In-zone prod-style tenants (no env_dns_label) are proxied; labelled envs
+# (dev) stay DNS-only because Universal SSL covers *.domain but not
+# *.dev.domain. External-DNS tenants are told to publish DNS-only records to
+# our LB alias; if a tenant fronts a host with its own CDN instead, that host
+# resolves to CDN addresses, is not "ours" for the checks below, and stays off
+# the certificate and probes (see certificate-http01.yaml.tpl).
+# Decided once here, BEFORE the --finalize-only split: the tenant DNS records
+# (prep phase) and the endpoint-probe decision (finalize phase) both read it,
+# and under CI's split run each phase is a separate process (pipeline 2094
+# died on an unbound variable when this lived inside the prep-only block).
+if [ "${DNS_EXTERNAL:-false}" != "true" ] && { [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; }; then
+  TENANT_DNS_CF_PROXIED="true"
+else
+  TENANT_DNS_CF_PROXIED="false"
+fi
+
 # When --finalize-only, skip infra verification and helm setup (already done in prep)
 if [ "$FINALIZE_ONLY" = "true" ]; then
   print_status "Running finalize-only mode — skipping to cleanup and health checks"
@@ -164,21 +181,6 @@ if [ "$LLM_ENABLED" = "true" ]; then
   kubectl create namespace "$NS_LLM" 2>/dev/null || true
 fi
 print_status "Tenant namespaces created/verified"
-
-# Are this tenant's public DNS records Cloudflare-proxied (orange cloud)?
-# In-zone prod-style tenants (no env_dns_label) are proxied; labelled envs
-# (dev) stay DNS-only because Universal SSL covers *.domain but not
-# *.dev.domain. External-DNS tenants are told to publish DNS-only records to
-# our LB alias; if a tenant fronts a host with its own CDN instead, that host
-# resolves to CDN addresses, is not "ours" for the checks below, and stays off
-# the certificate and probes (see certificate-http01.yaml.tpl). Decided once
-# here; used by the tenant DNS records below and by the endpoint-probe
-# decision at the end.
-if [ "${DNS_EXTERNAL:-false}" != "true" ] && { [ -z "$TENANT_ENV_DNS_LABEL" ] || [ "$TENANT_ENV_DNS_LABEL" = "null" ]; }; then
-  TENANT_DNS_CF_PROXIED="true"
-else
-  TENANT_DNS_CF_PROXIED="false"
-fi
 
 # =============================================================================
 # Deploy per-tenant wildcard TLS certificate (DNS-01 via Cloudflare)
