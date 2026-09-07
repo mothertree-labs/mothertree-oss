@@ -61,10 +61,6 @@ spec:
           image: tailscale/tailscale:v1.102.3
           restartPolicy: Always
           env:
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
             - name: TS_AUTHKEY
               valueFrom:
                 secretKeyRef:
@@ -74,8 +70,14 @@ spec:
               value: "${TS_HOSTNAME}"
             - name: TS_EXTRA_ARGS
               value: "--login-server=${HEADSCALE_URL}"
+            # FIXED-name state Secret (like the subnet router), not one per pod:
+            # the node identity — and with it the mesh IP the other cluster
+            # dials — survives pod recreation. With a per-pod Secret every
+            # recreation registered a NEW Headscale node with a new IP and
+            # silently broke the federation (audit cause 7, 2026-09-02).
+            # Safe because strategy is Recreate: two pods never share state.
             - name: TS_KUBE_SECRET
-              value: "${FED_NAME}-tailscale-state-$(POD_NAME)"
+              value: "${FED_NAME}-tailscale-state"
             - name: TS_ACCEPT_DNS
               value: "false"
             - name: TS_USERSPACE

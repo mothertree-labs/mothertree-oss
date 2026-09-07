@@ -13,31 +13,58 @@
 #
 #   role: consumer (prod)
 #       Deploys `prometheus-eu-bridge`: a socat + Tailscale sidecar pod that
-#       forwards an in-cluster ClusterIP (:9090) to the prod-eu exposer's mesh IP
-#       (metrics_federation.source_mesh_ip), PLUS a Grafana datasource ConfigMap
-#       registering "Prometheus (prod-eu)" (uid: prometheus-eu).
+#       forwards an in-cluster ClusterIP (:9090) to the exposer's mesh IP, PLUS a
+#       Grafana datasource ConfigMap registering "Prometheus (prod-eu)"
+#       (uid: prometheus-eu). The exposer's mesh IP is DISCOVERED from Headscale
+#       at deploy time: the ONLINE node carrying tag:monitoring that advertises
+#       hostname prom-mesh-<source_env> (metrics_federation.source_env is
+#       REQUIRED). metrics_federation.source_mesh_ip is only a fallback for
+#       when no such node is online.
 #
 #   (role unset)   -> feature disabled for this env; the script is a no-op.
+#
+# Positive control (consumer) — two branches, on purpose:
+#   discovered: Headscale showed an online exposer, so /-/ready not answering
+#               through the tunnel is a defect on OUR side (ACL, tunnel, socat)
+#               -> FATAL, the deploy stops.
+#   fallback:   no online exposer on Headscale, the configured source_mesh_ip
+#               was used -> a miss is the OTHER cluster being down, which must
+#               not block unrelated prod deploys -> loud ERROR + WARNING, the
+#               deploy continues; MetricsFederationDown covers it from here.
+#
+# Trust model: the node NAME is client-advertised (any mesh node can call
+# itself prom-mesh-<env>); the real gate is the tag:monitoring ACL tag, which
+# only a tagged pre-auth key minted through the Headscale API can confer.
+# Pinning the exposer's Headscale node id (TOFU) is a follow-up.
+#
+# Node identity: both pods keep a FIXED-name Tailscale state Secret
+# (<name>-tailscale-state), so a pod recreation re-registers the same Headscale
+# node and keeps its mesh IP. Until 2026-09 the state Secret was per pod name,
+# and every recreation of the exposer registered a new node with a new IP that
+# the consumer's static config never learned about (audit cause 7). A cluster
+# still on a per-pod Secret is migrated on the first deploy: the running pod's
+# state is adopted under the fixed name so the node (and IP) is preserved.
 #
 # Bootstrap order (operator):
 #   1. Set metrics_federation.role: exposer in the prod-eu infra config. The
 #      sidecar's tag:monitoring pre-auth key is minted via the Headscale API
 #      (tailscale.rotator_api_key) — nothing to pre-create.
-#   2. deploy_infra -e prod-eu  (deploys the exposer); read its assigned mesh IP:
-#        tailscale --socket=... status   (or: headscale nodes list | grep prom-mesh)
+#   2. deploy_infra -e prod-eu  (deploys the exposer; the script prints the
+#      node's mesh IP at the end — nothing to copy anywhere).
 #   3. Add an ACL rule allowing tag:monitoring -> tag:monitoring:9090 and redeploy
 #      the Headscale ACL (ansible/templates/headscale-acl-policy.json.j2).
-#   4. Set metrics_federation.role: consumer AND metrics_federation.source_mesh_ip:
-#      <exposer mesh IP> in the prod infra config.
+#   4. Set metrics_federation.role: consumer AND metrics_federation.source_env:
+#      prod-eu in the prod infra config.
 #   5. deploy_infra -e prod  (deploys the consumer + datasource).
 #
 # Required infra config (config/platform/infra/<env>.config.yaml):
 #   metrics_federation:
 #     role: exposer | consumer
-#     source_mesh_ip: "100.64.x.x"   # consumer only
+#     source_env: "prod-eu"          # consumer, REQUIRED: the exposer's environment
+#     source_mesh_ip: "100.64.x.x"   # consumer, optional: fallback when no exposer is online
 # Required infra secret (infra tenant <env>.secrets.yaml):
 #   tailscale:
-#     rotator_api_key: "<Headscale API key>"   # mints/verifies the sidecar's key
+#     rotator_api_key: "<Headscale API key>"   # mints/verifies the sidecar's key, lists nodes
 #
 # Called by: deploy_infra (after pg-metrics-bridge). Can also be run standalone.
 #
@@ -71,7 +98,7 @@ mt_require_env
 source "${REPO_ROOT}/scripts/lib/infra-config.sh"
 mt_load_infra_config
 
-mt_require_commands kubectl envsubst
+mt_require_commands kubectl envsubst jq
 
 MANIFESTS_DIR="$REPO_ROOT/apps/manifests/metrics-federation"
 
@@ -92,16 +119,64 @@ export NS_MONITORING
 # Tailscale pre-auth keys are minted through the Headscale API (tag:monitoring, 90 days)
 # on first-time bootstrap and whenever the key in the Secret turns out to be
 # missing, untagged, single-use, expired or near expiry (#613). The in-cluster
-# key-rotator CronJob runs the same check daily. See scripts/lib/tailscale-keys.sh.
-: "${TAILSCALE_ROTATOR_API_KEY:?tailscale.rotator_api_key not set in infra secrets — required to mint/verify the metrics federation sidecar pre-auth key (headscale apikeys create --expiration 87600h)}"
+# key-rotator CronJob runs the same check daily. The same API lists the mesh
+# nodes, which is how the consumer finds the exposer. See scripts/lib/tailscale-keys.sh.
+: "${TAILSCALE_ROTATOR_API_KEY:?tailscale.rotator_api_key not set in infra secrets — required to mint/verify the metrics federation sidecar pre-auth key and to discover the exposer (headscale apikeys create --expiration 87600h)}"
 HEADSCALE_API_KEY="$TAILSCALE_ROTATOR_API_KEY"
 source "${REPO_ROOT}/scripts/lib/tailscale-keys.sh"
+
+# =============================================================================
+# Consumer: resolve the exposer's CURRENT mesh IP
+# =============================================================================
+
+# Sets EXPOSER_IP and EXPOSER_SOURCE (discovered | fallback). Discovery — the
+# online tag:monitoring node advertising prom-mesh-<source_env> — wins over
+# metrics_federation.source_mesh_ip, which only covers the case where no such
+# node is online right now. Ambiguity (two online exposers) and "nothing
+# online, no fallback" are fatal: guessing an address would only move the
+# failure to the positive control below.
+_fed_resolve_exposer_ip() {
+  local re found fallback="${MT_METRICS_FED_SOURCE_IP:-}"
+  EXPOSER_IP=""; EXPOSER_SOURCE=""
+  : "${MT_METRICS_FED_SOURCE_ENV:?metrics_federation.source_env is required when role=consumer — the environment whose exposer to dial (its node advertises prom-mesh-<source_env>, e.g. prod-eu); set it in the infra config}"
+  re="^prom-mesh-${MT_METRICS_FED_SOURCE_ENV}\$"
+  print_status "Discovering the exposer on Headscale (online tag:monitoring node advertising /$re/)..."
+  if found=$(mt_ts_resolve_node "$re" tag:monitoring 90); then
+    EXPOSER_IP=$(printf '%s' "$found" | cut -f2)
+    EXPOSER_SOURCE=discovered
+    print_status "Exposer found: node $(printf '%s' "$found" | cut -f1) at $EXPOSER_IP"
+    if [ -n "$fallback" ] && [ "$fallback" != "$EXPOSER_IP" ]; then
+      print_warning "metrics_federation.source_mesh_ip ($fallback) is stale — the exposer is at $EXPOSER_IP; the discovered address is used. Update or drop the config value."
+    fi
+    return 0
+  fi
+  case "$MT_TS_RESOLVE_REASON" in
+    api)
+      printf '%s\n' "$found"
+      print_error "Cannot list Headscale nodes to find the exposer — see the error above"
+      return 1 ;;
+    ambiguous)
+      print_error "More than one online exposer matches /$re/ — set metrics_federation.source_env in the infra config to pick one:"
+      printf '%s\n' "$MT_TS_RESOLVE_CANDIDATES" | sed 's/^/    /'
+      return 1 ;;
+  esac
+  if [ -n "$fallback" ]; then
+    print_warning "No online exposer matches /$re/ on Headscale — falling back to metrics_federation.source_mesh_ip ($fallback); the positive control below is non-fatal on this path."
+    EXPOSER_IP="$fallback"
+    EXPOSER_SOURCE=fallback
+    return 0
+  fi
+  print_error "No online exposer matches /$re/ on Headscale and metrics_federation.source_mesh_ip is unset — is the exposer deployed and on the mesh?"
+  return 1
+}
 
 # =============================================================================
 # Role selection
 # =============================================================================
 
 DEPLOY_DATASOURCE=false
+EXPOSER_IP=""
+EXPOSER_SOURCE=""
 case "$ROLE" in
   exposer)
     # prod-eu: expose the in-cluster Prometheus on the mesh.
@@ -110,13 +185,16 @@ case "$ROLE" in
     export TS_HOSTNAME="prom-mesh-${MT_ENV}"
     ;;
   consumer)
-    # prod: forward an in-cluster ClusterIP to the prod-eu exposer's mesh IP.
-    : "${MT_METRICS_FED_SOURCE_IP:?metrics_federation.source_mesh_ip is required when role=consumer (the prod-eu exposer's 100.64.x.x mesh IP — see bootstrap steps in this script's header).}"
+    # prod: forward an in-cluster ClusterIP to the exposer's mesh IP.
+    if [ -n "${MT_METRICS_FED_SOURCE_IP:-}" ]; then
+      mt_require_mesh_ip MT_METRICS_FED_SOURCE_IP "$MT_METRICS_FED_SOURCE_IP" "metrics_federation.source_mesh_ip"
+    fi
+    _fed_resolve_exposer_ip || exit 1
     # Defence-in-depth: this value flows straight into socat args and the mesh
     # probe's argv, so it must be a Tailscale CGNAT mesh IP (100.64.0.0/10).
-    mt_require_mesh_ip MT_METRICS_FED_SOURCE_IP "$MT_METRICS_FED_SOURCE_IP" "metrics_federation.source_mesh_ip"
+    mt_require_mesh_ip EXPOSER_IP "$EXPOSER_IP" "discovered exposer mesh IP"
     export FED_NAME="prometheus-eu-bridge"
-    export SOCAT_TARGET="${MT_METRICS_FED_SOURCE_IP}:9090"
+    export SOCAT_TARGET="${EXPOSER_IP}:9090"
     export TS_HOSTNAME="prom-eu-bridge-${MT_ENV}"
     DEPLOY_DATASOURCE=true
     ;;
@@ -146,6 +224,17 @@ envsubst '${NS_MONITORING} ${FED_NAME}' < "$MANIFESTS_DIR/rbac.yaml.tpl" | mt_ap
 
 print_status "Verifying metrics federation Tailscale auth key..."
 mt_ts_ensure_secret "$NS_MONITORING" "${FED_NAME}-tailscale-auth" tag:monitoring "$FED_NAME"
+
+# =============================================================================
+# Node identity — fixed-name state Secret (one-time adoption from per-pod state)
+# =============================================================================
+
+# A cluster still running the per-pod layout has its live node identity copied
+# under the fixed name BEFORE the Deployment rolls, so the new pod comes up as
+# the same Headscale node with the same mesh IP (the consumer on the other
+# cluster keeps working). Flags the change tracker when it wrote the Secret.
+print_status "Ensuring the fixed-name Tailscale state Secret (stable node identity)..."
+mt_ts_adopt_pod_state_secret "$NS_MONITORING" "$FED_NAME" "app=${FED_NAME}"
 
 # =============================================================================
 # Apply Deployment + Service
@@ -187,14 +276,41 @@ fi
 # delivery yet, so a blocked deploy is the only signal that would be seen.
 mt_wait_for_tailscale_sidecar "$NS_MONITORING" "app=${FED_NAME}" tag:monitoring
 if [ "$ROLE" = consumer ]; then
-  # Positive control: the exposer's Prometheus answers through the tunnel.
-  # This one is a WARNING, not a failure: the exposer's per-pod node identity
-  # means its mesh IP changes whenever its pod is recreated, while
-  # metrics_federation.source_mesh_ip is a static config value (audit cause 7,
-  # tracked separately). A miss here is the Grafana "Prometheus (prod-eu)"
-  # datasource being dead — loud, but not worth blocking deploy_infra on.
-  mt_tailscale_sidecar_fetch "$NS_MONITORING" "app=${FED_NAME}" "http://${MT_METRICS_FED_SOURCE_IP}:9090/-/ready" 'Ready' 60 \
-    || print_warning "Federation consumer cannot reach the exposer at ${MT_METRICS_FED_SOURCE_IP}:9090 — check metrics_federation.source_mesh_ip against the exposer's current mesh IP"
+  # Positive control on the real target: the exposer's Prometheus answers
+  # through the tunnel. Two branches (see the header):
+  #   discovered — Headscale just showed the exposer ONLINE, so a miss is a
+  #                defect on our side (ACL, tunnel, socat): FATAL.
+  #   fallback   — no online exposer on Headscale, the configured address was
+  #                used: a miss is the other cluster being down, which must not
+  #                block unrelated deploys here. Loud, non-fatal;
+  #                MetricsFederationDown fires once Prometheus notices.
+  if ! mt_tailscale_sidecar_fetch "$NS_MONITORING" "app=${FED_NAME}" "http://${EXPOSER_IP}:9090/-/ready" 'Ready' 60; then
+    if [ "$EXPOSER_SOURCE" = discovered ]; then
+      print_error "Federation consumer cannot reach the exposer's Prometheus at ${EXPOSER_IP}:9090 over the mesh although Headscale lists it online — ACL tag:monitoring -> tag:monitoring:9090 missing, tunnel down, or the exposer's socat is not listening"
+      exit 1
+    fi
+    print_error "Federation consumer cannot reach ${EXPOSER_IP}:9090 (fallback address from metrics_federation.source_mesh_ip; Headscale lists no online exposer)"
+    print_warning "Continuing: the exposer's cluster is down or not deployed — not a reason to block this deploy. Grafana's 'Prometheus (prod-eu)' datasource stays down and MetricsFederationDown fires until the exposer is back and this script re-runs."
+  fi
+else
+  # Exposer: report what the other cluster will discover.
+  if found=$(mt_ts_find_online_nodes "^${TS_HOSTNAME}\$" tag:monitoring); then
+    if [ -n "$found" ]; then
+      print_status "Exposer online on Headscale (node, mesh IP) — the consumer discovers this at its next deploy:"
+      printf '%s\n' "$found" | sed 's/^/    /'
+    else
+      print_warning "Headscale lists no online node named ${TS_HOSTNAME} yet (the sidecar just joined — the map poll may lag a few seconds)"
+    fi
+  else
+    printf '%s\n' "$found"
+    print_warning "Could not read the exposer's node back from Headscale (read-back only; the mesh gate above already passed)"
+  fi
 fi
+
+# =============================================================================
+# Housekeeping — per-pod state Secrets left by the previous layout / pod churn
+# =============================================================================
+
+mt_ts_prune_pod_state_secrets "$NS_MONITORING" "$FED_NAME"
 
 print_success "Metrics federation ($ROLE) deployed to $NS_MONITORING"

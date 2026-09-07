@@ -127,4 +127,7 @@ mt_wait_for_tailscale_sidecar "$NS_DB" app=pg-metrics-bridge tag:monitoring
 mt_tailscale_sidecar_fetch "$NS_DB" app=pg-metrics-bridge "http://${PG_VM_TAILSCALE_IP}:9187/metrics" '^pg_' 60 \
   || { print_error "PG metrics bridge cannot fetch postgres_exporter metrics from ${PG_VM_TAILSCALE_IP}:9187 over the mesh"; exit 1; }
 
+# Per-pod state Secrets: every recreation leaves the previous pod's behind.
+mt_ts_prune_pod_state_secrets "$NS_DB" pg-metrics-bridge
+
 print_success "PG metrics bridge deployed to $NS_DB"
