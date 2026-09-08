@@ -1040,6 +1040,17 @@ mt_http01_san_lines() {
     done
 }
 
+# Returns 0 when MT_ENV is a production-like environment — every environment
+# except dev (prod, prod-eu, any future prod-*). Use this instead of a literal
+# `[ "$MT_ENV" = "prod" ]` for behaviour that must also hold on prod-eu: that
+# literal silently excluded prod-eu more than once (blackbox probe modules,
+# alert delivery). An unset MT_ENV counts as prod-like — the safe direction,
+# since prod-like is always the stricter mode.
+# Usage: if mt_is_prod_like; then ...; fi
+mt_is_prod_like() {
+    [ "${MT_ENV:-}" != "dev" ]
+}
+
 # Wait for Nextcloud's occ status to report installed=true.
 # This is the "Gate 4" readiness check after the install Job + helmfile sync:
 # pod-Ready is necessary but not sufficient (the seed-identity init container

@@ -2,6 +2,10 @@ prometheus:
   # Dev-only overrides. Requests raised to match actual usage (~1156Mi observed)
   # so the scheduler accurately represents node pressure.
   prometheusSpec:
+    # External label on every alert; dev posts into its own room, but the
+    # bridge template prints "Cluster: <label>" everywhere for consistency.
+    externalLabels:
+      cluster: '{{ .Environment.Name }}'
     # Dev-only: avoid consuming a Linode block volume attachment.
     # Single-node dev clusters can hit Linode's max attached volume limit when multiple tenants are deployed.
     storageSpec:
@@ -44,6 +48,12 @@ defaultRules:
     KubeMemoryOvercommit: true
 
 alertmanager:
+  alertmanagerSpec:
+    # Dev-only: keep Alertmanager on emptyDir (the base values give it a PVC).
+    # Same reason as Prometheus above — dev clusters are created and reaped
+    # daily and would leak a block volume per cycle.
+    storage:
+      emptyDir: {}
   ingress:
     hosts:
       - 'alertmanager.internal.{{ env "INFRA_ENV_DNS_LABEL" }}.{{ env "INFRA_DOMAIN" }}'
@@ -71,6 +81,14 @@ alertmanager:
         - match:
             alertname: PgBouncerDegraded
           receiver: 'null'
+        # Weekly channel heartbeat (AlertChannelHeartbeat, always firing — see
+        # alerting-heartbeat.rules): a room silent for more than a week means
+        # the Matrix path is broken.
+        - match:
+            heartbeat: "true"
+          receiver: 'matrix-alerts'
+          group_wait: 0s
+          repeat_interval: 168h
         # Critical alerts: notify Matrix immediately and more frequently
         - match:
             severity: critical

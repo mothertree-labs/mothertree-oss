@@ -1,4 +1,10 @@
 prometheus:
+  prometheusSpec:
+    # External label on every alert (and anything federated / remote-written).
+    # prod-eu posts into the same Matrix room as prod through the same bot;
+    # the bridge template prints "Cluster: <label>" to tell them apart.
+    externalLabels:
+      cluster: '{{ .Environment.Name }}'
   ingress:
     hosts:
       - 'prometheus.prod-eu.{{ env "INFRA_DOMAIN" }}'
@@ -47,6 +53,14 @@ alertmanager:
           receiver: 'deadman'
           group_interval: 1m
           repeat_interval: 1m
+        # Weekly channel heartbeat (AlertChannelHeartbeat, always firing — see
+        # alerting-heartbeat.rules): a room silent for more than a week means
+        # the Matrix path is broken.
+        - match:
+            heartbeat: "true"
+          receiver: 'matrix-alerts'
+          group_wait: 0s
+          repeat_interval: 168h
         # Critical alerts: notify Matrix immediately and more frequently
         - match:
             severity: critical
@@ -58,20 +72,20 @@ alertmanager:
           receiver: 'matrix-alerts'
     receivers:
       - name: 'null'
+      # Room ID and deadman URL come from the infra tenant's secrets
+      # (alertbot.room_id, healthchecks.deadman_url) via deploy_infra, which
+      # refuses to run without them — no placeholder defaults here.
       - name: 'critical-alerts'
         webhook_configs:
-          # TODO: Matrix room ID should come from tenant config
-          # Room ID: #alerts on Matrix server
-          - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ env "ALERTMANAGER_MATRIX_ROOM_ID" | default "!room:matrix.example.org" }}'
+          - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ requiredEnv "ALERTMANAGER_MATRIX_ROOM_ID" }}'
             send_resolved: true
       - name: 'deadman'
         webhook_configs:
-          - url: '{{ env "HEALTHCHECKS_DEADMAN_URL" | default "https://hc-ping.com/REPLACE_WITH_YOUR_UUID" }}'
+          - url: '{{ requiredEnv "HEALTHCHECKS_DEADMAN_URL" }}'
             send_resolved: false
       - name: 'matrix-alerts'
         webhook_configs:
-          # TODO: Matrix room ID should come from tenant config
-          - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ env "ALERTMANAGER_MATRIX_ROOM_ID" | default "!room:matrix.example.org" }}'
+          - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ requiredEnv "ALERTMANAGER_MATRIX_ROOM_ID" }}'
             send_resolved: true
     inhibit_rules:
       # Don't send warning alerts if critical alert is already firing

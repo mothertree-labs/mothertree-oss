@@ -49,8 +49,14 @@ else
   ALERTBOT_USER_ID="@alertbot:$MATRIX_HOST"
 fi
 
-# Check for Matrix access token
+# Check for Matrix access token. Optional on dev only: everywhere else an
+# environment without alert delivery is a broken environment (Fail Fast).
 if [ -z "${MATRIX_ALERTMANAGER_ACCESS_TOKEN:-}" ]; then
+  if mt_is_prod_like; then
+    print_error "MATRIX_ALERTMANAGER_ACCESS_TOKEN is not set — alert delivery is mandatory outside dev"
+    print_error "Set alertbot.access_token in the infra tenant's ${MT_ENV}.secrets.yaml"
+    exit 1
+  fi
   print_warning "MATRIX_ALERTMANAGER_ACCESS_TOKEN is not set"
   print_warning "Matrix notifications will not work until you:"
   print_warning "  1. Create an alertbot user on Matrix"
@@ -65,7 +71,10 @@ print_status "Using Matrix homeserver: $MATRIX_HOMESERVER"
 print_status "Using Matrix user: $ALERTBOT_USER_ID"
 
 # Generate the config YAML
-# Note: Room IDs are specified in AlertManager webhook URLs, not here
+# Note: Room IDs are specified in AlertManager webhook URLs, not here.
+# The `cluster` label is Prometheus' external label (set per environment in
+# apps/environments/<env>/prometheus.yaml.gotmpl) — several clusters post
+# into the same room through the same bot.
 CONFIG_YAML=$(cat <<EOF
 # HTTP server configuration
 http:
@@ -87,6 +96,7 @@ templating:
     <p>
     <strong><font color="red">🔥 FIRING</font></strong><br/>
     <strong>Alert:</strong> {{ .Alert.Labels.alertname }}<br/>
+    {{ if .Alert.Labels.cluster }}<strong>Cluster:</strong> {{ .Alert.Labels.cluster }}<br/>{{ end }}
     <strong>Severity:</strong> {{ .Alert.Labels.severity }}<br/>
     {{ if .Alert.Annotations.summary }}<strong>Summary:</strong> {{ .Alert.Annotations.summary }}<br/>{{ end }}
     {{ if .Alert.Annotations.description }}<strong>Description:</strong> {{ .Alert.Annotations.description }}<br/>{{ end }}
@@ -96,6 +106,7 @@ templating:
     <p>
     <strong><font color="green">✅ RESOLVED</font></strong><br/>
     <strong>Alert:</strong> {{ .Alert.Labels.alertname }}<br/>
+    {{ if .Alert.Labels.cluster }}<strong>Cluster:</strong> {{ .Alert.Labels.cluster }}<br/>{{ end }}
     <strong>Severity:</strong> {{ .Alert.Labels.severity }}<br/>
     {{ if .Alert.Annotations.summary }}<strong>Summary:</strong> {{ .Alert.Annotations.summary }}{{ end }}
     </p>
@@ -133,8 +144,14 @@ kubectl rollout restart deployment/matrix-alertmanager -n "$NS_MONITORING" 2>/de
 print_status "Waiting for matrix-alertmanager to be ready..."
 if kubectl rollout status deployment/matrix-alertmanager -n "$NS_MONITORING" --timeout=120s; then
   print_success "matrix-alertmanager deployed successfully"
+elif mt_is_prod_like; then
+  # A bridge that never becomes Ready is an undeliverable alert channel — the
+  # exact state deploy_infra's fail-fast exists to rule out. Fatal outside dev.
+  print_error "matrix-alertmanager did not become Ready within 120s — alert delivery is mandatory outside dev"
+  print_error "Check: kubectl logs -n $NS_MONITORING -l app=matrix-alertmanager ; kubectl describe deployment/matrix-alertmanager -n $NS_MONITORING"
+  exit 1
 else
-  print_warning "matrix-alertmanager deployment may not be ready yet"
+  print_warning "matrix-alertmanager deployment may not be ready yet (non-fatal on dev)"
   print_status "Check logs: kubectl logs -n $NS_MONITORING -l app=matrix-alertmanager"
 fi
 
@@ -146,7 +163,7 @@ print_success "Alerting deployment complete for $MT_ENV"
 echo ""
 print_status "Next steps:"
 echo "  1. Ensure the alertbot user ($ALERTBOT_USER_ID) is invited to the alerts room AND the deploy room"
-echo "  2. Alerts room ID is configured in apps/environments/$MT_ENV/prometheus.yaml"
-echo "     Deploy room ID is configured in tenant secrets (alertbot.deploy_room_id)"
-echo "  3. Run 'helmfile -e $MT_ENV -l name=kube-prometheus-stack apply' to update AlertManager config"
+echo "  2. Alerts room ID and deploy room ID come from the infra tenant's secrets"
+echo "     (alertbot.room_id / alertbot.deploy_room_id); deploy_infra renders them into Alertmanager"
+echo "  3. Re-run deploy_infra -e $MT_ENV after changing either (it syncs kube-prometheus-stack)"
 echo "  4. Monitor logs: kubectl logs -n $NS_MONITORING -l app=matrix-alertmanager"
