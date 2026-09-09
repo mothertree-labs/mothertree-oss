@@ -5,13 +5,34 @@ on:
     - cron: "0 8 * * 4" # Thursday 08:00 UTC
   workflow_dispatch: # Allow manual trigger
 
+# A manual run overlapping the schedule would race on the force-push to the
+# shared bot branch and on the "does a PR already exist" lookup.
+concurrency:
+  group: nextcloud-app-versions
+  cancel-in-progress: false
+
+# A single, stable branch that is force-updated each run. The previous
+# date-stamped scheme (chore/nextcloud-app-updates-YYYYMMDD) pushed the branch
+# BEFORE creating the PR, so once `gh pr create` started failing every run left
+# behind another orphan branch — 14 of them accumulated unnoticed between
+# 2026-06 and 2026-09. One branch, one PR, re-used.
+env:
+  UPDATE_BRANCH: chore/nextcloud-app-updates
+  MANIFEST: apps/manifests/nextcloud/app-versions.json
+  FAILURE_LABEL: ci-failure
+
 jobs:
   check-versions:
     name: Check for app updates
     runs-on: ubuntu-latest
+    # The concurrency group above serialises runs, so a job wedged on a slow
+    # app-store fetch would otherwise hold the group — and block every later
+    # schedule AND manual dispatch — for the 6h default.
+    timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: write
+      issues: write # failure notification (see the last step)
 
     steps:
       - name: Checkout repository
@@ -22,41 +43,59 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Check for updates
+      # One invocation, so one fetch of the app store and one selection. When
+      # the check and the writeback each fetched independently, the PR body
+      # could describe different releases than the manifest actually pinned —
+      # and that summary is the human review control for a supply-chain change.
+      # Whether there is anything to propose is then read from the working tree,
+      # not from an exit code.
+      - name: Check for updates and refresh the manifest
         id: check
         run: |
           set +e
-          output=$(./scripts/check-nextcloud-app-versions.sh 2>&1)
+          output=$(./scripts/check-nextcloud-app-versions.sh --update 2>&1)
           exit_code=$?
+          set -e
           echo "$output"
-          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
 
-          # Extract update summary for PR body
-          if [ "$exit_code" -eq 2 ]; then
-            # Capture lines with " -> " (version changes)
-            changes=$(echo "$output" | grep ' -> ' | sed 's/^  //')
-            {
-              echo "changes<<EOF"
-              echo "$changes"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
+          # Anything non-zero is a failure, including codes we don't anticipate:
+          # 126/127 (script not executable, python3 missing) and 137/143 (the
+          # runner OOM-killing or timing out the step). Enumerating only the
+          # codes we expect is what let this workflow fail green for 14 weeks.
+          if [ "$exit_code" -ne 0 ]; then
+            echo "::error::Nextcloud app version check failed (exit ${exit_code})"
+            exit 1
           fi
 
-      - name: Update manifest
-        if: steps.check.outputs.exit_code == '2'
-        run: ./scripts/check-nextcloud-app-versions.sh --update
+          if git diff --quiet -- "$MANIFEST"; then
+            echo "No app updates available."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-      - name: Create PR
-        if: steps.check.outputs.exit_code == '2'
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          # Random delimiter: $output contains third-party version strings.
+          delim="EOF_$(openssl rand -hex 16)"
+          {
+            echo "changes<<${delim}"
+            echo "$output" | grep ' -> ' | sed 's/^ *//'
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the PR
+        if: steps.check.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CHANGES: ${{ steps.check.outputs.changes }}
         run: |
-          BRANCH="chore/nextcloud-app-updates-$(date +%Y%m%d)"
-          git checkout -b "$BRANCH"
-          git add apps/manifests/nextcloud/app-versions.json
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B "$UPDATE_BRANCH"
+          git add "$MANIFEST"
+
           git commit -m "chore(nextcloud): update app versions
 
           Automated weekly check found new compatible versions.
@@ -64,13 +103,14 @@ jobs:
           Changes:
           $CHANGES"
 
-          git push origin "$BRANCH"
+          # Force-update: this branch is bot-owned and always reflects the
+          # latest check, so a stale run never blocks a fresh one.
+          git push --force origin "$UPDATE_BRANCH"
 
-          gh pr create \
-            --title "chore(nextcloud): update app versions" \
-            --body "## Nextcloud App Updates
+          BODY="## Nextcloud App Updates
 
           Automated weekly check found new compatible app versions.
+          Prereleases and nightlies are excluded; see \`scripts/lib/nextcloud-app-versions.py\`.
 
           ### Changes
 
@@ -85,5 +125,75 @@ jobs:
           5. Deploy to prod
 
           ---
-          Generated by [Nextcloud App Version Check](.github/workflows/nextcloud-app-versions.yml)" \
-            --label "chore"
+          Generated by [Nextcloud App Version Check](.github/workflows/nextcloud-app-versions.yml)"
+
+          # `gh pr list --head` matches on headRefName alone and cannot be
+          # owner-qualified, so on a public repo it also returns fork PRs. Left
+          # unfiltered, anyone could open a fork PR on this branch name and this
+          # job would edit THEIR pull request every week instead of ever opening
+          # ours — silently, and green. Restrict to same-repo PRs.
+          EXISTING=$(gh pr list --head "$UPDATE_BRANCH" --state open --limit 100 \
+            --json number,isCrossRepository \
+            --jq '[.[] | select(.isCrossRepository == false)][0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            echo "Updating existing PR #${EXISTING}"
+            gh pr edit "$EXISTING" --body "$BODY"
+          else
+            # Only pass --label if it exists: under `set -e` an unknown label
+            # aborts the call, which would lose the PR entirely.
+            LABEL_ARGS=()
+            if gh label list --limit 200 --json name --jq '.[].name' | grep -qx "chore"; then
+              LABEL_ARGS=(--label "chore")
+            else
+              echo "note: 'chore' label missing; opening the PR without it"
+            fi
+            gh pr create \
+              --title "chore(nextcloud): update app versions" \
+              --body "$BODY" \
+              "${LABEL_ARGS[@]}"
+          fi
+
+      # Nothing surfaced the 14 consecutive failures of this workflow between
+      # 2026-06 and 2026-09 — a scheduled job that fails silently is the same as
+      # one that was never running. Raise a tracked issue instead, reusing a
+      # single open issue so a persistent breakage doesn't file one per week.
+      - name: Report failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE="Nextcloud app version check is failing"
+
+          # Look the issue up by a LABEL we control, not by title. Searching
+          # open issues on title alone is the same unowned-lookup weakness as
+          # the fork-PR one fixed above: this repo is public, so anyone could
+          # pre-open an issue with this exact title and every future failure
+          # notice would land as a comment on their thread while the real one
+          # is never created — silently restoring the failure mode this step
+          # exists to prevent. Non-collaborators cannot apply labels, so a
+          # dedicated label is a lookup key an outsider cannot occupy.
+          gh label create "$FAILURE_LABEL" \
+            --color B60205 \
+            --description "Automated CI failure report" >/dev/null 2>&1 || true
+
+          EXISTING=$(gh issue list --state open --label "$FAILURE_LABEL" --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
+
+          NOTE="The scheduled \`Nextcloud App Version Check\` workflow failed, so the
+          pinned Nextcloud app versions are no longer being refreshed.
+
+          Run: $RUN_URL"
+
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$NOTE"
+          else
+            # Deliberately not tolerant of a missing label here: the label IS
+            # the lookup key, so creating the issue without it would orphan the
+            # next run's lookup and file a duplicate every week. Failing is
+            # loud and visible in the Actions tab.
+            gh issue create --title "$TITLE" --body "$NOTE" --label "$FAILURE_LABEL"
+          fi
