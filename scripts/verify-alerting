@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+#
+# Alerting self-test — prove the alert delivery path works right after a
+# deploy, end to end: Alertmanager → matrix-alertmanager bridge → Matrix.
+#
+# Why: prod-eu ran for eleven weeks (2026-06-18 → 2026-09-08) with every alert
+# undeliverable — no bridge pod and a placeholder deadman URL — and nothing was
+# red. The deployed rules cannot report a broken channel through the channel.
+# This script fires a synthetic alert straight into Alertmanager and requires
+# three counters to move within the window:
+#
+#   alertmanager_notifications_total{integration="webhook"}        +1 or more
+#   alertmanager_notifications_failed_total{integration="webhook"}  unchanged
+#   matrix_alertmanager_receiver_send_success_total (bridge)        +1 or more
+#
+# i.e. Alertmanager notified a webhook and the bridge actually posted to
+# Matrix. The BRIDGE counters decide: a rise in Alertmanager's webhook failure
+# counter alone is reported but not fatal, because that counter also covers
+# the healthchecks receivers (Watchdog pings every minute) and has no
+# per-receiver label — an hc-ping.com hiccup must not fail the Matrix test.
+# Both metric endpoints are read from inside the Alertmanager container
+# (busybox wget), so nothing needs to be exposed. The synthetic alert is
+# routed to the deploy room (falls back to the alerts room) with
+# `selftest: "true"` — see the `selftest` receiver in each
+# apps/environments/<env>/prometheus.yaml.gotmpl.
+#
+# Attribution: the counters are not per alert, so a real alert delivered in
+# the same window would also satisfy the check. That cannot produce a false
+# RED, and a false GREEN would still mean "the bridge posts to Matrix" — only
+# the deploy-room route itself would be unproven. The per-run `run` label
+# keeps repeated runs from being deduplicated by Alertmanager and lets the
+# alert be found in its API (`/api/v2/alerts?filter=run="<id>"`).
+#
+# Fail Fast: any inability to establish the verdict is a failure (exit 2), not
+# a pass. On dev alone, an absent bridge Deployment is tolerated with a warning
+# (deploy-alerting.sh skips the bridge there when no alertbot token is
+# configured); everywhere else it is a failure.
+#
+# Usage:
+#   ./scripts/verify-alerting -e <env>        # uses $KUBECONFIG, or
+#                                             # <repo>/kubeconfig.<env>.yaml
+# Environment:
+#   ALERT_SELFTEST_TIMEOUT   seconds to wait for the counters (default 120)
+#   RELEASE_VERSION          included in the alert text when set
+# Exit codes: 0 delivered, 1 not delivered / delivery failed, 2 could not
+# evaluate (Alertmanager unreachable, metrics unreadable).
+set -euo pipefail
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+
+NS_MON="${NS_MONITORING:-infra-monitoring}"
+AM_LABEL="app.kubernetes.io/name=alertmanager"
+BRIDGE_URL="http://matrix-alertmanager.${NS_MON}.svc.cluster.local:3000/metrics"
+AM_URL="http://localhost:9093"
+
+# --- metric plumbing ---------------------------------------------------------
+# Everything below reads through `kubectl exec` into the Alertmanager container.
+# A failed exec prints nothing and returns non-zero; callers treat that as
+# "cannot evaluate", never as zero.
+
+# _am_exec <cmd...>: run inside the alertmanager container of $AM_POD.
+_am_exec() {
+    kubectl exec -n "$NS_MON" "$AM_POD" -c alertmanager -- "$@"
+}
+
+# _fetch_metrics <url>: raw Prometheus text exposition, or return 1.
+_fetch_metrics() {
+    _am_exec wget -qO- -T 10 "$1" 2>/dev/null
+}
+
+# _metric_sum <text> <regex-for-series-prefix>: sum the values of every series
+# whose line starts with the prefix (labels may follow). Prints an integer.
+_metric_sum() {
+    local text="$1" prefix="$2"
+    printf '%s\n' "$text" | awk -v p="$prefix" '
+        index($0, p) == 1 { s += $2; n++ }
+        END { if (n == 0) print "NA"; else printf "%d\n", s }'
+}
+
+# _snapshot: sets WEBHOOK_TOTAL WEBHOOK_FAILED BRIDGE_OK BRIDGE_FAIL from live
+# metrics. Returns 1 when either endpoint could not be read or a required
+# series is absent (a fresh Alertmanager exposes the webhook series only after
+# its first notification — NA is normalised to 0 for the totals, but the
+# bridge series must exist: they are registered at startup).
+_snapshot() {
+    local am bridge
+    am=$(_fetch_metrics "${AM_URL}/metrics") || { echo "  could not read Alertmanager metrics"; return 1; }
+    bridge=$(_fetch_metrics "$BRIDGE_URL") || { echo "  could not read bridge metrics at ${BRIDGE_URL}"; return 1; }
+    WEBHOOK_TOTAL=$(_metric_sum "$am" 'alertmanager_notifications_total{integration="webhook"')
+    WEBHOOK_FAILED=$(_metric_sum "$am" 'alertmanager_notifications_failed_total{integration="webhook"')
+    BRIDGE_OK=$(_metric_sum "$bridge" 'matrix_alertmanager_receiver_send_success_total')
+    BRIDGE_FAIL=$(_metric_sum "$bridge" 'matrix_alertmanager_receiver_send_failure_total')
+    [ "$WEBHOOK_TOTAL" = "NA" ] && WEBHOOK_TOTAL=0
+    [ "$WEBHOOK_FAILED" = "NA" ] && WEBHOOK_FAILED=0
+    if [ "$BRIDGE_OK" = "NA" ] || [ "$BRIDGE_FAIL" = "NA" ]; then
+        echo "  bridge metrics endpoint answered but has no matrix_alertmanager_receiver_send_* series"
+        return 1
+    fi
+    return 0
+}
+
+# _end_time: RFC3339 timestamp <minutes> from now (GNU or BSD date).
+_end_time() {
+    local mins="$1"
+    date -u -d "+${mins} min" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -v+"${mins}"M +%Y-%m-%dT%H:%M:%SZ
+}
+
+# --- verdict -----------------------------------------------------------------
+# verify_delivery <base_total> <base_failed> <base_ok> <base_fail> <timeout_s>
+# Polls _snapshot until the counters prove delivery, or a failure counter
+# moves, or the timeout passes. Returns 0 delivered, 1 failed / timed out,
+# 2 metrics became unreadable. Separated from main so tests can drive it with
+# a fake _snapshot.
+verify_delivery() {
+    local b_total="$1" b_failed="$2" b_ok="$3" b_fail="$4" timeout="$5"
+    local start=$SECONDS unreadable=0
+    while :; do
+        if ! _snapshot; then
+            unreadable=$((unreadable + 1))
+            if [ "$unreadable" -ge 3 ]; then
+                print_error "Metrics unreadable three times in a row — cannot establish delivery"
+                return 2
+            fi
+        else
+            unreadable=0
+            if [ "$BRIDGE_FAIL" -gt "$b_fail" ]; then
+                print_error "Bridge could not post to Matrix (send_failure_total ${b_fail} → ${BRIDGE_FAIL})"
+                return 1
+            fi
+            if [ "$WEBHOOK_TOTAL" -gt "$b_total" ] && [ "$BRIDGE_OK" -gt "$b_ok" ]; then
+                if [ "$WEBHOOK_FAILED" -gt "$b_failed" ]; then
+                    print_warning "Alertmanager webhook failures rose during the window (failed_total ${b_failed} → ${WEBHOOK_FAILED}) — the bridge delivered, so this is another webhook receiver (healthchecks?); check AlertmanagerFailedToSendAlerts"
+                fi
+                print_success "Delivered: webhook notifications ${b_total} → ${WEBHOOK_TOTAL}, bridge Matrix sends ${b_ok} → ${BRIDGE_OK}, bridge failures unchanged"
+                return 0
+            fi
+        fi
+        if [ $((SECONDS - start)) -ge "$timeout" ]; then
+            print_error "No delivery within ${timeout}s (webhook ${b_total} → ${WEBHOOK_TOTAL:-?}, bridge sends ${b_ok} → ${BRIDGE_OK:-?})"
+            if [ "${WEBHOOK_FAILED:-$b_failed}" -gt "$b_failed" ]; then
+                print_error "Alertmanager webhook failures rose meanwhile (failed_total ${b_failed} → ${WEBHOOK_FAILED}) — Alertmanager likely could not reach the bridge"
+            fi
+            return 1
+        fi
+        sleep "${ALERT_SELFTEST_POLL:-5}"
+    done
+}
+
+# --- main --------------------------------------------------------------------
+main() {
+    source "${REPO_ROOT}/scripts/lib/args.sh"
+    mt_usage() {
+        echo "Usage: $0 -e <env>"
+        echo ""
+        echo "Fire a synthetic alert into Alertmanager and require it to reach Matrix"
+        echo "through the matrix-alertmanager bridge (counters, not log grepping)."
+    }
+    mt_parse_args "$@"
+    mt_require_env
+    if [ -z "${KUBECONFIG:-}" ]; then
+        if [ -f "${REPO_ROOT}/kubeconfig.${MT_ENV}.yaml" ]; then
+            export KUBECONFIG="${REPO_ROOT}/kubeconfig.${MT_ENV}.yaml"
+        else
+            print_error "KUBECONFIG is not set and ${REPO_ROOT}/kubeconfig.${MT_ENV}.yaml does not exist"
+            exit 2
+        fi
+    fi
+    mt_require_commands kubectl
+    local timeout="${ALERT_SELFTEST_TIMEOUT:-120}"
+    print_status "Alerting self-test: env=${MT_ENV} namespace=${NS_MON} timeout=${timeout}s"
+
+    # Bridge present? (three-state: an API error is not "absent")
+    local out rc=0
+    out=$(kubectl get deployment matrix-alertmanager -n "$NS_MON" -o name 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        if grep -qE 'deployments\.apps "matrix-alertmanager" not found' <<< "$out"; then
+            if mt_is_prod_like; then
+                print_error "No matrix-alertmanager Deployment in ${NS_MON} — alert delivery is mandatory outside dev"
+                exit 1
+            fi
+            print_warning "No matrix-alertmanager Deployment in ${NS_MON} on ${MT_ENV} (no alertbot token configured) — self-test skipped"
+            exit 0
+        fi
+        print_error "Could not query the matrix-alertmanager Deployment: ${out}"
+        exit 2
+    fi
+
+    # Alertmanager pod, Running and Ready (deploy_infra may have just rolled it).
+    AM_POD=""
+    local waited=0
+    while :; do
+        AM_POD=$(kubectl get pods -n "$NS_MON" -l "$AM_LABEL" \
+            -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null \
+            | awk '$2=="True"{print $1; exit}') || AM_POD=""
+        [ -n "$AM_POD" ] && break
+        if [ "$waited" -ge 120 ]; then
+            print_error "No Ready Alertmanager pod (label ${AM_LABEL}) in ${NS_MON} after 120s — cannot evaluate"
+            exit 2
+        fi
+        sleep 5; waited=$((waited + 5))
+    done
+    print_status "Using Alertmanager pod ${AM_POD}"
+
+    # Baseline.
+    if ! _snapshot; then
+        print_error "Cannot read baseline metrics — cannot evaluate"
+        exit 2
+    fi
+    local b_total="$WEBHOOK_TOTAL" b_failed="$WEBHOOK_FAILED" b_ok="$BRIDGE_OK" b_fail="$BRIDGE_FAIL"
+    print_status "Baseline: webhook notifications=${b_total} failed=${b_failed}; bridge sends ok=${b_ok} failed=${b_fail}"
+
+    # Fire. Labels select the `selftest` route (group_wait 0s); the alert
+    # self-expires so it never lingers in the UI or gets re-notified. The
+    # per-run `run` label makes every run a distinct alert: an identical
+    # re-fire while the previous one is still active would be deduplicated
+    # by Alertmanager until repeat_interval and read here as a timeout.
+    local release="${RELEASE_VERSION:-unknown}" endt run_id
+    run_id="${CI_PIPELINE_NUMBER:-local}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    endt=$(_end_time 3)
+    print_status "Firing AlertingSelfTest (release ${release}, run ${run_id}, ends ${endt})"
+    if ! _am_exec amtool --alertmanager.url="$AM_URL" alert add AlertingSelfTest \
+            selftest=true severity=info cluster="$MT_ENV" release="$release" run="$run_id" \
+            --annotation="summary=\"Deploy self-test on ${MT_ENV} (${release}): the Alertmanager -> Matrix path works\"" \
+            --end="$endt" 2>&1 | sed 's/^/    /'; then
+        print_error "amtool could not post the synthetic alert — cannot evaluate"
+        exit 2
+    fi
+
+    verify_delivery "$b_total" "$b_failed" "$b_ok" "$b_fail" "$timeout"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "--- Alertmanager log (notify lines, last 3 min) ---"
+        kubectl logs -n "$NS_MON" "$AM_POD" -c alertmanager --since=3m 2>/dev/null | grep -iE 'notify|webhook|error' | tail -10 | sed 's/^/    /' || true
+        echo "--- bridge log (last 3 min) ---"
+        kubectl logs -n "$NS_MON" -l app=matrix-alertmanager --since=3m --tail=20 2>/dev/null | sed 's/^/    /' || true
+        [ "$rc" -eq 2 ] && exit 2
+        exit 1
+    fi
+    print_success "Alerting self-test passed on ${MT_ENV}"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

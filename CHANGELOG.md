@@ -31,6 +31,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   0.57 threw `NoSuchMethodError` on every magic-link REST call (seen on the
   dev deploy). 0.72 is the first compatible release.
 ### Added
+- Post-deploy alerting self-test (`scripts/verify-alerting`, run by
+  `ci/scripts/ci-deploy.sh` right after `deploy_infra` in every environment):
+  fires a synthetic `AlertingSelfTest` into Alertmanager with `amtool` and
+  requires, within two minutes, that Alertmanager's webhook notification
+  counter rose, its failure counter did not, and the matrix-alertmanager
+  bridge's Matrix send counter rose — i.e. a message really reached Matrix.
+  Anything else fails the deploy; an unreadable verdict is a failure, not a
+  pass. The alert is routed to the deploy room (`selftest` receiver) so the
+  alerts room stays alert-only. prod-eu ran eleven weeks with every alert
+  undeliverable and nothing was red; this makes that a red pipeline.
+- Out-of-band notification-outage signal on prod and prod-eu:
+  `AlertmanagerFailedToSendAlerts` / `AlertmanagerClusterFailedToSendAlerts`
+  are additionally routed to a `deadman-fail` receiver that hits the
+  healthchecks deadman URL's `/fail` endpoint, so a Matrix delivery outage
+  flips the healthchecks check to failed immediately instead of waiting for
+  the deadman to expire.
 - Keycloak user + admin event logging is now enabled on every tenant realm
   (`docs/keycloak-realm-config.json.tpl`: `eventsEnabled`, `adminEventsEnabled`,
   90-day `eventsExpiration`, 90-day `adminEventsExpiration` realm attribute,

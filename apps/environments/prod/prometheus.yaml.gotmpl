@@ -81,6 +81,26 @@ alertmanager:
           receiver: 'matrix-alerts'
           group_wait: 0s
           repeat_interval: 168h
+        # Deploy self-test (scripts/verify-alerting, run by ci-deploy.sh right
+        # after deploy_infra): a synthetic AlertingSelfTest must reach Matrix
+        # through the bridge within the gate's window, or the deploy is red.
+        # Posted to the deploy room so the alerts room stays alert-only.
+        - match:
+            selftest: "true"
+          receiver: 'selftest'
+          group_wait: 0s
+          group_interval: 1m
+          repeat_interval: 1h
+        # Out of band: "Alertmanager cannot deliver notifications" is the one
+        # alert the Matrix channel may never carry. Flip the healthchecks
+        # deadman check to failed at once (hc-ping /fail endpoint), and
+        # continue down the routes so Matrix still gets it when it can.
+        - match_re:
+            alertname: 'Alertmanager(Cluster)?FailedToSendAlerts'
+          receiver: 'deadman-fail'
+          group_wait: 0s
+          repeat_interval: 30m
+          continue: true
         # Critical alerts: email + Matrix, notify immediately and more frequently
         - match:
             severity: critical
@@ -114,6 +134,19 @@ alertmanager:
       - name: 'deadman'
         webhook_configs:
           - url: '{{ requiredEnv "HEALTHCHECKS_DEADMAN_URL" }}'
+            send_resolved: false
+      - name: 'selftest'
+        webhook_configs:
+          # Deploy room when the infra tenant defines alertbot.deploy_room_id,
+          # else the alerts room. Fire-only: a resolved self-test is noise.
+          - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ env "DEPLOY_MATRIX_ROOM_ID" | default (requiredEnv "ALERTMANAGER_MATRIX_ROOM_ID") }}'
+            send_resolved: false
+      - name: 'deadman-fail'
+        webhook_configs:
+          # healthchecks.io ping URLs accept "/fail" to flip the check to failed
+          # immediately; this is how a notification outage reaches a human when
+          # Matrix cannot.
+          - url: '{{ requiredEnv "HEALTHCHECKS_DEADMAN_URL" | trimSuffix "/" }}/fail'
             send_resolved: false
       - name: 'matrix-alerts'
         webhook_configs:

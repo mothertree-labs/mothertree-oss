@@ -429,6 +429,22 @@ echo "=== Running deploy_infra -e $MT_ENV ==="
 echo ""
 echo "=== deploy_infra complete ==="
 
+# Prove the alert delivery path right after the infra deploy: a synthetic
+# alert must reach Matrix through the bridge (Alertmanager + bridge counters).
+# prod-eu ran eleven weeks with undeliverable alerts and nothing was red;
+# this turns that into a RED pipeline. It must not, however, block the tenant
+# deploys below: the alertbot posts to a Synapse that create_env itself
+# deploys, so a Matrix outage would otherwise wedge the very hotfix that
+# restores Matrix. The verdict is captured here and enforced at the end, after
+# every tenant has been deployed.
+echo ""
+echo "=== Alerting self-test (scripts/verify-alerting -e $MT_ENV) ==="
+ALERT_SELFTEST_RC=0
+"$REPO_ROOT/scripts/verify-alerting" -e "$MT_ENV" || ALERT_SELFTEST_RC=$?
+if [[ "$ALERT_SELFTEST_RC" -ne 0 ]]; then
+  echo "ERROR: alerting self-test FAILED (rc=$ALERT_SELFTEST_RC) — continuing with tenant deploys; this run will exit non-zero at the end"
+fi
+
 # Release infra lock early — create_env is tenant-scoped, doesn't need it.
 # This lets the other pipeline's deploy_infra proceed while we run create_env.
 _release_infra_lock
@@ -459,6 +475,10 @@ done
 echo ""
 if [[ ${#FAILED_TENANTS[@]} -gt 0 ]]; then
   echo "ERROR: Failed tenants: ${FAILED_TENANTS[*]}"
+  exit 1
+fi
+if [[ "${ALERT_SELFTEST_RC:-0}" -ne 0 ]]; then
+  echo "ERROR: alerting self-test failed earlier (rc=$ALERT_SELFTEST_RC) — alert delivery on $MT_ENV is NOT proven; tenants were deployed anyway so a fix can land"
   exit 1
 fi
 
