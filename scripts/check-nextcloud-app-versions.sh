@@ -2,32 +2,53 @@
 # Check for available Nextcloud app updates against pinned versions.
 #
 # Reads apps/manifests/nextcloud/app-versions.json and queries the Nextcloud
-# app store API to find newer compatible versions.
+# app store API to find newer compatible versions. Release selection lives in
+# scripts/lib/nextcloud-app-versions.py so that the report and the writeback
+# can never disagree about which release is "latest" — they did once, which is
+# how a release candidate reached the manifest.
+#
+# Prereleases (6.6.0-rc.2) and nightlies are skipped unless --allow-prerelease.
 #
 # Usage:
-#   ./scripts/check-nextcloud-app-versions.sh           # Show available updates
-#   ./scripts/check-nextcloud-app-versions.sh --update   # Update app-versions.json in place
+#   ./scripts/check-nextcloud-app-versions.sh                      # Show available updates
+#   ./scripts/check-nextcloud-app-versions.sh --update             # Update app-versions.json in place
+#   ./scripts/check-nextcloud-app-versions.sh --allow-prerelease   # Include RCs/betas (manual use)
+#
+# Exit: 0 = up to date, 1 = error, 2 = updates available (0 in --update mode).
 
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 MANIFEST="$REPO_ROOT/apps/manifests/nextcloud/app-versions.json"
+SELECTOR="$REPO_ROOT/scripts/lib/nextcloud-app-versions.py"
 UPDATE_MODE=false
+SELECT_ARGS=()
 
-if [ "${1:-}" = "--update" ]; then
-    UPDATE_MODE=true
-fi
+for arg in "$@"; do
+    case "$arg" in
+        --update)
+            UPDATE_MODE=true
+            SELECT_ARGS+=("--update")
+            ;;
+        --allow-prerelease)
+            SELECT_ARGS+=("--allow-prerelease")
+            ;;
+        *)
+            echo "Error: unknown argument '$arg'" >&2
+            exit 1
+            ;;
+    esac
+done
 
-if [ ! -f "$MANIFEST" ]; then
-    echo "Error: $MANIFEST not found" >&2
-    exit 1
-fi
+[ -f "$MANIFEST" ] || { echo "Error: $MANIFEST not found" >&2; exit 1; }
+[ -f "$SELECTOR" ] || { echo "Error: $SELECTOR not found" >&2; exit 1; }
 
 PLATFORM_VERSION=$(python3 - "$MANIFEST" <<'PYEOF'
 import json, sys
 print(json.load(open(sys.argv[1]))['platform_version'])
 PYEOF
 )
+: "${PLATFORM_VERSION:?platform_version missing from $MANIFEST}"
 
 echo "Checking Nextcloud app store for platform version $PLATFORM_VERSION..."
 echo ""
@@ -36,88 +57,19 @@ API_URL="https://apps.nextcloud.com/api/v1/platform/${PLATFORM_VERSION}/apps.jso
 API_CACHE=$(mktemp)
 trap 'rm -f "$API_CACHE"' EXIT
 
-curl -sf "$API_URL" > "$API_CACHE" || {
+# Bounded: an unbounded fetch inside the workflow's concurrency group would
+# wedge every subsequent scheduled run and manual dispatch, not just this one.
+curl -sf --max-time 60 "$API_URL" > "$API_CACHE" || {
     echo "Error: Could not fetch app store API at $API_URL" >&2
     exit 1
 }
 
-# Compare pinned versions against latest compatible versions
 set +e
-RESULT=$(python3 - "$MANIFEST" "$API_CACHE" <<'PYEOF'
-import json, sys
-
-manifest_path, api_path = sys.argv[1], sys.argv[2]
-
-with open(manifest_path) as f:
-    manifest = json.load(f)
-with open(api_path) as f:
-    apps = json.load(f)
-
-app_index = {a['id']: a for a in apps}
-
-updates = []
-for app_id, info in sorted(manifest['apps'].items()):
-    # Support both formats: {"version": "x", "url": "..."} and plain "version"
-    pinned_version = info['version'] if isinstance(info, dict) else info
-
-    if app_id not in app_index:
-        print(f'  {app_id}: {pinned_version} (not found in app store)')
-        continue
-    releases = app_index[app_id].get('releases', [])
-    if not releases:
-        print(f'  {app_id}: {pinned_version} (no releases)')
-        continue
-    latest_version = releases[0]['version']
-    if latest_version != pinned_version:
-        print(f'  {app_id}: {pinned_version} -> {latest_version}')
-        updates.append((app_id, pinned_version, latest_version))
-    else:
-        print(f'  {app_id}: {pinned_version} (up to date)')
-
-if updates:
-    print(f'\n{len(updates)} update(s) available')
-    sys.exit(2)
-else:
-    print('\nAll apps are up to date')
-    sys.exit(0)
-PYEOF
-)
+python3 "$SELECTOR" "$MANIFEST" "$API_CACHE" "${SELECT_ARGS[@]+"${SELECT_ARGS[@]}"}"
 RESULT_EXIT=$?
 set -e
 
-echo "$RESULT"
-
 if [ "$RESULT_EXIT" -eq 2 ] && [ "$UPDATE_MODE" = true ]; then
-    echo ""
-    echo "Updating $MANIFEST..."
-    python3 - "$MANIFEST" "$API_CACHE" <<'PYEOF'
-import json, sys
-
-manifest_path, api_path = sys.argv[1], sys.argv[2]
-
-with open(manifest_path) as f:
-    manifest = json.load(f)
-with open(api_path) as f:
-    apps = json.load(f)
-
-app_index = {a['id']: a for a in apps}
-
-for app_id in manifest['apps']:
-    if app_id in app_index:
-        releases = app_index[app_id].get('releases', [])
-        if releases:
-            # Store both version and authoritative download URL from the API
-            manifest['apps'][app_id] = {
-                'version': releases[0]['version'],
-                'url': releases[0]['download']
-            }
-
-with open(manifest_path, 'w') as f:
-    json.dump(manifest, f, indent=2)
-    f.write('\n')
-
-print('Manifest updated successfully')
-PYEOF
     # The update we were asked to perform succeeded. Exit 2 means "updates
     # pending" — that's the check-mode contract, not an error here. Reporting
     # success keeps the CI step (which runs under `bash -e`) from failing.
