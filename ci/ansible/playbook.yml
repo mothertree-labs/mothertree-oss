@@ -759,10 +759,16 @@
     # still carries every secret rotated since it was taken.
     # Scoped deliberately to `bak-autounjam-*`: the `bak-pre-*` snapshots are
     # deliberate operator rollback artifacts and are NOT this change's to delete.
-    - name: Find orphaned queue auto-unjam DB snapshots
+    - name: Find orphaned queue-jam DB snapshots
       ansible.builtin.find:
         paths: /var/lib/woodpecker
-        patterns: "woodpecker.sqlite.bak-autounjam-*"
+        # bak-autounjam-*: left by the retired cron.
+        # bak-jam-*:       left by the MANUAL recovery in ci/RUNBOOK.md, which
+        #                  tells the operator these get reaped here.
+        # bak-pre-*:       deliberate operator upgrade-rollback snapshots — NOT reaped.
+        patterns:
+          - "woodpecker.sqlite.bak-autounjam-*"
+          - "woodpecker.sqlite.bak-jam-*"
       register: unjam_db_backups
 
     - name: Remove orphaned queue auto-unjam DB snapshots
