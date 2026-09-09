@@ -3,7 +3,7 @@
 # Deploy Matrix Alertmanager for AlertManager -> Matrix room notifications
 #
 # This script:
-# 1. Loads tenant config (Matrix host, access token, etc.)
+# 1. Loads the INFRA tenant config/secrets (mt_load_infra_config) (Matrix host, access token, etc.)
 # 2. Generates configuration and manifests
 # 3. Deploys the matrix-alertmanager service
 #
@@ -17,22 +17,32 @@ source "${REPO_ROOT}/scripts/lib/common.sh"
 source "${REPO_ROOT}/scripts/lib/args.sh"
 
 mt_usage() {
-    echo "Usage: $0 -e <env> -t <tenant>"
+    echo "Usage: $0 -e <env> [-t <infra-tenant>]"
     echo ""
     echo "Deploy matrix-alertmanager (AlertManager -> Matrix room notifications)."
     echo ""
     echo "Options:"
     echo "  -e <env>       Environment (e.g., dev, prod)"
-    echo "  -t <tenant>    Tenant name (e.g., example)"
+    echo "  -t <tenant>    Accepted for compatibility; the infra tenant is discovered from the infra config"
     echo "  -h, --help     Show this help"
 }
 
 mt_parse_args "$@"
 mt_require_env
-mt_require_tenant
 
-source "${REPO_ROOT}/scripts/lib/config.sh"
-mt_load_tenant_config
+# The bridge is INFRASTRUCTURE, not a tenant app: load the infra tenant's
+# config and secrets (alertbot.*, MATRIX_HOST, NS_MONITORING, KUBECONFIG) with
+# the infra loader, exactly as deploy_infra does. The tenant loader
+# (mt_load_tenant_config) cannot load an infra-only tenant — prod-eu's infra
+# tenant has no deployable fields — and died with "TENANT_DOMAIN: unbound
+# variable" the first time alert delivery was enabled there (pipeline 2112).
+# The -t argument is accepted for compatibility with deploy_infra's call and
+# the older docs, but the infra tenant is discovered from the infra config.
+source "${REPO_ROOT}/scripts/lib/infra-config.sh"
+mt_load_infra_config
+if [ -n "${MT_TENANT:-}" ] && [ "$MT_TENANT" != "$INFRA_TENANT_NAME" ]; then
+  print_warning "-t ${MT_TENANT} ignored: the alerting bridge is infrastructure and uses the infra tenant '${INFRA_TENANT_NAME}'"
+fi
 
 mt_require_commands kubectl envsubst
 
