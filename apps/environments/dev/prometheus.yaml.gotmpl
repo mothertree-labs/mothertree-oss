@@ -89,6 +89,16 @@ alertmanager:
           receiver: 'matrix-alerts'
           group_wait: 0s
           repeat_interval: 168h
+        # Deploy self-test (scripts/verify-alerting, run by ci-deploy.sh right
+        # after deploy_infra): a synthetic AlertingSelfTest must reach Matrix
+        # through the bridge within the gate's window, or the deploy is red.
+        # Posted to the deploy room so the alerts room stays alert-only.
+        - match:
+            selftest: "true"
+          receiver: 'selftest'
+          group_wait: 0s
+          group_interval: 1m
+          repeat_interval: 1h
         # Critical alerts: notify Matrix immediately and more frequently
         - match:
             severity: critical
@@ -96,6 +106,12 @@ alertmanager:
           repeat_interval: 1h
     receivers:
       - name: 'null'
+      - name: 'selftest'
+        webhook_configs:
+          # Deploy room when the infra tenant defines alertbot.deploy_room_id,
+          # else the alerts room. Fire-only: a resolved self-test is noise.
+          - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ env "DEPLOY_MATRIX_ROOM_ID" | default (env "ALERTMANAGER_MATRIX_ROOM_ID") | default "!room:matrix.example.org" }}'
+            send_resolved: false
       - name: 'matrix-alerts'
         webhook_configs:
           - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ env "ALERTMANAGER_MATRIX_ROOM_ID" | default "!room:matrix.example.org" }}'

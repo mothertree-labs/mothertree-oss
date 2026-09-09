@@ -10,7 +10,7 @@ SCRIPTS=$(find scripts apps/scripts apps/deploy-*.sh ci/scripts -name '*.sh' \
   2>/dev/null || true)
 
 # Also check scripts outside the find paths / without a .sh extension
-for extra in scripts/create_env scripts/check-tailscale-keys apps/manifests/tailscale-key-rotator/rotate.sh; do
+for extra in scripts/create_env scripts/check-tailscale-keys scripts/infra-health-gate scripts/verify-alerting apps/manifests/tailscale-key-rotator/rotate.sh; do
   if [ -f "$extra" ]; then
     SCRIPTS="$SCRIPTS $extra"
   fi
