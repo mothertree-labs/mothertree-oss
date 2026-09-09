@@ -357,14 +357,27 @@ if [ "$CLUSTER_EXISTS" = "true" ]; then
     exit 4
   fi
   # Discover nextcloud_<tenant> + roundcube_<tenant> databases. One name per line.
-  TENANT_DBS=$("${KUBECTL[@]}" run psql-list-tenants --rm -i --restart=Never \
+  # The listing's exit status and its output are kept apart on purpose (issue
+  # #548, 2026-09-02): `kubectl run -i` on LKE can lose the attach and return an
+  # EMPTY result, which used to be read as "no databases" — teardown then
+  # skipped the drop silently and the next cold bring-up hit "The Login is
+  # already being used". A failed listing is now reported as such. It stays
+  # non-fatal here because teardown must not leave the cluster running for
+  # it, and the per-tenant cold-start guard in apps/deploy-nextcloud.sh
+  # (Step 4e) resets a leftover nextcloud_<tenant> DB on the next deploy.
+  TENANT_DBS=""
+  LIST_RC=0
+  LIST_OUT=$("${KUBECTL[@]}" run psql-list-tenants --rm -i --restart=Never \
     --image=postgres:16 --quiet -n default \
     --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
     --env "PGUSER=postgres" \
     --env "PGPASSWORD=$PG_PASSWORD" \
     -- psql -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'nextcloud\\_%' ESCAPE '\\' OR datname LIKE 'roundcube\\_%' ESCAPE '\\';" \
-    2>/dev/null | grep -E '^[a-z0-9_-]+$' || true)
-  if [ -z "$TENANT_DBS" ]; then
+    2>&1) || LIST_RC=$?
+  if [ "$LIST_RC" -ne 0 ]; then
+    print_warning "Could not list tenant DBs via PgBouncer (rc=$LIST_RC) — NOT dropping anything; leftovers are reset by the per-tenant cold-start guard on the next deploy"
+    printf '%s\n' "$LIST_OUT" | grep -v '^[[:space:]]*$' | tail -3 | sed 's/^/    /'
+  elif ! TENANT_DBS=$(grep -E '^[a-z0-9_-]+$' <<< "$LIST_OUT"); then
     echo "  No nextcloud_* / roundcube_* databases found, skipping drop"
   else
     while IFS= read -r db; do
