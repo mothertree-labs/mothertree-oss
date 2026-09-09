@@ -28,7 +28,7 @@ spec:
         - name: matrix-alertmanager
           # Using metio/matrix-alertmanager-receiver from Docker Hub
           # See: https://hub.docker.com/r/metio/matrix-alertmanager-receiver
-          image: metio/matrix-alertmanager-receiver:2026.8.26
+          image: metio/matrix-alertmanager-receiver:2026.9.9
           securityContext:
             runAsUser: 65532
             allowPrivilegeEscalation: false
