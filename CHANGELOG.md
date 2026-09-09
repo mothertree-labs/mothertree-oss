@@ -152,6 +152,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   WebUI retrieval → sources + cited answer; user-role JWT sees both models).
 
 ### Fixed
+- Nextcloud cold-start DB poison (#548): a tenant deploy that finds NO
+  `nextcloud-identity` Secret (fresh cluster) but a fully installed
+  `nextcloud_<tenant>` database (left on the always-up PostgreSQL VM by a
+  previous cluster lifetime) no longer runs `occ maintenance:install` into
+  "The Login is already being used". `apps/deploy-nextcloud.sh` now probes the
+  leased tenant's DB for a Nextcloud schema before the install Job with an
+  explicit verdict (a lost `kubectl` answer is UNKNOWN and aborts without
+  touching anything); on dev a verified orphan is dropped and reinstalled
+  fresh, on every other environment the deploy refuses and explains. The
+  guard is scoped to the tenant being deployed. The cluster-wide sweep in
+  `scripts/dev-bringup.sh` — which read a lost catalog listing as "no
+  databases" (pipelines 1906, 2108) and could drop a tenant another pipeline
+  was installing — is removed; the teardown listing in
+  `scripts/destroy-dev-cluster.sh` now reports a failed listing instead of
+  silently skipping the drop. Library: `scripts/lib/nextcloud-db.sh`, unit
+  tests in `scripts/lib/tests/nextcloud-db.test.sh`.
 - Cross-cluster metrics federation no longer breaks when the prod-eu exposer
   pod is recreated. Both federation pods now keep a fixed-name Tailscale state
   Secret (`<name>-tailscale-state`, like the subnet router) so a recreation

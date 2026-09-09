@@ -18,6 +18,7 @@ set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 source "${REPO_ROOT}/scripts/lib/common.sh"
+source "${REPO_ROOT}/scripts/lib/nextcloud-db.sh"
 source "${REPO_ROOT}/scripts/lib/args.sh"
 
 mt_usage() {
@@ -232,39 +233,23 @@ IDENTITY_SECRET_EXISTS_PRE_SB=$(kubectl get secret nextcloud-identity -n "$NS_FI
     --ignore-not-found -o name 2>/dev/null || true)
 if [ -n "$IDENTITY_SECRET_EXISTS_PRE_SB" ]; then
     # Only the emptyDir architecture auto-recovers; never auto-wipe a legacy PVC install.
-    _nc_pvc=$(kubectl get pvc nextcloud-nextcloud -n "$NS_FILES" -o name 2>/dev/null || true)
-    if [ -z "$_nc_pvc" ]; then
+    _nc_pvc_rc=0
+    mt_nc_k8s_state "$NS_FILES" pvc nextcloud-nextcloud || _nc_pvc_rc=$?
+    if [ "$_nc_pvc_rc" -eq 2 ]; then
+        print_error "Could not determine whether the legacy PVC nextcloud-nextcloud exists in $NS_FILES — aborting WITHOUT touching the tenant"
+        printf '%s\n' "$MT_NC_K8S_ERROR" | tail -3 | sed 's/^/    /'
+        exit 1
+    fi
+    if [ "$_nc_pvc_rc" -eq 1 ]; then
         # Probe with an EXPLICIT verdict (issue #623). The old two-stage
         # `mt_psql` probe (kubectl run --rm -i) read a LOST attach result —
         # exit 0, empty stdout — as "DB absent" and then deleted the identity
-        # Secret of a HEALTHY dev tenant. Now a single Job in NS_DB (the
-        # postgres image, credentials from the Secret, never on a command line)
-        # answers with MT_PROBE_VERDICT=OK|MISSING and a detail line; anything
-        # else is UNKNOWN, retried, and then FAILS CLOSED — nothing is acted on.
-        #   MISSING = the DB is not in the catalog (db=0), or it is but has no
-        #             Nextcloud schema (db=1 schema=0); both confirmed by the
-        #             query itself. A query that cannot connect prints no verdict.
-        read -r -d '' _nc_probe_script <<'PROBE' || true
-present=$(psql -h pgbouncer -U postgres -d postgres -tAc "SELECT count(*) FROM pg_database WHERE datname='$NC_DB'") || { echo "nc-schema-probe: catalog query failed"; exit 0; }
-case "$present" in
-    0) echo "MT_PROBE_DETAIL=db=0 schema=0"; echo "MT_PROBE_VERDICT=MISSING"; exit 0 ;;
-    1) ;;
-    *) echo "nc-schema-probe: unexpected catalog answer '$present'"; exit 0 ;;
-esac
-schema=$(psql -h pgbouncer -U postgres -d "$NC_DB" -tAc "SELECT (to_regclass('public.oc_appconfig') IS NOT NULL)::int") || { echo "nc-schema-probe: tenant DB query failed"; exit 0; }
-case "$schema" in
-    1) echo "MT_PROBE_DETAIL=db=1 schema=1"; echo "MT_PROBE_VERDICT=OK" ;;
-    0) echo "MT_PROBE_DETAIL=db=1 schema=0"; echo "MT_PROBE_VERDICT=MISSING" ;;
-    *) echo "nc-schema-probe: unexpected schema answer '$schema'" ;;
-esac
-exit 0
-PROBE
+        # Secret of a HEALTHY dev tenant. mt_nc_schema_probe (scripts/lib/
+        # nextcloud-db.sh) runs a single Job in NS_DB that answers with
+        # MT_PROBE_VERDICT=OK|MISSING; anything else is UNKNOWN, retried, and
+        # then FAILS CLOSED — nothing is acted on.
         _nc_rc=0
-        mt_kubectl_probe "nextcloud schema ${NEXTCLOUD_DB_NAME}" 3 \
-            mt_probe_job "$NS_DB" "nc-schema-probe" "postgres:17-alpine" \
-                --env-from-secret "PGPASSWORD=postgres-credentials/postgres-password" \
-                --env "PGCONNECT_TIMEOUT=5" --env "NC_DB=$NEXTCLOUD_DB_NAME" --timeout 180 \
-                -- sh -c "$_nc_probe_script" || _nc_rc=$?
+        mt_nc_schema_probe "$NEXTCLOUD_DB_NAME" || _nc_rc=$?
         case "$_nc_rc" in
             0) _nc_state="schema_present" ;;
             1) _nc_state="schema_absent" ;;
@@ -292,6 +277,60 @@ PROBE
     fi
 fi
 # === end Step 4d =============================================================
+
+# === Step 4e: Cold-start orphan guard (issue #548) ===========================
+# The mirror image of 4d: NO nextcloud-identity Secret (so the install Job will
+# run below) but the tenant DB already carries a full Nextcloud schema. That is
+# an orphan of a previous cluster lifetime: the DB lives on the always-up
+# PostgreSQL VM and survives every dev cluster rebuild, the Secret does not.
+# `occ maintenance:install` against it aborts with "The Login is already being
+# used" and the deploy stalls (8 recurrences by 2026-09-08; since main pushes
+# run the full dev deploy, this also blocked prod deploys).
+#
+# The guard lives HERE, per tenant, so it is scoped to exactly the tenant this
+# pipeline leased — the earlier cluster-wide sweeps (dev-bringup.sh /
+# destroy-dev-cluster.sh) both misread a lost `kubectl run -i` listing as "no
+# databases" and could touch tenants outside the lease. Same explicit-verdict
+# probe as 4d; a drop counts only after a fresh probe proves the DB is gone.
+# dev: drop + fresh install. Any other env: refuse and abort untouched.
+#
+# Both existence reads below are three-state on purpose: a kube-API error is
+# neither "present" nor "absent" and aborts before anything destructive.
+_nc_rc=0
+mt_nc_k8s_state "$NS_FILES" secret nextcloud-identity || _nc_rc=$?
+case "$_nc_rc" in
+    0) : ;;   # warm path: identity present, the install Job is skipped below
+    1)
+        _nc_rc=0
+        mt_nc_k8s_state "$NS_FILES" pvc nextcloud-nextcloud || _nc_rc=$?
+        case "$_nc_rc" in
+            0)
+                # Legacy PVC install: the identity is recovered from the PVC in
+                # Step 5c below (PVC migration), so a populated DB is expected.
+                print_status "Cold start with a legacy PVC present; skipping the orphan guard (identity is migrated from the PVC)" ;;
+            1)
+                # A previous pipeline's install Job may still be running in the
+                # cluster (Woodpecker cancel kills the runner step, not the Job).
+                # Remove it, waiting for termination, before deciding anything
+                # about the DB it was writing to; Step 5a.2 recreates it.
+                if ! kubectl -n "$NS_FILES" delete job/nextcloud-install --ignore-not-found --wait=true; then
+                    print_error "Could not remove a prior nextcloud-install Job in $NS_FILES — aborting before the orphan guard"
+                    exit 1
+                fi
+                if ! mt_nc_cold_start_guard "$NEXTCLOUD_DB_NAME" "$MT_ENV" "$MT_TENANT"; then
+                    exit 1
+                fi ;;
+            *)
+                print_error "Could not determine whether the legacy PVC nextcloud-nextcloud exists in $NS_FILES — aborting WITHOUT touching the tenant"
+                printf '%s\n' "$MT_NC_K8S_ERROR" | tail -3 | sed 's/^/    /'
+                exit 1 ;;
+        esac ;;
+    *)
+        print_error "Could not determine whether the nextcloud-identity Secret exists in $NS_FILES — aborting WITHOUT touching the tenant"
+        printf '%s\n' "$MT_NC_K8S_ERROR" | tail -3 | sed 's/^/    /'
+        exit 1 ;;
+esac
+# === end Step 4e =============================================================
 
 # Step 5: Run Nextcloud database initialization job (in files namespace where secrets are accessible)
 print_status "Running Nextcloud database initialization..."
