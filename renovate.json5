@@ -13,17 +13,32 @@
 // Why: CVE-2026-18963 (Keycloak) sat unnoticed because the tag lives in
 // apps/values/keycloak-codecentric.yaml, which no Dependabot ecosystem parses.
 //
-// Policy: minor/patch bumps open PRs automatically (weekly). MAJOR bumps only
+// Policy: minor/patch bumps open PRs automatically (weekly), rate-limited to
+// 2 PRs/hour and batched into groups so a bot run cannot flood CI. MAJOR bumps only
 // appear on the Dependency Dashboard issue and need a checkbox tick — infra
 // majors (Postgres client, kube-prometheus-stack, Ollama…) want a human.
 //
-// Validate locally:  npx --yes --package renovate -- renovate-config-validator --strict
+// Validate locally:
+//   npx --yes --package renovate@latest -- renovate-config-validator --strict renovate.json5
+// Pin @latest: an unpinned `--package renovate` can resolve a cached 37.x from the
+// npx store, which predates `managerFilePatterns` and reports 7 bogus errors.
+// A local `RE2 not usable` warning is benign (native module build), not a config error.
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", ":dependencyDashboard"],
   "timezone": "America/Los_Angeles",
   "schedule": ["before 8am on wednesday"],
-  "prHourlyLimit": 0,
+  // Rate limit. NOTE: prHourlyLimit caps how many PRs are opened per hour; it
+  // does NOT space them out inside that hour. Setting it to 6 for "one every
+  // 10 minutes" would still open all 6 back-to-back and then idle — which is
+  // exactly the burst we are trying to avoid. A small number is what actually
+  // produces spacing, so this is pinned to the dev tenant-lease capacity (2
+  // pools): at most 2 PR pipelines can make progress at once anyway, and each
+  // one is a full dev deploy plus 10 e2e shards.
+  // Why this matters: on 2026-09-09 an unlimited batch opened 6 PRs in ~100s,
+  // 9 pipelines; the resulting cancel-churn tripped the queue-unjam cron into
+  // restarting Woodpecker and killing four live pipelines (see PR #648).
+  "prHourlyLimit": 2,
   "prConcurrentLimit": 10,
   "labels": ["dependencies", "renovate"],
   "semanticCommits": "enabled",
@@ -152,6 +167,77 @@
       "description": "Internal CI-built images (mothertree-*) are versioned by image-versions.env, never by Renovate",
       "matchPackageNames": ["/^ghcr\\.io\\/[^/]+\\/mothertree-/"],
       "enabled": false,
+    },
+
+    // ---- Low-risk batching --------------------------------------------------
+    // Every PR here costs a full dev deploy + 10 e2e shards against a 2-tenant
+    // lease pool, so PR COUNT is the real cost driver — grouping cuts it harder
+    // than any rate limit can. Only genuinely low-risk streams are batched;
+    // anything stateful or tenant-facing (postgres, redis, nextcloud, stalwart,
+    // postfix, pgbouncer, coturn, jitsi, impress, keycloak, tailscale, the LLM
+    // stack) deliberately stays one-PR-per-dep so a bad bump is easy to bisect.
+    //
+    // Each group is scoped to minor/patch/digest ONLY: a major must still land on
+    // the Dependency Dashboard on its own, so batching cannot smuggle one through
+    // or let one held major block the rest of its group.
+    //
+    // Each group is also prPriority -1 so that under the 2/hour cap these always
+    // yield to everything else. Without it a tooling bump can occupy a scarce
+    // slot ahead of an internet-facing component (Stalwart, ingress-nginx,
+    // Postfix, Synapse), which would trade burst-safety for CVE latency.
+    {
+      // Currently inert: every action is pinned to a bare major tag
+      // (actions/checkout@v4, ...), so Renovate only ever offers MAJOR updates
+      // for them and those stay dashboard-gated above. The rule is kept because
+      // it starts paying off the moment actions are SHA-pinned — which is the
+      // real supply-chain win here, since a bare tag can be re-pushed.
+      "description": "GitHub Actions: one PR for all of them (CI workflow only, never touches the deployed platform)",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "prPriority": -1,
+    },
+    {
+      // Generic base images and one CLI, all exercised by the normal dev deploy
+      // + e2e path. Deliberately EXCLUDED, each keeping its own PR:
+      //   alpine/k8s      — runs the tailscale-key-rotator (HEADSCALE_API_KEY),
+      //                     headscale-cleanup and acme-challenge-cleanup
+      //                     (CF_API_TOKEN) CronJobs. Cron-driven, so a bad bump
+      //                     fails silently at the next tick, not in CI.
+      //   alpine/kubectl  — only usage is inside the Jitsi JVB manifest.
+      //   chrll/microsocks— single-maintainer Docker Hub namespace, and the
+      //                     artifact is a SOCKS5 proxy; a digest bump there
+      //                     deserves its own review, not a batch.
+      //   bitnami/kubectl — pinned to :latest, so Renovate cannot version it at
+      //                     all; listing it would be false assurance. Pin it to
+      //                     a real tag to bring it under management.
+      "description": "Generic base/CLI images in one PR",
+      "matchPackageNames": [
+        "alpine",
+        "busybox",
+        "python",
+        "node",
+        "amazon/aws-cli",
+        "alpine/socat",
+      ],
+      "groupName": "base-images",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "prPriority": -1,
+    },
+    {
+      // Note: matrix-alertmanager-receiver uses calver, and the rule further
+      // down makes a year rollover (2026.x -> 2027.x) a MAJOR — so that update
+      // leaves this group and opens on its own. That is correct, just not what
+      // "grouped" might suggest.
+      "description": "Internal monitoring/alerting sidecars in one PR (not tenant-facing)",
+      "matchPackageNames": [
+        "prom/statsd-exporter",
+        "prom/pushgateway",
+        "metio/matrix-alertmanager-receiver",
+      ],
+      "groupName": "monitoring",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "prPriority": -1,
     },
 
     // ---- Keycloak (CVE-2026-18963 class) --------------------------------------
