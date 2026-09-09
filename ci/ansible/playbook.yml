@@ -308,6 +308,34 @@
         mode: "0644"
       notify: Restart Woodpecker agent
 
+    # The packaged woodpecker-server unit ships NO `Restart=` (systemd default
+    # `Restart=no`), while the agent unit above declares
+    # `Requires=woodpecker-server.service` — so a server crash took the agent
+    # down with it and nothing brought either back. Until 2026-09-09 the only
+    # automatic recovery was the `is-failed` branch of the queue-unjam cron,
+    # which is now retired (see below); systemd is a strictly better owner of
+    # this job because it restarts a *crashed* unit without any notion of a
+    # "jam" and will never stop a healthy one.
+    # Drop-in, not a unit override, so the .deb keeps ownership of the unit.
+    # Notifies daemon-reload ONLY — a `Restart=` change takes effect on reload,
+    # and restarting the server here would kill every in-flight pipeline.
+    - name: Ensure woodpecker-server systemd drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/woodpecker-server.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Give woodpecker-server an auto-restart policy (drop-in)
+      ansible.builtin.copy:
+        content: |
+          # Managed by Ansible — see ci/ansible/playbook.yml
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+        dest: /etc/systemd/system/woodpecker-server.service.d/10-restart.conf
+        mode: "0644"
+      notify: Reload systemd daemon
+
     - name: Reload systemd daemon
       ansible.builtin.systemd:
         daemon_reload: true
@@ -683,29 +711,67 @@
         job: '/usr/local/bin/cleanup-stale-e2e-users.sh >> /var/log/e2e-cleanup.log 2>&1'
       when: e2e_cleanup_pools is defined
 
-    # ── Woodpecker queue-zombie auto-unjam ─────────────────────────
-    # Self-healing for the recurring queue-backup desync bug (3.14.x/3.15.x):
-    # superseded/cancelled pipelines leave phantom rows in the `tasks` queue
-    # table backed by already-finished workflows, starving all agent slots so
-    # "CI stops starting pipelines." The script acts ONLY on the bug's exact
-    # fingerprint (sustained "resubmitting expired task" loop AND live zombie
-    # task rows) and applies the validated stop->backup->surgical-delete->restart
-    # recovery; it is a silent no-op otherwise. See memory: woodpecker-queue-zombies.
-    - name: Deploy Woodpecker queue auto-unjam script
-      ansible.builtin.template:
-        src: woodpecker-queue-unjam.sh.j2
-        dest: /usr/local/bin/woodpecker-queue-unjam.sh
-        owner: root
-        group: root
-        mode: "0700"
-
-    - name: Schedule Woodpecker queue auto-unjam (cron)
-      # flock -n so a slow recovery tick (stop/restart) never overlaps the next.
+    # ── Woodpecker queue-zombie auto-unjam: RETIRED ────────────────
+    # Removed 2026-09-09 after it took down a whole morning of CI.
+    #
+    # The script restarted woodpecker-server + woodpecker-agent whenever it saw
+    # two signals together: a "resubmitting expired task" loop in the journal
+    # and zombie rows in the `tasks` table. Both signals are produced by
+    # CANCELLED pipelines — and this repo's `cancel_previous_pipeline_events` is
+    # `[pull_request]` (the server default is wider still:
+    # WOODPECKER_DEFAULT_CANCEL_PREVIOUS_PIPELINE_EVENTS=pull_request,push), so a
+    # pipeline is cancelled every time a bot opens PRs in a burst. A Renovate
+    # batch therefore manufactures the exact fingerprint of the bug it hunted.
+    #
+    # On 2026-09-09 11:40:01Z it logged "JAM DETECTED (loop=23, zombies=27)" and
+    # stopped both services while four pipelines were legitimately running,
+    # killing #2126/#2127/#2131/#2132 mid-flight (PRs #640-#643). The queue was
+    # never starved — those pipelines were dispatched and executing, just slow
+    # behind a cold dev cluster and the 2-tenant lease pool.
+    #
+    # The defect is structural, not a threshold that needs tuning: NEITHER signal
+    # says anything about whether other work is running, so a blind
+    # `systemctl stop` can never be safe. Note this is NOT "upstream fixed it" —
+    # the fingerprint was still present on the day this was retired, on the
+    # server the host was actually running at the time (no provision run had
+    # followed the version bump in PR #600, so the pin above was ahead of it).
+    # A real jam is now handled by an operator, whose eyes are a better guard
+    # than a cron with no notion of in-flight work.
+    - name: Remove retired Woodpecker queue auto-unjam cron
       ansible.builtin.cron:
         name: "woodpecker-queue-unjam"
-        minute: "*/5"
         user: root
-        job: 'flock -n /var/lock/woodpecker-queue-unjam /usr/local/bin/woodpecker-queue-unjam.sh >> /var/log/woodpecker-queue-unjam.log 2>&1'
+        state: absent
+
+    - name: Remove retired Woodpecker queue auto-unjam script and leftovers
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/bin/woodpecker-queue-unjam.sh
+        - /var/log/woodpecker-queue-unjam.log
+        - /var/lock/woodpecker-queue-unjam
+
+    # The retired script was also its own backup pruner (KEEP_BACKUPS=5), so
+    # without this its snapshots would be orphaned forever. They are ~1 GB each
+    # and are full copies of the Woodpecker DB, which holds the CI secret
+    # store — leaving them defeats credential rotation, since an old snapshot
+    # still carries every secret rotated since it was taken.
+    # Scoped deliberately to `bak-autounjam-*`: the `bak-pre-*` snapshots are
+    # deliberate operator rollback artifacts and are NOT this change's to delete.
+    - name: Find orphaned queue auto-unjam DB snapshots
+      ansible.builtin.find:
+        paths: /var/lib/woodpecker
+        patterns: "woodpecker.sqlite.bak-autounjam-*"
+      register: unjam_db_backups
+
+    - name: Remove orphaned queue auto-unjam DB snapshots
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ unjam_db_backups.files }}"
+      loop_control:
+        label: "{{ item.path }}"
 
     # ── On-demand-dev idle reaper ──────────────────────────────────
     # The reaper destroys the dev LKE cluster after IDLE_HOURS of no CI
@@ -782,6 +848,10 @@
       ansible.builtin.systemd:
         name: docker
         state: restarted
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
 
     - name: Restart Woodpecker server
       ansible.builtin.systemd:

@@ -60,6 +60,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   those read `kube_pod_container_*`. Both expressions fire on the live prod
   outage and nowhere else (#613).
 ### Changed
+- Retired the `woodpecker-queue-unjam` cron on the CI server (script + `*/5`
+  cron removed by `ci/ansible/playbook.yml`). It restarted `woodpecker-server`
+  and `woodpecker-agent` whenever it saw a "resubmitting expired task" loop
+  together with zombie `tasks` rows — but both of those signals are produced by
+  *cancelled* pipelines, and `cancel_previous_pipeline_events: [pull_request]`
+  cancels a pipeline every time a bot opens PRs in a burst. A Renovate batch
+  therefore manufactures the exact fingerprint of the bug the script hunted.
+  On 2026-09-09 it fired at 11:40:01Z ("JAM DETECTED (loop=23, zombies=27)")
+  and stopped both services while four pipelines were legitimately running,
+  killing #2126/#2127/#2131/#2132 mid-flight (PRs #640-#643). The queue was
+  never starved. The defect is structural rather than a mistuned threshold:
+  neither signal reports whether other work is in flight, so a blind
+  `systemctl stop` can never be safe. This is not "upstream fixed it" — the
+  fingerprint was still present on the day it was retired, on the Woodpecker
+  the CI host was actually running at the time (the playbook pin was ahead of
+  the host, which had not been reprovisioned since that bump). A genuine jam
+  is now an operator action.
+- `woodpecker-server` now gets a systemd `Restart=on-failure` drop-in. The
+  packaged unit shipped no `Restart=` at all, while the agent unit declares
+  `Requires=woodpecker-server.service` — so a server crash took the agent down
+  with it and nothing brought either back. The retired unjam cron's `is-failed`
+  branch was the only automatic recovery; systemd is a strictly better owner,
+  since it restarts a *crashed* unit with no notion of a "jam" and will never
+  stop a healthy one. The drop-in notifies `daemon-reload` only, never a
+  restart, so applying it cannot disturb in-flight pipelines.
+- Retiring the unjam cron also removes its leftovers: its log, lock file, and
+  the orphaned `woodpecker.sqlite.bak-autounjam-*` snapshots it used to prune
+  itself (several GB of full DB copies holding the CI secret store, which
+  would otherwise outlive any credential rotation). Deliberate operator
+  `bak-pre-*` rollback snapshots are left untouched.
 - `deploy_infra` now waits for every DaemonSet in the infra namespaces it
   owns to converge after the tier=system helmfile sync, and aborts the deploy
   on crash-looping / unpullable pods or a stalled rollout (new
