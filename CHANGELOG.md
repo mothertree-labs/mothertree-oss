@@ -152,6 +152,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   WebUI retrieval → sources + cited answer; user-role JWT sees both models).
 
 ### Fixed
+- Dev CSI block volumes no longer leak on every cluster recycle. Dev now
+  provisions Loki's volume from a dev-only StorageClass
+  (`apps/manifests/loki/dev-storageclass.yaml`, applied by `deploy_infra`)
+  that stamps the Linode tag `dev` on each volume and reclaims on delete, so
+  `scripts/destroy-dev-cluster.sh`'s existing pass-1 sweep positively
+  identifies and removes any leftover — the untagged pass 2 stays opt-in
+  because prod shares the region. 29 orphaned volumes (~$29/month, and the
+  account's active-services cap in June) had accumulated since the sweep was
+  made opt-in in May. A warm dev cluster is migrated once: the Loki
+  StatefulSet and its PVC are recreated on the new class (dev logs discarded).
 - Nextcloud cold-start DB poison (#548): a tenant deploy that finds NO
   `nextcloud-identity` Secret (fresh cluster) but a fully installed
   `nextcloud_<tenant>` database (left on the always-up PostgreSQL VM by a

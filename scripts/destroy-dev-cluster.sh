@@ -209,7 +209,7 @@ if [ "$DRY_RUN" = "true" ]; then
 
   echo "Volume orphan-sweep candidates (region=$CLUSTER_REGION, tag=dev):"
   linode-cli volumes list --json 2>/dev/null | jq -r --arg region "$CLUSTER_REGION" '
-    .[] | select(.tags | index("dev")) | select(.region == $region)
+    .[] | select(.tags | index("dev")) | select(.region == $region) | select(.linode_id == null)
     | "  \(.id)\t\(.label)\t(\(.size) Gi)"' || true
   echo ""
 
@@ -477,12 +477,20 @@ print_success "All always-up resources (postgres-dev, headscale-dev, turn-server
 # Step 4: orphan sweep — block volumes (two-pass)
 # ---------------------------------------------------------------------------
 
-# Pass 1: Terraform-tagged 'dev' volumes that somehow survived terraform destroy.
+# Pass 1: volumes tagged 'dev' — Terraform-tagged always-up data volumes that
+# somehow survived terraform destroy (preserved by label below) AND, since
+# 2026-09-08, every CSI volume dev provisions: the dev StorageClass
+# (apps/manifests/loki/dev-storageclass.yaml) stamps `dev` on each pvc-* volume
+# at creation, so a dev CSI orphan is positively identified by its tag and
+# deleted here. Prod CSI volumes never carry the tag — and as a second lock,
+# only UNATTACHED volumes qualify: after terraform destroy no legitimate dev
+# CSI volume can still be attached, so a `dev`-tagged volume that is attached
+# belongs to a live node somewhere and is left alone.
 # Belt-and-suspenders — should be empty in practice. Skips the always-up VM
 # data volumes by label.
 print_status "Orphan sweep pass 1: tagged 'dev' volumes..."
 linode-cli volumes list --json 2>/dev/null | jq -r --arg region "$CLUSTER_REGION" '
-  .[] | select(.tags | index("dev")) | select(.region == $region)
+  .[] | select(.tags | index("dev")) | select(.region == $region) | select(.linode_id == null)
   | "\(.id)\t\(.label)"' \
 | while IFS=$'\t' read -r id label; do
     # Skip the always-up VM data volumes — these are the whole point of "always-up".
@@ -549,7 +557,7 @@ if [ "${SWEEP_CSI_ORPHANS:-false}" = "true" ]; then
       done
   fi
 else
-  print_status "Skipping CSI volume orphan sweep (SWEEP_CSI_ORPHANS not set — prod shares us-lax; clean pvc-* manually)"
+  print_status "Skipping untagged CSI orphan sweep (SWEEP_CSI_ORPHANS not set — prod shares us-lax; dev-tagged pvc-* volumes were handled by pass 1)"
 fi
 
 # ---------------------------------------------------------------------------

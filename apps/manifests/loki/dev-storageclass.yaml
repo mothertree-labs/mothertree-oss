@@ -1,0 +1,29 @@
+# Dev-only StorageClass for CSI block volumes (applied by deploy_infra when
+# MT_ENV=dev). Two differences from the LKE default `linode-block-storage-retain`:
+#
+#   1. Every volume it provisions carries the Linode tag `dev`. That is the
+#      fingerprint scripts/destroy-dev-cluster.sh (orphan sweep pass 1) uses to
+#      tell a dev volume from a prod one — prod, prod-eu and dev all live in
+#      us-lax, and CSI volumes are otherwise indistinguishable (empty tags,
+#      opaque pvc-<uuid> label). Until now dev CSI volumes carried no tag, so
+#      the reaper could not sweep them safely and they leaked one per cluster
+#      cycle (29 orphans / ~$29 per month / 29 active-services slots by
+#      2026-09-08, and in June the cap they consumed blocked a prod PVC).
+#   2. reclaimPolicy Delete: deleting the PVC (destroy-dev-cluster.sh Step 2b)
+#      deletes the Linode volume instead of leaving a Retained orphan behind.
+#      Dev data is disposable by design; the cluster is reaped daily.
+#
+# Prod keeps `linode-block-storage-retain` untouched — existing PVCs cannot
+# change class, and prod volumes are never swept.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: mt-dev-block-storage
+  labels:
+    app.kubernetes.io/part-of: mothertree
+provisioner: linodebs.csi.linode.com
+parameters:
+  linodebs.csi.linode.com/volumeTags: "dev"
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate

@@ -541,7 +541,83 @@ kubectl apply -f "$REPO_ROOT/apps/manifests/loki/loki-dashboard-configmap.yaml"
 # Deploy Loki for centralized logging
 # =============================================================================
 print_status "Deploying Loki log aggregation..."
-kubectl apply -f "$REPO_ROOT/apps/loki-manual.yaml"
+# Loki is the only PVC consumer on dev. On dev its volume must come from the
+# tagged, reclaim-Delete StorageClass (apps/manifests/loki/dev-storageclass.yaml)
+# so the reaper's orphan sweep can recognise and remove it — see the manifest
+# header. Prod keeps the LKE default class the manifest names.
+LOKI_STORAGE_CLASS="linode-block-storage-retain"
+if [ "$MT_ENV" = "dev" ]; then
+  LOKI_STORAGE_CLASS="mt-dev-block-storage"
+  kubectl apply -f "$REPO_ROOT/apps/manifests/loki/dev-storageclass.yaml"
+  # volumeClaimTemplates are immutable: a StatefulSet created with the old
+  # class cannot be updated in place. On dev, drop the StatefulSet and its
+  # PVC (dev logs are disposable) so the apply below recreates both on the
+  # new class. A kube-API error is not "absent" — fail rather than guess.
+  _loki_sc_rc=0
+  LOKI_CURRENT_SC=$(kubectl get statefulset loki -n "$NS_MONITORING" \
+    -o jsonpath='{.spec.volumeClaimTemplates[0].spec.storageClassName}' 2>&1) || _loki_sc_rc=$?
+  if [ "$_loki_sc_rc" -ne 0 ]; then
+    if grep -qiE '\(NotFound\)|not found' <<< "$LOKI_CURRENT_SC"; then
+      LOKI_CURRENT_SC=""
+    else
+      print_error "Could not read the Loki StatefulSet's storage class: $LOKI_CURRENT_SC"
+      exit 1
+    fi
+  fi
+  if [ -n "$LOKI_CURRENT_SC" ] && [ "$LOKI_CURRENT_SC" != "$LOKI_STORAGE_CLASS" ]; then
+    print_warning "Loki StatefulSet uses storage class '$LOKI_CURRENT_SC'; recreating it on '$LOKI_STORAGE_CLASS' (dev logs on the old volume are discarded)"
+    # This is the first irreversible delete in deploy_infra, so do not trust
+    # the -e label alone: KUBECONFIG may have been exported to another
+    # cluster's file. LKE node names embed the cluster id (lke<id>-...); ask
+    # the Linode API which cluster that id is and require the dev label. (The
+    # vaulted terraform outputs cannot serve here: dev is recreated every
+    # cycle, so their LKE_CLUSTER_ID is stale by design.) Any failure to
+    # establish identity refuses the migration.
+    : "${TF_VAR_linode_token:?linode token required to verify the connected cluster before the Loki storage migration}"
+    _first_node=""
+    if ! _first_node=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>&1) || [ -z "$_first_node" ]; then
+      print_error "Could not read the connected cluster's node names: $_first_node"
+      exit 1
+    fi
+    case "$_first_node" in
+      lke[0-9]*-*) : ;;
+      *) print_error "Node '$_first_node' is not an LKE node name (lke<id>-...); refusing the Loki storage migration"; exit 1 ;;
+    esac
+    _node_cluster_id="${_first_node#lke}"; _node_cluster_id="${_node_cluster_id%%-*}"
+    _cluster_label=""
+    if ! _cluster_label=$(curl -sfS --max-time 20 -H "Authorization: Bearer $TF_VAR_linode_token" \
+        "https://api.linode.com/v4/lke/clusters/${_node_cluster_id}" 2>&1 | jq -er '.label') || [ -z "$_cluster_label" ]; then
+      print_error "Could not resolve LKE cluster ${_node_cluster_id} via the Linode API (${_cluster_label:-no answer}); refusing the Loki storage migration"
+      exit 1
+    fi
+    if [ "$_cluster_label" != "matrix-cluster-${MT_ENV}" ]; then
+      print_error "Connected cluster ${_node_cluster_id} is '${_cluster_label}', not 'matrix-cluster-${MT_ENV}' — KUBECONFIG points elsewhere. Refusing the Loki storage migration."
+      exit 1
+    fi
+    print_status "Connected cluster ${_node_cluster_id} verified as ${_cluster_label}"
+    # The old PV was provisioned with reclaimPolicy Retain: deleting its PVC
+    # would leave a Released PV and an UNTAGGED Linode volume behind — exactly
+    # the orphan this change exists to stop. Flip the PV to Delete first so the
+    # CSI driver removes the Linode volume together with the claim. Read the
+    # PV list fail-closed: an empty answer from a failed API call must not
+    # silently skip the patch.
+    _loki_pvs=""
+    if ! _loki_pvs=$(kubectl get pvc -n "$NS_MONITORING" -l app=loki -o jsonpath='{.items[*].spec.volumeName}' 2>&1); then
+      print_error "Could not list Loki PVCs in $NS_MONITORING: $_loki_pvs"
+      exit 1
+    fi
+    for _pv in $_loki_pvs; do
+      print_status "Setting reclaimPolicy=Delete on PV $_pv so its Linode volume goes with the claim"
+      kubectl patch pv "$_pv" -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
+    done
+    kubectl delete statefulset loki -n "$NS_MONITORING" --wait=true
+    # The StatefulSet controller stamps its selector labels (app=loki) onto the
+    # PVCs it creates, so this matches the legacy claim as well.
+    kubectl delete pvc -n "$NS_MONITORING" -l app=loki --wait=true --ignore-not-found
+  fi
+fi
+sed "s/storageClassName: linode-block-storage-retain/storageClassName: ${LOKI_STORAGE_CLASS}/" \
+  "$REPO_ROOT/apps/loki-manual.yaml" | kubectl apply -f -
 kubectl apply -f "$REPO_ROOT/apps/manifests/loki/loki-servicemonitor.yaml"
 kubectl apply -f "$REPO_ROOT/apps/manifests/loki/vector-servicemonitor.yaml"
 
