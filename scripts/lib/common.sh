@@ -286,7 +286,44 @@ read_k8s_secret() {
 #   mt_reset_change_tracker            # call once at top of deploy script
 #   mt_apply kubectl apply -f foo.yaml # replaces bare kubectl apply
 #   mt_apply kubectl apply -f <(envsubst < foo.tpl)  # works with process substitution
+#   mt_apply kubectl apply -f - <<EOF  # works with a heredoc on stdin
 #   mt_restart_if_changed deployment/foo -n "$NS"     # replaces kubectl rollout restart
+#
+# Change detection is a server-side `kubectl diff` of the same manifest
+# (exit 0 = live object identical, 1 = differs / absent), NOT the
+# "configured"/"unchanged" word in kubectl's output. Client-side apply prints
+# "configured" whenever it SENDS a patch, even one the API server turns into
+# a no-op: every Secret rendered by `kubectl create --dry-run=client -o yaml`
+# (carries `creationTimestamp: null`), every `stringData` Secret (stored as
+# `data`), and any manifest whose quantities the server normalises
+# (`cpu: 2000m` → `2`). Grepping that word made mt_restart_if_changed fire on
+# EVERY deploy for Ollama (1.3 GB model re-pull from S3 each time), Jitsi
+# Prosody, Roundcube, both portals and Open WebUI — verified on the prod
+# deploy log of pipeline 2122 (2026-09-09).
+#
+# The manifest named by -f (a file, `-` for stdin, or a <(...) process
+# substitution, which can only be read once) is slurped into memory and fed
+# to both diff and apply. Diff output is discarded on purpose — it would
+# print Secret data into deploy logs. If diff itself cannot run (rc > 1:
+# RBAC, unknown kind, no `diff` binary) the old output-grep is used so a real
+# change is never silently missed; that path only ever over-restarts.
+#
+# Caveats:
+#   - Never pipe INTO or OUT OF mt_apply (`gen | mt_apply kubectl apply -f -`,
+#     `mt_apply ... | tee`): bash runs pipeline members in subshells, so the
+#     flag is set in a throwaway shell and the caller never sees it. Use
+#     `-f <(gen)` / `-f - <<EOF` / `> file` instead. (Pre-existing: ~30
+#     infra-tier call sites still pipe in — tracked separately.)
+#   - Only pass flags that BOTH `kubectl diff` and `kubectl apply` accept
+#     (`-n` is fine). An apply-only flag makes diff exit 1 or 2 depending on
+#     the kubectl version; either way that call site degrades to
+#     restart-every-deploy (silently on 1, with a warning on 2).
+#   - Detection is stateless (live vs manifest). If a deploy applies a
+#     changed Secret and dies before its mt_restart_if_changed runs, the next
+#     deploy sees no difference and will not restart the consumer — run
+#     `kubectl rollout restart` by hand in that case.
+#   - Do not run deploy scripts under `bash -x`: the in-memory manifest
+#     (Secret data included) would be echoed to stderr.
 _mt_deploy_changed=false
 
 mt_reset_change_tracker() {
@@ -294,12 +331,64 @@ mt_reset_change_tracker() {
 }
 
 mt_apply() {
-    local output rc=0
-    output=$("$@" 2>&1) || rc=$?
-    printf '%s\n' "$output"
-    if printf '%s\n' "$output" | grep -qE ' (configured|created)$'; then
-        _mt_deploy_changed=true
+    local -a pre=() post=()
+    local src="" have_f=false arg manifest output rc=0 diff_rc diff_err
+    # Split "$@" into <before -f> / <manifest source> / <after -f>
+    while [ $# -gt 0 ]; do
+        arg=$1
+        if [ "$have_f" = false ]; then
+            case "$arg" in
+                -f|--filename)
+                    [ $# -ge 2 ] || { print_error "mt_apply: $arg needs an argument"; return 2; }
+                    src=$2; have_f=true; shift 2; continue ;;
+                -f=*|--filename=*) src=${arg#*=}; have_f=true; shift; continue ;;
+            esac
+            pre+=("$arg")
+        else
+            post+=("$arg")
+        fi
+        shift
+    done
+
+    if [ "$have_f" = false ]; then
+        # No manifest to diff — legacy behaviour (output grep).
+        output=$("${pre[@]}" 2>&1) || rc=$?
+        printf '%s\n' "$output"
+        if printf '%s\n' "$output" | grep -qE ' (configured|created)$'; then
+            _mt_deploy_changed=true
+        fi
+        return $rc
     fi
+
+    if [ "$src" = "-" ]; then
+        manifest=$(cat)
+    else
+        manifest=$(cat -- "$src") || { print_error "mt_apply: cannot read manifest '$src'"; return 2; }
+    fi
+
+    # Server-side diff first: 0 = no change, 1 = change, >1 = diff unavailable.
+    local -a diffcmd=("${pre[@]}")
+    local i
+    for i in "${!diffcmd[@]}"; do
+        if [ "${diffcmd[$i]}" = "apply" ]; then diffcmd[$i]="diff"; break; fi
+    done
+    # KUBECTL_EXTERNAL_DIFF is unset so an inherited env var can never route
+    # the LIVE/MERGED objects (Secret data included) through an arbitrary program.
+    diff_rc=0
+    diff_err=$(printf '%s\n' "$manifest" | env -u KUBECTL_EXTERNAL_DIFF "${diffcmd[@]}" -f - "${post[@]}" 2>&1 >/dev/null) || diff_rc=$?
+
+    output=$(printf '%s\n' "$manifest" | "${pre[@]}" -f - "${post[@]}" 2>&1) || rc=$?
+    printf '%s\n' "$output"
+
+    case "$diff_rc" in
+        0) ;;
+        1) _mt_deploy_changed=true ;;
+        *)
+            print_warning "mt_apply: kubectl diff unavailable (rc=$diff_rc: ${diff_err%%$'\n'*}) — falling back to apply-output grep"
+            if printf '%s\n' "$output" | grep -qE ' (configured|created)$'; then
+                _mt_deploy_changed=true
+            fi ;;
+    esac
     return $rc
 }
 
