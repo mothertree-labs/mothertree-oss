@@ -17,8 +17,8 @@ set -euo pipefail
 
 ACTION="${1:?Usage: ci-e2e-lock.sh acquire|release}"
 
-_CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
-vcli() { $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
+# shellcheck source=ci-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"   # vcli, vcli_del_if
 
 E2E_TTL=2400  # 40 min — e2e suite takes 5-25 min, renewed by ci-renew-lease
 LOCK_VALUE="${CI_PIPELINE_NUMBER}#${CI_PIPELINE_EVENT:-unknown}"
@@ -41,17 +41,21 @@ do_acquire() {
 }
 
 do_release() {
-  local holder
-  holder=$(vcli GET "$E2E_KEY" 2>/dev/null || true)
+  # Compare-and-delete rather than GET, compare, DEL: the TTL can lapse between
+  # the read and the delete and another pipeline can acquire in that window, in
+  # which case an unconditional DEL removes THEIR lock (#647).
+  local deleted
+  deleted=$(vcli_del_if "$E2E_KEY" "$LOCK_VALUE" 2>/dev/null || echo 0)
 
-  if [[ -z "$holder" ]]; then
-    echo "e2e lock already released (key absent)"
+  if [[ "$deleted" == "1" ]]; then
+    echo "Released e2e lock: ${E2E_KEY}"
     return 0
   fi
 
-  if [[ "$holder" == "$LOCK_VALUE" ]]; then
-    vcli DEL "$E2E_KEY" > /dev/null
-    echo "Released e2e lock: ${E2E_KEY}"
+  local holder
+  holder=$(vcli GET "$E2E_KEY" 2>/dev/null || true)
+  if [[ -z "$holder" ]]; then
+    echo "e2e lock already released (key absent)"
   else
     echo "e2e lock ${E2E_KEY} held by ${holder}, not us (${LOCK_VALUE}) — not releasing"
   fi

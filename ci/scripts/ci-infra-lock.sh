@@ -46,7 +46,7 @@ _e2e_tests_running() {
       holder_pipeline=$(_extract_pipeline_number "$holder")
       if ! _pipeline_is_alive "$holder_pipeline"; then
         echo "  e2e lock on ${pool} held by pipeline #${holder_pipeline} which is no longer running — clearing" >&2
-        vcli DEL "ci-e2e-active-${pool}" > /dev/null 2>&1 || true
+        vcli_del_if "ci-e2e-active-${pool}" "$holder" > /dev/null 2>&1 || true
         continue
       fi
       echo "$holder"
@@ -88,7 +88,11 @@ do_acquire() {
       holder_pipeline=$(_extract_pipeline_number "$holder")
       if ! _pipeline_is_alive "$holder_pipeline"; then
         echo "  Infra lock held by pipeline #${holder_pipeline} which is no longer running — force-acquiring"
-        vcli DEL "$LOCK_KEY" > /dev/null 2>&1 || true
+        # Compare-and-delete against the holder we actually read. Two waiters
+        # that both saw this same dead holder would otherwise both DEL, and the
+        # second would erase the lock the first had just won — #2131 and #2132
+        # both reported "Acquired infra lock" that way (#647).
+        vcli_del_if "$LOCK_KEY" "$holder" > /dev/null 2>&1 || true
         continue  # retry acquire immediately
       fi
 
@@ -105,8 +109,10 @@ do_acquire() {
     # Check 3: recheck e2e after acquiring (close TOCTOU race)
     e2e_holder=$(_e2e_tests_running) || true
     if [[ -n "$e2e_holder" ]]; then
-      # e2e started between our check and lock acquire — release and retry
-      vcli DEL "$LOCK_KEY" > /dev/null 2>&1 || true
+      # e2e started between our check and lock acquire — release and retry.
+      # Guarded: if our TTL lapsed and someone else now holds the key, this
+      # must not delete their lock.
+      vcli_del_if "$LOCK_KEY" "$LOCK_VALUE" > /dev/null 2>&1 || true
       echo "  Released lock: e2e tests started ($e2e_holder), retrying..."
       sleep "$POLL_INTERVAL"
       elapsed=$((elapsed + POLL_INTERVAL))
@@ -119,17 +125,20 @@ do_acquire() {
 }
 
 do_release() {
-  local holder
-  holder=$(vcli GET "$LOCK_KEY" 2>/dev/null || true)
+  # One atomic compare-and-delete rather than GET, compare, DEL: between the
+  # read and the delete the key can expire and be re-acquired by someone else.
+  local deleted
+  deleted=$(vcli_del_if "$LOCK_KEY" "$LOCK_VALUE" 2>/dev/null || echo 0)
 
-  if [[ -z "$holder" ]]; then
-    echo "Infra lock already released (key absent)"
+  if [[ "$deleted" == "1" ]]; then
+    echo "Released infra lock (pipeline #$CI_PIPELINE_NUMBER)"
     return 0
   fi
 
-  if [[ "$holder" == "$LOCK_VALUE" ]]; then
-    vcli DEL "$LOCK_KEY" > /dev/null
-    echo "Released infra lock (pipeline #$CI_PIPELINE_NUMBER)"
+  local holder
+  holder=$(vcli GET "$LOCK_KEY" 2>/dev/null || true)
+  if [[ -z "$holder" ]]; then
+    echo "Infra lock already released (key absent)"
   else
     echo "Infra lock held by $holder, not us ($LOCK_VALUE) — not releasing"
   fi
