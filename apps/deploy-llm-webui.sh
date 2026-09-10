@@ -78,7 +78,10 @@ LOCAL_PORT=$((RANDOM + 10000))
 print_status "Setting up port-forward to Keycloak on port ${LOCAL_PORT}..."
 kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http ${LOCAL_PORT}:80 > /tmp/keycloak-pf.log 2>&1 &
 PF_PID=$!
-trap 'kill $PF_PID 2>/dev/null || true' EXIT
+# One EXIT trap only — a second `trap ... EXIT` replaces rather than appends,
+# which would silently drop the port-forward kill. gate_log is set much later;
+# ${gate_log:-} keeps this valid under `set -u` before then.
+trap 'kill $PF_PID 2>/dev/null || true; rm -f "${gate_log:-}"' EXIT
 sleep 3
 
 KEYCLOAK_URL="http://localhost:${LOCAL_PORT}"
@@ -396,8 +399,35 @@ fi
 # default so the forced-RAG search handler was skipped — see
 # docs/plans/llm/web-search.md). This gate exercises the real path as a
 # role=user account: SearXNG canary, then a chat completion with
-# features.web_search=true asserting the response cites sources. It fails
-# the deploy loudly — no silent skip.
+# features.web_search=true asserting the response cites sources.
+#
+# ADVISORY BY DEFAULT. The gate reports one of three outcomes and this script
+# decides what is fatal:
+#
+#   0  passed
+#   2  could not run — upstream search engines refused this cluster's egress
+#      IP (CAPTCHA / rate limit), Ollama down, model or key missing. Warn and
+#      continue: "cannot run the test" is not "the test failed", and blocking
+#      on it took the whole PR queue down on 2026-09-10 (#658/#657/#625/#639
+#      all failed this step on a freshly rebuilt dev cluster whose new egress
+#      IP was CAPTCHA'd by duckduckgo and startpage from the first query).
+#   3  regression — the canary proved upstream search works and our chat path
+#      still cited no sources. This is the real signal. Warned about loudly,
+#      and still non-fatal by default per the 2026-09-10 decision to make the
+#      gate optional "for now"; set WEBSEARCH_GATE_ENFORCE=1 to re-arm it as a
+#      deploy blocker once the search backend is dependable again.
+#   *  anything else, 1 included — the harness broke, not the deployment.
+#      kubectl reports its own failures (no such pod, API unreachable, exec
+#      denied) as exit 1, which is why the gate's regression verdict is 3:
+#      a connection problem must never be announced as "web search is broken".
+#      90 is synthesised here for "exited 0 but never printed a verdict".
+#
+# Exit 0 is NOT taken at face value: it must be corroborated by the gate's own
+# GATE PASS line, or an empty stdin to `python3 -` would read EOF, exit 0, and
+# be reported as a pass that tested nothing.
+#
+# A non-pass also downgrades the closing "deployed" line from green to a
+# warning, so a log that no longer goes red cannot end looking clean.
 # ---------------------------------------------------------------------------
 print_status "Waiting for Open WebUI rollout before web-search gate..."
 # 300s: under concurrent CI deploys the pod can take >180s to become Ready
@@ -407,16 +437,88 @@ kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=300s
 print_status "Running web-search functional gate (SearXNG + chat completion sources)..."
 # GATE_MODEL is passed via env(1), not spliced into the sh -c string, so a
 # quote in the config value cannot break out into the remote shell.
-if ! kubectl exec -i -n "$NS_LLM" deploy/open-webui -- env "GATE_MODEL=$LLM_MODEL" sh -c \
-    'export WEBUI_SECRET_KEY="${WEBUI_SECRET_KEY:-$(cat /app/backend/.webui_secret_key 2>/dev/null)}"; python3 -' \
-    < "$REPO_ROOT/apps/websearch-gate/websearch-gate.py"; then
-    print_error "Web-search gate FAILED for $MT_TENANT — web search is broken on this deployment."
-    print_error "Debug: kubectl logs -n $NS_LLM deploy/open-webui --tail=100"
-    print_error "       kubectl logs -n infra-llm deploy/searxng --tail=50"
+# The gate script must exist and be readable BEFORE we try to deliver it. A
+# failed input redirect is reported by bash as exit 1, which now merely warns —
+# so without this check a moved file or a mis-resolved REPO_ROOT would turn the
+# gate into a permanent silent no-op. That is a repo-integrity bug, not a
+# "legitimate reason the test cannot run", so it stays fatal.
+# -s as well as -r: `-r` alone passes on a zero-byte or truncated file, and
+# `python3 - < empty` then exits 0 having run nothing — which the GATE PASS
+# corroboration below turns into 90 (advisory), i.e. the exact repo-integrity
+# class this check declares fatal would have slipped through as a warning.
+GATE_SCRIPT="$REPO_ROOT/apps/websearch-gate/websearch-gate.py"
+if [ ! -r "$GATE_SCRIPT" ] || [ ! -s "$GATE_SCRIPT" ]; then
+    print_error "Web-search gate script missing, unreadable or empty: $GATE_SCRIPT"
     exit 1
 fi
-print_success "Web-search gate passed"
 
-print_success "Open WebUI deployed for $MT_TENANT!"
+# Captured to a file rather than piped: assigning gate_rc inside a pipeline runs
+# it in a subshell and loses the value (the same trap CLAUDE.md documents for
+# mt_apply). `|| gate_rc=$?` keeps `set -e` from aborting before we classify —
+# the exit code IS the result here, not an error to propagate.
+gate_log="$(mktemp)"
+gate_rc=0
+kubectl exec -i -n "$NS_LLM" deploy/open-webui -- env "GATE_MODEL=$LLM_MODEL" sh -c \
+    'export WEBUI_SECRET_KEY="${WEBUI_SECRET_KEY:-$(cat /app/backend/.webui_secret_key 2>/dev/null)}"; python3 -' \
+    < "$GATE_SCRIPT" > "$gate_log" 2>&1 || gate_rc=$?
+cat "$gate_log"
+
+# Exit 0 alone is not proof the gate ran. `kubectl exec -i` delivering empty or
+# truncated stdin leaves `python3 -` with nothing to execute: it reads EOF and
+# exits 0, and the deploy would report a pass having tested nothing. Same class
+# as the Roundcube schema-verify false negative (an empty result from
+# `kubectl run -i` is not an answer). The gate prints an unambiguous positive
+# token when it really passed, so require it and fail closed to "no verdict".
+if [ "$gate_rc" -eq 0 ] && ! grep -q "GATE PASS:" "$gate_log"; then
+    print_warning "Web-search gate exited 0 without printing a GATE PASS verdict —"
+    print_warning "  treating as NO VERDICT, not a pass (likely empty/truncated stdin to python3 -)."
+    gate_rc=90
+fi
+rm -f "$gate_log"
+
+case "$gate_rc" in
+    0)
+        print_success "Web-search gate passed"
+        ;;
+    2)
+        print_warning "Web-search gate COULD NOT RUN for $MT_TENANT — the test was not performed."
+        print_warning "  Web search is NOT known to be broken and is NOT known to be working."
+        print_warning "  Usual cause: upstream engines refusing this cluster's egress IP."
+        print_warning "  Check:  kubectl logs -n infra-llm deploy/searxng --tail=50"
+        ;;
+    3)
+        # Canary proved upstream search works and our chat path still cited no
+        # sources — the exact silent breakage this gate was built for.
+        print_warning "*** Web-search gate FAILED for $MT_TENANT — web search is BROKEN on this deployment. ***"
+        print_warning "  This is OURS, not upstream: either the container env contradicts the"
+        print_warning "  deploy (ENABLE_WEB_SEARCH / SEARXNG_QUERY_URL — checked before the"
+        print_warning "  canary), or the canary proved upstream search works and our chat path"
+        print_warning "  still cited no sources. The gate's own output above says which."
+        print_warning "  See docs/plans/llm/web-search.md."
+        print_warning "  Debug: kubectl logs -n $NS_LLM deploy/open-webui --tail=100"
+        if [ "${WEBSEARCH_GATE_ENFORCE:-0}" = "1" ]; then
+            print_error "WEBSEARCH_GATE_ENFORCE=1 — failing the deploy."
+            exit 1
+        fi
+        print_warning "  Continuing anyway (gate is advisory; set WEBSEARCH_GATE_ENFORCE=1 to block)."
+        ;;
+    *)
+        # Not a verdict about the deployment: the gate never got to report one.
+        print_warning "Web-search gate did not report a verdict for $MT_TENANT (exit $gate_rc)."
+        print_warning "  90 = exited 0 but printed no GATE PASS, so nothing was actually tested."
+        print_warning "  Otherwise the harness broke: the gate itself only ever exits 0/2/3, so"
+        print_warning "  any other code is kubectl exec failing (no such pod, API unreachable,"
+        print_warning "  exec denied) or the script erroring before it could judge."
+        print_warning "  Either way web search is UNTESTED, not known-broken."
+        print_warning "  Debug: kubectl logs -n $NS_LLM deploy/open-webui --tail=100"
+        ;;
+esac
+
+if [ "$gate_rc" -eq 0 ]; then
+    print_success "Open WebUI deployed for $MT_TENANT!"
+else
+    # Do not let the last line of a non-blocking failure be unqualified green.
+    print_warning "Open WebUI deployed for $MT_TENANT — but the web-search gate did NOT pass (exit $gate_rc, see above)."
+fi
 print_success "  URL:  https://${LLM_HOST}"
 print_success "  Auth: Keycloak realm $TENANT_KEYCLOAK_REALM via $AUTH_HOST"

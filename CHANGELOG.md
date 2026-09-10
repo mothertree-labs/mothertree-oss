@@ -7,6 +7,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- The web-search deploy gate no longer fails a deploy when it simply **could not
+  run**. `apps/websearch-gate/websearch-gate.py` now separates two outcomes that
+  it previously collapsed into one exit code: **3 = regression** (the SearXNG
+  canary proved upstream search works and our chat path still cited no sources —
+  the silent 0.9.6→0.11 breakage the gate exists to catch) and **2 = cannot run**
+  (upstream engines refused the cluster's egress IP, Ollama down, model or key
+  missing). `deploy-llm-webui.sh` classifies the result; exit 2 warns and
+  continues, because "cannot run the test" is not "the test failed". The
+  regression verdict is 3 rather than 1 because the gate is delivered over
+  `kubectl exec`, which reports its own transport failures as 1 — sharing the
+  code would let an unreachable API be announced as broken web search.
+  On 2026-09-10 the old behavior took the whole PR queue down — #658, #657, #625
+  and #639 all failed `deploy-dev-llm` for a reason none of them caused, after
+  the on-demand dev cluster was rebuilt onto a fresh Linode egress IP that
+  duckduckgo and startpage CAPTCHA from the first query. Exit 3 is also
+  non-fatal by default for now; set `WEBSEARCH_GATE_ENFORCE=1` to re-arm the
+  gate as a deploy blocker. See `docs/plans/llm/web-search.md`.
+- The web-search gate's pass is now corroborated, not assumed: `kubectl exec -i`
+  delivering empty or truncated stdin leaves `python3 -` reading EOF and exiting
+  0, which the deploy would have reported as a pass having tested nothing (the
+  same class as the Roundcube schema-verify false negative). A pass now requires
+  the gate's own `GATE PASS:` line in the captured output. A missing or
+  unreadable gate script is also checked before delivery and stays fatal, so a
+  moved file cannot turn the gate into a silent permanent no-op.
+- The gate's canary failure message now names the engines that refused, from the
+  `unresponsive_engines` array SearXNG already returns in the body the canary
+  parses and discarded. It previously reported a bare `HTTP 200, 0 results`,
+  which reads as "search backend down" and sent an investigation to the wrong
+  place — the backend was healthy and the engines were CAPTCHA'd.
 - `mt_apply` (the conditional-restart change tracker in `scripts/lib/common.sh`)
   now decides "changed" with a server-side `kubectl diff` of the manifest
   instead of grepping "configured" out of the `kubectl apply` output.
@@ -192,9 +221,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cannot flake it). Catches upgrades that break search without breaking the
   deployment (pod healthy, OIDC fine, model list renders, but search
   silently never runs — the 0.9.6→0.11 native-function-calling regression).
-  Fails the deploy loudly; verified to pass on 0.9.6 with current wiring,
-  pass on 0.11.0 with `function_calling=legacy`, and fail (exit 1, no
-  sources) on a naive 0.11.0 bump.
+  Verified to pass on 0.9.6 with current wiring, pass on 0.11.0 with
+  `function_calling=legacy`, and fail (no sources) on a naive 0.11.0 bump.
+  Originally failed the deploy on any non-zero exit; now advisory, and
+  reports whether it reached a verdict at all — see the `### Fixed` entry
+  above.
 - LLM web search for Open WebUI, self-hosted via SearXNG (the alternative
   provider route from `docs/plans/llm/web-search.md`; no external API key).
   A shared `searxng` deployment now lives in `infra-llm`
