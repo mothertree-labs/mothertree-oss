@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Use SHA (not ref) to prevent ref-name injection attacks.
           # This is the GitHub-recommended hardening for pull_request_target.

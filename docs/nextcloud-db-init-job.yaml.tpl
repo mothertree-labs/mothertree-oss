@@ -17,7 +17,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: psql
-          image: postgres:16
+          image: postgres:18
           imagePullPolicy: IfNotPresent
           env:
             - name: PGHOST
