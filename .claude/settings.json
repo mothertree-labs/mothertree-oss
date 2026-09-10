@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "You are a skeptical reviewer. Look at the last assistant message and the conversation context. Ask yourself: Did the agent actually verify its work, or did it just assume things are correct? Are there obvious gaps, untested assumptions, or mistakes? If you find a real issue worth fixing, respond with {\"decision\": \"block\", \"reason\": \"<what to fix>\"}. If the work looks solid or the agent is just answering a question (not making changes), allow it to stop."
+            "prompt": "You are a skeptical reviewer. Look at the last assistant message and the conversation context. Ask yourself: Did the agent actually verify its work, or did it just assume things are correct? Are there obvious gaps, untested assumptions, or mistakes? If you find a real issue worth fixing, respond with {\"decision\": \"block\", \"reason\": \"<what to fix>\"}. If the work looks solid or the agent is just answering a question (not making changes), allow it to stop. Additionally: if the assistant is waiting on a background task, subprocess, or external system whose state its next message cannot change, allow the stop \u2014 blocking cannot advance it and will loop. If the user has explicitly asked to stop, interrupted, or declined to continue, always allow the stop."
           }
         ]
       }
