@@ -11,7 +11,7 @@ _mt_resolve_project_conf
 [[ -n "$MT_PROJECT_CONF" ]] && source "$MT_PROJECT_CONF"
 
 IMAGE_TAG=${IMAGE_TAG:-${CONTAINER_REGISTRY:-ghcr.io/YOUR_ORG}/mothertree-perf:latest}
-K6_IMAGE=${K6_IMAGE:-grafana/k6:0.49.0}
+K6_IMAGE=${K6_IMAGE:-grafana/k6:2.2.0}
 # When PUSH=true, build multi-arch and push; otherwise build amd64 locally and load into Docker.
 PUSH=${PUSH:-false}
 # Override to "linux/amd64,linux/arm64" if you want multi-arch without setting PUSH.

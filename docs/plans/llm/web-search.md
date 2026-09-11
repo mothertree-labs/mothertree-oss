@@ -262,3 +262,90 @@ Known pre-existing quirk (untouched): the `open-webui-oidc` Secret in
 `open-webui-tenant.yaml.tpl` triggers `mt_apply`'s change flag on every
 `deploy-llm-webui.sh` run (same stringData-apply behavior), so Open WebUI
 restarts on each deploy. Not changed here — out of scope for this feature.
+
+---
+
+## The deploy gate is advisory (changed 2026-09-10)
+
+`apps/websearch-gate/websearch-gate.py` runs after every Open WebUI deploy. It
+used to fail the deploy on any non-zero exit. That conflated two questions that
+need different answers, and on 2026-09-10 it took the entire PR queue down —
+#658, #657, #625 and #639 all failed `deploy-dev-llm` for a reason none of them
+caused.
+
+### Why: datacenter egress IPs are not welcome at free search engines
+
+`ensure-dev-cluster` had rebuilt the on-demand dev cluster mid-pipeline, so it
+came up on a new Linode egress IP. Measured on that cluster, immediately after a
+clean `rollout restart deploy/searxng -n infra-llm`:
+
+| probe | results | engines refusing |
+|---|---|---|
+| 1 | 30 | duckduckgo CAPTCHA, startpage CAPTCHA |
+| 2 | 20 | + brave "too many requests" |
+| 3 | 20 | + brave suspended, startpage suspended |
+
+**duckduckgo and startpage refuse from the very first query on a fresh node** —
+that is the egress IP, not accumulated state, and no restart or retry fixes it.
+brave dies within a couple of queries. That leaves google-cse carrying the
+deploy alone, and a two-tenant deploy spends ~10 queries (each tenant runs up to
+3 canary + up to 2 chat searches), so it too hits "too many requests" and SearXNG
+starts answering `HTTP 200` with an empty result set.
+
+The `rollout restart` recipe still works, but it buys roughly one deploy.
+
+### The contract
+
+The script now reports; `deploy-llm-webui.sh` decides.
+
+| exit | meaning | deploy |
+|---|---|---|
+| 0 | search ran and cited sources | continue |
+| 2 | **cannot run** — engines refused, Ollama down, model/key missing | warn, continue |
+| 3 | **regression** — our deployment fails a test that could run | warn loudly, continue |
+| 90 | exited 0 but printed no `GATE PASS` — nothing was actually tested | warn, continue |
+| * | harness broke (incl. **1**) — no verdict was reached | warn, continue |
+
+The distinction that matters: exit 2 says *nothing* about our wiring, so it must
+never block. Exit 3 is the 0.9.6→0.11 class of silent breakage this gate exists
+to catch — the canary is what separates them, which is why the canary result has
+to be carried forward rather than the canary simply being downgraded.
+
+**The regression verdict is 3, not 1, on purpose.** The gate is delivered over
+`kubectl exec`, and kubectl reports its own transport failures — no such pod, API
+unreachable, exec denied — as exit 1. Had the verdict shared that code, a
+connection problem would be announced as "web search is broken on this
+deployment": the exact cannot-run/failed confusion this taxonomy removes.
+
+A non-pass also downgrades the closing "Open WebUI deployed" line from green to
+a warning, so a log that no longer goes red cannot end looking clean.
+
+**Exit 0 is not taken at face value.** `kubectl exec -i` delivering empty or
+truncated stdin leaves `python3 -` with nothing to execute: it reads EOF and
+exits 0, and the deploy would report a pass having tested nothing — the same
+class as the Roundcube schema-verify false negative, where an empty result from
+`kubectl run -i` was mistaken for an answer. A pass must therefore be
+corroborated by the gate's own `GATE PASS:` line; without it the result becomes
+90 (no verdict) rather than success.
+
+**Two things stay fatal**, because they are bugs rather than legitimate reasons
+the test cannot run: `WEBSEARCH_GATE_ENFORCE=1` with a regression, and a missing
+or unreadable gate script (a failed input redirect is exit 1, which now only
+warns — so without that pre-flight check a moved file or a mis-resolved
+`REPO_ROOT` would silently turn the gate into a permanent no-op).
+
+**Exit 3 is non-fatal by default** per the 2026-09-10 decision to make the gate
+optional "for now". Set `WEBSEARCH_GATE_ENFORCE=1` in the deploy environment to
+re-arm it as a blocker once the search backend is dependable. Note the trade-off
+while it is off: a genuine wiring regression ships with only a warning in the
+deploy log — exactly the silent-breakage scenario the gate was built for.
+
+### Making the backend dependable (not done)
+
+The durable fix is upstream of the gate: give SearXNG engines that answer from a
+datacenter IP — API-keyed engines (Brave Search API, a real google-cse quota) or
+engines that do not CAPTCHA datacenter ranges (mojeek, wikipedia, qwant) — rather
+than relying on the default free scraped set. Requires new secrets and a cost
+decision. A cheaper partial: hoist the canary out of the per-tenant loop, since
+SearXNG is a single shared deployment in `infra-llm` whose health cannot differ
+between tenants, and the duplicate canaries are ~half the query burn.

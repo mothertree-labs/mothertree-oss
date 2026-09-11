@@ -31,7 +31,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: psql
-          image: postgres:16
+          image: postgres:18
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

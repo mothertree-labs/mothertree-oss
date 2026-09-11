@@ -9,7 +9,7 @@ comes up healthy, OIDC works, the model list renders, but search never runs
 (e.g. Open WebUI 0.11 only runs the forced-RAG search handler under legacy
 function calling; see docs/plans/llm/web-search.md).
 
-Three stages, each failing loudly (non-zero exit fails the deploy):
+Three stages:
   1. SearXNG canary — direct JSON query, isolates "search backend down /
      JSON API broken" from Open WebUI wiring failures.
   2. Provision a role=user gate account through Open WebUI's own model
@@ -20,6 +20,32 @@ Three stages, each failing loudly (non-zero exit fails the deploy):
      (sources present), not on answer text, so LLM nondeterminism does not
      flake the gate: with the deterministic forced-RAG path wired
      correctly, search always runs and always yields sources.
+
+Exit codes — this script REPORTS, the deploy script decides what is fatal.
+The two conditions are not the same question and must not share an exit code:
+
+  0  PASS         search ran and cited sources.
+  2  CANNOT RUN   the test could not be performed at all — upstream engines
+                  CAPTCHA'd/rate-limited, Ollama down, model or key missing.
+                  Says nothing about our wiring. Never a deploy blocker:
+                  "cannot run the test" is not "the test failed".
+  3  REGRESSION   we can run the test and our deployment fails it: the canary
+                  proved upstream search works, yet the chat path cited no
+                  sources (or the container env contradicts the deploy). This
+                  is the 0.9.6->0.11 class of silent breakage the gate exists
+                  to catch.
+
+Deliberately NOT 1 for the regression verdict. This script is delivered over
+`kubectl exec`, and kubectl reports its own transport failures (no such pod, API
+unreachable, exec denied) as exit 1. Sharing that code would let a connection
+problem be announced as "web search is broken on this deployment" — precisely the
+cannot-run/failed confusion this taxonomy exists to remove. 1 and every other
+unexpected code mean the harness broke, and the caller treats them as cannot-run.
+
+Datacenter egress IPs make code 2 routine: SearXNG's default free engines
+(duckduckgo, startpage) answer CAPTCHA from the first query on a fresh Linode
+node, and brave/google-cse rate-limit within a handful. See
+docs/plans/llm/web-search.md.
 
 Env (set by the deploy script / container):
   GATE_MODEL         model to chat with (falls back to DEFAULT_MODELS)
@@ -70,9 +96,25 @@ SECRET_KEY_FILES = (
 )
 
 
+# See the module docstring: 3 = our deployment is broken, 2 = we could not
+# find out. Collapsing them into one non-zero code is what let a CAPTCHA'd
+# upstream engine block every PR in the queue.
+EXIT_PASS = 0
+EXIT_CANNOT_RUN = 2
+# Not 1: kubectl exec reports its own transport failures as 1 (see docstring).
+EXIT_REGRESSION = 3
+
+
 def fail(msg):
+    """A verdict: the test ran and our deployment failed it."""
     print(f"GATE FAIL: {msg}", flush=True)
-    sys.exit(1)
+    sys.exit(EXIT_REGRESSION)
+
+
+def cannot_run(msg):
+    """Not a verdict: the test could not be performed, so nothing was learned."""
+    print(f"GATE CANNOT RUN: {msg}", flush=True)
+    sys.exit(EXIT_CANNOT_RUN)
 
 
 async def acall(fn, *args, **kwargs):
@@ -102,7 +144,7 @@ def wait_for_ollama(ollama_url):
             last = repr(e)
         print(f"  waiting for ollama {attempt}/18 ({last}), retrying in 10s")
         time.sleep(10)
-    fail(f"Ollama not reachable at {base} after ~3 minutes ({last}) — inference backend down")
+    cannot_run(f"Ollama not reachable at {base} after ~3 minutes ({last}) — inference backend down")
 
 
 def searxng_canary(searxng_url):
@@ -116,18 +158,34 @@ def searxng_canary(searxng_url):
                 params={"q": queries[attempt - 1], "format": "json"},
                 timeout=30,
             )
-            results = r.json().get("results", []) if r.ok else []
+            body = r.json() if r.ok else {}
+            results = body.get("results", [])
             if results:
                 print(f"searxng canary OK: HTTP {r.status_code}, {len(results)} results")
                 return
+            # SearXNG answers 200 with an empty result set when every engine
+            # refused, and names them in unresponsive_engines. The old message
+            # threw that away and reported a bare "0 results", which reads as
+            # "search backend down" and sent at least one investigation to the
+            # wrong place — the backend was healthy, the engines were CAPTCHA'd.
             last = f"HTTP {r.status_code}, {len(results)} results"
+            dead = body.get("unresponsive_engines") or []
+            named = ", ".join(
+                f"{e[0]} ({e[1]})"
+                for e in dead
+                if isinstance(e, (list, tuple)) and len(e) >= 2
+            )
+            if named:
+                last += f"; engines refusing: {named}"
         except Exception as e:  # noqa: BLE001 — any transport/parse error is a retry
             last = repr(e)
         print(f"  searxng canary attempt {attempt}/3 failed ({last}), retrying in 5s")
         time.sleep(5)
-    fail(
+    cannot_run(
         f"SearXNG returned no usable results after 3 attempts ({last}) — "
-        "search backend down, JSON API disabled, or upstream engines unreachable"
+        "search backend down, JSON API disabled, or upstream engines unreachable. "
+        "If engines are named above, upstream is refusing this cluster's egress IP "
+        "and the deployment is not implicated."
     )
 
 
@@ -145,7 +203,7 @@ async def run(model):
             role="user",
         )
     if user is None:
-        fail(f"could not provision gate user {GATE_EMAIL}")
+        cannot_run(f"could not provision gate user {GATE_EMAIL}")
     print(f"gate user ready: {user.id} (role={user.role})")
     try:
         token = create_token(data={"id": user.id}, expires_delta=timedelta(minutes=10))
@@ -181,11 +239,11 @@ async def run(model):
             # the model before the next attempt.
             time.sleep(20)
         if resp is None or resp.status_code != 200:
-            fail(f"chat completion failed after 3 attempts: {last}")
+            cannot_run(f"chat completion failed after 3 attempts: {last}")
         try:
             body = resp.json()
         except ValueError:
-            fail(f"chat completion returned non-JSON body: {resp.text[:300]}")
+            cannot_run(f"chat completion returned non-JSON body: {resp.text[:300]}")
         try:
             answer = body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
@@ -217,6 +275,10 @@ async def run(model):
             "see docs/plans/llm/web-search.md. "
             f"Response keys: {sorted(body.keys())}"
         )
+    # INVARIANT: exit 0 <=> this line is printed. deploy-llm-webui.sh treats a
+    # 0 exit without this token as "no verdict" (90), not a pass, because an
+    # empty stdin to `python3 -` also exits 0. Any future soft-success path
+    # MUST print this line or return non-zero — never return 0 silently.
     print(f"GATE PASS: web search ran, {len(sources)} source(s) cited")
 
     # Best-effort cleanup so the gate account doesn't linger in the user list.
@@ -251,7 +313,7 @@ def main():
         fail("SEARXNG_QUERY_URL not set in the container env")
     model = os.environ.get("GATE_MODEL") or os.environ.get("DEFAULT_MODELS") or ""
     if not model:
-        fail("no model to test with (GATE_MODEL / DEFAULT_MODELS both unset)")
+        cannot_run("no model to test with (GATE_MODEL / DEFAULT_MODELS both unset)")
 
     # WEBUI_SECRET_KEY must be in the env BEFORE open_webui modules are
     # imported (open_webui.env hard-fails without it). Depending on version
@@ -264,12 +326,12 @@ def main():
                     os.environ["WEBUI_SECRET_KEY"] = f.read().strip()
                 break
     if not os.environ.get("WEBUI_SECRET_KEY"):
-        fail(f"WEBUI_SECRET_KEY not in env and no key file found in {SECRET_KEY_FILES}")
+        cannot_run(f"WEBUI_SECRET_KEY not in env and no key file found in {SECRET_KEY_FILES}")
 
     searxng_canary(searxng_url)
     ollama_url = os.environ.get("OLLAMA_BASE_URL", "")
     if not ollama_url:
-        fail("OLLAMA_BASE_URL not set in the container env")
+        cannot_run("OLLAMA_BASE_URL not set in the container env")
     wait_for_ollama(ollama_url)
     try:
         asyncio.run(run(model))

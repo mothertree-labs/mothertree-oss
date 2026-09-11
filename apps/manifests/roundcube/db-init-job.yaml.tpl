@@ -23,7 +23,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: db-init
-        image: postgres:15-alpine
+        image: postgres:18-alpine
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

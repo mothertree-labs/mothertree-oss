@@ -6,7 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Renovate tier-1 major bumps, batched: GitHub Actions (`actions/checkout` v4→v7,
+  `actions/setup-python` v5→v7, `github/codeql-action` v3→v4), `grafana/k6`→2.2.0,
+  `redis`→8 and `postgres`→18 in the perf and db-init Jobs. No deployed runtime
+  moves: the Postgres server stays PG 17 (`pg_version` in `ansible/playbook.yml`,
+  which Renovate does not manage), and the real Redis was already on
+  `redis:8-alpine`. The db-init Jobs are `psql` only — no `pg_dump`/`pg_restore`,
+  so the one direction that genuinely breaks across versions is not in play. (The
+  two `pgbench.yaml` Jobs are *not* read-only — `pgbench -i` recreates the
+  `pgbench_*` tables and loads ~100k rows — but nothing in CI or `scripts/run_perf`
+  applies them; they are manual-only.) Every tag was confirmed against the registry
+  before writing. Two of these have a clock on them — CodeQL Action v3 is deprecated in
+  December 2026, and `actions/checkout@v4` already emits Node 20 deprecation
+  warnings on GitHub's runners.
+
 ### Fixed
+- `perf/VERSION` bumped 0.2.1 → 0.2.2 so the k6 change actually ships.
+  `ci/scripts/build-image.sh` skips the build when `mothertree-perf:$TAG` already
+  exists and merely re-points `:latest` at the existing tag — and the six k6 Jobs
+  consume `:latest`. Since #600 already published `0.2.1` (from a k6 0.49.0 base),
+  leaving `perf/VERSION` alone would have logged "already exists, skipping build"
+  and shipped the old image while the diff claimed otherwise. Same tag-collision
+  trap as #650/#360.
+- The k6 perf image was built from `grafana/k6:0.49.0`, not the `0.59.0` in
+  `perf/docker/k6-runner.Dockerfile`: `apps/scripts/perf/build-k6-image.sh` passes
+  its own default through `--build-arg K6_IMAGE=`, which overrides the Dockerfile
+  `ARG`. Only the Dockerfile was under Renovate, so the pin that actually wins was
+  unmanaged and ten minor versions behind — and a Renovate bump of the Dockerfile
+  alone would have been a no-op. Both pins now say `2.2.0`, and
+  `renovate.json5` covers the script so they cannot drift apart again.
+- **Two of the six k6 entrypoints could not compile at all** under the version the
+  image was actually built from. `perf/k6/docs/load.js` fails on the object spread
+  (`...docData` in `perf/k6/docs/documents.js`) and `perf/k6/docs/discover.js`
+  fails at 119:39 — both `SyntaxError` under 0.49.0's Babel-based compiler, both
+  clean on 2.2.0. Verified by running `k6 archive` over every script in `perf/k6/`
+  against both versions.
+- The web-search deploy gate no longer fails a deploy when it simply **could not
+  run**. `apps/websearch-gate/websearch-gate.py` now separates two outcomes that
+  it previously collapsed into one exit code: **3 = regression** (the SearXNG
+  canary proved upstream search works and our chat path still cited no sources —
+  the silent 0.9.6→0.11 breakage the gate exists to catch) and **2 = cannot run**
+  (upstream engines refused the cluster's egress IP, Ollama down, model or key
+  missing). `deploy-llm-webui.sh` classifies the result; exit 2 warns and
+  continues, because "cannot run the test" is not "the test failed". The
+  regression verdict is 3 rather than 1 because the gate is delivered over
+  `kubectl exec`, which reports its own transport failures as 1 — sharing the
+  code would let an unreachable API be announced as broken web search.
+  On 2026-09-10 the old behavior took the whole PR queue down — #658, #657, #625
+  and #639 all failed `deploy-dev-llm` for a reason none of them caused, after
+  the on-demand dev cluster was rebuilt onto a fresh Linode egress IP that
+  duckduckgo and startpage CAPTCHA from the first query. Exit 3 is also
+  non-fatal by default for now; set `WEBSEARCH_GATE_ENFORCE=1` to re-arm the
+  gate as a deploy blocker. See `docs/plans/llm/web-search.md`.
+- The web-search gate's pass is now corroborated, not assumed: `kubectl exec -i`
+  delivering empty or truncated stdin leaves `python3 -` reading EOF and exiting
+  0, which the deploy would have reported as a pass having tested nothing (the
+  same class as the Roundcube schema-verify false negative). A pass now requires
+  the gate's own `GATE PASS:` line in the captured output. A missing or
+  unreadable gate script is also checked before delivery and stays fatal, so a
+  moved file cannot turn the gate into a silent permanent no-op.
+- The gate's canary failure message now names the engines that refused, from the
+  `unresponsive_engines` array SearXNG already returns in the body the canary
+  parses and discarded. It previously reported a bare `HTTP 200, 0 results`,
+  which reads as "search backend down" and sent an investigation to the wrong
+  place — the backend was healthy and the engines were CAPTCHA'd.
 - `mt_apply` (the conditional-restart change tracker in `scripts/lib/common.sh`)
   now decides "changed" with a server-side `kubectl diff` of the manifest
   instead of grepping "configured" out of the `kubectl apply` output.
@@ -192,9 +256,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cannot flake it). Catches upgrades that break search without breaking the
   deployment (pod healthy, OIDC fine, model list renders, but search
   silently never runs — the 0.9.6→0.11 native-function-calling regression).
-  Fails the deploy loudly; verified to pass on 0.9.6 with current wiring,
-  pass on 0.11.0 with `function_calling=legacy`, and fail (exit 1, no
-  sources) on a naive 0.11.0 bump.
+  Verified to pass on 0.9.6 with current wiring, pass on 0.11.0 with
+  `function_calling=legacy`, and fail (no sources) on a naive 0.11.0 bump.
+  Originally failed the deploy on any non-zero exit; now advisory, and
+  reports whether it reached a verdict at all — see the `### Fixed` entry
+  above.
 - LLM web search for Open WebUI, self-hosted via SearXNG (the alternative
   provider route from `docs/plans/llm/web-search.md`; no external API key).
   A shared `searxng` deployment now lives in `infra-llm`
