@@ -264,9 +264,10 @@ if [ -z "$_auth_cluster_ip" ]; then
 else
     # Explicit-verdict probe via a Job + post-completion logs (issue #623): the
     # old `kubectl run --rm -i` read a lost attach as "did not propagate" and
-    # failed healthy deploys (pipeline 2077). Returns 1 = definitely not
-    # converged, 2 = no answer; both abort — never claim success on silence.
-    if ! mt_coredns_rewrite_verify "$NS_LLM" "$AUTH_HOST" "$_auth_cluster_ip"; then
+    # failed healthy deploys (pipeline 2077). mt_coredns_rewrite_require aborts
+    # on 1 (definitely not converged) but WARNS and proceeds on 2 (no verdict):
+    # that flake stranded two merged PRs short of prod on 2026-09-11 (#662).
+    if ! mt_coredns_rewrite_require "$NS_LLM" "$AUTH_HOST" "$_auth_cluster_ip"; then
         print_error "Check kube-system/coredns-custom ConfigMap and CoreDNS pod logs:"
         print_error "  kubectl -n kube-system get configmap coredns-custom -o yaml"
         print_error "  kubectl -n kube-system logs -l k8s-app=kube-dns --tail=100"

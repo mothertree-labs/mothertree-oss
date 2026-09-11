@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- A lost `kubectl` attach no longer fails a deploy over a check it could not run.
+  `mt_coredns_rewrite_verify` already distinguished "definitely not converged"
+  (rc 1) from "could not determine" (rc 2), but both call sites collapsed them
+  and aborted on either. On 2026-09-11 a transport flake on a freshly rebuilt dev
+  cluster produced rc 2, which failed `deploy-dev-llm`, which skipped
+  `mothertree-build`, which skipped `deploy-prod` — so two already-merged PRs
+  never reached production. The rewrite had in fact propagated correctly (both
+  CoreDNS replicas answered with the right address when checked by hand). New
+  `mt_coredns_rewrite_require` applies the policy in one place: rc 1 aborts, rc 2
+  warns loudly and proceeds. Probes gating a *destructive* action must keep
+  failing closed — that is what stops a lost attach being read as "schema
+  missing" and triggering a `DROP SCHEMA` (#623) — so this helper is documented
+  as read-only-verification only. (#662)
+- db-init Jobs no longer race their own deletion. `kubectl delete job` can return
+  before the API server drops the object, so delete-then-recreate could fail with
+  `Error from server (AlreadyExists)` — and Jobs are largely immutable, so
+  `apply` cannot absorb it. That broke pipeline 2173. stalwart and synapse
+  open-coded a wait; docs, nextcloud and roundcube did not. New
+  `mt_delete_job_wait` is that logic once: force-delete, drop orphaned pods
+  carrying the `job-name` label, then poll until the object is gone, failing with
+  the manual-recovery command rather than recreating into the window. Also adds
+  the `ttlSecondsAfterFinished: 300` that the three working siblings already set
+  to `docs/db-init-job.yaml.tpl` and `docs/nextcloud-db-init-job.yaml.tpl`, so
+  completed Jobs stop accumulating. (#667)
+- `mt_delete_job_wait` distinguishes "the server said NotFound" from "we could
+  not reach the server": a bare non-zero `kubectl get` was previously read as
+  "job absent", so an unreachable API or expired kubeconfig would have returned
+  success and let the caller recreate into an existing Job — the same
+  transport-vs-answer conflation #623 exists to prevent, in a helper sitting
+  beside the #623 probes. Also guards a 0/non-numeric timeout, which made `seq`
+  empty so the poll loop never ran and the function fell through reporting
+  "gone" without having looked. (That one fails open only on GNU coreutils —
+  BSD `seq 1 0` counts *down* — so it reproduces on CI but not on a Mac.)
+- The no-verdict path of the CoreDNS check now emits a fixed, greppable
+  `MT_COREDNS_VERIFY_INDETERMINATE` token. rc 2 is meant to be a transient
+  flake, but nothing can distinguish transient from structural (probe pod
+  unschedulable, image pull blocked, NetworkPolicy) — so if it ever became
+  permanent the gate would be vacuous while still appearing present in the log.
+  A run of these is now findable.
+
 ### Changed
 - Renovate tier-1 major bumps, batched: GitHub Actions (`actions/checkout` v4→v7,
   `actions/setup-python` v5→v7, `github/codeql-action` v3→v4), `grafana/k6`→2.2.0,

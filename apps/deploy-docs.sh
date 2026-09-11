@@ -264,7 +264,7 @@ else
     print_warning "DNS check timed out, proceeding anyway (job has retries)"
 fi
 
-kubectl -n "$NS_DOCS" delete job/docs-db-init --ignore-not-found=true || true
+mt_delete_job_wait "$NS_DOCS" docs-db-init || exit 1
 envsubst '${DOCS_DB_NAME} ${TENANT_DB_USER} ${PG_HOST} ${KEYCLOAK_DB_PASSWORD}' < "$REPO_ROOT/docs/db-init-job.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
 if ! poll_job_complete "$NS_DOCS" "docs-db-init" 300 5; then
     print_error "Database initialization failed"

@@ -359,7 +359,7 @@ kubectl create secret generic docs-secrets \
     -n "$NS_FILES" \
     --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl -n "$NS_FILES" delete job/nextcloud-db-init --ignore-not-found=true || true
+mt_delete_job_wait "$NS_FILES" nextcloud-db-init || exit 1
 envsubst '${NEXTCLOUD_DB_NAME} ${TENANT_DB_USER} ${PG_HOST}' < "$REPO_ROOT/docs/nextcloud-db-init-job.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_FILES/g" | kubectl apply -f -
 if ! poll_job_complete "$NS_FILES" "nextcloud-db-init" 180 5; then
     print_error "Nextcloud database initialization failed"

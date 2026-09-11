@@ -1661,13 +1661,92 @@ mt_kubectl_probe() {
 }
 
 # ---------------------------------------------------------------------------
+# mt_delete_job_wait -- delete a Job and WAIT until the API server has really
+# dropped it, so the recreate that follows cannot race the deletion.
+# Usage: mt_delete_job_wait <namespace> <job-name> [timeout-seconds=60]
+#
+# `kubectl delete job` can return before the object is gone (finalizers,
+# background propagation), so `delete` immediately followed by `apply`/`create`
+# is a race: the create can land while the old Job still exists and fail with
+#   Error from server (AlreadyExists): jobs.batch "<name>" already exists
+# That is what broke pipeline 2173 (#667) -- and Jobs are largely immutable, so
+# `apply` cannot paper over it the way it does for a Deployment.
+#
+# stalwart and synapse already open-code this wait; docs, nextcloud and
+# roundcube did not. This is that logic, once.
+# ---------------------------------------------------------------------------
+# _mt_job_presence -- 0 = exists, 1 = confirmed gone, 2 = could not tell.
+# Split out so both the pre-check and the poll loop use the SAME discrimination:
+# a non-zero `kubectl get` is only "gone" when the server actually said NotFound.
+# An unreachable API or expired kubeconfig is a transport failure, not an answer
+# -- reading it as "no job here" is the conflation #623 exists to stop.
+_mt_job_presence() {
+    local job="$1" namespace="$2" err
+    err=$(kubectl get job "$job" -n "$namespace" 2>&1 >/dev/null) && return 0
+    case "$err" in
+        *NotFound*|*"not found"*) return 1 ;;
+        *) printf '%s' "$err"; return 2 ;;
+    esac
+}
+
+mt_delete_job_wait() {
+    local namespace="${1:?mt_delete_job_wait: namespace}" job="${2:?mt_delete_job_wait: job name}"
+    local timeout="${3:-60}" i err rc=0
+    # Guard before `seq`: on GNU coreutils (i.e. CI) `seq 1 0` is EMPTY, so the
+    # loop body would never execute and the function would fall off the end
+    # returning 0 -- reporting "gone" without ever having looked. Note BSD/macOS
+    # `seq 1 0` instead counts DOWN ("1 0"), so this fails open only on Linux:
+    # a local mutation test that drops the guard still passes on a Mac.
+    [ "$timeout" -ge 1 ] 2>/dev/null || timeout=60
+
+    # `|| rc=$?` rather than a bare assignment + `$?`: under `set -e` a non-zero
+    # command substitution aborts the script, and rc 1 here is the HEALTHY
+    # "job confirmed absent" path. Today every call site is `... || exit 1`,
+    # which suppresses errexit through the whole body -- but a future bare
+    # `mt_delete_job_wait ns job` would die on the common case.
+    err=$(_mt_job_presence "$job" "$namespace") || rc=$?
+    case "$rc" in
+        1) return 0 ;;                       # confirmed absent, nothing to do
+        2) print_error "mt_delete_job_wait: cannot determine whether job/$job exists in $namespace: $err"
+           print_error "  Refusing to continue: recreating blind would fail with AlreadyExists."
+           return 1 ;;
+    esac
+
+    print_status "Deleting previous $job job in $namespace..."
+    kubectl delete job "$job" -n "$namespace" --force --grace-period=0 >/dev/null 2>&1 || true
+    # Orphaned pods from an earlier run keep the job-name label and can block or
+    # confuse the recreate; drop them too. (job-name is the legacy label;
+    # batch.kubernetes.io/job-name is canonical since 1.27 -- poll_job_complete
+    # has the same dependency, so this stays consistent with it.)
+    kubectl delete pods -n "$namespace" -l "job-name=$job" --force --grace-period=0 >/dev/null 2>&1 || true
+
+    for i in $(seq 1 "$timeout"); do
+        rc=0; err=$(_mt_job_presence "$job" "$namespace") || rc=$?
+        [ "$rc" -eq 1 ] && return 0
+        if [ "$i" -eq "$timeout" ]; then
+            if [ "$rc" -eq 2 ]; then
+                print_error "Gave up waiting for job/$job in $namespace: could not read its state ($err)"
+            else
+                print_error "Timeout waiting for job/$job in $namespace to be deleted."
+            fi
+            print_error "  Recreating it now would fail with AlreadyExists. Delete it by hand:"
+            print_error "    kubectl delete job $job -n $namespace --force --grace-period=0"
+            return 1
+        fi
+        sleep "${MT_JOB_DELETE_POLL_INTERVAL:-1}"
+    done
+}
+
+# ---------------------------------------------------------------------------
 # mt_coredns_rewrite_verify -- prove a CoreDNS rewrite is live on EVERY replica
 # Usage: mt_coredns_rewrite_verify <namespace> <host> <want-ip> [attempts=2]
 #
 # Runs busybox nslookup against each Running CoreDNS pod IP from a Job in
 # <namespace>, polling up to 90s for all replicas to answer <want-ip>.
 # Returns 0 (converged), 1 (definitely not converged), 2 (could not determine --
-# the probe itself never delivered a verdict). Callers abort on both 1 and 2.
+# the probe itself never delivered a verdict). This function only REPORTS; for
+# the deploy policy that decides which of those is fatal, see
+# mt_coredns_rewrite_require below, which is what callers should use.
 # ---------------------------------------------------------------------------
 mt_coredns_rewrite_verify() {
     local namespace="${1:?}" host="${2:?}" want="${3:?}" attempts="${4:-2}"
@@ -1720,4 +1799,53 @@ PROBE
         *) print_error "Could not determine whether the CoreDNS rewrite for $host propagated (probe returned no verdict after $attempts attempts)" ;;
     esac
     return "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# mt_coredns_rewrite_require -- verify a CoreDNS rewrite and apply the standard
+# deploy policy to the result. Usage is identical to mt_coredns_rewrite_verify.
+#
+# Returns 0 = proceed, 1 = abort the deploy. The split that matters:
+#
+#   rc 1 from the verify (DEFINITELY not converged) -> abort. A real answer,
+#         and a wrong one.
+#   rc 2 from the verify (could NOT determine)      -> warn loudly, proceed.
+#         The probe itself never delivered a verdict -- its Job could not be
+#         scheduled, the transport was lost, or it timed out. That says nothing
+#         about the rewrite, so it must not fail the deploy: "cannot run the
+#         check" is not "the check failed".
+#
+# Why this exists: on 2026-09-11 a lost kubectl attach on a freshly rebuilt dev
+# cluster produced rc 2 here, which the callers treated as fatal. That failed
+# deploy-dev-llm, which skipped mothertree-build, which skipped deploy-prod --
+# so two already-merged PRs never reached production, over a transport flake on
+# a rewrite that had in fact propagated correctly (verified by hand afterwards:
+# both CoreDNS replicas answered with the right address). See #662.
+#
+# NOTE: this policy is for READ-ONLY verification only. Probes that gate a
+# destructive action must keep failing closed on rc 2 -- that is exactly what
+# stops a lost attach from being read as "schema missing" and triggering a
+# DROP SCHEMA (#623). Do not reuse this helper for those.
+# ---------------------------------------------------------------------------
+mt_coredns_rewrite_require() {
+    local namespace="${1:?}" host="${2:?}" want="${3:?}" attempts="${4:-2}"
+    local rc=0
+    mt_coredns_rewrite_verify "$namespace" "$host" "$want" "$attempts" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) # Fixed token, deliberately machine-greppable: rc 2 is meant to be a
+           # TRANSIENT flake, but nothing here can tell transient from structural
+           # (probe pod unschedulable, image pull blocked, NetworkPolicy). If it
+           # became permanent this gate would be vacuous while still looking
+           # present in the log, so make a run of them findable.
+           print_warning "MT_COREDNS_VERIFY_INDETERMINATE host=$host ns=$namespace"
+           print_warning "Continuing anyway: the probe gave no verdict, which is not evidence the rewrite failed."
+           print_warning "  Repeated INDETERMINATE across deploys means the probe itself is broken -- investigate."
+           print_warning "  The authoritative checks are the end-to-end gates in create_env (e.g. the SMTP"
+           print_warning "  submission gate for mail); a standalone deploy-*.sh run does not have them behind it."
+           print_warning "  If in-cluster resolution of $host looks wrong, start here:"
+           print_warning "    kubectl -n kube-system get configmap coredns-custom -o yaml"
+           return 0 ;;
+    esac
 }

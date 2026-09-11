@@ -154,8 +154,10 @@ stringData:
 EOF
 print_success "Roundcube secrets applied"
 
-# Delete any previous db-init job
-kubectl delete job roundcube-db-init -n "$NS_WEBMAIL" --ignore-not-found=true
+# Delete any previous db-init job and wait for it to actually be gone --
+# delete returns before the API server drops the object, and recreating into
+# that window fails with AlreadyExists (#667).
+mt_delete_job_wait "$NS_WEBMAIL" roundcube-db-init || exit 1
 
 # Apply the database initialization job
 print_status "Running database initialization job..."
