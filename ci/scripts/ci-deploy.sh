@@ -301,8 +301,9 @@ _start_lease_renewal
 _release_deploy_lock() {
   if [[ -n "${_DEPLOY_LOCK_ACQUIRED:-}" ]]; then
     echo "Releasing deploy lock..."
-    $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-      DEL "$LOCK_KEY" >/dev/null 2>&1 || true
+    # Only delete the lock if we still hold it: if our TTL lapsed mid-deploy and
+    # another pipeline acquired it, an unconditional DEL would drop THEIR lock.
+    vcli_del_if "$LOCK_KEY" "$CI_PIPELINE_NUMBER" >/dev/null 2>&1 || true
   fi
 }
 
@@ -311,6 +312,10 @@ _DEPLOY_LOCK_ACQUIRED=""
 if [[ "$ALL_TENANTS" == "true" ]]; then
   # Prod: acquire deploy lock with last-writer-wins semantics
   : "${CI_VALKEY_PASSWORD:?CI_VALKEY_PASSWORD is required for deploy locking}"
+  # Every lock value on this path is derived from the pipeline number, and an
+  # empty-but-set value passes `set -u` and every downstream check. Assert it
+  # here rather than discovering it inside an EXIT trap.
+  : "${CI_PIPELINE_NUMBER:?CI_PIPELINE_NUMBER is required for deploy locking}"
   _CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
   LOCK_KEY="ci-deploy-${MT_ENV}"
   PENDING_KEY="ci-deploy-pending-${MT_ENV}"
@@ -335,10 +340,19 @@ if [[ "$ALL_TENANTS" == "true" ]]; then
     # the same pipeline set it, or a restarted step left it), just re-acquire.
     if [[ "$HOLDER" == "$CI_PIPELINE_NUMBER" ]]; then
       echo "Lock holder is this pipeline (#$CI_PIPELINE_NUMBER) — re-acquiring"
-      $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-        SET "$LOCK_KEY" "$CI_PIPELINE_NUMBER" XX EX "$LOCK_TTL" >/dev/null 2>&1
-      _DEPLOY_LOCK_ACQUIRED=1
-      echo "Acquired deploy lock (pipeline #$CI_PIPELINE_NUMBER)"
+      # Guarded refresh, and the result is CHECKED. The previous unconditional
+      # `SET … XX` discarded its result and announced success regardless: if the
+      # key had expired in the window, XX is a no-op and we would deploy
+      # PRODUCTION holding no lock at all, leaving another pipeline free to
+      # acquire and deploy concurrently. Same bug family as #647, same key.
+      if [[ "$(vcli_renew_if "$LOCK_KEY" "$CI_PIPELINE_NUMBER" "$LOCK_TTL" 2>/dev/null || echo 0)" == "1" ]]; then
+        _DEPLOY_LOCK_ACQUIRED=1
+        echo "Acquired deploy lock (pipeline #$CI_PIPELINE_NUMBER)"
+      else
+        echo "ERROR: deploy lock for #$CI_PIPELINE_NUMBER vanished or changed hands" >&2
+        echo "       while re-acquiring. Refusing to deploy without holding it." >&2
+        exit 1
+      fi
     else
 
     $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
@@ -373,16 +387,21 @@ if [[ "$ALL_TENANTS" == "true" ]]; then
         CURRENT_PENDING=$($_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
           GET "$PENDING_KEY" 2>/dev/null || echo "")
         if [[ "$CURRENT_PENDING" != "$CI_PIPELINE_NUMBER" ]]; then
-          # We've been superseded — release lock and abort
-          $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-            DEL "$LOCK_KEY" >/dev/null 2>&1 || true
+          # We've been superseded — release the lock we just took, and only
+          # that one.
+          vcli_del_if "$LOCK_KEY" "$CI_PIPELINE_NUMBER" >/dev/null 2>&1 || true
           echo "Superseded (pending=${CURRENT_PENDING:-<empty>}, us=$CI_PIPELINE_NUMBER) — skipping deploy"
           echo "=== Deploy skipped (newer merge will deploy) ==="
           exit 0
         fi
-        # We're the latest — clear pending key
-        $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-          DEL "$PENDING_KEY" >/dev/null 2>&1 || true
+        # We're the latest — clear OUR pending marker, compare-and-delete.
+        # Unconditional DEL here erases a newer pipeline's claim if one landed
+        # between the read above and this line: that pipeline then acquires the
+        # lock, reads pending as empty, and aborts as "Superseded" — so its
+        # merged commit never reaches prod, with a green pipeline. Note :370
+        # treats an empty pending as "keep going" while :385 treats it as
+        # "abort", which is what makes the erasure fatal rather than benign.
+        vcli_del_if "$PENDING_KEY" "$CI_PIPELINE_NUMBER" >/dev/null 2>&1 || true
         _DEPLOY_LOCK_ACQUIRED=1
         echo "Acquired deploy lock (pipeline #$CI_PIPELINE_NUMBER)"
         break
@@ -395,8 +414,10 @@ if [[ "$ALL_TENANTS" == "true" ]]; then
       HOLDER_PIPELINE=$(_extract_pipeline_number "$HOLDER")
       if ! _pipeline_is_alive "$HOLDER_PIPELINE"; then
         echo "Deploy lock held by pipeline #${HOLDER_PIPELINE} which is no longer running — force-acquiring"
-        $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning \
-          DEL "$LOCK_KEY" >/dev/null 2>&1 || true
+        # Compare-and-delete against the holder we read. This is the PROD deploy
+        # lock: two pipelines both clearing the same dead holder would both
+        # proceed to deploy production concurrently (#647).
+        vcli_del_if "$LOCK_KEY" "$HOLDER" >/dev/null 2>&1 || true
         continue  # retry acquire immediately
       fi
 

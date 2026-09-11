@@ -3,6 +3,9 @@
 #
 # Source this file to get:
 #   vcli()                          — Valkey CLI wrapper (requires CI_VALKEY_PASSWORD)
+#   vcli_del_if()                   — atomic compare-and-delete (never steal a
+#                                     lock another waiter has just won)
+#   vcli_renew_if()                 — atomic TTL refresh, only if still ours
 #   _extract_pipeline_number()      — parse pipeline number from lock values
 #   _pipeline_is_alive()            — check if a Woodpecker pipeline is still running
 #
@@ -17,6 +20,60 @@ _CI_VCLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
 vcli() {
   : "${CI_VALKEY_PASSWORD:?CI_VALKEY_PASSWORD is required}"
   $_CI_VCLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"
+}
+
+# ── Guarded TTL refresh ─────────────────────────────────────────
+# Refresh <key>'s TTL only if it still holds <expected-value>. Echoes 1 when the
+# TTL was extended, 0 when the key had changed hands or expired.
+#
+# The unguarded form of this — `SET <key> <us> XX EX <ttl>` with the result
+# discarded — is the same family of bug as vcli_del_if's: if the key expired in
+# the window, XX is a silent no-op and the caller proceeds believing it holds a
+# lock it does not; if someone else acquired, XX overwrites their holder value.
+vcli_renew_if() {  # vcli_renew_if <key> <expected-value> <ttl-seconds>
+  # See vcli_del_if: never ${n:?} here — it would abort a caller's EXIT trap.
+  if [[ -z "${1:-}" || -z "${2:-}" || -z "${3:-}" ]]; then
+    echo "vcli_renew_if: key, expected value and ttl are all required" >&2
+    return 2
+  fi
+  local key="$1"
+  local expected="$2"
+  local ttl="$3"
+  vcli EVAL \
+    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end" \
+    1 "$key" "$expected" "$ttl"
+}
+
+# ── Atomic compare-and-delete ───────────────────────────────────
+# Delete <key> only if it still holds <expected-value>. Echoes 1 when the key
+# was deleted, 0 when it had changed hands (or vanished) in the meantime.
+#
+# Every lock in CI is a `SET NX EX` whose value identifies the holder. The
+# acquire is atomic; a bare `GET` followed by `DEL` is not. Two waiters that
+# observe the SAME dead holder will both issue the DEL, and the second one
+# deletes the lock the first has just won — so both believe they hold it.
+#
+# That is not hypothetical: on 2026-09-09 pipelines #2131 and #2132 both printed
+# "Acquired infra lock" through exactly this path and then ran concurrent
+# `terraform apply` against phase1-dev/terraform.tfstate (issue #647).
+#
+# Doing the compare and the delete in one Lua body makes it atomic: only the
+# holder value we actually observed can be removed.
+vcli_del_if() {  # vcli_del_if <key> <expected-value>
+  # NOT ${1:?...}: a parameter-expansion failure exits the shell outright and is
+  # NOT caught by `|| true`. These run inside ci-deploy.sh's EXIT trap, where an
+  # abort would skip _cleanup and leave the decrypted deploy vault and tenant
+  # *.secrets.yaml on disk. Return non-zero instead. ${1:-} so `set -u` does not
+  # re-create the abort when an argument is genuinely absent.
+  if [[ -z "${1:-}" || -z "${2:-}" ]]; then
+    echo "vcli_del_if: key and expected value are both required" >&2
+    return 2
+  fi
+  local key="$1"
+  local expected="$2"
+  vcli EVAL \
+    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end" \
+    1 "$key" "$expected"
 }
 
 # ── Linode API: dev kubeconfig fetch ────────────────────────────

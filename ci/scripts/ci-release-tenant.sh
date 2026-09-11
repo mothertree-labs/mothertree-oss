@@ -11,9 +11,8 @@ set -euo pipefail
 : "${CI_VALKEY_PASSWORD:?CI_VALKEY_PASSWORD is required}"
 
 # Redis-compatible CLI (redis-tools installed on the CI host via Ansible)
-_CLI=$(command -v valkey-cli 2>/dev/null || command -v redis-cli)
-# shellcheck disable=SC2086
-vcli() { $_CLI -h 127.0.0.1 -a "$CI_VALKEY_PASSWORD" --no-auth-warning "$@"; }
+# shellcheck source=ci-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"   # vcli, vcli_del_if
 
 echo "--- CI Tenant Release (pipeline #${CI_PIPELINE_NUMBER})"
 
@@ -38,23 +37,35 @@ release_lease() {
   echo "--- Releasing e2e lock and Valkey lease"
 
   # Release e2e protection lock first (unblocks other pipelines' deploy_infra)
+  # The e2e holder is "<pipeline>#<event>", and the event recorded at acquire
+  # time may differ from ours, so ownership is a PREFIX test. Keep that, but
+  # delete via compare-and-delete against the exact value just read: if the key
+  # changes hands in between, the CAS simply does nothing (#647).
   local e2e_key="ci-e2e-active-${POOL}"
   local e2e_holder
   e2e_holder=$(vcli GET "$e2e_key" 2>/dev/null || true)
   if [[ -n "$e2e_holder" && "$e2e_holder" == "${CI_PIPELINE_NUMBER}#"* ]]; then
-    vcli DEL "$e2e_key" > /dev/null
-    echo "Released e2e lock: ${e2e_key}"
+    if [[ "$(vcli_del_if "$e2e_key" "$e2e_holder" 2>/dev/null || echo 0)" == "1" ]]; then
+      echo "Released e2e lock: ${e2e_key}"
+    else
+      echo "e2e lock ${e2e_key} changed hands while releasing — left alone"
+    fi
   elif [[ -n "$e2e_holder" ]]; then
     echo "e2e lock ${e2e_key} held by ${e2e_holder} — not releasing"
   fi
 
-  # Release tenant lease
-  local holder
-  holder=$(vcli GET "$LEASE_KEY" 2>/dev/null || true)
-  if [[ "$holder" == "$CI_PIPELINE_NUMBER" ]]; then
-    vcli DEL "$LEASE_KEY" > /dev/null
+  # Release tenant lease. This is the counterpart of the `SET NX` in
+  # ci-lease-tenant.sh on the same ci-lease-<pool> key. It runs at the very end
+  # of a long pipeline, so the lease TTL lapsing mid-release is realistic — and
+  # an unconditional DEL would then free a slot another pipeline already holds,
+  # letting a third lease the same dev tenant concurrently.
+  local deleted
+  deleted=$(vcli_del_if "$LEASE_KEY" "$CI_PIPELINE_NUMBER" 2>/dev/null || echo 0)
+  if [[ "$deleted" == "1" ]]; then
     echo "Released lease: ${LEASE_KEY}"
   else
+    local holder
+    holder=$(vcli GET "$LEASE_KEY" 2>/dev/null || true)
     echo "Lease ${LEASE_KEY} held by pipeline #${holder:-unknown} — not releasing"
   fi
 
