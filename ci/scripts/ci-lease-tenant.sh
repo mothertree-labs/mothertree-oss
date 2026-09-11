@@ -61,7 +61,10 @@ while [[ -z "$LEASED_POOL" ]]; do
       HOLDER_PIPELINE=$(_extract_pipeline_number "$HOLDER")
       if ! _pipeline_is_alive "$HOLDER_PIPELINE"; then
         echo "  ${pool}: held by pipeline #${HOLDER_PIPELINE} which is no longer running — force-acquiring"
-        vcli DEL "$KEY" > /dev/null 2>&1 || true
+        # Compare-and-delete: two pipelines that both saw this dead holder would
+        # otherwise both clear it and both then believe they leased the slot (#647).
+        vcli_del_if "$KEY" "$HOLDER" > /dev/null 2>&1 || true
+        # Keyed by the dead pipeline, so no other waiter contends for it.
         vcli DEL "ci-build-${HOLDER_PIPELINE}" > /dev/null 2>&1 || true
         RESULT=$(vcli SET "$KEY" "$CI_PIPELINE_NUMBER" NX EX "$LEASE_TTL" 2>/dev/null || true)
         if [[ "$RESULT" == "OK" ]]; then

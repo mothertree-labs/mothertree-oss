@@ -26,9 +26,39 @@ Check whether the branch includes changes to admin-portal or account-portal code
 ## Step 1: Identify Changed Portals
 
 ```bash
-# Get list of changed files vs main
-git diff --name-only main...HEAD
+# Anchor every comparison to the MERGE-BASE, and refresh the remote ref first.
+git fetch origin main --quiet
+BASE=$(git merge-base origin/main HEAD)
+
+git diff --name-only "$BASE"                  # commits + index + worktree
+git status --porcelain --untracked-files=all  # untracked files appear ONLY here
 ```
+
+> **Use `$BASE`, not `main...HEAD` and not bare `origin/main`.** Both of the
+> obvious forms fail, in opposite directions, and this gate has already passed
+> vacuously twice on 2026-09-09 because of it.
+>
+> - `git diff main...HEAD` (three-dot) compares **commits**, so on a branch whose
+>   work is staged-but-uncommitted it returns **empty** — "no portal changes" no
+>   matter what is staged.
+> - `git diff origin/main` (two-dot) compares against the remote's **current
+>   tip**. If `main` advanced after you branched and someone else bumped a
+>   VERSION there, this reports a difference in the **reverse** direction, and
+>   Step 2 reads that as "already bumped" — a false negative on precisely the
+>   case this gate exists to catch. It also over-reports in Step 1, listing
+>   portal files `main` touched that this branch never did.
+>
+> `git diff "$BASE"` is strictly broader than the three-dot form (it includes
+> index and worktree) and strictly narrower than the two-dot form (it excludes
+> `main`'s own changes) — the union actually wanted.
+>
+> Also: never bare `main` — local `main` in this repo has diverged before
+> (commit `c505a9c`) — and always `git fetch` first, since a stale `origin/main`
+> makes the merge-base stale too.
+>
+> Say in your report which form you used. This gate is the only thing standing
+> between an unbumped VERSION and `build-image.sh` reusing an existing tag, so a
+> vacuous pass here is worse than no gate: it gets cited as assurance. See #650.
 
 Check if any files match these patterns (excluding test-only and config-only changes):
 
@@ -60,13 +90,44 @@ Check if any files match these patterns (excluding test-only and config-only cha
 For each portal that has code changes, check:
 
 ```bash
-# Was the VERSION file changed in this branch?
-git diff main...HEAD -- apps/admin-portal/VERSION
-git diff main...HEAD -- apps/account-portal/VERSION
+: "${BASE:?BASE is empty — git merge-base failed; refusing to guess}"
 
-# Was image-versions.env updated?
-git diff main...HEAD -- apps/image-versions.env
+# Only the portals Step 1 actually flagged. Checking both unconditionally makes
+# Step 3 inject spurious bumps into portals this branch never touched.
+for portal in ${CHANGED_PORTALS:-}; do
+  vf="apps/$portal/VERSION"
+
+  # ${BASE} MUST be braced. In zsh a literal ":a" after an unbraced $BASE is the
+  # absolute-path modifier: "$BASE:apps/..." silently becomes an absolutised SHA
+  # followed by "pps/...", git fatals, 2>/dev/null hides it, and every portal
+  # then reads as already-bumped. Works fine under bash, so it survives review.
+  if git cat-file -e "${BASE}:${vf}" 2>/dev/null; then
+    before=$(git show "${BASE}:${vf}" | tr -d '[:space:]')
+  else
+    echo "  $portal: no VERSION at BASE — new portal, no bump required"; continue
+  fi
+  [ -r "$vf" ] || { echo "  FATAL: $vf missing from the worktree"; exit 1; }
+  after=$(tr -d '[:space:]' < "$vf")
+
+  # "changed" and "bumped" are different predicates and only the second is what
+  # this gate claims. String inequality would pass 0.9.38 -> 0.9.37. Use sort -V:
+  # a lexical compare also misreads 0.9.9 -> 0.9.10 as a downgrade.
+  if [ "$before" = "$after" ]; then
+    echo "  $portal: $before NOT bumped"
+  elif [ "$(printf '%s\n%s\n' "$before" "$after" | sort -V | head -1)" = "$after" ]; then
+    echo "  $portal: $before -> $after WENT BACKWARDS"; exit 1
+  else
+    echo "  $portal: $before -> $after bumped"
+    # The failure this gate exists to prevent (see the top of this file): VERSION
+    # moves, image-versions.env does not, and the deploy pulls the old image.
+    tag=$(grep -oE "^$(echo "$portal" | tr 'a-z-' 'A-Z_')_IMAGE_TAG=.*" apps/image-versions.env | cut -d= -f2)
+    [ "$tag" = "$after" ] || { echo "  OUT OF SYNC: image-versions.env has $tag"; exit 1; }
+  fi
+done
 ```
+
+Step 1 must export what it matched, e.g. `CHANGED_PORTALS="admin-portal account-portal"`,
+so this loop and Step 3 act on the same set.
 
 ## Step 3: Bump If Needed
 

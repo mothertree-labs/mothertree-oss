@@ -116,3 +116,7 @@ e2e/.env
 .rodney/
 __pycache__/
 .local-ops/
+
+# Agent worktrees. Not ignored previously, so a `git add -A` could sweep an
+# in-progress worktree into a commit on this PUBLIC repo.
+.claude/worktrees/
