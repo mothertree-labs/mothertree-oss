@@ -17,7 +17,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: pgbench
-          image: postgres:16
+          image: postgres:18
           env:
             - name: PGBENCH_CONN
               value: "${POSTGRES_DSN}"
