@@ -80,6 +80,7 @@
         "/^apps/(manifests|values|environments|templates)/.+\\.ya?ml(?:\\.tpl|\\.gotmpl)?$/",
         "/^apps/deploy-[^/]+\\.sh$/",
         "/^scripts/lib/nextcloud-db\\.sh$/",
+        "/^apps/scripts/perf/build-k6-image\\.sh$/",
         "/^apps/loki-manual\\.yaml$/",
         "/^docs/.+\\.ya?ml(?:\\.tpl)?$/",
         "/^ansible/.+\\.ya?ml$/",
@@ -88,6 +89,13 @@
         "\\n[ \\t]*-?[ \\t]*image:[ \\t]*[\"']?(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?[\"']?",
         // Probe-Job image constant in scripts/lib/nextcloud-db.sh (#548).
         "\\nMT_NC_PROBE_IMAGE=\"(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)\"",
+        // k6 base image default in apps/scripts/perf/build-k6-image.sh. This is
+        // the pin that ACTUALLY wins: build-k6-image.sh passes it as
+        // --build-arg K6_IMAGE=, overriding the ARG default in
+        // perf/docker/k6-runner.Dockerfile. Managing only the Dockerfile left
+        // the real pin unmanaged and 10 minor versions behind (0.49.0 vs
+        // 0.59.0), so a Renovate bump there was a no-op.
+        "\\nK6_IMAGE=\\$\\{K6_IMAGE:-(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)\\}",
       ],
       "datasourceTemplate": "docker",
     },

@@ -266,7 +266,10 @@ Two bots, split by what each can parse — never let them overlap or you get dup
 
 Policy: minor/patch bumps open PRs weekly (Wednesday); **major bumps only appear on the Dependency Dashboard issue and need a checkbox** before a PR is created. Same-stream images are grouped (`keycloak`, `jitsi`, `docs-impress`, `nextcloud`, `llm`, `tailscale-mesh`).
 
-**When adding a pinned image or version anywhere**, keep it as a literal `image: repo/name:tag` line (or `repository:`/`tag:` pair) so Renovate sees it. If a new file lives outside the paths above, extend `managerFilePatterns`. Validate with `npx --yes --package renovate -- renovate-config-validator --strict`.
+**When adding a pinned image or version anywhere**, keep it as a literal `image: repo/name:tag` line (or `repository:`/`tag:` pair) so Renovate sees it. If a new file lives outside the paths above, extend `managerFilePatterns`. Validate with `npx --yes --package renovate@44 -- renovate-config-validator --strict` — **pin the major**: an unpinned `npx` may resolve a cached older major (e.g. 37.x), which predates `managerFilePatterns` and reports 7 bogus `Invalid configuration option` errors against a perfectly valid config.
+
+The validator is **not** sufficient on its own. It logs `RE2 not usable, falling back to RegExp` and so never exercises the RE2 engine hosted Renovate actually compiles `matchStrings` with — the blind spot behind #553, where a lookahead halted Renovate entirely. Also check every new `matchString` under a Rust-regex engine (same feature class as RE2), e.g.
+`rg -U -o '<pattern>' <file>` — no lookahead, lookbehind, or backreferences.
 
 ## Important Notes
 
