@@ -334,11 +334,31 @@ or unreadable gate script (a failed input redirect is exit 1, which now only
 warns — so without that pre-flight check a moved file or a mis-resolved
 `REPO_ROOT` would silently turn the gate into a permanent no-op).
 
-**Exit 3 is non-fatal by default** per the 2026-09-10 decision to make the gate
-optional "for now". Set `WEBSEARCH_GATE_ENFORCE=1` in the deploy environment to
-re-arm it as a blocker once the search backend is dependable. Note the trade-off
-while it is off: a genuine wiring regression ships with only a warning in the
-deploy log — exactly the silent-breakage scenario the gate was built for.
+**Enforcement is per-environment (since 2026-09-11).** `deploy-llm-webui.sh`
+derives it from `MT_ENV`: **fatal on `prod` and `prod-eu`, advisory on dev**, with
+an explicit `WEBSEARCH_GATE_ENFORCE` in the environment overriding either way.
+
+The split follows the measurement, not a guess. Prod and prod-eu have stable
+egress IPs and passed cleanly on 2026-09-10/11 (canary returning 29-31 results),
+so a regression there is real and should block. Dev is rebuilt on demand onto
+fresh Linode IPs that duckduckgo and startpage CAPTCHA from the first query
+(#661) — which is exactly what let a hard gate take the whole PR queue down.
+
+It is derived in the script rather than set in `.woodpecker/` so a standalone
+`./apps/deploy-llm-webui.sh -e prod -t <tenant>` behaves like the pipeline. An
+`MT_ENV` outside the allowlist stays advisory and says so in the log, rather than
+auto-arming a gate for an environment nobody has measured.
+
+**How the failure actually reaches the pipeline: exit 20.** `deploy-llm-webui.sh`
+exits **20** when an enforced gate fails, and that specific code is what makes
+enforcement real. `create_env` deliberately treats a generic non-zero from this
+script as non-fatal ("had issues, continuing") because of #446, where a stuck
+Ollama init made deploys flaky — so a bare `exit 1` would be swallowed there and
+`deploy-prod` would go green with web search broken. `create_env` propagates 20
+and only 20; `ci/scripts/ci-deploy-app.sh` calls the script bare under `set -e`
+and so propagates it too. If you are looking at a red prod deploy, **exit 20 from
+this script means the web-search gate failed and enforcement is on** — not that
+the deploy script itself broke.
 
 ### Making the backend dependable (not done)
 

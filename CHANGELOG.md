@@ -6,7 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- The web-search gate is now **fatal on prod and prod-eu, advisory on dev**,
+  derived from `MT_ENV` in `deploy-llm-webui.sh`. When the gate was made advisory
+  it was made advisory *everywhere*, which was the safe default at the time but
+  left production with no protection against exactly the silent wiring regression
+  the gate exists to catch. Prod has since passed cleanly twice (canary returning
+  29-31 results), confirming its egress IP is not degraded the way rebuilt dev
+  clusters are — so the protection can be restored where it matters while dev
+  stays advisory. Deriving it in the script rather than in `.woodpecker/` means a
+  standalone `./apps/deploy-llm-webui.sh -e prod -t <tenant>` behaves like the
+  pipeline; an explicit `WEBSEARCH_GATE_ENFORCE` still overrides either way.
+
+  **The enforcement had to be plumbed through `create_env` to mean anything.**
+  `create_env` deliberately treats a non-zero exit from `deploy-llm-webui.sh` as
+  non-fatal ("had issues, continuing") because of #446, where a stuck Ollama init
+  made deploys flaky — so a bare `exit 1` would have been swallowed and
+  `deploy-prod` would have gone green with web search broken, leaving the
+  enforcement real only for standalone runs. The script now exits **20** for "an
+  enforced gate failed", which `create_env` propagates while every other non-zero
+  stays non-fatal. The other caller, `ci/scripts/ci-deploy-app.sh`, invokes the
+  script bare under `set -e` and so propagates it too — the two callers had
+  different policies, which is why a bare `exit 1` would have been honoured on
+  one path and swallowed on the other.
+
 ### Fixed
+- The roundcube db-init Job escapes single quotes in the database password before
+  interpolating it into a SQL literal, as its four siblings (stalwart, synapse,
+  docs, nextcloud) already did. The password is deliberately not in
+  `deploy-roundcube.sh`'s `envsubst` list, so it is expanded inside the container
+  straight into `PASSWORD '...'` — a generated password containing `'` produced
+  `ERROR: syntax error at or near "with"` and cascaded into four further
+  failures. Operator-controlled input, so this was a latent deploy-breaker rather
+  than an injection risk. (#664)
+- The roundcube db-init Job now runs every `psql` with `-v ON_ERROR_STOP=1`, as
+  its four siblings already did and it did **nowhere**. Without it psql exits 0
+  on a SQL error, so `set -e` never fired, the container exited 0 and the Job
+  reported `Complete` — meaning `REVOKE CONNECT ON DATABASE ... FROM PUBLIC` and
+  `REVOKE ALL ON SCHEMA public FROM PUBLIC`, the cross-tenant isolation controls,
+  could silently not apply while the deploy reported success. This is also what
+  let the #664 quoting bug cascade quietly.
+- That Job no longer wraps the password in a `DO $$ ... $$` block — it was the
+  only one of the five templates that did. Dollar-quoting consumes raw characters
+  until its matching tag and ignores single quotes inside the body, so a password
+  containing `$$` terminates the block early and the rest parses as top-level SQL;
+  doubling `'` cannot prevent that. Replaced with the siblings' flat
+  role-exists-then-CREATE/ALTER form, keeping the password on stdin rather than in
+  `psql -c` argv (where the siblings leave it visible in `/proc/<pid>/cmdline`).
+  Verified end to end against a throwaway PostgreSQL 17 container with the password
+  `a'b$$c;DROP--d`: the role is created, authenticates, the run is idempotent,
+  `PUBLIC` ends up unable to CONNECT, and an erroring statement now exits 3
+  instead of 0.
 - A lost `kubectl` attach no longer fails a deploy over a check it could not run.
   `mt_coredns_rewrite_verify` already distinguished "definitely not converged"
   (rc 1) from "could not determine" (rc 2), but both call sites collapsed them
@@ -46,8 +96,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unschedulable, image pull blocked, NetworkPolicy) — so if it ever became
   permanent the gate would be vacuous while still appearing present in the log.
   A run of these is now findable.
-
-### Changed
 - Renovate tier-1 major bumps, batched: GitHub Actions (`actions/checkout` v4→v7,
   `actions/setup-python` v5→v7, `github/codeql-action` v3→v4), `grafana/k6`→2.2.0,
   `redis`→8 and `postgres`→18 in the perf and db-init Jobs. No deployed runtime
