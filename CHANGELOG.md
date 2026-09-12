@@ -29,6 +29,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   script bare under `set -e` and so propagates it too — the two callers had
   different policies, which is why a bare `exit 1` would have been honoured on
   one path and swallowed on the other.
+- Renovate tier-2 bumps: `prometheus-blackbox-exporter` 9.8.0 → 11.18.0, and
+  `node` 20 → 24 in `dev-env/Dockerfile` (local tooling; node 20 is EOL).
+  blackbox is the only one where we override chart values. Diffing the chart's own
+  value keys across versions, the single removal is `extraEnvFromSecret` (now
+  `extraEnvFrom`), which we do not set — we set only `config`, `resources` and
+  `serviceMonitor`, all still present. Rendering both versions against our
+  committed values files, the entire diff is chart/version labels, the exporter
+  image `v0.26.0` → `v0.28.0`, and three added pod-template labels: the same four objects,
+  still `ClusterIP` on 9115, no new RBAC or Ingress, and an identical
+  already-hardened `securityContext`. All three probe modules survive, and
+  `http_2xx`'s `insecure_skip_verify: false` is confirmed in the rendered output
+  (the other two set no `tls_config` and inherit the same default). The chart
+  version was confirmed present in its repository index, and the `node:24-bookworm`
+  tag against Docker Hub, before writing.
+
+  **Two bumps Renovate offered were deliberately left out of this batch:**
+  `reflector` 7.1.288 → 10.0.65, because it holds cluster-wide `secrets: ["*"]`
+  and propagates the wildcard TLS cert into tenant namespaces — its mirrors are
+  real Secrets that persist independently, so a v10 that started but silently
+  stopped reconciling would leave TLS working today and fail at the next cert
+  renewal, weeks later, and `wait: true` proves only that the pod started. And
+  `node` → 24 for **calendar-automation**, because `.github/dependabot.yml` pins
+  node to 22 LTS for the sibling node services with the note that "the prior 20→25
+  jump broke CJS/ESM interop" and that a tracking issue gates the next major;
+  calendar-automation is CommonJS with native dependencies and simply has no
+  Dependabot docker entry, which is why Renovate offered it at all.
 
 ### Fixed
 - The roundcube db-init Job escapes single quotes in the database password before
