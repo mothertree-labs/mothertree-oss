@@ -277,7 +277,7 @@ print_success "Database role/database verified"
 
 # Step 10: Run database migrations
 print_status "Running Django database migrations..."
-kubectl -n "$NS_DOCS" delete job/docs-migrations --ignore-not-found=true || true
+mt_delete_job_wait "$NS_DOCS" docs-migrations || exit 1
 cat "$REPO_ROOT/docs/migrations-job.yaml" | \
   sed "s/namespace: docs/namespace: $NS_DOCS/g" | \
   sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g" | \
