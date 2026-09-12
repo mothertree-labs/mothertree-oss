@@ -17,7 +17,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: k6
-          image: ghcr.io/YOUR_ORG/mothertree-perf:latest
+          image: ${PERF_IMAGE}
           args:
             - run
             - k6/docs/load.js

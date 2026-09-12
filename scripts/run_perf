@@ -11,6 +11,7 @@ if [ $# -lt 3 ]; then
   echo "Options:" >&2
   echo "  --users <csv_path>     Path to CSV file (default: perf/users/users.csv)" >&2
   echo "  --skip-build           Skip building/pushing Docker image" >&2
+  echo "  --yes                  Required to run against prod" >&2
   echo "  --vus <number>         Number of virtual users (overrides K6_VUS from env file)" >&2
   echo "  --duration <duration>  Test duration, e.g. '5m', '10m' (overrides K6_DURATION)" >&2
   exit 1
@@ -22,6 +23,7 @@ SCENARIO="$3"
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 USERS_CSV="${REPO}/perf/users/users.csv"
 SKIP_BUILD=false
+ASSUME_YES=false
 K6_VUS_OVERRIDE=""
 K6_DURATION_OVERRIDE=""
 
@@ -32,6 +34,10 @@ while [[ $# -gt 0 ]]; do
     --users)
       USERS_CSV="$2"
       shift 2
+      ;;
+    --yes)
+      ASSUME_YES=true
+      shift
       ;;
     --skip-build)
       SKIP_BUILD=true
@@ -56,6 +62,15 @@ done
 if [[ "$MT_ENV" != "dev" && "$MT_ENV" != "prod" ]]; then
   echo "[ERROR] Environment must be 'dev' or 'prod'" >&2
   exit 1
+fi
+
+# Match apps/scripts/perf/run-k8s.sh, which already refuses prod without --yes.
+# This script sources prod secrets, targets the prod cluster and starts a real
+# load test; the missing gate was harmless only while the k6 Jobs could not
+# start at all (they pinned an unpullable image). Now that they run, it matters.
+if [[ "$MT_ENV" == "prod" && "$ASSUME_YES" != "true" ]]; then
+  echo "[ERROR] Refusing to run a load test against prod without --yes" >&2
+  exit 2
 fi
 
 # Validate suite and scenario
@@ -97,6 +112,21 @@ if [[ ! -f "$KUBECONFIG" ]]; then
 fi
 
 # Build and push Docker image (unless skipped)
+# Resolve the perf image ref once, up front: the build below must push the same
+# tag the Job manifest pins. A non-empty check is useless here (image-tags.sh
+# substitutes a default for an empty value), so assert the thing that can
+# actually go wrong -- an unresolved placeholder registry, which would otherwise
+# reach kubectl as an unpullable reference.
+REPO_ROOT="${REPO_ROOT:-$REPO}"
+# shellcheck source=lib/image-tags.sh
+source "${REPO}/scripts/lib/image-tags.sh"
+_mt_load_image_tags
+case "$PERF_IMAGE" in
+  *YOUR_ORG*) echo "[ERROR] CONTAINER_REGISTRY is unset: perf image resolved to the placeholder '$PERF_IMAGE'." >&2
+              echo "[ERROR] Set CONTAINER_REGISTRY or provide config/platform/project.conf." >&2
+              exit 1 ;;
+esac
+
 if [[ "$SKIP_BUILD" == "false" ]]; then
   echo "[INFO] Building and pushing k6 performance test image..."
   BUILD_SCRIPT="$REPO/apps/scripts/perf/build-k6-image.sh"
@@ -104,10 +134,26 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
     echo "[ERROR] Build script not found: $BUILD_SCRIPT" >&2
     exit 1
   fi
+  # A local build must NOT write the CI-owned semver tag. ci/scripts/build-image.sh
+  # treats an existing tag as done -- it pulls that image and retags :latest from
+  # it -- so a locally pushed :0.2.2 would become canonical for BOTH tags and no
+  # pipeline would rebuild it short of a VERSION bump. Push a distinguishable dev
+  # ref instead, and pin that, so the build and the Job still agree.
+  _perf_sha=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo nogit)
+  # --porcelain, not `diff --quiet`: the latter compares worktree against the
+  # INDEX, so a staged-but-uncommitted tree reports clean while the Docker build
+  # context (the worktree) does include those changes -- the tag would then claim
+  # to be a clean build of <sha>.
+  [ -z "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] || _perf_sha="${_perf_sha}-dirty"
+  PERF_IMAGE="${PERF_IMAGE}-dev-${_perf_sha}"
   pushd "$REPO" >/dev/null
-    PUSH=true "$BUILD_SCRIPT"
+    # PLATFORMS pinned as ci/scripts/build-image.sh does: build-k6-image.sh
+    # defaults to a multi-arch list under PUSH=true but calls plain `docker build`
+    # with no --platform, so leaving it unset makes the pushed arch depend on the
+    # local buildx driver.
+    IMAGE_TAG="$PERF_IMAGE" PUSH=true PLATFORMS="linux/amd64" "$BUILD_SCRIPT"
   popd >/dev/null
-  echo "[INFO] Image built and pushed successfully"
+  echo "[INFO] Image built and pushed: $PERF_IMAGE (local dev ref; --skip-build uses the CI tag)"
 else
   echo "[INFO] Skipping image build (--skip-build flag set)"
 fi
@@ -253,6 +299,14 @@ while IFS='=' read -r key value || [[ -n "$key" ]]; do
     yq eval ".spec.template.spec.containers[0].env = .spec.template.spec.containers[0].env + [{\"name\": \"$key\", \"value\": \"$value_escaped\"}]" -i "$TMP_MANIFEST"
   fi
 done < "$ENV_FILE" 2>/dev/null || true
+
+# This script injects env vars with yq and never runs envsubst, so the
+# manifest's ${PERF_IMAGE} placeholder would be applied verbatim. Resolve it the
+# same way the deploy scripts do and set the field explicitly. (Before #665 the
+# manifests carried a hardcoded ghcr.io/YOUR_ORG literal that nothing
+# substituted, so kubelet reported InvalidImageName and the Jobs never ran.)
+PERF_IMAGE="$PERF_IMAGE" yq eval '.spec.template.spec.containers[0].image = strenv(PERF_IMAGE)' -i "$TMP_MANIFEST"
+echo "[INFO] Perf image: $PERF_IMAGE"
 
 # Apply the job manifest
 echo "[INFO] Applying job manifest: $MANIFEST_PATH (with env vars injected)"

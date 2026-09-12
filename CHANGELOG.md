@@ -134,6 +134,82 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `a'b$$c;DROP--d`: the role is created, authenticates, the run is idempotent,
   `PUBLIC` ends up unable to CONNECT, and an erroring statement now exits 3
   instead of 0.
+- The perf k6 Jobs could never pull their image, and fixing that exposed a
+  second, quieter problem. All six manifests hardcoded the literal
+  `ghcr.io/YOUR_ORG/mothertree-perf:latest` and **nothing substituted it** —
+  `scripts/run_perf` injects env vars with `yq` and never runs `envsubst`, while
+  `apps/scripts/perf/run-k8s.sh` does run `envsubst` but `YOUR_ORG` is a bare
+  literal, not a variable. `scripts/lib/image-tags.sh` has exported a correct
+  `PERF_IMAGE` all along; no manifest referenced it and neither runner sourced it.
+  It failed closed (`docker pull` rejects the reference — `repository name must
+  be lowercase` — so kubelet reported `InvalidImageName`), but the Jobs were
+  unrunnable, which is likely why the k6 version drift behind them went unnoticed.
+  The manifests now use `${PERF_IMAGE}` like every other first-party image, and
+  both runners resolve it: `run-k8s.sh` through its existing `envsubst`,
+  `run_perf` by setting the field with `yq`.
+  (partial #665 — the securityContext/limits half of that issue is untouched)
+- `PERF_IMAGE_TAG` was `0.1.0` while `perf/VERSION` is `0.2.2` — perf was the only
+  component whose pin disagreed with its VERSION file (admin-portal, account-portal
+  and roundcube all match). Because nothing ever consumed `PERF_IMAGE`, the
+  version-bump discipline had never reached it. Left alone, the fix above would
+  have turned a loud `InvalidImageName` into a **silently stale image**: an
+  operator runs a load test — possibly against prod — believing they are running
+  what they just built. Pin corrected to `0.2.2`.
+- `run_perf` now builds the tag it pins. It called `build-k6-image.sh` with no
+  `IMAGE_TAG`, so the build pushed `:latest` while the manifest pinned
+  `$PERF_IMAGE` — "Image built and pushed successfully" followed by a run against
+  a different image. It now passes `IMAGE_TAG="$PERF_IMAGE"` and resolves the ref
+  before building rather than after.
+- `run_perf` refuses to run against prod without `--yes`, matching
+  `apps/scripts/perf/run-k8s.sh`, which already did. It sources prod secrets,
+  targets the prod cluster and starts a real load test with no prompt; the missing
+  gate was inert only while the Jobs could not start at all.
+- `ci/scripts/version-check.sh` now asserts every component's image pin in
+  `apps/image-versions.env` matches its VERSION file, so the drift above cannot
+  recur. It runs **unconditionally**, not only when a component's sources changed,
+  because that is exactly the shape of the bug: `perf/VERSION` moved
+  0.1.0 → 0.2.1 → 0.2.2 across two Renovate batches while `PERF_IMAGE_TAG` stayed
+  at 0.1.0, and `version-check.sh` explicitly excludes `image-versions.env` from
+  source detection, so nothing ever compared the two. Verified by mutation:
+  restoring `PERF_IMAGE_TAG=0.1.0` makes the check fail with the fix to apply, and
+  removing the key entirely fails too. All four components match today, so this
+  adds a guard without red-lining CI.
+
+  Three things about the gate that took review to get right. It runs **above** the
+  script's early `exit 0`, because that exit is reached not only when a branch
+  matches its base but whenever `git fetch` fails — the fetch is `|| true` and the
+  diff is `2>/dev/null || echo ""` — so an unreachable forge would have made the
+  new invariant pass vacuously, which is the failure mode it exists to prevent.
+  Verified: with the base ref unavailable and a mismatched pin, it still exits 1.
+  It also asserts that **every** `*_IMAGE_TAG` key present in the file has a
+  corresponding check, so a fifth component cannot be silently unguarded — the
+  same "nothing ever compared them" bug one level up. And because the pin is
+  documented as an independent rollout lever, a deliberate mismatch (a rollback,
+  or build-now-deploy-later) is still possible via `MT_ALLOW_PIN_DRIFT=1`, named
+  in the failure message itself since that is where an operator will be looking
+  mid-incident. `apps/image-versions.env` now states the invariant and that
+  escape, because the gate feeds validate → mothertree-build → deploy-prod: a
+  blocked rollback would not deploy even if the red check were force-merged past.
+- A local `run_perf` build no longer overwrites the CI-owned semver tag. Pinning
+  the built ref was necessary, but `IMAGE_TAG="$PERF_IMAGE"` meant a local run
+  pushed over `:0.2.2` — and since `ci/scripts/build-image.sh` treats an existing
+  tag as done (it *pulls* that image and retags `:latest` from it), a locally
+  built image would have become canonical for **both** tags with no pipeline
+  rebuilding it short of a VERSION bump. Local builds now push and pin
+  `<version>-dev-<sha>` (`-dirty` when the tree is — detected with
+  `git status --porcelain`, since `git diff --quiet` compares against the *index*
+  and so reports a staged-but-uncommitted tree as clean while the Docker build
+  context does include those changes), while `--skip-build` still uses the clean
+  CI tag. `PLATFORMS="linux/amd64"` is now passed as CI does, since
+  `build-k6-image.sh` defaults to a multi-arch list under `PUSH=true` but calls
+  plain `docker build` with no `--platform`, making the pushed architecture depend
+  on the local buildx driver.
+- Both runners now reject an unresolved placeholder registry instead of asserting
+  a value that cannot be empty: `image-tags.sh` uses `${PERF_IMAGE:-...}`, so a
+  non-empty check is dead code, while a `YOUR_ORG` placeholder reaching `kubectl`
+  is the failure that actually happens. `run-k8s.sh` also exits rather than
+  applying the template literally when `envsubst` is missing, and cleans up its
+  rendered manifest on every exit path.
 - A lost `kubectl` attach no longer fails a deploy over a check it could not run.
   `mt_coredns_rewrite_verify` already distinguished "definitely not converged"
   (rc 1) from "could not determine" (rc 2), but both call sites collapsed them

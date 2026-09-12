@@ -53,12 +53,32 @@ fi
 # Choose kubeconfig per environment
 KUBECONFIG_PATH="${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}/kubeconfig.${ENVIRONMENT}.yaml"
 
+# The k6 manifests reference ${PERF_IMAGE}; resolve it the same way the deploy
+# scripts do. Without this they carried a hardcoded `ghcr.io/YOUR_ORG/...`
+# literal that nothing substituted, so kubelet reported InvalidImageName and the
+# Jobs could never pull (#665).
+REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+# shellcheck source=../../../scripts/lib/image-tags.sh
+source "${REPO_ROOT}/scripts/lib/image-tags.sh"
+_mt_load_image_tags
+# A non-empty check would be dead code here: image-tags.sh uses ${PERF_IMAGE:-...}
+# so an empty value is replaced by the default. The reachable failure is an
+# unresolved placeholder registry, which would otherwise reach kubectl as an
+# unpullable reference -- assert that instead.
+case "${PERF_IMAGE:-}" in
+  *YOUR_ORG*|"") echo "CONTAINER_REGISTRY is unset: perf image resolved to '${PERF_IMAGE:-<empty>}'." >&2
+                 echo "Set CONTAINER_REGISTRY or provide config/platform/project.conf." >&2
+                 exit 5 ;;
+esac
+
 # If envsubst is available, template into a temp file; otherwise apply as-is
 TMP_MANIFEST=$(mktemp)
+trap 'rm -f "${TMP_MANIFEST:-}"' EXIT
 if command -v envsubst >/dev/null 2>&1; then
   envsubst < "${MANIFEST_PATH}" > "${TMP_MANIFEST}"
 else
-  cp "${MANIFEST_PATH}" "${TMP_MANIFEST}"
+  echo "envsubst not found: the manifest's \${PERF_IMAGE} (and \${POSTGRES_DSN} etc.) would be applied literally." >&2
+  exit 4
 fi
 
 # Ensure namespace 'perf' exists before applying
