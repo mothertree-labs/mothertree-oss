@@ -8,6 +8,10 @@ metadata:
     app.kubernetes.io/part-of: mother-tree
 spec:
   backoffLimit: 1
+  # Matches the synapse/stalwart/roundcube db-init Jobs. Without it a completed
+  # Job persists forever and the next deploy of this tenant fails with
+  # `AlreadyExists` -- which is exactly what broke pipeline 2173 (#667).
+  ttlSecondsAfterFinished: 300
   template:
     metadata:
       labels:

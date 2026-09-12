@@ -536,9 +536,13 @@ fi
 # with deploy-llm-webui.sh). The helper filters out Terminating CoreDNS pods
 # (rollout-status returns once the new ReplicaSet is ready, but old pods can
 # linger in `Running` for a few seconds — probing those IPs would burn the
-# whole 90s budget on dead addresses). Returns 1 = definitely not converged,
-# 2 = no answer; both abort — never claim success on silence.
-if ! mt_coredns_rewrite_verify "$NS_MAIL" "$MAIL_HOST" "$_stalwart_cluster_ip"; then
+# whole 90s budget on dead addresses). mt_coredns_rewrite_require aborts on
+# 1 (definitely not converged) but WARNS and proceeds on 2 (no verdict) --
+# "could not run the check" is not "the check failed" (#662). Safe here because
+# the mail path has two fatal end-to-end backstops downstream: the SMTP smoke
+# test in provision-smtp.js and submission gate #19, both of which exercise
+# strictly more than this probe (DNS + NetworkPolicy + listener + TLS + SASL).
+if ! mt_coredns_rewrite_require "$NS_MAIL" "$MAIL_HOST" "$_stalwart_cluster_ip"; then
     print_error "Check kube-system/coredns-custom ConfigMap and CoreDNS pod logs:"
     print_error "  kubectl -n kube-system get configmap coredns-custom -o yaml"
     print_error "  kubectl -n kube-system logs -l k8s-app=kube-dns --tail=100"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Unit tests for the explicit-verdict probe helpers in scripts/lib/common.sh
 # (issue #623): mt_kubectl_probe, mt_probe_exec, mt_probe_job, mt_kubectl_logs,
-# mt_coredns_rewrite_verify. Runs against a fake kubectl (fake-kubectl.sh) —
+# mt_coredns_rewrite_verify, plus mt_coredns_rewrite_require (#662) and
+# mt_delete_job_wait (#667). Runs against a fake kubectl (fake-kubectl.sh) —
 # no cluster needed. Invoked by ci/scripts/shell-unit-tests.sh.
 set -uo pipefail
 
@@ -9,7 +10,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../common.sh
 source "$HERE/../common.sh"
 
-export MT_PROBE_BACKOFF_BASE=0 MT_PROBE_POLL_INTERVAL=0
+export MT_PROBE_BACKOFF_BASE=0 MT_PROBE_POLL_INTERVAL=0 MT_JOB_DELETE_POLL_INTERVAL=0
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 cp "$HERE/fake-kubectl.sh" "$TMP/bin/kubectl"; chmod +x "$TMP/bin/kubectl"
@@ -145,6 +146,79 @@ case "$(jq -r '.spec.template.spec.containers[0].command[2]' "$MT_TEST_MANIFEST"
 scenario coredns-none
 out=$(mt_coredns_rewrite_verify tn-x-mail mail.example.com 10.128.0.7); rc=$?
 check "coredns no pods rc" 2 "$rc"
+
+# --- mt_coredns_rewrite_require (#662) --------------------------------------
+# Policy split: a definite "not converged" aborts the deploy; "could not
+# determine" must NOT, because it says nothing about the rewrite. Collapsing the
+# two is what let a lost attach on a rebuilt dev cluster fail deploy-dev-llm and
+# strand two merged PRs short of production.
+_saved_verify=$(declare -f mt_coredns_rewrite_verify)
+
+mt_coredns_rewrite_verify() { return 0; }
+mt_coredns_rewrite_require ns host 1.2.3.4 >/dev/null 2>&1; rc=$?
+check "require: converged -> proceed" 0 "$rc"
+
+mt_coredns_rewrite_verify() { return 1; }
+mt_coredns_rewrite_require ns host 1.2.3.4 >/dev/null 2>&1; rc=$?
+check "require: NOT converged -> abort" 1 "$rc"
+
+mt_coredns_rewrite_verify() { return 2; }
+out=$(mt_coredns_rewrite_require ns host 1.2.3.4 2>&1); rc=$?
+check "require: no verdict -> proceed" 0 "$rc"
+case "$out" in *"not evidence the rewrite failed"*) check "require: no-verdict warns loudly" y y ;;
+               *)                                   check "require: no-verdict warns loudly" y n ;; esac
+
+eval "$_saved_verify"   # restore the real implementation
+
+# --- mt_delete_job_wait (#667) ----------------------------------------------
+# `kubectl delete job` can return before the API server drops the object, so
+# delete-then-recreate races and fails with AlreadyExists. The helper must not
+# return until the Job is actually gone.
+_dj_state="$TMP/dj"
+kubectl() {  # local stub: shell function wins over the fake on PATH
+    case "$*" in
+        "get job "*)
+            case "$MT_DJ_SCENARIO" in
+                absent)   echo 'Error from server (NotFound): jobs.batch "myjob" not found' >&2; return 1 ;;
+                vanishes) n=$(( $(cat "$_dj_state" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$_dj_state"
+                          if [ "$n" -ge 3 ]; then echo 'Error from server (NotFound): jobs.batch "myjob" not found' >&2; return 1; fi
+                          return 0 ;;
+                stuck)    return 0 ;;
+                # transport failure: NOT an answer, must never read as "absent"
+                unreadable) echo 'Unable to connect to the server: dial tcp: i/o timeout' >&2; return 1 ;;
+            esac ;;
+        *delete*) return 0 ;;
+    esac
+}
+
+MT_DJ_SCENARIO=absent; : > "$_dj_state"
+mt_delete_job_wait ns myjob >/dev/null 2>&1; rc=$?
+check "delete_job_wait: already absent -> 0, no delete" 0 "$rc"
+
+MT_DJ_SCENARIO=vanishes; echo 0 > "$_dj_state"
+mt_delete_job_wait ns myjob >/dev/null 2>&1; rc=$?
+check "delete_job_wait: gone after polling -> 0" 0 "$rc"
+
+MT_DJ_SCENARIO=stuck; : > "$_dj_state"
+out=$(mt_delete_job_wait ns myjob 2 2>&1); rc=$?
+check "delete_job_wait: never gone -> 1 (do NOT recreate)" 1 "$rc"
+case "$out" in *"AlreadyExists"*) check "delete_job_wait: error names the failure mode" y y ;;
+               *)                 check "delete_job_wait: error names the failure mode" y n ;; esac
+
+# A transport failure is not an answer: it must NOT be read as "job absent",
+# which would return 0 and let the caller recreate into an existing Job (#623).
+MT_DJ_SCENARIO=unreadable; : > "$_dj_state"
+out=$(mt_delete_job_wait ns myjob 2 2>&1); rc=$?
+check "delete_job_wait: unreadable state -> 1, not 'absent'" 1 "$rc"
+case "$out" in *"cannot determine"*) check "delete_job_wait: says it could not determine" y y ;;
+               *)                    check "delete_job_wait: says it could not determine" y n ;; esac
+
+# Latent fail-open: a 0/non-numeric timeout made `seq` empty, so the loop never
+# ran and the function fell through returning 0 -- "gone" without looking.
+MT_DJ_SCENARIO=stuck; : > "$_dj_state"
+mt_delete_job_wait ns myjob 0 >/dev/null 2>&1; rc=$?
+check "delete_job_wait: timeout=0 does not fail open" 1 "$rc"
+unset -f kubectl
 
 echo "kubectl-probe.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
