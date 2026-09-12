@@ -7,6 +7,9 @@ metadata:
     app.kubernetes.io/name: nextcloud-oidc-config
     app.kubernetes.io/part-of: mother-tree
 spec:
+  # Matches its db-init siblings; mt_delete_job_wait is the real guard against
+  # AlreadyExists, but a completed Job should not persist indefinitely either.
+  ttlSecondsAfterFinished: 300
   backoffLimit: 3
   template:
     metadata:
