@@ -979,9 +979,19 @@ fi
 if [ "${LLM_ENABLED:-false}" = "true" ]; then
   print_status "LLM WebUI: deploy to $NS_LLM namespace"
   if [ -x "$REPO_ROOT/apps/deploy-llm-webui.sh" ]; then
-    if ! "$REPO_ROOT/apps/deploy-llm-webui.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
-      print_warning "deploy-llm-webui.sh had issues (non-fatal, continuing)"
-    fi
+    # Non-fatal by default (#446: a stuck Ollama init made deploys flaky), with
+    # ONE exception: exit 20 means an ENFORCED gate failed -- currently the
+    # web-search gate on prod/prod-eu. Without this the enforcement would be
+    # decorative on the only path that ships to production, since the generic
+    # wrapper would turn it into a warning and create_env would still return 0.
+    _llm_rc=0
+    "$REPO_ROOT/apps/deploy-llm-webui.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)) || _llm_rc=$?
+    case "$_llm_rc" in
+      0)  ;;
+      20) print_error "deploy-llm-webui.sh: an enforced gate failed on $MT_ENV — failing the deploy."
+          exit 1 ;;
+      *)  print_warning "deploy-llm-webui.sh had issues (exit $_llm_rc, non-fatal, continuing)" ;;
+    esac
   else
     print_warning "deploy-llm-webui.sh not found — skipping LLM WebUI deploy"
   fi

@@ -8,6 +8,9 @@ metadata:
     app.kubernetes.io/component: install
     app.kubernetes.io/part-of: mother-tree
 spec:
+  # Matches the db-init Jobs. Without it a completed Job persists forever and
+  # the next deploy of this tenant can fail with `AlreadyExists` (#667 class).
+  ttlSecondsAfterFinished: 300
   backoffLimit: 0
   template:
     metadata:

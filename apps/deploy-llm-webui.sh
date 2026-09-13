@@ -414,9 +414,12 @@ fi
 #      IP was CAPTCHA'd by duckduckgo and startpage from the first query).
 #   3  regression — the canary proved upstream search works and our chat path
 #      still cited no sources. This is the real signal. Warned about loudly,
-#      and still non-fatal by default per the 2026-09-10 decision to make the
-#      gate optional "for now"; set WEBSEARCH_GATE_ENFORCE=1 to re-arm it as a
-#      deploy blocker once the search backend is dependable again.
+#      FATAL on prod/prod-eu, advisory on dev -- see the case statement below.
+#      WEBSEARCH_GATE_ENFORCE in the environment overrides either way.
+# This script exits 20 when an enforced gate fails, which create_env treats as
+# fatal; any other non-zero stays non-fatal there (see #446). Gate result codes
+# from the gate script itself are separate and listed below.
+#
 #   *  anything else, 1 included — the harness broke, not the deployment.
 #      kubectl reports its own failures (no such pod, API unreachable, exec
 #      denied) as exit 1, which is why the gate's regression verdict is 3:
@@ -434,6 +437,27 @@ print_status "Waiting for Open WebUI rollout before web-search gate..."
 # 300s: under concurrent CI deploys the pod can take >180s to become Ready
 # (image churn + node CPU contention) — observed live in pipeline 1894.
 kubectl rollout status deployment/open-webui -n "$NS_LLM" --timeout=300s
+
+# Enforcement is per-environment, not global. Prod and prod-eu have stable egress
+# IPs and passed the gate cleanly on 2026-09-10/11 (canary returning 29-31
+# results), so a regression there is real and should block. Dev is rebuilt on
+# demand and lands on fresh Linode IPs that duckduckgo and startpage CAPTCHA from
+# the first query (#661), which is what made a hard gate able to take the whole
+# PR queue down -- so dev stays advisory.
+#
+# Derived from MT_ENV rather than set in .woodpecker/ so that a standalone
+# `./apps/deploy-llm-webui.sh -e prod -t <tenant>` gets the same treatment as the
+# pipeline; an explicit WEBSEARCH_GATE_ENFORCE in the environment still wins.
+case "${MT_ENV:-}" in
+    prod|prod-eu) _gate_enforce="${WEBSEARCH_GATE_ENFORCE:-1}" ;;
+    *)            # Unknown env stays ADVISORY on purpose: auto-arming a gate that is
+                  # known to fail on fresh egress IPs (#661) for any future env name
+                  # would reintroduce the 2026-09-10 queue-wide outage. But silence
+                  # is the real risk here, so say so.
+                  _gate_enforce="${WEBSEARCH_GATE_ENFORCE:-0}"
+                  [ -n "${WEBSEARCH_GATE_ENFORCE:-}" ] || \
+                    print_warning "MT_ENV=${MT_ENV:-unset} is not in the gate-enforcement allowlist (prod, prod-eu) — web-search gate is ADVISORY." ;;
+esac
 
 print_status "Running web-search functional gate (SearXNG + chat completion sources)..."
 # GATE_MODEL is passed via env(1), not spliced into the sh -c string, so a
@@ -497,11 +521,20 @@ case "$gate_rc" in
         print_warning "  still cited no sources. The gate's own output above says which."
         print_warning "  See docs/plans/llm/web-search.md."
         print_warning "  Debug: kubectl logs -n $NS_LLM deploy/open-webui --tail=100"
-        if [ "${WEBSEARCH_GATE_ENFORCE:-0}" = "1" ]; then
-            print_error "WEBSEARCH_GATE_ENFORCE=1 — failing the deploy."
-            exit 1
+        if [ "$_gate_enforce" = "1" ]; then
+            print_error "Web-search gate enforced on ${MT_ENV:-this env} — failing the deploy."
+            # Exit 20, not 1. This script has two callers and they disagree:
+            # ci/scripts/ci-deploy-app.sh calls it bare under `set -e` (any
+            # non-zero is fatal), while create_env deliberately treats a generic
+            # non-zero as non-fatal ("had issues, continuing") because of #446,
+            # where a stuck Ollama init made deploys flaky. A bare exit 1 would
+            # therefore be honoured on one path and swallowed on the other, so
+            # deploy-prod could go green with web search broken. 20 is the
+            # distinct "an enforced gate failed" signal that create_env
+            # propagates explicitly; ci-deploy-app.sh already propagates it.
+            exit 20
         fi
-        print_warning "  Continuing anyway (gate is advisory; set WEBSEARCH_GATE_ENFORCE=1 to block)."
+        print_warning "  Continuing anyway (gate is advisory on ${MT_ENV:-this env}; WEBSEARCH_GATE_ENFORCE=1 blocks)."
         ;;
     *)
         # Not a verdict about the deployment: the gate never got to report one.
