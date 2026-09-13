@@ -6,7 +6,134 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- The web-search gate is now **fatal on prod and prod-eu, advisory on dev**,
+  derived from `MT_ENV` in `deploy-llm-webui.sh`. When the gate was made advisory
+  it was made advisory *everywhere*, which was the safe default at the time but
+  left production with no protection against exactly the silent wiring regression
+  the gate exists to catch. Prod has since passed cleanly twice (canary returning
+  29-31 results), confirming its egress IP is not degraded the way rebuilt dev
+  clusters are — so the protection can be restored where it matters while dev
+  stays advisory. Deriving it in the script rather than in `.woodpecker/` means a
+  standalone `./apps/deploy-llm-webui.sh -e prod -t <tenant>` behaves like the
+  pipeline; an explicit `WEBSEARCH_GATE_ENFORCE` still overrides either way.
+
+  **The enforcement had to be plumbed through `create_env` to mean anything.**
+  `create_env` deliberately treats a non-zero exit from `deploy-llm-webui.sh` as
+  non-fatal ("had issues, continuing") because of #446, where a stuck Ollama init
+  made deploys flaky — so a bare `exit 1` would have been swallowed and
+  `deploy-prod` would have gone green with web search broken, leaving the
+  enforcement real only for standalone runs. The script now exits **20** for "an
+  enforced gate failed", which `create_env` propagates while every other non-zero
+  stays non-fatal. The other caller, `ci/scripts/ci-deploy-app.sh`, invokes the
+  script bare under `set -e` and so propagates it too — the two callers had
+  different policies, which is why a bare `exit 1` would have been honoured on
+  one path and swallowed on the other.
+- Renovate tier-2 bumps: `prometheus-blackbox-exporter` 9.8.0 → 11.18.0, and
+  `node` 20 → 24 in `dev-env/Dockerfile` (local tooling; node 20 is EOL).
+  blackbox is the only one where we override chart values. Diffing the chart's own
+  value keys across versions, the single removal is `extraEnvFromSecret` (now
+  `extraEnvFrom`), which we do not set — we set only `config`, `resources` and
+  `serviceMonitor`, all still present. Rendering both versions against our
+  committed values files, the entire diff is chart/version labels, the exporter
+  image `v0.26.0` → `v0.28.0`, and three added pod-template labels: the same four objects,
+  still `ClusterIP` on 9115, no new RBAC or Ingress, and an identical
+  already-hardened `securityContext`. All three probe modules survive, and
+  `http_2xx`'s `insecure_skip_verify: false` is confirmed in the rendered output
+  (the other two set no `tls_config` and inherit the same default). The chart
+  version was confirmed present in its repository index, and the `node:24-bookworm`
+  tag against Docker Hub, before writing.
+
+  **Two bumps Renovate offered were deliberately left out of this batch:**
+  `reflector` 7.1.288 → 10.0.65, because it holds cluster-wide `secrets: ["*"]`
+  and propagates the wildcard TLS cert into tenant namespaces — its mirrors are
+  real Secrets that persist independently, so a v10 that started but silently
+  stopped reconciling would leave TLS working today and fail at the next cert
+  renewal, weeks later, and `wait: true` proves only that the pod started. And
+  `node` → 24 for **calendar-automation**, because `.github/dependabot.yml` pins
+  node to 22 LTS for the sibling node services with the note that "the prior 20→25
+  jump broke CJS/ESM interop" and that a tracking issue gates the next major;
+  calendar-automation is CommonJS with native dependencies and simply has no
+  Dependabot docker entry, which is why Renovate offered it at all.
+
 ### Fixed
+- Four more db-init-class Jobs raced their own deletion — #667 fixed the
+  pattern but I only caught three of the call sites. `docs-migrations`
+  (`apps/deploy-docs.sh`), `nextcloud-install`
+  (both sites in `apps/deploy-nextcloud.sh`) and `nextcloud-oidc-config` all
+  deleted and immediately recreated, so the same `Error from server
+  (AlreadyExists)` was reachable. This is not hypothetical: pipeline 2188 failed
+  with `jobs.batch "docs-migrations" already exists`, one file over from the Jobs
+  that had just been fixed. (The Job name is a fixed literal — the tenant appears
+  only in the namespace — so the CI log's masking of it was incidental.) All four now use `mt_delete_job_wait`, and
+  `docs/migrations-job.yaml` and `apps/manifests/nextcloud/install-job.yaml.tpl`
+  gain the `ttlSecondsAfterFinished: 300` their siblings already had.
+
+  Found by enumerating **every** `kubectl delete job` call site and checking each
+  for a following wait, rather than grepping for one spelling — the mistake that
+  hid these the first time. Of the other hits: `deploy-nextcloud.sh` is
+  already correct by a different route (`--wait=true` with its exit status
+  checked), `deploy-llm.sh` deletes without recreating, and the rest are
+  cleanup inside the probe helpers, an error-message string, a test stub, or
+  `scripts/migrate-to-tenant-namespaces.sh`, which deletes without recreating.
+  `deploy-stalwart.sh` and `deploy-matrix.sh` were already correct via
+  their own force-delete-plus-wait loops.
+- The `nextcloud-install` deletion in Step 4e (ahead of the cold-start guard)
+  was converted too, and it was the most consequential
+  of them. It used `kubectl delete job --ignore-not-found --wait=true`, which I
+  first recorded as "already correct by a different route" — that was wrong.
+  `--wait=true` waits for the **Job object**, and `kubectl delete` defaults to
+  `--cascade=background`, so the pod is reaped asynchronously with the default 30s
+  grace period (`terminationGracePeriodSeconds` is unset on that Job). Its own
+  comment says it exists to remove a live `occ maintenance:install` writer *before*
+  the cold-start guard decides whether to drop the database that writer is using —
+  and that is exactly what it did not guarantee. A surviving pod can recreate the
+  schema after `mt_nc_drop_db_verified` has dropped and verified it, producing the
+  "The Login is already being used" failure #548 exists to prevent; on prod the
+  schema probe can instead read a partial schema and refuse with a misleading
+  "dropping the DB would destroy tenant data". No prod data-loss path, because the
+  drop is `DROP DATABASE ... WITH (FORCE)` and is verified afterwards — but the
+  window was real. `mt_delete_job_wait` force-deletes with `--grace-period=0`,
+  sweeps pods by `job-name`, and polls until the API server confirms removal.
+- `docs/nextcloud-oidc-config-job.yaml.tpl` also gains the TTL, which it had been
+  missing while its four siblings all carried 300.
+
+  One deliberate trade-off: `ttlSecondsAfterFinished` applies to `Failed` as well
+  as `Complete`, so a failed Job and its pods now disappear five minutes after
+  failing. In-run diagnostics are unaffected — `poll_job_complete` detects the
+  `Failed` condition within one 5s interval and dumps logs immediately — but
+  post-hoc inspection of an old pipeline loses the Job object, and relies on Loki
+  retention for the pod logs.
+  `scripts/run_perf:219` has the same race but is deliberately left alone — it
+  does not source `scripts/lib/common.sh`, so calling the helper there would be an
+  unbound command and would abort the script under `set -euo pipefail`. It needs
+  the library wired in first.
+- The roundcube db-init Job escapes single quotes in the database password before
+  interpolating it into a SQL literal, as its four siblings (stalwart, synapse,
+  docs, nextcloud) already did. The password is deliberately not in
+  `deploy-roundcube.sh`'s `envsubst` list, so it is expanded inside the container
+  straight into `PASSWORD '...'` — a generated password containing `'` produced
+  `ERROR: syntax error at or near "with"` and cascaded into four further
+  failures. Operator-controlled input, so this was a latent deploy-breaker rather
+  than an injection risk. (#664)
+- The roundcube db-init Job now runs every `psql` with `-v ON_ERROR_STOP=1`, as
+  its four siblings already did and it did **nowhere**. Without it psql exits 0
+  on a SQL error, so `set -e` never fired, the container exited 0 and the Job
+  reported `Complete` — meaning `REVOKE CONNECT ON DATABASE ... FROM PUBLIC` and
+  `REVOKE ALL ON SCHEMA public FROM PUBLIC`, the cross-tenant isolation controls,
+  could silently not apply while the deploy reported success. This is also what
+  let the #664 quoting bug cascade quietly.
+- That Job no longer wraps the password in a `DO $$ ... $$` block — it was the
+  only one of the five templates that did. Dollar-quoting consumes raw characters
+  until its matching tag and ignores single quotes inside the body, so a password
+  containing `$$` terminates the block early and the rest parses as top-level SQL;
+  doubling `'` cannot prevent that. Replaced with the siblings' flat
+  role-exists-then-CREATE/ALTER form, keeping the password on stdin rather than in
+  `psql -c` argv (where the siblings leave it visible in `/proc/<pid>/cmdline`).
+  Verified end to end against a throwaway PostgreSQL 17 container with the password
+  `a'b$$c;DROP--d`: the role is created, authenticates, the run is idempotent,
+  `PUBLIC` ends up unable to CONNECT, and an erroring statement now exits 3
+  instead of 0.
 - A lost `kubectl` attach no longer fails a deploy over a check it could not run.
   `mt_coredns_rewrite_verify` already distinguished "definitely not converged"
   (rc 1) from "could not determine" (rc 2), but both call sites collapsed them
@@ -46,8 +173,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unschedulable, image pull blocked, NetworkPolicy) — so if it ever became
   permanent the gate would be vacuous while still appearing present in the log.
   A run of these is now findable.
-
-### Changed
 - Renovate tier-1 major bumps, batched: GitHub Actions (`actions/checkout` v4→v7,
   `actions/setup-python` v5→v7, `github/codeql-action` v3→v4), `grafana/k6`→2.2.0,
   `redis`→8 and `postgres`→18 in the perf and db-init Jobs. No deployed runtime

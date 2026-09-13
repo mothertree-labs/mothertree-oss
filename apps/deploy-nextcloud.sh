@@ -313,7 +313,24 @@ case "$_nc_rc" in
                 # cluster (Woodpecker cancel kills the runner step, not the Job).
                 # Remove it, waiting for termination, before deciding anything
                 # about the DB it was writing to; Step 5a.2 recreates it.
-                if ! kubectl -n "$NS_FILES" delete job/nextcloud-install --ignore-not-found --wait=true; then
+                #
+                # mt_delete_job_wait, not `delete --wait=true`: the latter waits
+                # for the JOB OBJECT, and delete defaults to
+                # --cascade=background, so the pod is reaped asynchronously with
+                # the default 30s grace period. That leaves a live
+                # `occ maintenance:install` writer running while the guard below
+                # decides whether to drop the database it is writing to -- a
+                # surviving pod can recreate the schema after the drop has been
+                # verified, which is the "Login is already being used" failure
+                # #548 exists to prevent. The helper force-deletes with
+                # --grace-period=0, sweeps pods by job-name, and polls until the
+                # API server confirms the JOB is gone. That narrows the window
+                # sharply rather than closing it provably: --force removes a
+                # pod's API object without waiting for kubelet to confirm the
+                # container died. The residual risk is covered downstream --
+                # the drop is DROP DATABASE ... WITH (FORCE), which terminates
+                # surviving sessions, and it is re-probed afterwards.
+                if ! mt_delete_job_wait "$NS_FILES" nextcloud-install; then
                     print_error "Could not remove a prior nextcloud-install Job in $NS_FILES — aborting before the orphan guard"
                     exit 1
                 fi
@@ -451,7 +468,7 @@ if [ -z "$IDENTITY_SECRET_EXISTS_PRE" ]; then
         | kubectl apply -f -
 
     # Apply the Job (delete prior in case of retry).
-    kubectl -n "$NS_FILES" delete job/nextcloud-install --ignore-not-found=true || true
+    mt_delete_job_wait "$NS_FILES" nextcloud-install || exit 1
     NS_FILES="$NS_FILES" envsubst '${NS_FILES}' \
         < "$REPO_ROOT/apps/manifests/nextcloud/install-job.yaml.tpl" \
         | kubectl apply -f -
@@ -1140,7 +1157,7 @@ if [ -f "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl" ]; then
       sed "s/namespace: files/namespace: $NS_FILES/g" > /tmp/nextcloud-oidc-config-job.yaml
 
     # Delete previous job if exists
-    kubectl -n "$NS_FILES" delete job/nextcloud-oidc-config --ignore-not-found=true || true
+    mt_delete_job_wait "$NS_FILES" nextcloud-oidc-config || exit 1
 
     # Apply the job
     kubectl apply -f /tmp/nextcloud-oidc-config-job.yaml
