@@ -31,6 +31,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one path and swallowed on the other.
 
 ### Fixed
+- Four more db-init-class Jobs raced their own deletion — #667 fixed the
+  pattern but I only caught three of the call sites. `docs-migrations`
+  (`apps/deploy-docs.sh`), `nextcloud-install`
+  (both sites in `apps/deploy-nextcloud.sh`) and `nextcloud-oidc-config` all
+  deleted and immediately recreated, so the same `Error from server
+  (AlreadyExists)` was reachable. This is not hypothetical: pipeline 2188 failed
+  with `jobs.batch "docs-migrations" already exists`, one file over from the Jobs
+  that had just been fixed. (The Job name is a fixed literal — the tenant appears
+  only in the namespace — so the CI log's masking of it was incidental.) All four now use `mt_delete_job_wait`, and
+  `docs/migrations-job.yaml` and `apps/manifests/nextcloud/install-job.yaml.tpl`
+  gain the `ttlSecondsAfterFinished: 300` their siblings already had.
+
+  Found by enumerating **every** `kubectl delete job` call site and checking each
+  for a following wait, rather than grepping for one spelling — the mistake that
+  hid these the first time. Of the other hits: `deploy-nextcloud.sh` is
+  already correct by a different route (`--wait=true` with its exit status
+  checked), `deploy-llm.sh` deletes without recreating, and the rest are
+  cleanup inside the probe helpers, an error-message string, a test stub, or
+  `scripts/migrate-to-tenant-namespaces.sh`, which deletes without recreating.
+  `deploy-stalwart.sh` and `deploy-matrix.sh` were already correct via
+  their own force-delete-plus-wait loops.
+- The `nextcloud-install` deletion in Step 4e (ahead of the cold-start guard)
+  was converted too, and it was the most consequential
+  of them. It used `kubectl delete job --ignore-not-found --wait=true`, which I
+  first recorded as "already correct by a different route" — that was wrong.
+  `--wait=true` waits for the **Job object**, and `kubectl delete` defaults to
+  `--cascade=background`, so the pod is reaped asynchronously with the default 30s
+  grace period (`terminationGracePeriodSeconds` is unset on that Job). Its own
+  comment says it exists to remove a live `occ maintenance:install` writer *before*
+  the cold-start guard decides whether to drop the database that writer is using —
+  and that is exactly what it did not guarantee. A surviving pod can recreate the
+  schema after `mt_nc_drop_db_verified` has dropped and verified it, producing the
+  "The Login is already being used" failure #548 exists to prevent; on prod the
+  schema probe can instead read a partial schema and refuse with a misleading
+  "dropping the DB would destroy tenant data". No prod data-loss path, because the
+  drop is `DROP DATABASE ... WITH (FORCE)` and is verified afterwards — but the
+  window was real. `mt_delete_job_wait` force-deletes with `--grace-period=0`,
+  sweeps pods by `job-name`, and polls until the API server confirms removal.
+- `docs/nextcloud-oidc-config-job.yaml.tpl` also gains the TTL, which it had been
+  missing while its four siblings all carried 300.
+
+  One deliberate trade-off: `ttlSecondsAfterFinished` applies to `Failed` as well
+  as `Complete`, so a failed Job and its pods now disappear five minutes after
+  failing. In-run diagnostics are unaffected — `poll_job_complete` detects the
+  `Failed` condition within one 5s interval and dumps logs immediately — but
+  post-hoc inspection of an old pipeline loses the Job object, and relies on Loki
+  retention for the pod logs.
+  `scripts/run_perf:219` has the same race but is deliberately left alone — it
+  does not source `scripts/lib/common.sh`, so calling the helper there would be an
+  unbound command and would abort the script under `set -euo pipefail`. It needs
+  the library wired in first.
 - The roundcube db-init Job escapes single quotes in the database password before
   interpolating it into a SQL literal, as its four siblings (stalwart, synapse,
   docs, nextcloud) already did. The password is deliberately not in
