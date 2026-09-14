@@ -748,7 +748,10 @@ export KEYCLOAK_THEME_HASH
 print_status "Packaging platform theme (content hash ${KEYCLOAK_THEME_HASH:0:12})..."
 TMP_TAR_DIR=$(mktemp -d)
 TMP_TAR="$TMP_TAR_DIR/theme.tar.gz"
-(cd "$THEMES_DIR" && git ls-files -z platform | tar --null -T - -czf "$TMP_TAR")
+# COPYFILE_DISABLE: macOS bsdtar would otherwise add an AppleDouble ._file per
+# file (extended attributes), which the init container's busybox tar extracts as
+# real files — then the hash no longer describes exactly what shipped.
+(cd "$THEMES_DIR" && git ls-files -z platform | COPYFILE_DISABLE=1 tar --null -T - -czf "$TMP_TAR")
 
 mt_apply kubectl apply -f <(kubectl -n "$NS_AUTH" create configmap keycloak-platform-theme \
     --from-file=theme.tar.gz="$TMP_TAR" \
