@@ -89,6 +89,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     creates starts after the config was applied, so it already has the new
     config. An error or an unrecognised status restarts as before (the
     over-restart direction), and a settled target still restarts.
+  - The Keycloak theme ConfigMap in `deploy_infra` is now applied only when the
+    theme **content** changed. The tarball it carries is not reproducible (tar
+    and gzip record mtimes, and every CI clone has fresh ones), so the
+    server-side diff reported a change on every deploy. With the flag finally
+    propagating, the first CI run of this branch restarted Keycloak on a
+    no-op deploy — which drops every user session (Infinispan, no persistent
+    sessions). A sha256 over the sorted theme files is recorded as the
+    `mothertree.org/theme-hash` annotation on the live ConfigMap; a matching
+    hash skips the apply entirely, a different one applies and lets the tracked
+    restart roll Keycloak once. A real theme change therefore restarts Keycloak
+    — the behaviour the code always claimed and never had.
 - Four more db-init-class Jobs raced their own deletion — #667 fixed the
   pattern but I only caught three of the call sites. `docs-migrations`
   (`apps/deploy-docs.sh`), `nextcloud-install`

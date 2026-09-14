@@ -726,17 +726,34 @@ print_status "Creating Keycloak theme ConfigMap..."
 mt_reset_change_tracker
 THEMES_DIR="$REPO_ROOT/apps/themes"
 if [ -d "$THEMES_DIR/platform" ]; then
-  print_status "Packaging platform theme..."
-  TMP_TAR=$(mktemp /tmp/platform-theme-XXXXXX.tar.gz)
-  pushd "$THEMES_DIR" >/dev/null
-    tar -czf "$TMP_TAR" platform
-  popd >/dev/null
+  # The tarball is NOT reproducible (tar/gzip record mtimes, and every CI clone
+  # has fresh mtimes), so a byte diff of the ConfigMap says "changed" on every
+  # deploy. While the change flag was lost in a subshell (#644) that was
+  # invisible; once it propagated, every deploy restarted Keycloak and dropped
+  # every user session. Gate on a hash of the theme CONTENT instead, recorded
+  # as an annotation on the live ConfigMap: same hash -> leave the ConfigMap
+  # alone (no apply, no flag, no restart); different -> apply and let
+  # mt_restart_if_changed roll Keycloak once.
+  THEME_HASH=$(cd "$THEMES_DIR" && find platform -type f | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | cut -d' ' -f1)
+  [ -n "$THEME_HASH" ] || { print_error "Could not hash $THEMES_DIR/platform"; exit 1; }
+  LIVE_THEME_HASH=$(kubectl -n "$NS_AUTH" get configmap keycloak-platform-theme \
+      -o jsonpath='{.metadata.annotations.mothertree\.org/theme-hash}' 2>/dev/null || true)
+  if [ "$LIVE_THEME_HASH" = "$THEME_HASH" ]; then
+    print_status "Platform theme unchanged (content hash ${THEME_HASH:0:12}), ConfigMap left as is"
+  else
+    print_status "Packaging platform theme (content hash ${THEME_HASH:0:12}, live: ${LIVE_THEME_HASH:0:12})..."
+    TMP_TAR=$(mktemp /tmp/platform-theme-XXXXXX.tar.gz)
+    pushd "$THEMES_DIR" >/dev/null
+      tar -czf "$TMP_TAR" platform
+    popd >/dev/null
 
-  mt_apply kubectl apply -f <(kubectl -n "$NS_AUTH" create configmap keycloak-platform-theme \
-      --from-file=theme.tar.gz="$TMP_TAR" \
-      --dry-run=client -o yaml)
-  rm -f "$TMP_TAR"
-  print_status "Platform theme ConfigMap created in namespace $NS_AUTH"
+    mt_apply kubectl apply -f <(kubectl -n "$NS_AUTH" create configmap keycloak-platform-theme \
+        --from-file=theme.tar.gz="$TMP_TAR" \
+        --dry-run=client -o yaml \
+      | kubectl annotate --local -f - "mothertree.org/theme-hash=${THEME_HASH}" --dry-run=client -o yaml)
+    rm -f "$TMP_TAR"
+    print_status "Platform theme ConfigMap applied in namespace $NS_AUTH"
+  fi
 else
   print_warning "Theme directory not found at $THEMES_DIR/platform, skipping theme ConfigMap"
 fi
