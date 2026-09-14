@@ -147,10 +147,10 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
   [ -z "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] || _perf_sha="${_perf_sha}-dirty"
   PERF_IMAGE="${PERF_IMAGE}-dev-${_perf_sha}"
   pushd "$REPO" >/dev/null
-    # PLATFORMS pinned as ci/scripts/build-image.sh does: build-k6-image.sh
-    # defaults to a multi-arch list under PUSH=true but calls plain `docker build`
-    # with no --platform, so leaving it unset makes the pushed arch depend on the
-    # local buildx driver.
+    # PLATFORMS pinned as ci/scripts/build-image.sh does. build-k6-image.sh
+    # passes it as --platform; left unset under PUSH=true it defaults to a
+    # multi-arch list, which plain `docker build` + `docker push` cannot produce.
+    # The nodes are amd64, so an Apple Silicon build must not follow the host.
     IMAGE_TAG="$PERF_IMAGE" PUSH=true PLATFORMS="linux/amd64" "$BUILD_SCRIPT"
   popd >/dev/null
   echo "[INFO] Image built and pushed: $PERF_IMAGE (local dev ref; --skip-build uses the CI tag)"

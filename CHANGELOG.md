@@ -200,10 +200,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `git status --porcelain`, since `git diff --quiet` compares against the *index*
   and so reports a staged-but-uncommitted tree as clean while the Docker build
   context does include those changes), while `--skip-build` still uses the clean
-  CI tag. `PLATFORMS="linux/amd64"` is now passed as CI does, since
-  `build-k6-image.sh` defaults to a multi-arch list under `PUSH=true` but calls
-  plain `docker build` with no `--platform`, making the pushed architecture depend
-  on the local buildx driver.
+  CI tag. `PLATFORMS="linux/amd64"` is now passed as CI does, and
+  `build-k6-image.sh` now actually forwards it as `--platform`: it computed the
+  list (defaulting to multi-arch under `PUSH=true`) but called plain
+  `docker build` without it, so the pushed architecture followed the host — an
+  Apple Silicon build would have pushed an arm64 image the amd64 nodes cannot
+  run.
 - Both runners now reject an unresolved placeholder registry instead of asserting
   a value that cannot be empty: `image-tags.sh` uses `${PERF_IMAGE:-...}`, so a
   non-empty check is dead code, while a `YOUR_ORG` placeholder reaching `kubectl`
