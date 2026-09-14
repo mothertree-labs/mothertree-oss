@@ -90,7 +90,7 @@ fi
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy_infra"
 
-mt_require_commands kubectl helm helmfile yq jq curl openssl
+mt_require_commands kubectl helm helmfile yq jq curl openssl git shasum
 
 # Tailscale sidecar pre-auth keys are verified against Headscale (and replaced
 # when unusable) by each sidecar's deploy script and daily by the in-cluster
@@ -723,37 +723,35 @@ fi
 # Track whether the ConfigMap actually changed so we can conditionally restart
 # Keycloak below — unnecessary restarts destroy all user sessions (Infinispan).
 print_status "Creating Keycloak theme ConfigMap..."
-mt_reset_change_tracker
 THEMES_DIR="$REPO_ROOT/apps/themes"
 if [ -d "$THEMES_DIR/platform" ]; then
   # The tarball is NOT reproducible (tar/gzip record mtimes, and every CI clone
   # has fresh mtimes), so a byte diff of the ConfigMap says "changed" on every
   # deploy. While the change flag was lost in a subshell (#644) that was
-  # invisible; once it propagated, every deploy restarted Keycloak and dropped
-  # every user session. Gate on a hash of the theme CONTENT instead, recorded
-  # as an annotation on the live ConfigMap: same hash -> leave the ConfigMap
-  # alone (no apply, no flag, no restart); different -> apply and let
-  # mt_restart_if_changed roll Keycloak once.
-  THEME_HASH=$(cd "$THEMES_DIR" && find platform -type f | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | cut -d' ' -f1)
-  [ -n "$THEME_HASH" ] || { print_error "Could not hash $THEMES_DIR/platform"; exit 1; }
-  LIVE_THEME_HASH=$(kubectl -n "$NS_AUTH" get configmap keycloak-platform-theme \
-      -o jsonpath='{.metadata.annotations.mothertree\.org/theme-hash}' 2>/dev/null || true)
-  if [ "$LIVE_THEME_HASH" = "$THEME_HASH" ]; then
-    print_status "Platform theme unchanged (content hash ${THEME_HASH:0:12}), ConfigMap left as is"
-  else
-    print_status "Packaging platform theme (content hash ${THEME_HASH:0:12}, live: ${LIVE_THEME_HASH:0:12})..."
-    TMP_TAR=$(mktemp /tmp/platform-theme-XXXXXX.tar.gz)
-    pushd "$THEMES_DIR" >/dev/null
-      tar -czf "$TMP_TAR" platform
-    popd >/dev/null
+  # invisible; once it propagated, every deploy restarted Keycloak. So the
+  # ConfigMap diff is deliberately NOT what rolls Keycloak. A hash of the theme
+  # CONTENT (the git index, so local junk like .DS_Store cannot perturb it) is
+  # exported for the Helm values, where it becomes a pod-template annotation:
+  # helmfile sync then rolls the StatefulSet exactly when the theme changed,
+  # atomically with the deploy, and a deploy that dies after the ConfigMap
+  # apply is healed by the next sync rather than recorded as done.
+  THEME_FILES=$(git -C "$REPO_ROOT" ls-files -z apps/themes/platform | tr '\0' '\n' | head -1)
+  [ -n "$THEME_FILES" ] || { print_error "No tracked files under $THEMES_DIR/platform — refusing to ship an empty theme"; exit 1; }
+  KEYCLOAK_THEME_HASH=$(git -C "$REPO_ROOT" ls-files -z apps/themes/platform | xargs -0 shasum -a 256 | shasum -a 256 | cut -d' ' -f1)
+  [ -n "$KEYCLOAK_THEME_HASH" ] || { print_error "Could not hash $THEMES_DIR/platform"; exit 1; }
+  export KEYCLOAK_THEME_HASH
+  print_status "Packaging platform theme (content hash ${KEYCLOAK_THEME_HASH:0:12})..."
+  TMP_TAR_DIR=$(mktemp -d)
+  TMP_TAR="$TMP_TAR_DIR/theme.tar.gz"
+  pushd "$THEMES_DIR" >/dev/null
+    tar -czf "$TMP_TAR" platform
+  popd >/dev/null
 
-    mt_apply kubectl apply -f <(kubectl -n "$NS_AUTH" create configmap keycloak-platform-theme \
-        --from-file=theme.tar.gz="$TMP_TAR" \
-        --dry-run=client -o yaml \
-      | kubectl annotate --local -f - "mothertree.org/theme-hash=${THEME_HASH}" --dry-run=client -o yaml)
-    rm -f "$TMP_TAR"
-    print_status "Platform theme ConfigMap applied in namespace $NS_AUTH"
-  fi
+  mt_apply kubectl apply -f <(kubectl -n "$NS_AUTH" create configmap keycloak-platform-theme \
+      --from-file=theme.tar.gz="$TMP_TAR" \
+      --dry-run=client -o yaml)
+  rm -rf "$TMP_TAR_DIR"
+  print_status "Platform theme ConfigMap applied in namespace $NS_AUTH"
 else
   print_warning "Theme directory not found at $THEMES_DIR/platform, skipping theme ConfigMap"
 fi
@@ -775,21 +773,19 @@ fi
 # NOTE: Keycloak DB password is managed on the external PG VM (created by Ansible).
 # No in-cluster password sync needed — PgBouncer uses auth_query to authenticate.
 
-# Deploy Keycloak (connects to PG VM via PgBouncer)
-print_status "Deploying Keycloak to $NS_AUTH namespace (replicas: $KEYCLOAK_REPLICAS)..."
+# Deploy Keycloak (connects to PG VM via PgBouncer). values/keycloak-theme.yaml.gotmpl
+# turns KEYCLOAK_THEME_HASH into a pod-template annotation, so this sync is what
+# rolls Keycloak when the theme changed (the init container extracts the theme
+# tar.gz on pod start) — and only then: unnecessary restarts are an auth outage
+# on single-replica environments and drop Infinispan-cached state.
+: "${KEYCLOAK_THEME_HASH:?theme hash must be computed before the Keycloak sync}"
+print_status "Deploying Keycloak to $NS_AUTH namespace (replicas: $KEYCLOAK_REPLICAS, theme ${KEYCLOAK_THEME_HASH:0:12})..."
 pushd "$REPO_ROOT/apps" >/dev/null
   helmfile -e "$MT_ENV" -l name=keycloak sync --skip-deps
 popd >/dev/null
 
-# Conditionally restart Keycloak only when theme ConfigMap actually changed.
-# The init container extracts the theme tar.gz on startup, so a restart is needed
-# when theme files change — but unnecessary restarts destroy all user sessions
-# (sessions live in Infinispan in-memory cache; persistent-user-sessions is not enabled).
-mt_restart_if_changed statefulset/keycloak-keycloakx -n "$NS_AUTH"
-
 # Always wait for rollout to complete — helmfile sync above may have triggered a
-# rolling update even if we didn't explicitly restart (e.g., chart value changes).
-# This returns immediately if no rollout is in progress.
+# rolling update (theme hash, chart values). Returns immediately if none is in progress.
 kubectl -n "$NS_AUTH" rollout status statefulset/keycloak-keycloakx --timeout=300s
 
 # Cold-start gate: confirm Keycloak's OIDC discovery is actually serving.

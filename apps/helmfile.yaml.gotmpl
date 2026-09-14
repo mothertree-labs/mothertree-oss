@@ -209,6 +209,7 @@ releases:
       name: keycloak
     values:
       - values/keycloak-codecentric.yaml
+      - values/keycloak-theme.yaml.gotmpl
       - environments/{{ .Environment.Name }}/keycloak.yaml.gotmpl
     createNamespace: false  # Created by create_env
     # Ensure Infinispan has time to replicate caches to the new pod before the

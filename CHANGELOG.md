@@ -89,17 +89,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     creates starts after the config was applied, so it already has the new
     config. An error or an unrecognised status restarts as before (the
     over-restart direction), and a settled target still restarts.
-  - The Keycloak theme ConfigMap in `deploy_infra` is now applied only when the
-    theme **content** changed. The tarball it carries is not reproducible (tar
-    and gzip record mtimes, and every CI clone has fresh ones), so the
-    server-side diff reported a change on every deploy. With the flag finally
-    propagating, the first CI run of this branch restarted Keycloak on a
-    no-op deploy — which drops every user session (Infinispan, no persistent
-    sessions). A sha256 over the sorted theme files is recorded as the
-    `mothertree.org/theme-hash` annotation on the live ConfigMap; a matching
-    hash skips the apply entirely, a different one applies and lets the tracked
-    restart roll Keycloak once. A real theme change therefore restarts Keycloak
-    — the behaviour the code always claimed and never had.
+  - Keycloak is now rolled by a **pod-template annotation carrying a hash of the
+    theme content**, not by the theme ConfigMap's byte diff. The tarball in that
+    ConfigMap is not reproducible (tar and gzip record mtimes, and every CI clone
+    has fresh ones), so the server-side diff reported a change on every deploy;
+    with the flag finally propagating, the first CI run of this branch restarted
+    Keycloak on a no-op deploy — an auth outage on single-replica environments
+    (90 s `minReadySeconds`, one pod in dev) on every deploy, prod included.
+    `deploy_infra` now exports `KEYCLOAK_THEME_HASH` (sha256 over the
+    git-tracked files of `apps/themes/platform`, so local `.DS_Store` junk cannot
+    perturb it) and `values/keycloak-theme.yaml.gotmpl` turns it into
+    `podAnnotations`, so `helmfile sync` itself rolls the StatefulSet exactly when
+    the theme changed — atomically with the deploy, healed by the next sync if a
+    deploy dies half-way, and with no separate `mt_restart_if_changed` that could
+    fire on a spurious diff. A real theme change therefore restarts Keycloak,
+    which the code has claimed since the tracker was introduced and never did.
 - Four more db-init-class Jobs raced their own deletion — #667 fixed the
   pattern but I only caught three of the call sites. `docs-migrations`
   (`apps/deploy-docs.sh`), `nextcloud-install`

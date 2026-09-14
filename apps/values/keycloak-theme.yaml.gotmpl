@@ -1,0 +1,10 @@
+# Rolls Keycloak exactly when the platform theme changed. deploy_infra exports
+# KEYCLOAK_THEME_HASH (sha256 over the git-tracked files of apps/themes/platform)
+# before `helmfile -l name=keycloak sync`; the init container extracts the theme
+# ConfigMap on pod start, so a changed hash here is what makes new pods pick the
+# new theme up. Deliberately not tied to the ConfigMap's byte diff: its tar.gz
+# is not reproducible and would roll Keycloak on every deploy (#644 follow-up).
+# `env`, not `requiredEnv`, so `helmfile lint` renders without it; deploy_infra
+# asserts it is set before the sync.
+podAnnotations:
+  mothertree.org/theme-hash: '{{ env "KEYCLOAK_THEME_HASH" }}'
