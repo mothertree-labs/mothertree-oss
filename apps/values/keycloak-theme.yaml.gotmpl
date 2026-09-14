@@ -4,7 +4,8 @@
 # ConfigMap on pod start, so a changed hash here is what makes new pods pick the
 # new theme up. Deliberately not tied to the ConfigMap's byte diff: its tar.gz
 # is not reproducible and would roll Keycloak on every deploy (#644 follow-up).
-# `env`, not `requiredEnv`, so `helmfile lint` renders without it; deploy_infra
-# asserts it is set before the sync.
+# requiredEnv: a manual `helmfile -l name=keycloak sync` without it must fail
+# rather than render an empty annotation (which would roll Keycloak now and
+# again on the next deploy_infra). Lint renders via ci/scripts/lib/helmfile-lint-env.sh.
 podAnnotations:
-  mothertree.org/theme-hash: '{{ env "KEYCLOAK_THEME_HASH" }}'
+  mothertree.org/theme-hash: {{ requiredEnv "KEYCLOAK_THEME_HASH" | quote }}
