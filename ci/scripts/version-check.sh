@@ -27,12 +27,110 @@ echo "Base ref: ${BASE_REF}"
 # Get list of changed files
 CHANGED_FILES=$(git diff --name-only "${BASE_REF}" HEAD 2>/dev/null || echo "")
 
+FAIL=0
+
+# ---------------------------------------------------------------------------
+# Assert every component's image pin in apps/image-versions.env matches its
+# VERSION file.
+#
+# This runs UNCONDITIONALLY, not only when a component's sources changed. The
+# drift it catches arises precisely from changes that do NOT touch
+# image-versions.env: perf/VERSION went 0.1.0 -> 0.2.1 -> 0.2.2 across two
+# Renovate batches while PERF_IMAGE_TAG stayed at 0.1.0, and version-check.sh
+# explicitly excludes image-versions.env from source detection (see
+# NON_SOURCE_PATTERNS), so nothing ever compared them. That drift was invisible
+# for two releases because nothing consumed PERF_IMAGE; once the perf manifests
+# started using it, CI would have built :0.2.2 while the Jobs pulled :0.1.0 --
+# a clean, successful run of the wrong image rather than a loud failure.
+# ---------------------------------------------------------------------------
+# Anchor to the repo root: check_pin is this script's first filesystem read, so
+# relative paths would make it the only part that depends on CWD.
+_VC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PIN_FILE="${_VC_ROOT}/apps/image-versions.env"
+
+check_pin() {
+  local name="$1" version_file="$2" pin_key="$3"
+  local want have
+
+  version_file="${_VC_ROOT}/${version_file}"
+
+  if [ ! -f "$version_file" ]; then
+    echo "ERROR: ${name} — ${version_file} not found"; FAIL=1; return
+  fi
+  want=$(tr -d ' \t\r\n' < "$version_file")
+  have=$(grep -E "^${pin_key}=" "$PIN_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' \t\r\n')
+
+  if [ -z "$want" ]; then
+    echo "ERROR: ${name} — ${version_file} is empty"; FAIL=1; return
+  fi
+  if [ -z "$have" ]; then
+    echo "^^^ +++"
+    echo "ERROR: ${name} — ${pin_key} is missing from ${PIN_FILE}."
+    echo "Fix: add ${pin_key}=${want} to ${PIN_FILE}"
+    FAIL=1; return
+  fi
+  case "$have" in
+    *[\"\']*)
+      echo "^^^ +++"
+      echo "ERROR: ${name} — ${pin_key} in ${PIN_FILE} is quoted: ${pin_key}=${have}"
+      echo "Values must be bare (KEY=1.2.3); image-tags.sh would export the quotes"
+      echo "into the image reference and the pull would fail."
+      FAIL=1; return ;;
+  esac
+  if [ "$want" != "$have" ]; then
+    echo "^^^ +++"
+    echo "ERROR: ${name} — image pin does not match its VERSION file."
+    echo "  ${PIN_FILE}: ${pin_key}=${have}"
+    echo "  ${version_file}: ${want}"
+    echo ""
+    echo "The deploy manifests pull the pinned tag, so a mismatch means the"
+    echo "cluster runs a different build than CI produced -- silently."
+    echo "Fix: set ${pin_key}=${want} in ${PIN_FILE}"
+    echo ""
+    echo "Deliberately pinning an older image (a rollback, or build-now-deploy-later)?"
+    echo "Re-run with MT_ALLOW_PIN_DRIFT=1 to allow it. Note that this gate feeds"
+    echo "validate -> mothertree-build -> deploy-prod, so without it the rollback"
+    echo "does not deploy either."
+    if [ "${MT_ALLOW_PIN_DRIFT:-0}" = "1" ]; then
+      echo "MT_ALLOW_PIN_DRIFT=1 — allowing the mismatch."
+      return
+    fi
+    FAIL=1; return
+  fi
+  echo "OK: ${name} — pin ${pin_key}=${have} matches ${version_file}"
+}
+
+check_pin "admin-portal"   "apps/admin-portal/VERSION"    "ADMIN_PORTAL_IMAGE_TAG"
+check_pin "account-portal" "apps/account-portal/VERSION"  "ACCOUNT_PORTAL_IMAGE_TAG"
+check_pin "roundcube"      "apps/docker/roundcube/VERSION" "ROUNDCUBE_IMAGE_TAG"
+check_pin "perf"           "perf/VERSION"                 "PERF_IMAGE_TAG"
+
+# A fifth component must not be silently unguarded -- that is the same
+# "nothing ever compared them" failure this gate exists to prevent.
+_vc_checked="ADMIN_PORTAL_IMAGE_TAG ACCOUNT_PORTAL_IMAGE_TAG ROUNDCUBE_IMAGE_TAG PERF_IMAGE_TAG"
+while IFS= read -r _vc_key; do
+  case " $_vc_checked " in
+    *" $_vc_key "*) ;;
+    *) echo "^^^ +++"
+       echo "ERROR: ${_vc_key} in ${PIN_FILE} has no check_pin call in $(basename "${BASH_SOURCE[0]}")."
+       echo "Add one so its pin is compared against its VERSION file."
+       FAIL=1 ;;
+  esac
+done < <(grep -oE '^[A-Z_]+_IMAGE_TAG' "$PIN_FILE" 2>/dev/null || true)
+
 if [ -z "$CHANGED_FILES" ]; then
-  echo "No changed files detected, skipping version check"
+  # The pin checks above need no diff and have already run. Reaching here also
+  # covers a FAILED `git fetch`: the fetch is `|| true` and the diff is
+  # `2>/dev/null || echo ""`, so an unreachable forge lands here with an empty
+  # list -- which is exactly when a vacuous pass is most dangerous.
+  echo "No changed files detected (or base ref unavailable); skipping the source/VERSION checks"
+  if [ "$FAIL" -ne 0 ]; then
+    echo ""
+    echo "Version check failed on the pin invariant above."
+    exit 1
+  fi
   exit 0
 fi
-
-FAIL=0
 
 # Patterns that don't count as "source changes" requiring a version bump.
 # These are test infrastructure, config, and non-runtime files.

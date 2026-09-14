@@ -17,7 +17,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: k6
-          image: ghcr.io/YOUR_ORG/mothertree-perf:latest
+          image: ${PERF_IMAGE}
           env:
             - name: USERS_CSV_PATH
               value: /data/users.csv

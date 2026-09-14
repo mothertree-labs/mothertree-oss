@@ -55,12 +55,12 @@ else
 fi
 
 if [[ "${PUSH}" == "true" ]]; then
-  docker build --build-arg "K6_IMAGE=${K6_IMAGE}" \
+  docker build --platform "${PLATFORMS}" --build-arg "K6_IMAGE=${K6_IMAGE}" \
     -f perf/docker/k6-runner.Dockerfile -t "${IMAGE_TAG}" .
   docker push "${IMAGE_TAG}"
   echo "Pushed ${IMAGE_TAG}"
 else
-  docker build --build-arg "K6_IMAGE=${K6_IMAGE}" \
+  docker build --platform "${PLATFORMS}" --build-arg "K6_IMAGE=${K6_IMAGE}" \
     -f perf/docker/k6-runner.Dockerfile -t "${IMAGE_TAG}" .
   echo "Built (local) ${IMAGE_TAG}"
   echo "Push with: docker push ${IMAGE_TAG}"
