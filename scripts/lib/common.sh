@@ -312,8 +312,13 @@ read_k8s_secret() {
 #   - Never pipe INTO or OUT OF mt_apply (`gen | mt_apply kubectl apply -f -`,
 #     `mt_apply ... | tee`): bash runs pipeline members in subshells, so the
 #     flag is set in a throwaway shell and the caller never sees it. Use
-#     `-f <(gen)` / `-f - <<EOF` / `> file` instead. (Pre-existing: ~30
-#     infra-tier call sites still pipe in — tracked separately.)
+#     `-f <(gen)` / `-f - <<EOF` / `> file` instead. Enforced by
+#     scripts/lib/tests/mt-apply-callsites.test.sh (#644: 30 infra-tier sites
+#     piped in, so pgbouncer/postfix/keycloak-theme restarts never fired).
+#   - With `-f <(gen)` the generator's exit status is lost (it runs in its own
+#     process), so an empty manifest is rejected here (rc 2) rather than
+#     handed to kubectl — a failed envsubst/`kubectl create --dry-run` must not
+#     look like "nothing to apply".
 #   - Only pass flags that BOTH `kubectl diff` and `kubectl apply` accept
 #     (`-n` is fine). An apply-only flag makes diff exit 1 or 2 depending on
 #     the kubectl version; either way that call site degrades to
@@ -365,6 +370,10 @@ mt_apply() {
     else
         manifest=$(cat -- "$src") || { print_error "mt_apply: cannot read manifest '$src'"; return 2; }
     fi
+    if [ -z "${manifest//[[:space:]]/}" ]; then
+        print_error "mt_apply: manifest from '$src' is empty — did the generator (envsubst / kubectl create --dry-run) fail?"
+        return 2
+    fi
 
     # Server-side diff first: 0 = no change, 1 = change, >1 = diff unavailable.
     local -a diffcmd=("${pre[@]}")
@@ -396,8 +405,22 @@ mt_has_changes() {
     [[ "$_mt_deploy_changed" == "true" ]]
 }
 
+# Skips the explicit restart when a rollout is ALREADY in flight on the
+# target — typically because the workload's own manifest embeds config
+# checksums (pgbouncer, postfix, tailscale-router) and the apply a moment ago
+# changed its pod template. Every pod that rollout creates starts after the
+# config was applied, so it already has the new config; a second
+# `rollout restart` on top would just churn the pods again (for PgBouncer,
+# every tenant's DB connections). Only an explicit "Waiting for ..." status
+# counts as in flight; an error or an unrecognised message restarts as before.
 mt_restart_if_changed() {
+    local status
     if mt_has_changes; then
+        status=$(kubectl rollout status "$@" --watch=false 2>&1) || true
+        if [[ "$status" == "Waiting for "* ]]; then
+            print_status "Config changes detected, but a rollout of $* is already in progress — not restarting again (${status%%$'\n'*})"
+            return 0
+        fi
         print_status "Config changes detected, restarting $*..."
         kubectl rollout restart "$@"
     else

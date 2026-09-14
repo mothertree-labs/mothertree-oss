@@ -65,16 +65,16 @@ print_status "  Headscale URL: $HEADSCALE_URL"
 
 print_status "Applying cleanup ConfigMap..."
 mt_reset_change_tracker
-envsubst '${NS_DB}' \
-  < "$MANIFESTS_DIR/configmap.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB}' \
+  < "$MANIFESTS_DIR/configmap.yaml.tpl")
 
 # =============================================================================
 # Apply CronJob
 # =============================================================================
 
 print_status "Applying cleanup CronJob..."
-envsubst '${NS_DB} ${HEADSCALE_URL}' \
-  < "$MANIFESTS_DIR/cronjob.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB} ${HEADSCALE_URL}' \
+  < "$MANIFESTS_DIR/cronjob.yaml.tpl")
 
 print_success "Headscale cleanup CronJob deployed to $NS_DB"
 echo "  Schedule: hourly at :15"

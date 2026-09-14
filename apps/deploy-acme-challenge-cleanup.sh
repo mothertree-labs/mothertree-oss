@@ -76,16 +76,16 @@ print_status "  Zone: $INFRA_DOMAIN"
 
 print_status "Applying cleanup ConfigMap..."
 mt_reset_change_tracker
-envsubst '${NS_CERTMANAGER}' \
-  < "$MANIFESTS_DIR/configmap.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_CERTMANAGER}' \
+  < "$MANIFESTS_DIR/configmap.yaml.tpl")
 
 # =============================================================================
 # Apply CronJob
 # =============================================================================
 
 print_status "Applying cleanup CronJob..."
-envsubst '${NS_CERTMANAGER} ${INFRA_DOMAIN}' \
-  < "$MANIFESTS_DIR/cronjob.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_CERTMANAGER} ${INFRA_DOMAIN}' \
+  < "$MANIFESTS_DIR/cronjob.yaml.tpl")
 
 print_success "ACME challenge cleanup CronJob deployed to $NS_CERTMANAGER"
 echo "  Schedule: hourly at :40"

@@ -57,6 +57,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Dependabot docker entry, which is why Renovate offered it at all.
 
 ### Fixed
+- Tracked restarts in the infra tier never fired (#644). 30 call sites in
+  `deploy-pgbouncer.sh`, `deploy-postfix.sh`, `deploy-tailscale-router.sh`,
+  `deploy-tailscale-key-rotator.sh`, `deploy-metrics-federation.sh`,
+  `deploy-pg-metrics-bridge.sh`, `deploy-headscale-cleanup.sh`,
+  `deploy-acme-challenge-cleanup.sh` and `deploy_infra` fed `mt_apply` through a
+  pipe (`gen | mt_apply kubectl apply -f -`). bash runs every pipeline member in
+  a subshell, so the change flag was set in a throwaway shell and the caller's
+  `mt_restart_if_changed` never saw it — independent of, and older than, the
+  diff-detection fix in `mt_apply`. Concretely: a Keycloak theme change never
+  restarted Keycloak (the comment above that call says it should), and a
+  pg-metrics-bridge / metrics-federation config change never rolled its
+  Deployment. All 30 sites now use `-f <(gen)`, and a new unit test
+  (`scripts/lib/tests/mt-apply-callsites.test.sh`) fails the build on any
+  pipeline into or out of `mt_apply`, in both directions, so the shape cannot
+  come back.
+
+  Two things the conversion itself required:
+  - `mt_apply` now rejects an **empty manifest** (rc 2, with a message naming the
+    source) instead of handing it to kubectl. With `-f <(gen)` the generator's
+    exit status is invisible to the caller, so a failed `envsubst` or
+    `kubectl create --dry-run` would otherwise surface only as kubectl's
+    "no objects passed to apply" — or, for a partial write, as a partial apply.
+  - `mt_restart_if_changed` now **skips the explicit restart when a rollout is
+    already in flight** on the target (`kubectl rollout status --watch=false`
+    reports `Waiting for …`). pgbouncer, postfix and tailscale-router embed config
+    checksums in their pod templates, so a config change already rolls them via
+    the Deployment apply; with the flag finally propagating, the tracked restart
+    would have fired a second rollout right behind the first — for PgBouncer,
+    churning every tenant's DB connections twice. Every pod the in-flight rollout
+    creates starts after the config was applied, so it already has the new
+    config. An error or an unrecognised status restarts as before (the
+    over-restart direction), and a settled target still restarts.
 - Four more db-init-class Jobs raced their own deletion — #667 fixed the
   pattern but I only caught three of the call sites. `docs-migrations`
   (`apps/deploy-docs.sh`), `nextcloud-install`

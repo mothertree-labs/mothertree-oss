@@ -128,7 +128,7 @@ export CHECKSUM_POSTFIX_CONFIG CHECKSUM_INIT_SCRIPTS
 
 print_status "Applying Postfix RBAC..."
 mt_reset_change_tracker
-envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/postfix-rbac.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/postfix-rbac.yaml.tpl")
 
 # =============================================================================
 # Clean up legacy Tailscale sidecar artifacts (issue #348 migration)
@@ -204,25 +204,24 @@ done
 
 # Postfix config ConfigMap (main.cf, master.cf, aliases)
 print_status "Applying postfix-config ConfigMap..."
-kubectl create configmap postfix-config -n "$NS_MAIL" \
+mt_apply kubectl apply -f <(kubectl create configmap postfix-config -n "$NS_MAIL" \
   --from-file=main.cf="$WORK_DIR/main.cf" \
   --from-file=master.cf="$MANIFESTS_DIR/postfix-master.cf" \
   --from-file=aliases="$WORK_DIR/aliases" \
-  --dry-run=client -o yaml | mt_apply kubectl apply -f -
+  --dry-run=client -o yaml)
 
 # Init scripts ConfigMap
 print_status "Applying postfix-init-scripts ConfigMap..."
-kubectl create configmap postfix-init-scripts -n "$NS_MAIL" \
+mt_apply kubectl apply -f <(kubectl create configmap postfix-init-scripts -n "$NS_MAIL" \
   --from-file=10-master-cf-overrides.sh="$MANIFESTS_DIR/10-master-cf-overrides.sh" \
-  --dry-run=client -o yaml | mt_apply kubectl apply -f -
+  --dry-run=client -o yaml)
 
 # =============================================================================
 # Apply Deployment
 # =============================================================================
 print_status "Applying Postfix Deployment..."
-envsubst '${NS_MAIL} ${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${SMTP_ALLOWED_SENDER_DOMAINS} ${POSTFIX_MYNETWORKS} ${CHECKSUM_POSTFIX_CONFIG} ${CHECKSUM_INIT_SCRIPTS}' \
-  < "$MANIFESTS_DIR/deployment.yaml.tpl" \
-  | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_MAIL} ${SMTP_HOSTNAME} ${SMTP_DOMAIN} ${SMTP_ALLOWED_SENDER_DOMAINS} ${POSTFIX_MYNETWORKS} ${CHECKSUM_POSTFIX_CONFIG} ${CHECKSUM_INIT_SCRIPTS}' \
+  < "$MANIFESTS_DIR/deployment.yaml.tpl")
 
 # =============================================================================
 # Apply Services

@@ -113,24 +113,24 @@ export CHECKSUM_PGBOUNCER_CONFIG CHECKSUM_PGBOUNCER_USERLIST
 
 print_status "Applying PgBouncer RBAC..."
 mt_reset_change_tracker
-envsubst '${NS_DB}' < "$MANIFESTS_DIR/pgbouncer-rbac.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB}' < "$MANIFESTS_DIR/pgbouncer-rbac.yaml.tpl")
 
 # =============================================================================
 # Create/update ConfigMap
 # =============================================================================
 
 print_status "Applying PgBouncer ConfigMap..."
-kubectl create configmap pgbouncer-config -n "$NS_DB" \
+mt_apply kubectl apply -f <(kubectl create configmap pgbouncer-config -n "$NS_DB" \
   --from-file=pgbouncer.ini="$WORK_DIR/pgbouncer.ini" \
-  --dry-run=client -o yaml | mt_apply kubectl apply -f -
+  --dry-run=client -o yaml)
 
 # =============================================================================
 # Apply Secrets
 # =============================================================================
 
 print_status "Applying PgBouncer Secrets..."
-envsubst '${NS_DB} ${PGBOUNCER_AUTH_PASSWORD} ${PG_SUPERUSER_PASSWORD}' \
-  < "$MANIFESTS_DIR/pgbouncer-secret.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB} ${PGBOUNCER_AUTH_PASSWORD} ${PG_SUPERUSER_PASSWORD}' \
+  < "$MANIFESTS_DIR/pgbouncer-secret.yaml.tpl")
 
 # Tailscale auth secret: verify the key it holds against Headscale; mint and
 # write a tag:pgbouncer key if the Secret is missing or its key is unusable.
@@ -141,24 +141,24 @@ mt_ts_ensure_secret "$NS_DB" pgbouncer-tailscale-auth tag:pgbouncer
 # Create postgres-credentials Secret for deploy scripts (mt_psql / mt_pg_password helpers).
 # This replaces the Bitnami-generated docs-postgresql secret that scripts previously read.
 print_status "Applying postgres-credentials Secret..."
-kubectl create secret generic postgres-credentials -n "$NS_DB" \
+mt_apply kubectl apply -f <(kubectl create secret generic postgres-credentials -n "$NS_DB" \
   --from-literal=postgres-password="$PG_SUPERUSER_PASSWORD" \
-  --dry-run=client -o yaml | mt_apply kubectl apply -f -
+  --dry-run=client -o yaml)
 
 # =============================================================================
 # Apply Deployment
 # =============================================================================
 
 print_status "Applying PgBouncer Deployment..."
-envsubst '${NS_DB} ${PG_VM_TAILSCALE_IP} ${HEADSCALE_URL} ${CHECKSUM_PGBOUNCER_CONFIG} ${CHECKSUM_PGBOUNCER_USERLIST}' \
-  < "$MANIFESTS_DIR/pgbouncer-deployment.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB} ${PG_VM_TAILSCALE_IP} ${HEADSCALE_URL} ${CHECKSUM_PGBOUNCER_CONFIG} ${CHECKSUM_PGBOUNCER_USERLIST}' \
+  < "$MANIFESTS_DIR/pgbouncer-deployment.yaml.tpl")
 
 # =============================================================================
 # Apply Service
 # =============================================================================
 
 print_status "Applying PgBouncer Service..."
-envsubst '${NS_DB}' < "$MANIFESTS_DIR/pgbouncer-service.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB}' < "$MANIFESTS_DIR/pgbouncer-service.yaml.tpl")
 
 # =============================================================================
 # Conditional restart (only if config/secrets changed)
