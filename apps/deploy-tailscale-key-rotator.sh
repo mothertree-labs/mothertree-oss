@@ -73,16 +73,16 @@ print_status "  Headscale URL: $HEADSCALE_URL"
 
 print_status "Applying key rotator RBAC..."
 mt_reset_change_tracker
-envsubst '${NS_DB} ${NS_INGRESS_INTERNAL} ${NS_MONITORING}' \
-  < "$MANIFESTS_DIR/rbac.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB} ${NS_INGRESS_INTERNAL} ${NS_MONITORING}' \
+  < "$MANIFESTS_DIR/rbac.yaml.tpl")
 
 # =============================================================================
 # Apply Secret (API key)
 # =============================================================================
 
 print_status "Applying rotator API key secret..."
-envsubst '${NS_DB} ${TAILSCALE_ROTATOR_API_KEY}' \
-  < "$MANIFESTS_DIR/secret.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB} ${TAILSCALE_ROTATOR_API_KEY}' \
+  < "$MANIFESTS_DIR/secret.yaml.tpl")
 
 # =============================================================================
 # Apply ConfigMap (component list + driver + shared library)
@@ -94,21 +94,20 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 envsubst '${NS_DB} ${NS_INGRESS_INTERNAL} ${NS_MONITORING}' \
   < "$MANIFESTS_DIR/components.conf.tpl" > "$WORK_DIR/components.conf"
 
-kubectl create configmap tailscale-rotator-config -n "$NS_DB" \
+mt_apply kubectl apply -f <(kubectl create configmap tailscale-rotator-config -n "$NS_DB" \
   --from-file=components.conf="$WORK_DIR/components.conf" \
   --from-file=rotate.sh="$MANIFESTS_DIR/rotate.sh" \
   --from-file=tailscale-keys.sh="$LIB_FILE" \
   --dry-run=client -o yaml \
-  | kubectl label --local -f - app=tailscale-key-rotator --dry-run=client -o yaml \
-  | mt_apply kubectl apply -f -
+  | kubectl label --local -f - app=tailscale-key-rotator --dry-run=client -o yaml)
 
 # =============================================================================
 # Apply CronJob
 # =============================================================================
 
 print_status "Applying key rotator CronJob..."
-envsubst '${NS_DB} ${HEADSCALE_URL}' \
-  < "$MANIFESTS_DIR/cronjob.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB} ${HEADSCALE_URL}' \
+  < "$MANIFESTS_DIR/cronjob.yaml.tpl")
 
 print_success "Tailscale key rotator deployed to $NS_DB"
 echo "  Schedule: daily (04:00 UTC)"

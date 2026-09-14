@@ -60,9 +60,12 @@ ingress:
 postgresql:
   enabled: false
 
-# Custom platform theme mounted from ConfigMap
-# The theme is synced to ConfigMap via apps/scripts/sync-keycloak-theme.sh
-# Theme is stored as a tar.gz file and extracted via init container
+# Custom platform theme mounted from ConfigMap (tar.gz, extracted by the init
+# container on pod start). deploy_infra applies it and rolls Keycloak through the
+# theme-hash pod annotation (values/keycloak-theme.yaml.gotmpl).
+# apps/scripts/sync-keycloak-theme.sh is a dev-iteration shortcut: it applies the
+# ConfigMap and does a plain rollout restart WITHOUT updating the annotation, so
+# the next deploy_infra will not roll again for that change.
 extraVolumes: |
   - name: platform-theme
     configMap:

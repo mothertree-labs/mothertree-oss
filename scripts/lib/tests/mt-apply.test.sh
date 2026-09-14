@@ -14,6 +14,7 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 export MT_TEST_CALLS="$TMP/calls" MT_TEST_DIFF_RC="$TMP/diff_rc" MT_TEST_APPLY_SAYS="$TMP/apply_says" MT_TEST_APPLY_RC="$TMP/apply_rc"
 export MT_TEST_DIFF_IN="$TMP/diff_in" MT_TEST_APPLY_IN="$TMP/apply_in"
+export MT_TEST_ROLLOUT_SAYS="$TMP/rollout_says" MT_TEST_ROLLOUT_RC="$TMP/rollout_rc"
 # The fake records every invocation, saves the manifest each subcommand read
 # from stdin, prints leak-canary text on `diff` stdout (must never surface),
 # and exits with the scripted code.
@@ -33,6 +34,8 @@ case " $* " in
         exit "$(cat "$MT_TEST_APPLY_RC")" ;;
     *" rollout restart "*)
         echo "restarted"; exit 0 ;;
+    *" rollout status "*)
+        cat "$MT_TEST_ROLLOUT_SAYS"; exit "$(cat "$MT_TEST_ROLLOUT_RC")" ;;
 esac
 echo "fake-kubectl: unscripted call: $*" >&2; exit 99
 FAKE
@@ -46,6 +49,7 @@ check() {  # check <description> <expected> <actual>
 scenario() {  # scenario <diff rc> <apply output line> [apply rc]
     : > "$MT_TEST_CALLS"; rm -f "$MT_TEST_DIFF_IN" "$MT_TEST_APPLY_IN"
     echo "$1" > "$MT_TEST_DIFF_RC"; echo "$2" > "$MT_TEST_APPLY_SAYS"; echo "${3:-0}" > "$MT_TEST_APPLY_RC"
+    echo 'deployment "d" successfully rolled out' > "$MT_TEST_ROLLOUT_SAYS"; echo 0 > "$MT_TEST_ROLLOUT_RC"
     mt_reset_change_tracker
 }
 MANIFEST=$'apiVersion: v1\nkind: Secret\nmetadata:\n  name: s\ndata:\n  k: dg==\n'
@@ -140,6 +144,58 @@ echo 1 > "$MT_TEST_DIFF_RC"; mt_apply kubectl apply -f "$TMP/m.yaml" >/dev/null
 echo 0 > "$MT_TEST_DIFF_RC"; mt_apply kubectl apply -f "$TMP/m.yaml" >/dev/null
 check "sticky: one change keeps the flag" true "$_mt_deploy_changed"
 mt_reset_change_tracker; check "reset clears" false "$_mt_deploy_changed"
+
+# --- an empty manifest is a generator failure, not "nothing to apply" (#644) ---
+# With `-f <(gen)` the generator's exit status is invisible to the caller, so
+# a failed envsubst / `kubectl create --dry-run` shows up as empty input.
+scenario 1 "x"
+mt_apply kubectl apply -f <(true) > "$TMP/out" 2>&1; rc=$?
+check "empty manifest: rc" 2 "$rc"
+check "empty manifest: kubectl never called" "" "$(cat "$MT_TEST_CALLS")"
+check "empty manifest: not flagged" false "$_mt_deploy_changed"
+case "$(cat "$TMP/out")" in *"is empty"*) check "empty manifest: explains" yes yes ;; *) check "empty manifest: explains" yes no ;; esac
+scenario 1 "x"
+mt_apply kubectl apply -f <(printf '\n  \n') >/dev/null 2>&1; rc=$?
+check "whitespace-only manifest: rc" 2 "$rc"
+
+# --- the pipe form is exactly the bug: the flag is set in a subshell (#644) ---
+# Not a feature under test but the regression the call-site lint exists for;
+# if bash ever ran the last pipeline member in the parent shell this would
+# start passing and the lint could be retired.
+scenario 1 "secret/s configured"
+printf '%s' "$MANIFEST" | mt_apply kubectl apply -f - >/dev/null 2>&1
+check "pipe-in: diff said changed but caller never sees the flag" false "$_mt_deploy_changed"
+scenario 1 "secret/s configured"
+mt_apply kubectl apply -f <(printf '%s' "$MANIFEST") >/dev/null 2>&1
+check "process substitution: caller sees the flag" true "$_mt_deploy_changed"
+
+# --- mt_restart_if_changed skips the restart when a rollout is already in flight ---
+scenario 1 "secret/s configured"
+mt_apply kubectl apply -f "$TMP/m.yaml" >/dev/null 2>&1
+mt_restart_if_changed deployment/d -n ns > "$TMP/out" 2>&1
+case "$(cat "$MT_TEST_CALLS")" in *"rollout restart deployment/d -n ns"*) check "settled target: restarted" yes yes ;; *) check "settled target: restarted" yes no ;; esac
+scenario 1 "secret/s configured"
+mt_apply kubectl apply -f "$TMP/m.yaml" >/dev/null 2>&1
+printf 'Waiting for deployment "d" rollout to finish: 1 out of 2 new replicas have been updated...\n' > "$MT_TEST_ROLLOUT_SAYS"
+mt_restart_if_changed deployment/d -n ns > "$TMP/out" 2>&1; rc=$?
+check "in-flight target: rc" 0 "$rc"
+case "$(cat "$MT_TEST_CALLS")" in *"rollout restart"*) check "in-flight target: NOT restarted again" no yes ;; *) check "in-flight target: NOT restarted again" no no ;; esac
+case "$(cat "$TMP/out")" in *"already in progress"*) check "in-flight target: says why" yes yes ;; *) check "in-flight target: says why" yes no ;; esac
+scenario 1 "secret/s configured"
+mt_apply kubectl apply -f "$TMP/m.yaml" >/dev/null 2>&1
+printf 'Waiting for deployment spec update to be observed...\n' > "$MT_TEST_ROLLOUT_SAYS"
+mt_restart_if_changed deployment/d -n ns >/dev/null 2>&1
+case "$(cat "$MT_TEST_CALLS")" in *"rollout restart"*) check "unobserved spec update: NOT restarted again" no yes ;; *) check "unobserved spec update: NOT restarted again" no no ;; esac
+scenario 1 "secret/s configured"
+mt_apply kubectl apply -f "$TMP/m.yaml" >/dev/null 2>&1
+printf 'Error from server (NotFound): deployments.apps "d" not found\n' > "$MT_TEST_ROLLOUT_SAYS"; echo 1 > "$MT_TEST_ROLLOUT_RC"
+mt_restart_if_changed deployment/d -n ns >/dev/null 2>&1
+case "$(cat "$MT_TEST_CALLS")" in *"rollout restart"*) check "status error: restarts as before" yes yes ;; *) check "status error: restarts as before" yes no ;; esac
+scenario 0 "secret/s unchanged"
+mt_apply kubectl apply -f "$TMP/m.yaml" >/dev/null 2>&1
+printf 'Waiting for deployment "d" rollout to finish\n' > "$MT_TEST_ROLLOUT_SAYS"
+mt_restart_if_changed deployment/d -n ns >/dev/null 2>&1
+case "$(cat "$MT_TEST_CALLS")" in *"rollout status"*|*"rollout restart"*) check "no change: rollout never consulted" no yes ;; *) check "no change: rollout never consulted" no no ;; esac
 
 echo "mt-apply: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

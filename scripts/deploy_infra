@@ -90,7 +90,7 @@ fi
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy_infra"
 
-mt_require_commands kubectl helm helmfile yq jq curl openssl
+mt_require_commands kubectl helm helmfile yq jq curl openssl git shasum
 
 # Tailscale sidecar pre-auth keys are verified against Headscale (and replaced
 # when unusable) by each sidecar's deploy script and daily by the in-cluster
@@ -323,10 +323,10 @@ if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "$
   printf '%s' "$SES_SMTP_PASSWORD" > "$AM_SES_SECRET_DIR/password"
   umask "$_AM_SES_PREV_UMASK"
   unset _AM_SES_PREV_UMASK
-  kubectl create secret generic ses-credentials -n "$NS_MONITORING" \
+  mt_apply kubectl apply -f <(kubectl create secret generic ses-credentials -n "$NS_MONITORING" \
     --from-file=username="$AM_SES_SECRET_DIR/username" \
     --from-file=password="$AM_SES_SECRET_DIR/password" \
-    --dry-run=client -o yaml | mt_apply kubectl apply -f -
+    --dry-run=client -o yaml)
   rm -rf "$AM_SES_SECRET_DIR"
   unset AM_SES_SECRET_DIR
 else
@@ -719,27 +719,45 @@ else
   print_warning "deploy-acme-challenge-cleanup.sh not found"
 fi
 
-# Create Keycloak theme ConfigMap BEFORE deploying Keycloak.
-# Track whether the ConfigMap actually changed so we can conditionally restart
-# Keycloak below — unnecessary restarts destroy all user sessions (Infinispan).
+# Create Keycloak theme ConfigMap BEFORE deploying Keycloak. What rolls Keycloak
+# when the theme changes is KEYCLOAK_THEME_HASH (exported here, consumed as a
+# pod-template annotation by values/keycloak-theme.yaml.gotmpl), never the
+# ConfigMap's byte diff — see below.
 print_status "Creating Keycloak theme ConfigMap..."
-mt_reset_change_tracker
 THEMES_DIR="$REPO_ROOT/apps/themes"
-if [ -d "$THEMES_DIR/platform" ]; then
-  print_status "Packaging platform theme..."
-  TMP_TAR=$(mktemp /tmp/platform-theme-XXXXXX.tar.gz)
-  pushd "$THEMES_DIR" >/dev/null
-    tar -czf "$TMP_TAR" platform
-  popd >/dev/null
+unset KEYCLOAK_THEME_HASH
+[ -d "$THEMES_DIR/platform" ] || { print_error "Theme directory not found at $THEMES_DIR/platform — broken checkout?"; exit 1; }
+# The tarball is NOT reproducible (tar/gzip record mtimes, and every CI clone
+# has fresh mtimes), so a byte diff of the ConfigMap says "changed" on every
+# deploy. While the change flag was lost in a subshell (#644) that was
+# invisible; once it propagated, every deploy restarted Keycloak. So the
+# ConfigMap diff is deliberately NOT what rolls Keycloak. Instead the theme is
+# hashed and packaged from ONE list — the git-tracked files under platform/,
+# resolved inside $THEMES_DIR — so the annotation describes exactly the bytes
+# shipped, local junk (.DS_Store, editor files) neither ships nor perturbs the
+# hash, and the result does not depend on the caller's cwd or checkout path.
+# helmfile sync then rolls the StatefulSet exactly when the theme changed,
+# atomically with the deploy; a deploy that dies after the ConfigMap apply is
+# healed by the next sync rather than recorded as done.
+[ -n "$(git -C "$THEMES_DIR" ls-files platform | head -1)" ] \
+  || { print_error "No tracked files under $THEMES_DIR/platform — refusing to ship an empty theme"; exit 1; }
+KEYCLOAK_THEME_HASH=$(cd "$THEMES_DIR" && git ls-files -z platform | xargs -0 shasum -a 256 | shasum -a 256 | cut -d' ' -f1)
+[[ "$KEYCLOAK_THEME_HASH" =~ ^[0-9a-f]{64}$ ]] \
+  || { print_error "Theme hash is not a sha256 (got '${KEYCLOAK_THEME_HASH}')"; exit 1; }
+export KEYCLOAK_THEME_HASH
+print_status "Packaging platform theme (content hash ${KEYCLOAK_THEME_HASH:0:12})..."
+TMP_TAR_DIR=$(mktemp -d)
+TMP_TAR="$TMP_TAR_DIR/theme.tar.gz"
+# COPYFILE_DISABLE: macOS bsdtar would otherwise add an AppleDouble ._file per
+# file (extended attributes), which the init container's busybox tar extracts as
+# real files — then the hash no longer describes exactly what shipped.
+(cd "$THEMES_DIR" && git ls-files -z platform | COPYFILE_DISABLE=1 tar --null -T - -czf "$TMP_TAR")
 
-  kubectl -n "$NS_AUTH" create configmap keycloak-platform-theme \
-      --from-file=theme.tar.gz="$TMP_TAR" \
-      --dry-run=client -o yaml | mt_apply kubectl apply -f -
-  rm -f "$TMP_TAR"
-  print_status "Platform theme ConfigMap created in namespace $NS_AUTH"
-else
-  print_warning "Theme directory not found at $THEMES_DIR/platform, skipping theme ConfigMap"
-fi
+mt_apply kubectl apply -f <(kubectl -n "$NS_AUTH" create configmap keycloak-platform-theme \
+    --from-file=theme.tar.gz="$TMP_TAR" \
+    --dry-run=client -o yaml)
+rm -rf "$TMP_TAR_DIR"
+print_status "Platform theme ConfigMap applied in namespace $NS_AUTH"
 
 # PgBouncer is the sole database entrypoint (connects to external PG VM via Tailscale mesh)
 export PG_SERVICE_NAME="pgbouncer"
@@ -758,21 +776,19 @@ fi
 # NOTE: Keycloak DB password is managed on the external PG VM (created by Ansible).
 # No in-cluster password sync needed — PgBouncer uses auth_query to authenticate.
 
-# Deploy Keycloak (connects to PG VM via PgBouncer)
-print_status "Deploying Keycloak to $NS_AUTH namespace (replicas: $KEYCLOAK_REPLICAS)..."
+# Deploy Keycloak (connects to PG VM via PgBouncer). values/keycloak-theme.yaml.gotmpl
+# turns KEYCLOAK_THEME_HASH into a pod-template annotation, so this sync is what
+# rolls Keycloak when the theme changed (the init container extracts the theme
+# tar.gz on pod start) — and only then: unnecessary restarts are an auth outage
+# on single-replica environments and drop Infinispan-cached state.
+: "${KEYCLOAK_THEME_HASH:?theme hash must be computed before the Keycloak sync}"
+print_status "Deploying Keycloak to $NS_AUTH namespace (replicas: $KEYCLOAK_REPLICAS, theme ${KEYCLOAK_THEME_HASH:0:12})..."
 pushd "$REPO_ROOT/apps" >/dev/null
   helmfile -e "$MT_ENV" -l name=keycloak sync --skip-deps
 popd >/dev/null
 
-# Conditionally restart Keycloak only when theme ConfigMap actually changed.
-# The init container extracts the theme tar.gz on startup, so a restart is needed
-# when theme files change — but unnecessary restarts destroy all user sessions
-# (sessions live in Infinispan in-memory cache; persistent-user-sessions is not enabled).
-mt_restart_if_changed statefulset/keycloak-keycloakx -n "$NS_AUTH"
-
 # Always wait for rollout to complete — helmfile sync above may have triggered a
-# rolling update even if we didn't explicitly restart (e.g., chart value changes).
-# This returns immediately if no rollout is in progress.
+# rolling update (theme hash, chart values). Returns immediately if none is in progress.
 kubectl -n "$NS_AUTH" rollout status statefulset/keycloak-keycloakx --timeout=300s
 
 # Cold-start gate: confirm Keycloak's OIDC discovery is actually serving.

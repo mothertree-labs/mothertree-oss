@@ -116,8 +116,8 @@ export CHECKSUM_UNBOUND_CONFIG MT_ENV
 
 print_status "Applying Tailscale router RBAC..."
 mt_reset_change_tracker
-envsubst '${NS_INGRESS_INTERNAL}' \
-  < "$MANIFESTS_DIR/rbac.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_INGRESS_INTERNAL}' \
+  < "$MANIFESTS_DIR/rbac.yaml.tpl")
 
 # =============================================================================
 # Apply Tailscale auth secret
@@ -136,17 +136,17 @@ mt_ts_ensure_secret "$NS_INGRESS_INTERNAL" tailscale-router-auth tag:router
 # =============================================================================
 
 print_status "Applying Unbound DNS config..."
-kubectl create configmap tailscale-router-unbound -n "$NS_INGRESS_INTERNAL" \
+mt_apply kubectl apply -f <(kubectl create configmap tailscale-router-unbound -n "$NS_INGRESS_INTERNAL" \
   --from-file=unbound.conf="$WORK_DIR/unbound.conf" \
-  --dry-run=client -o yaml | mt_apply kubectl apply -f -
+  --dry-run=client -o yaml)
 
 # =============================================================================
 # Apply Deployment
 # =============================================================================
 
 print_status "Applying Tailscale router Deployment..."
-envsubst '${NS_INGRESS_INTERNAL} ${HEADSCALE_URL} ${SERVICE_CIDR} ${MT_ENV} ${CHECKSUM_UNBOUND_CONFIG}' \
-  < "$MANIFESTS_DIR/deployment.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_INGRESS_INTERNAL} ${HEADSCALE_URL} ${SERVICE_CIDR} ${MT_ENV} ${CHECKSUM_UNBOUND_CONFIG}' \
+  < "$MANIFESTS_DIR/deployment.yaml.tpl")
 
 # =============================================================================
 # Conditional restart + rollout wait

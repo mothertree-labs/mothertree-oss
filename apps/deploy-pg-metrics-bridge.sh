@@ -72,7 +72,7 @@ print_status "  Headscale URL: $HEADSCALE_URL"
 
 print_status "Applying PG metrics bridge RBAC..."
 mt_reset_change_tracker
-envsubst '${NS_DB}' < "$MANIFESTS_DIR/rbac.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB}' < "$MANIFESTS_DIR/rbac.yaml.tpl")
 
 # =============================================================================
 # Apply Secret
@@ -91,15 +91,15 @@ mt_ts_ensure_secret "$NS_DB" pg-metrics-bridge-tailscale-auth tag:monitoring pg-
 # =============================================================================
 
 print_status "Applying PG metrics bridge Deployment..."
-envsubst '${NS_DB} ${PG_VM_TAILSCALE_IP} ${HEADSCALE_URL}' \
-  < "$MANIFESTS_DIR/deployment.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB} ${PG_VM_TAILSCALE_IP} ${HEADSCALE_URL}' \
+  < "$MANIFESTS_DIR/deployment.yaml.tpl")
 
 # =============================================================================
 # Apply Service
 # =============================================================================
 
 print_status "Applying PG metrics bridge Service..."
-envsubst '${NS_DB}' < "$MANIFESTS_DIR/service.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_DB}' < "$MANIFESTS_DIR/service.yaml.tpl")
 
 # =============================================================================
 # Conditional restart

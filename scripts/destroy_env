@@ -52,9 +52,14 @@ kubectl delete -f "$REPO_ROOT/docs/y-provider-deployment.yaml" --ignore-not-foun
 kubectl delete -f "$REPO_ROOT/docs/y-provider-service.yaml" --ignore-not-found=true || true
 kubectl delete -f "$REPO_ROOT/docs/db-init-job.yaml" --ignore-not-found=true || true
 
-# Apps teardown
+# Apps teardown. An unselected `helmfile destroy` renders EVERY release's values
+# up front, and values/keycloak-theme.yaml.gotmpl requires KEYCLOAK_THEME_HASH
+# (deploy_infra computes it; a destroy has nothing to hash), so give it the
+# placeholder or the whole Helm teardown is skipped before it starts.
+export KEYCLOAK_THEME_HASH="${KEYCLOAK_THEME_HASH:-0000000000000000000000000000000000000000000000000000000000000000}"
 pushd "$REPO_ROOT/apps" >/dev/null
-  helmfile -e "$MT_ENV" destroy || true
+  helmfile -e "$MT_ENV" destroy \
+    || print_warning "helmfile destroy failed — continuing with infra teardown (terraform removes the cluster anyway)"
 popd >/dev/null
 
 # Infra teardown

@@ -216,7 +216,7 @@ mt_reset_change_tracker
 # =============================================================================
 
 print_status "Applying metrics federation RBAC..."
-envsubst '${NS_MONITORING} ${FED_NAME}' < "$MANIFESTS_DIR/rbac.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_MONITORING} ${FED_NAME}' < "$MANIFESTS_DIR/rbac.yaml.tpl")
 
 # =============================================================================
 # Apply Secret (verified against Headscale; minted when missing or unusable)
@@ -241,11 +241,11 @@ mt_ts_adopt_pod_state_secret "$NS_MONITORING" "$FED_NAME" "app=${FED_NAME}"
 # =============================================================================
 
 print_status "Applying metrics federation Deployment..."
-envsubst '${NS_MONITORING} ${FED_NAME} ${SOCAT_TARGET} ${HEADSCALE_URL} ${TS_HOSTNAME}' \
-  < "$MANIFESTS_DIR/deployment.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_MONITORING} ${FED_NAME} ${SOCAT_TARGET} ${HEADSCALE_URL} ${TS_HOSTNAME}' \
+  < "$MANIFESTS_DIR/deployment.yaml.tpl")
 
 print_status "Applying metrics federation Service..."
-envsubst '${NS_MONITORING} ${FED_NAME}' < "$MANIFESTS_DIR/service.yaml.tpl" | mt_apply kubectl apply -f -
+mt_apply kubectl apply -f <(envsubst '${NS_MONITORING} ${FED_NAME}' < "$MANIFESTS_DIR/service.yaml.tpl")
 
 # =============================================================================
 # Apply Grafana datasource (consumer only)
@@ -253,7 +253,7 @@ envsubst '${NS_MONITORING} ${FED_NAME}' < "$MANIFESTS_DIR/service.yaml.tpl" | mt
 
 if [ "$DEPLOY_DATASOURCE" = true ]; then
   print_status "Registering 'Prometheus (prod-eu)' Grafana datasource..."
-  envsubst '${NS_MONITORING}' < "$MANIFESTS_DIR/grafana-datasource.configmap.yaml.tpl" | mt_apply kubectl apply -f -
+  mt_apply kubectl apply -f <(envsubst '${NS_MONITORING}' < "$MANIFESTS_DIR/grafana-datasource.configmap.yaml.tpl")
 fi
 
 # =============================================================================
