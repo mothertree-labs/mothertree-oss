@@ -41,10 +41,14 @@ spec:
           # link); all three are mounted read-only from ConfigMaps below and
           # fail closed at import if upstream drifts. gunicorn's config file is
           # still shipped by the image (upstream's default CMD is uvicorn).
+          # --no-control-socket: gunicorn 26 would otherwise create
+          # $HOME/.gunicorn/gunicorn.ctl, and HOME is / for the image's
+          # unprivileged user ("Control server error: Permission denied");
+          # nothing here uses the control interface.
           command: ["/bin/sh", "-c"]
           args:
             - |
-              exec gunicorn -c /usr/local/etc/gunicorn/impress.py --workers ${DOCS_GUNICORN_WORKERS} --timeout 30 impress.wsgi:application
+              exec gunicorn -c /usr/local/etc/gunicorn/impress.py --no-control-socket --workers ${DOCS_GUNICORN_WORKERS} --timeout 30 impress.wsgi:application
           ports:
           - containerPort: 8000
             name: http
@@ -64,10 +68,19 @@ spec:
             mountPath: /app/mt_settings.py
             subPath: mt_settings.py
             readOnly: true
-          # /app/mt_patches does not exist in the image, so a directory mount
-          # shadows nothing. /app is the image's WORKDIR and on sys.path.
+          # Two subPath file mounts rather than a directory mount: subPath
+          # mounts are snapshots, so an in-place ConfigMap edit cannot reach a
+          # running pod without a rollout (mt_apply restarts on change). The
+          # container runtime creates the missing /app/mt_patches parent for a
+          # bind-mount destination (runc libcontainer createIfNotExists);
+          # proved locally with docker single-file mounts.
           - name: mt-patches
-            mountPath: /app/mt_patches
+            mountPath: /app/mt_patches/__init__.py
+            subPath: __init__.py
+            readOnly: true
+          - name: mt-patches
+            mountPath: /app/mt_patches/apps.py
+            subPath: apps.py
             readOnly: true
           env:
           # ConfigMap mounts are read-only; stop CPython trying to write
@@ -168,8 +181,15 @@ spec:
               memory: 400Mi
             limits:
               memory: 1Gi
+          # Run as the image's own unprivileged user (USER 1001:127, no passwd
+          # entry). Root was only ever needed for the pre-5.x in-place file
+          # patching; nothing under /app needs write, worker heartbeat files
+          # go to /tmp (world-writable in the image).
           securityContext:
-            runAsUser: 0
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 127
+            allowPrivilegeEscalation: false
       volumes:
       - name: storage-backends
         configMap:

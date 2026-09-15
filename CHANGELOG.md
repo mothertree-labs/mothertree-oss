@@ -45,6 +45,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `docs/storage_backends.py` is deleted: it was an unreferenced duplicate of
   the copy inside `docs/storage-backends-configmap.yaml` (the only one ever
   mounted) that still carried a runtime `pip install boto3==1.35.99` attempt.
+  With no in-place patching left, the backend Deployment and the migrations
+  Job **no longer run as root**: both now run as the image's own user
+  (`runAsNonRoot`, `runAsUser: 1001`, `runAsGroup: 127`,
+  `allowPrivilegeEscalation: false`), and gunicorn gets `--no-control-socket`
+  because gunicorn 26 would otherwise try to create `$HOME/.gunicorn` (HOME is
+  `/` for that user). The `mt_patches` files are two `subPath` mounts, so an
+  in-place ConfigMap edit cannot reach a running pod without a rollout.
 - **Docs frontend web root moved to `/app`** (impress 4.8, nginx-unprivileged
   image with its own entrypoint): the `save-status.js` and
   `logo-email.png` ConfigMap mounts now land at `/app/static` and

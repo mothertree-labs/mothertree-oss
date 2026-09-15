@@ -66,6 +66,7 @@ from unittest import mock
 from django.apps import AppConfig
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.test.utils import override_settings
 from django.utils.html import escape
 
 logger = logging.getLogger("mt_patches")
@@ -137,6 +138,13 @@ class PinnedLinkContext(dict):
         return super().pop(key, *default)
 
 
+def _mask_email(value):
+    """'alice@example.com' -> 'a***@example.com'; never returns the local part."""
+    value = str(value)
+    local, sep, domain = value.partition("@")
+    return f"{local[:1]}***@{domain}" if sep else f"{local[:1]}***"
+
+
 def _check_signature(func, expected, label):
     actual = str(inspect.signature(func))
     if actual != expected:
@@ -192,9 +200,12 @@ def install(document_cls, account_portal_url):
             if list(emails) != [invitee]:
                 # send_invitation_email started emailing someone other than the
                 # invitee while our pin was active: upstream semantics changed.
+                # Addresses are masked; this message can land in pod logs.
                 raise PatchError(
-                    "send_email recipients while an invitation pin is active are "
-                    f"{list(emails)!r}, expected [{invitee!r}]"
+                    "send_email recipients while an invitation pin is active: "
+                    f"{len(list(emails))} recipient(s) "
+                    f"{[_mask_email(e) for e in emails]}, expected exactly "
+                    f"[{_mask_email(invitee)!r}]"
                 )
             context = PinnedLinkContext(context, link)
         return original_send_email(self, subject, emails, context, language)
@@ -210,8 +221,12 @@ def self_test(document_cls, account_portal_url):
     """Send one invitation through the real code path with send_mail captured.
 
     No database access: the Document is never saved, EMAIL_URL_APP short-circuits
-    the Site lookup, and send_mail is replaced before anything reaches SMTP.
+    the Site lookup, and send_mail is replaced before anything reaches SMTP. As a
+    belt-and-braces guard the email backend is switched to locmem for the
+    duration of the test, so a missed mock lands in django.core.mail.outbox
+    (checked empty afterwards) instead of on the wire.
     """
+    from django.core import mail as django_mail  # pylint: disable=import-outside-toplevel
     from core import models as core_models  # pylint: disable=import-outside-toplevel
 
     captured = []
@@ -232,8 +247,18 @@ def self_test(document_cls, account_portal_url):
     invitee = "invitee+selftest@example.invalid"
     expected_link = guest_landing_link(account_portal_url, invitee, document.id)
 
-    with mock.patch.object(core_models, "send_mail", capture_send_mail):
-        document.send_invitation_email(invitee, "editor", sender, "en-us")
+    with override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
+        django_mail.outbox = []
+        with mock.patch.object(core_models, "send_mail", capture_send_mail):
+            document.send_invitation_email(invitee, "editor", sender, "en-us")
+        leaked = len(django_mail.outbox)
+        django_mail.outbox = []
+    if leaked:
+        raise PatchError(
+            f"self-test: {leaked} message(s) reached the Django email backend; "
+            "core.models.send_mail was not intercepted (nothing was sent: the "
+            "backend was locmem for the test)"
+        )
 
     if len(captured) != 1:
         raise PatchError(f"self-test expected exactly one email, got {len(captured)}")

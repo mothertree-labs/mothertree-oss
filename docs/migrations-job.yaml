@@ -85,8 +85,14 @@ spec:
               mountPath: /app/mt_settings.py
               subPath: mt_settings.py
               readOnly: true
+            # subPath file mounts, see backend-deployment.yaml for why.
             - name: mt-patches
-              mountPath: /app/mt_patches
+              mountPath: /app/mt_patches/__init__.py
+              subPath: __init__.py
+              readOnly: true
+            - name: mt-patches
+              mountPath: /app/mt_patches/apps.py
+              subPath: apps.py
               readOnly: true
           # Short-lived job, but it runs the full Django app-import (boto3 +
           # malware_detection). On a cold/contended dev cluster a 100m CPU request
@@ -99,8 +105,12 @@ spec:
               memory: 256Mi
             limits:
               memory: 512Mi
+          # Image's own unprivileged user; migrate needs no writes under /app.
           securityContext:
-            runAsUser: 0
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 127
+            allowPrivilegeEscalation: false
       volumes:
         - name: storage-backends
           configMap:
