@@ -66,7 +66,7 @@ variable "postgres_version" {
   # REPLACING a VM whose data volume survives, set it to the major already
   # under /mnt/pgdata on that volume: cloud-init only adopts an existing
   # cluster directory for the exact major it is given.
-  default     = "17"
+  default = "17"
 }
 
 variable "tags" {
