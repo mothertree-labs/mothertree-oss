@@ -5,12 +5,16 @@
 image:
   repository: docker.io/emberstack/kubernetes-reflector
 
-# Single replica, watch-driven, no leader election; sized from the chart's
-# own footprint (a small .NET service) — the same envelope as cert-manager.
+# Single replica, watch-driven, no leader election. Requests match the
+# controller's idle footprint (a small .NET service). The memory LIMIT is
+# generous on purpose: the controller caches every watched Secret and
+# ConfigMap cluster-wide, and an OOM loop between deploys would be exactly the
+# silent failure mode the propagation gate exists for (#673) — the gate would
+# catch it on the next deploy, but not before.
 resources:
   requests:
     cpu: 50m
     memory: 64Mi
   limits:
     cpu: 200m
-    memory: 256Mi
+    memory: 512Mi

@@ -67,7 +67,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   gate was landed first on the old chart so it is proven against a known-good
   controller; the pin is a separate, independently revertable commit. New
   `apps/values/reflector.yaml` sets only the qualified image repository and
-  modest resources (50m/64Mi requests, 200m/256Mi limits). The first deploy
+  resources (50m/64Mi requests; 200m CPU and a deliberately roomy 512Mi memory
+  limit, because the controller caches every watched Secret and ConfigMap
+  cluster-wide and an OOM loop between deploys would be the very failure mode
+  above). The canary stamp carries 64 random bits so a stale or forged mirror
+  can never match by accident, and the metadata reader refuses `.data` on any
+  Secret but the canary. The first deploy
   replaces the reflector pod once; the canary then proves the new controller
   propagates before anything else is deployed.
 - The web-search gate is now **fatal on prod and prod-eu, advisory on dev**,

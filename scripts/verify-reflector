@@ -103,7 +103,7 @@ main() {
             exit 2
         fi
     fi
-    mt_require_commands kubectl
+    mt_require_commands kubectl openssl   # openssl: canary stamp entropy
     local timeout="${REFLECTOR_VERIFY_TIMEOUT:-90}"
     local tenant="${MT_TENANT:-}"
     local passive=false
@@ -153,6 +153,7 @@ main() {
     fi
 
     local ns name targets selectors checked=0
+    local -a _entries=()
     while IFS=$'\t' read -r ns name targets selectors; do
         [ -n "$ns" ] || continue
         checked=$((checked + 1))
@@ -163,6 +164,24 @@ main() {
         fi
         if [ -z "$targets" ]; then
             print_error "$ns/$name has reflection-auto-enabled but an empty reflection-auto-namespaces list — the controller reads that as EVERY namespace; refusing to guess a target list"
+            failures=$((failures + 1))
+            continue
+        fi
+        # The controller treats every list entry as a full-match REGULAR
+        # EXPRESSION, so a `.` or `*` in an entry silently widens where the
+        # private key is copied. Namespace names are [a-z0-9-]; anything else
+        # is a misconfigured source, not a target to wait for.
+        local bad_target="" entry
+        IFS=',' read -r -a _entries <<< "$targets"
+        for entry in "${_entries[@]}"; do
+            entry="${entry//[[:space:]]/}"
+            [ -z "$entry" ] && continue
+            case "$entry" in
+                *[!a-z0-9-]*) bad_target="$entry"; break ;;
+            esac
+        done
+        if [ -n "$bad_target" ]; then
+            print_error "$ns/$name lists target '$bad_target' — not a plain namespace name ([a-z0-9-]); the controller reads entries as full-match regular expressions, so this may reflect the key into unintended namespaces (see apps/manifests/wildcard/certificate.yaml.tpl)"
             failures=$((failures + 1))
             continue
         fi

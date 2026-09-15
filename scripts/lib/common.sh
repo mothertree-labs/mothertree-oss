@@ -1903,11 +1903,28 @@ mt_coredns_rewrite_require() {
 # Prints the field, or the token MISSING (NotFound) / UNREADABLE (any other
 # kubectl failure). Always returns 0; callers interpret the token. A field the
 # object lacks (e.g. a missing annotation) prints as an empty line.
+#
+# Leak guard: this helper is generic, so it refuses any `{.data.` path on a
+# Secret other than the canary (whose data is a stamp we generated) — the
+# wildcard TLS Secrets it is otherwise pointed at hold the tenant's PRIVATE
+# KEY. Refused reads report UNREADABLE (fail closed) with the reason on stderr.
+# stdout and stderr are kept apart: a kubectl warning on stderr with rc 0 must
+# not become part of a resourceVersion and read as a spurious lag.
 _mt_secret_meta() {
-    local ns="$1" name="$2" path="$3" out rc=0
-    out=$(kubectl get secret "$name" -n "$ns" -o jsonpath="$path" 2>&1) || rc=$?
+    local ns="$1" name="$2" path="$3" out err rc=0 errf
+    case "$path" in
+        *'{.data.'*)
+            if [ "$name" != "reflector-canary" ]; then
+                print_error "_mt_secret_meta: refusing to read Secret data of $ns/$name (only metadata may be read here)" >&2
+                echo UNREADABLE
+                return 0
+            fi ;;
+    esac
+    errf=$(mktemp)
+    out=$(kubectl get secret "$name" -n "$ns" -o jsonpath="$path" 2>"$errf") || rc=$?
+    err=$(cat "$errf" 2>/dev/null); rm -f "$errf"
     if [ "$rc" -ne 0 ]; then
-        case "$out" in
+        case "$err" in
             *NotFound*|*"not found"*) echo MISSING ;;
             *) echo UNREADABLE ;;
         esac
@@ -1998,7 +2015,9 @@ mt_wait_for_reflection() {
 #
 # Applies an Opaque Secret `reflector-canary` in <src_ns>, annotated to
 # auto-reflect into <target_ns> only, with data.stamp = the current epoch
-# seconds — so every run is a real change the controller has to carry. Then
+# seconds plus 64 random bits (unguessable, so a stale or forged mirror can
+# never match by accident) — every run is a real change the controller has to
+# carry. Then
 # requires the mirror in <target_ns> to reach reflected-version == source
 # resourceVersion AND to carry the same stamp within <timeout>. Returns 0 when
 # proven, 1 otherwise with the fix named.
@@ -2012,7 +2031,7 @@ mt_reflector_canary() {
     local target_ns="${2:?mt_reflector_canary: target namespace required}"
     local timeout="${3:-90}"
     local name="reflector-canary" stamp stamp_b64 prev_changed=false rc=0
-    stamp=$(date +%s)
+    stamp="$(date +%s)-$(openssl rand -hex 8)"
     stamp_b64=$(printf '%s' "$stamp" | base64 | tr -d '\n')
     if mt_has_changes; then prev_changed=true; fi
 

@@ -9,10 +9,12 @@
 #   <ns>.<name>.reflected   its reflected-version annotation (absent = unannotated)
 #   <ns>.<name>.stamp       its data.stamp (base64, as the API would return it)
 #   <ns>.<name>.unreadable  any read fails with a non-NotFound error
+#   stderr-warning          every read also prints a kubectl warning on stderr (rc 0)
 #   flip-at / flip-ns       after N `get secret` calls, copy <flip-ns>.*.reflected.later
 #                           over .reflected (a controller catching up mid-wait)
-# and refuses whole-object reads (-o json/yaml) of a Secret: the gates must
-# only ever pull metadata fields, so Secret data can never leak into a log.
+# and refuses whole-object reads (-o json/yaml) of a Secret and any `{.data.`
+# read of a Secret other than the canary: the gates must only ever pull
+# metadata fields, so Secret data can never leak into a log.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,6 +38,8 @@ case " $* " in
     *" get secret "*)
         # kubectl get secret NAME -n NS -o jsonpath=PATH
         name=$3; ns=$5; path=${7#jsonpath=}
+        case "$path" in *'{.data.'*) [ "$name" = reflector-canary ] || { echo "fake-kubectl: .data read of non-canary Secret $ns/$name refused: $path" >&2; exit 98; } ;; esac
+        [ -f "$S/stderr-warning" ] && echo "Warning: some kubectl warning on stderr" >&2
         n=$(bump getsecret)
         if [ -f "$S/flip-at" ] && [ "$n" -ge "$(cat "$S/flip-at")" ]; then
             fns=$(cat "$S/flip-ns")
@@ -102,6 +106,30 @@ has "in-sync: says so" "in sync in 3 namespace(s)" "$out"
 has "in-sync: names the source rv" "(rv 100)" "$out"
 check "in-sync: no whole-object reads" 0 "$(grep -cE ' -o=?(json|yaml)( |$)' "$MT_TEST_CALLS")"
 has "in-sync: reads only metadata fields" "-o jsonpath={.metadata." "$(cat "$MT_TEST_CALLS")"
+
+# --- a kubectl warning on stderr (rc 0) must not corrupt the rv -------------
+reset
+secret $SRC $SEC 100; secret tn-x-mail $SEC 7 100; secret tn-x-docs $SEC 8 100; secret infra-auth $SEC 9 100
+touch "$MT_TEST_STATE/stderr-warning"
+out=$(mt_wait_for_reflection $SRC $SEC "$TARGETS" 0 2>/dev/null); rc=$?
+check "stderr warning: rc" 0 "$rc"
+has "stderr warning: clean rv" "(rv 100)" "$out"
+lacks "stderr warning: warning text not in the value" "Warning" "$out"
+check "stderr warning: helper returns only stdout" 100 "$(_mt_secret_meta $SRC $SEC '{.metadata.resourceVersion}' 2>/dev/null)"
+
+# --- leak guard: .data of a non-canary Secret is refused, fail closed --------
+reset
+secret $SRC $SEC 100 "" dGxza2V5
+out=$(_mt_secret_meta $SRC $SEC '{.data.tls\.key}' 2>"$TMP/guard.err"); rc=$?
+check "leak guard: helper rc" 0 "$rc"
+check "leak guard: token" UNREADABLE "$out"
+has "leak guard: explains on stderr" "refusing to read Secret data of $SRC/$SEC" "$(cat "$TMP/guard.err")"
+check "leak guard: kubectl never called" 0 "$(grep -c ' get secret ' "$MT_TEST_CALLS")"
+lacks "leak guard: data never surfaces" "dGxza2V5" "$out$(cat "$TMP/guard.err")"
+kubectl get secret $SEC -n $SRC -o jsonpath='{.data.tls\.key}' >/dev/null 2>&1; rc=$?
+check "leak guard: the fake itself refuses a non-canary .data read" 98 "$rc"
+out=$(_mt_secret_meta infra-auth reflector-canary '{.data.stamp}' 2>&1); rc=$?
+check "leak guard: canary .data read still allowed (MISSING here, not refused)" MISSING "$out"
 
 # --- one lagging namespace: fails and the message names exactly it ----------
 reset
@@ -186,7 +214,7 @@ lacks "canary manifest: no selector annotation" "namespaces-selector" "$m"
 has "canary manifest: Opaque" "type: Opaque" "$m"
 stamp_b64=$(awk '$1 == "stamp:" { print $2 }' "$MT_TEST_MANIFEST")
 stamp=$(printf '%s' "$stamp_b64" | base64 -d 2>/dev/null)
-case "$stamp" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*) check "canary manifest: stamp is base64 epoch seconds" y y ;; *) check "canary manifest: stamp is base64 epoch seconds" "epoch" "$stamp" ;; esac
+case "$stamp" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) check "canary manifest: stamp is base64(epoch-16hex)" y y ;; *) check "canary manifest: stamp is base64(epoch-16hex)" "epoch-16hex" "$stamp" ;; esac
 has "canary ok: stamp echoed from our own value, not the Secret" "stamp $stamp mirrored" "$out"
 check "canary ok: change tracker restored (was clean)" false "$_mt_deploy_changed"
 has "canary ok: diff ran before apply" "kubectl diff -f -" "$(cat "$MT_TEST_CALLS")"
