@@ -453,7 +453,7 @@ mt_pg_password() {
 }
 
 # Run psql against the external PG VM via PgBouncer.
-# Uses a temporary pod with the postgres:18-alpine image.
+# Uses a temporary pod running the postgres alpine client image pinned below.
 # Usage: mt_psql [-d dbname] -c "SQL..."
 #        echo "SQL" | mt_psql [-d dbname]
 mt_psql() {

@@ -286,7 +286,10 @@ variable "postgres_version" {
   # The major that actually runs on every environment is managed by Ansible
   # (pg_version, fed from the private infra config's .postgresql.version).
   # Keep this equal to Ansible's default so a fresh VM is not initialised on
-  # an older major than the one Ansible then installs and manages.
+  # an older major than the one Ansible then installs and manages. When
+  # REPLACING a VM whose data volume survives, set it to the major already
+  # under /mnt/pgdata on that volume: cloud-init only adopts an existing
+  # cluster directory for the exact major it is given.
   default     = "17"
 }
 

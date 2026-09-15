@@ -110,7 +110,7 @@
         // client pod onto a non-alpine tag, and the `--image=` prefix cannot
         // overlap with the `image:` matchString above (different separator, no
         // leading `--`). RE2-safe: no lookaround, no backreferences.
-        "--image=[\"']?(?<depName>postgres):(?<currentValue>[0-9]+(?:\\.[0-9]+)*-alpine)[\"']?",
+        "--image=[\"']?(?<depName>postgres):(?<currentValue>[0-9]+(?:\\.[0-9]+)*-alpine)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?[\"']?",
       ],
       "datasourceTemplate": "docker",
     },
