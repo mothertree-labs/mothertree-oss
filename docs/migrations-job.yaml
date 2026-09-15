@@ -20,14 +20,13 @@ spec:
       restartPolicy: Never
       containers:
         - name: backend
-          image: lasuite/impress-backend:v4.4.0
+          image: lasuite/impress-backend:v5.6.1
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
             - -c
             - |
               set -euo pipefail
-              pip install --no-cache-dir 'boto3==1.42.17' || true
               python manage.py migrate --noinput
           envFrom:
             - configMapRef:
@@ -70,12 +69,25 @@ spec:
                 secretKeyRef:
                   name: docs-secrets
                   key: OIDC_RP_CLIENT_SECRET
-            - name: DEFAULT_FILE_STORAGE
-              value: "storage_backends.LinodeS3Boto3Storage"
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          # Same settings module as the backend (DJANGO_SETTINGS_MODULE=mt_settings
+          # from docs-config), so the same three mounts are required or the
+          # import fails before `migrate` runs.
           volumeMounts:
             - name: storage-backends
               mountPath: /app/storage_backends.py
               subPath: storage_backends.py
+            - name: media-middleware
+              mountPath: /app/impress/middleware.py
+              subPath: middleware.py
+            - name: mt-settings
+              mountPath: /app/mt_settings.py
+              subPath: mt_settings.py
+              readOnly: true
+            - name: mt-patches
+              mountPath: /app/mt_patches
+              readOnly: true
           # Short-lived job, but it runs the full Django app-import (boto3 +
           # malware_detection). On a cold/contended dev cluster a 100m CPU request
           # got starved during concurrent tenant deploys, stretching the import
@@ -93,4 +105,24 @@ spec:
         - name: storage-backends
           configMap:
             name: storage-backends
+        - name: media-middleware
+          configMap:
+            name: storage-backends
+            items:
+              - key: middleware.py
+                path: middleware.py
+        - name: mt-settings
+          configMap:
+            name: docs-mt-python
+            items:
+              - key: mt_settings.py
+                path: mt_settings.py
+        - name: mt-patches
+          configMap:
+            name: docs-mt-python
+            items:
+              - key: __init__.py
+                path: __init__.py
+              - key: apps.py
+                path: apps.py
 

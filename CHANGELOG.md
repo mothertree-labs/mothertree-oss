@@ -7,6 +7,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **La Suite Docs (impress) 4.4.0 → 5.6.1** (`docs/backend-deployment.yaml`,
+  `docs/migrations-job.yaml`, `docs/frontend-deployment.yaml.tpl`,
+  `docs/y-provider-deployment.yaml`; tracking issue #606). This is a **schema
+  one-way door**: the `docs-migrations` Job applies core migrations 0028–0033
+  per tenant, and 0030 adds a NOT NULL `is_first_connection` column to the
+  user table, so a plain image-pin revert afterwards 500s every new login
+  (4.4.0 inserts users without that column). 0028 and 0032 also drop data
+  (templates, link-trace masking). **Rollback is forward-only**: take a
+  `pg_dump` of every `docs_<tenant>` database before merging; to go back,
+  either restore the dump, or — with the 5.x image still running — run
+  `python manage.py migrate core 0027` in a backend pod and only then revert
+  the pins. The deploy pipeline does not dump automatically.
+- **Docs customizations rewritten to fail closed** (`docs/mt_settings.py`,
+  `docs/mt_patches/`, ConfigMap `docs-mt-python`). Until now the backend
+  container regex-edited `impress/settings.py` at start-up (MediaMiddleware +
+  Linode storage backend) and `docs/patch_invitation.py` string-matched
+  `core/models.py` to redirect invitation emails to the account portal's
+  guest landing. Both failed *open*: on 4.8.x the invitation patch printed a
+  WARNING, exited 0, and shipped the plain document link (#606). Now
+  `DJANGO_SETTINGS_MODULE=mt_settings` loads a django-configurations subclass
+  of upstream `Production` that prepends the middleware, swaps the default
+  storage backend and appends the `mt_patches` app; that app's
+  `AppConfig.ready()` wraps `Document.send_invitation_email` /
+  `Document.send_email` (exact `inspect.signature` match required), pins the
+  guest-landing `link` through upstream's `context.update`, and runs a
+  send-path self-test with `send_mail` captured before the first request.
+  Any drift — a renamed method, a refactor that stops honouring the context,
+  a missing `ACCOUNT_PORTAL_URL` or `DJANGO_EMAIL_URL_APP` — raises at
+  start-up, the gunicorn worker does not boot and the pod never becomes
+  Ready, instead of silently sending the wrong link. Exactly one
+  `[mt_patches] ok` line is logged per worker. The `pip install boto3` at
+  container start is gone (the 5.x image is `uv`-built with boto3 in
+  `/app/.venv`; the old line targeted the wrong interpreter), as is the
+  `Site` domain hack in `apps/deploy-docs.sh`: email links now come from
+  `DJANGO_EMAIL_URL_APP` (docs-config), the setting upstream added in 4.5.
+  `docs/storage_backends.py` is deleted: it was an unreferenced duplicate of
+  the copy inside `docs/storage-backends-configmap.yaml` (the only one ever
+  mounted) that still carried a runtime `pip install boto3==1.35.99` attempt.
+- **Docs frontend web root moved to `/app`** (impress 4.8, nginx-unprivileged
+  image with its own entrypoint): the `save-status.js` and
+  `logo-email.png` ConfigMap mounts now land at `/app/static` and
+  `/app/email-assets`, which do not exist in the image and so shadow nothing;
+  the explicit `command:` override is dropped in favour of the image's
+  entrypoint. `e2e/tests/smoke/docs-health.spec.ts` gains a
+  `/static/save-status.js` 200 assertion next to the existing logo check, so
+  a future root move cannot 404 either asset silently again.
 - The web-search gate is now **fatal on prod and prod-eu, advisory on dev**,
   derived from `MT_ENV` in `deploy-llm-webui.sh`. When the gate was made advisory
   it was made advisory *everywhere*, which was the safe default at the time but

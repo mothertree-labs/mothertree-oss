@@ -15,7 +15,7 @@ data:
     class LinodeS3Boto3Storage(S3Boto3Storage):
         """
         Custom S3 storage backend for Linode Object Storage.
-        Uses boto3 1.35.99 for compatibility.
+        Uses the boto3 shipped in the impress image.
         Generates presigned URLs for private files.
         """
         

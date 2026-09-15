@@ -149,10 +149,21 @@ mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/env-d-yprovider-configmap.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/docs-config.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 
-# Create invitation patch ConfigMap (patches Docs email links to go through the account portal guest landing)
-mt_apply kubectl apply -f <(kubectl -n "$NS_DOCS" create configmap docs-invitation-patch \
-  --from-file=patch_invitation.py="$REPO_ROOT/docs/patch_invitation.py" \
+# Python customizations ConfigMap: mt_settings.py (settings subclass selected by
+# DJANGO_SETTINGS_MODULE=mt_settings in docs-config) and the mt_patches Django
+# app (invitation-email links through the account portal guest landing). Both
+# fail closed at import if the upstream image drifts, so a change here must
+# restart the backend — hence mt_apply.
+for f in docs/mt_settings.py docs/mt_patches/__init__.py docs/mt_patches/apps.py; do
+  [ -f "$REPO_ROOT/$f" ] || { print_error "Missing $f (required by the docs backend)"; exit 1; }
+done
+mt_apply kubectl apply -f <(kubectl -n "$NS_DOCS" create configmap docs-mt-python \
+  --from-file=mt_settings.py="$REPO_ROOT/docs/mt_settings.py" \
+  --from-file=__init__.py="$REPO_ROOT/docs/mt_patches/__init__.py" \
+  --from-file=apps.py="$REPO_ROOT/docs/mt_patches/apps.py" \
   --dry-run=client -o yaml)
+# The pre-5.x text-patching ConfigMap is no longer mounted; drop it if present.
+kubectl -n "$NS_DOCS" delete configmap docs-invitation-patch --ignore-not-found
 
 # Email assets ConfigMap — logo served by the frontend at /email-assets/logo-email.png
 # (referenced by DJANGO_EMAIL_LOGO_IMG in docs-config for invitation emails)
@@ -292,21 +303,8 @@ if ! poll_job_complete "$NS_DOCS" "docs-migrations" 900 5; then
 fi
 print_success "Database migrations completed"
 
-# Step 10b: Set Django Site domain for email links
-print_status "Setting Django Site domain..."
-BACKEND_POD=$(kubectl -n "$NS_DOCS" get pods -l app=backend --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-if [ -n "$BACKEND_POD" ]; then
-    kubectl -n "$NS_DOCS" exec "$BACKEND_POD" -- python manage.py shell -c "
-from django.contrib.sites.models import Site
-site = Site.objects.get(pk=1)
-site.domain = 'https://${DOCS_HOST}'
-site.name = '${TENANT_DISPLAY_NAME:-MotherTree} Docs'
-site.save()
-print(f'Site domain set to: {site.domain}')
-" 2>/dev/null && print_success "Django Site domain configured" || print_warning "Failed to set Site domain (non-critical)"
-else
-    print_warning "No running backend pod found, skipping Site domain configuration"
-fi
+# Email link base URL is DJANGO_EMAIL_URL_APP in docs-config (impress >= 4.5);
+# the django.contrib.sites row is no longer consulted, so no Site domain hack.
 
 # Step 11: Keycloak realm import is done in create_env script after Keycloak is deployed
 # (Keycloak is deployed via helmfile in create_env, after deploy-docs.sh completes)
