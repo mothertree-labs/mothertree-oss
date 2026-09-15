@@ -1899,35 +1899,60 @@ mt_coredns_rewrite_require() {
 # generated itself.
 # ---------------------------------------------------------------------------
 
+# _mt_jsonpath_metadata_only <jsonpath> [allow-canary-stamp=false]
+# ALLOWLIST for the jsonpath a Secret may be read with. After deleting every
+# `{.metadata.` opener, the exact output literals `{range .items[*]}`,
+# `{end}`, `{"\t"}`, `{"\n"}` (the cluster-wide listing in verify-reflector),
+# and — only when the second argument is "true" — the exact `{.data.stamp}`,
+# nothing structural may remain: any `{`, `[`, `@`, `$`, `..` or whitespace
+# left over is a construct that can reach Secret data (`{.data}`, `{$.data.x}`,
+# `{@.data.x}`, `{.data["tls.key"]}`, `{..tls\.key}`, `{ .data.x}`,
+# `{["data"]["x"]}`, a concatenated `{.metadata.name}{.data.x}`) and the
+# path is refused. A denylist on `{.data.` was bypassable by every other
+# spelling; this admits only what the gates actually use. Returns 0/1.
+_mt_jsonpath_metadata_only() {
+    local rest="$1" allow_stamp="${2:-false}" lit
+    lit='{.metadata.';        rest="${rest//"$lit"/}"
+    lit='{range .items[*]}';  rest="${rest//"$lit"/}"
+    lit='{end}';              rest="${rest//"$lit"/}"
+    lit='{"\t"}';             rest="${rest//"$lit"/}"
+    lit='{"\n"}';             rest="${rest//"$lit"/}"
+    if [ "$allow_stamp" = true ]; then
+        lit='{.data.stamp}';  rest="${rest//"$lit"/}"
+    fi
+    case "$rest" in
+        *'{'*|*'['*|*'@'*|*'$'*|*'..'*|*[[:space:]]*) return 1 ;;
+    esac
+    return 0
+}
+
 # _mt_secret_meta <namespace> <secret> <jsonpath>
 # Prints the field, or the token MISSING (NotFound) / UNREADABLE (any other
-# kubectl failure). Always returns 0; callers interpret the token. A field the
-# object lacks (e.g. a missing annotation) prints as an empty line.
+# kubectl failure, or a refused path). Always returns 0; callers interpret the
+# token. A field the object lacks (e.g. a missing annotation) prints as an
+# empty line.
 #
-# Leak guard: this helper is generic, so it refuses any `{.data.` path on a
-# Secret other than the canary (whose data is a stamp we generated) — the
-# wildcard TLS Secrets it is otherwise pointed at hold the tenant's PRIVATE
-# KEY. Refused reads report UNREADABLE (fail closed) with the reason on stderr.
-# stdout and stderr are kept apart: a kubectl warning on stderr with rc 0 must
-# not become part of a resourceVersion and read as a spurious lag.
+# Leak guard: this helper is generic and the Secrets it is pointed at hold the
+# tenant's PRIVATE KEY, so the path must pass _mt_jsonpath_metadata_only; the
+# only data read admitted is `{.data.stamp}` on `reflector-canary` (name AND
+# exact path — a stamp we generated). A refused path reports UNREADABLE (fail
+# closed) with the reason on stderr and kubectl is never invoked.
+# kubectl's stderr is discarded (a warning on stderr with rc 0 must never
+# become part of a resourceVersion); on a non-zero rc the object is classified
+# by a second metadata-only call, `--ignore-not-found -o name`.
 _mt_secret_meta() {
-    local ns="$1" name="$2" path="$3" out err rc=0 errf
-    case "$path" in
-        *'{.data.'*)
-            if [ "$name" != "reflector-canary" ]; then
-                print_error "_mt_secret_meta: refusing to read Secret data of $ns/$name (only metadata may be read here)" >&2
-                echo UNREADABLE
-                return 0
-            fi ;;
-    esac
-    errf=$(mktemp)
-    out=$(kubectl get secret "$name" -n "$ns" -o jsonpath="$path" 2>"$errf") || rc=$?
-    err=$(cat "$errf" 2>/dev/null); rm -f "$errf"
+    local ns="$1" name="$2" path="$3" out rc=0 allow_stamp=false
+    [ "$name" = "reflector-canary" ] && allow_stamp=true
+    if ! _mt_jsonpath_metadata_only "$path" "$allow_stamp"; then
+        print_error "_mt_secret_meta: refusing jsonpath '$path' on Secret $ns/$name — only metadata fields may be read here" >&2
+        echo UNREADABLE
+        return 0
+    fi
+    out=$(kubectl get secret "$name" -n "$ns" -o jsonpath="$path" 2>/dev/null) || rc=$?
     if [ "$rc" -ne 0 ]; then
-        case "$err" in
-            *NotFound*|*"not found"*) echo MISSING ;;
-            *) echo UNREADABLE ;;
-        esac
+        local probe prc=0
+        probe=$(kubectl get secret "$name" -n "$ns" --ignore-not-found -o name 2>/dev/null) || prc=$?
+        if [ "$prc" -eq 0 ] && [ -z "$probe" ]; then echo MISSING; else echo UNREADABLE; fi
         return 0
     fi
     printf '%s\n' "$out"
@@ -2030,8 +2055,13 @@ mt_reflector_canary() {
     local src_ns="${1:?mt_reflector_canary: source namespace required}"
     local target_ns="${2:?mt_reflector_canary: target namespace required}"
     local timeout="${3:-90}"
-    local name="reflector-canary" stamp stamp_b64 prev_changed=false rc=0
-    stamp="$(date +%s)-$(openssl rand -hex 8)"
+    local name="reflector-canary" stamp stamp_b64 prev_changed=false rc=0 rnd
+    # A failed/missing openssl must fail the canary, never degrade to `epoch-`.
+    rnd=$(openssl rand -hex 8 2>/dev/null) && [ "${#rnd}" -eq 16 ] || {
+        print_error "Reflector canary: openssl rand failed — cannot build an unguessable stamp (is openssl installed?)"
+        return 1
+    }
+    stamp="$(date +%s)-${rnd}"
     stamp_b64=$(printf '%s' "$stamp" | base64 | tr -d '\n')
     if mt_has_changes; then prev_changed=true; fi
 

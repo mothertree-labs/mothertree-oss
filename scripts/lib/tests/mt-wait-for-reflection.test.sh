@@ -12,9 +12,11 @@
 #   stderr-warning          every read also prints a kubectl warning on stderr (rc 0)
 #   flip-at / flip-ns       after N `get secret` calls, copy <flip-ns>.*.reflected.later
 #                           over .reflected (a controller catching up mid-wait)
-# and refuses whole-object reads (-o json/yaml) of a Secret and any `{.data.`
-# read of a Secret other than the canary: the gates must only ever pull
-# metadata fields, so Secret data can never leak into a log.
+# and refuses whole-object reads (-o json/yaml) of a Secret and any jsonpath
+# outside the metadata-only allowlist (same rule as _mt_jsonpath_metadata_only;
+# `{.data.stamp}` admitted on the canary only): the gates must only ever pull
+# metadata fields, so Secret data can never leak into a log. `--ignore-not-found
+# -o name` (the MISSING/UNREADABLE classifier) prints secret/<name> or nothing.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,9 +39,21 @@ case " $* " in
         echo "fake-kubectl: whole-object read of a Secret is forbidden in the reflector gates: $*" >&2; exit 98 ;;
     *" get secret "*)
         # kubectl get secret NAME -n NS -o jsonpath=PATH
-        name=$3; ns=$5; path=${7#jsonpath=}
-        case "$path" in *'{.data.'*) [ "$name" = reflector-canary ] || { echo "fake-kubectl: .data read of non-canary Secret $ns/$name refused: $path" >&2; exit 98; } ;; esac
+        # kubectl get secret NAME -n NS --ignore-not-found -o name
+        name=$3; ns=$5
         [ -f "$S/stderr-warning" ] && echo "Warning: some kubectl warning on stderr" >&2
+        case " $* " in *" --ignore-not-found -o name "*)
+            [ -f "$S/$ns.$name.unreadable" ] && { echo "Unable to connect to the server: dial tcp: i/o timeout" >&2; exit 1; }
+            [ -f "$S/$ns.$name.rv" ] && echo "secret/$name"
+            exit 0 ;;
+        esac
+        path=${7#jsonpath=}
+        # Same allowlist as _mt_jsonpath_metadata_only in common.sh.
+        rest="$path"
+        lit='{.metadata.'; rest="${rest//"$lit"/}"; lit='{range .items[*]}'; rest="${rest//"$lit"/}"; lit='{end}'; rest="${rest//"$lit"/}"
+        lit='{"\t"}'; rest="${rest//"$lit"/}"; lit='{"\n"}'; rest="${rest//"$lit"/}"
+        [ "$name" = reflector-canary ] && { lit='{.data.stamp}'; rest="${rest//"$lit"/}"; }
+        case "$rest" in *'{'*|*'['*|*'@'*|*'$'*|*'..'*|*[[:space:]]*) echo "fake-kubectl: non-metadata jsonpath on Secret $ns/$name refused: $path" >&2; exit 98 ;; esac
         n=$(bump getsecret)
         if [ -f "$S/flip-at" ] && [ "$n" -ge "$(cat "$S/flip-at")" ]; then
             fns=$(cat "$S/flip-ns")
@@ -117,19 +131,57 @@ has "stderr warning: clean rv" "(rv 100)" "$out"
 lacks "stderr warning: warning text not in the value" "Warning" "$out"
 check "stderr warning: helper returns only stdout" 100 "$(_mt_secret_meta $SRC $SEC '{.metadata.resourceVersion}' 2>/dev/null)"
 
-# --- leak guard: .data of a non-canary Secret is refused, fail closed --------
+# --- leak guard: every non-metadata jsonpath is refused, fail closed --------
+# The allowlist admits `{.metadata.…}` fragments (and the listing literals);
+# anything else — however `.data` is spelled — is UNREADABLE with kubectl
+# never called, and the fake independently refuses it (exit 98).
+refused() {  # refused <ns> <name> <path>
+    reset
+    secret "$1" "$2" 100 "" dGxza2V5
+    local out rc
+    out=$(_mt_secret_meta "$1" "$2" "$3" 2>"$TMP/guard.err"); rc=$?
+    check "refused [$3] on $1/$2: helper rc" 0 "$rc"
+    check "refused [$3] on $1/$2: token" UNREADABLE "$out"
+    has "refused [$3] on $1/$2: explains on stderr" "refusing jsonpath" "$(cat "$TMP/guard.err")"
+    check "refused [$3] on $1/$2: kubectl never called" 0 "$(grep -c ' get secret ' "$MT_TEST_CALLS")"
+    lacks "refused [$3] on $1/$2: data never surfaces" "dGxza2V5" "$out$(cat "$TMP/guard.err")"
+    kubectl get secret "$2" -n "$1" -o jsonpath="$3" >/dev/null 2>&1; rc=$?
+    check "refused [$3] on $1/$2: the fake itself refuses" 98 "$rc"
+}
+refused $SRC $SEC '{.data.tls\.key}'
+refused $SRC $SEC '{.data}'
+refused $SRC $SEC '{$.data.x}'
+refused $SRC $SEC '{@.data.x}'
+refused $SRC $SEC '{ .data.x}'
+refused $SRC $SEC '{.data["tls.key"]}'
+refused $SRC $SEC '{..x}'
+refused $SRC $SEC '{["data"]["tls.key"]}'
+refused $SRC $SEC '{.metadata.name}{.data.x}'
+refused $SRC $SEC '{.metadata.annotations..x}'
+refused $SRC $SEC '{.data.stamp}'                       # exact canary path, wrong name
+refused tn-evil-mail reflector-canary '{.data.anything}'  # canary name, wrong path
+# Allowed forms: the ones the gates actually use.
 reset
-secret $SRC $SEC 100 "" dGxza2V5
-out=$(_mt_secret_meta $SRC $SEC '{.data.tls\.key}' 2>"$TMP/guard.err"); rc=$?
-check "leak guard: helper rc" 0 "$rc"
-check "leak guard: token" UNREADABLE "$out"
-has "leak guard: explains on stderr" "refusing to read Secret data of $SRC/$SEC" "$(cat "$TMP/guard.err")"
-check "leak guard: kubectl never called" 0 "$(grep -c ' get secret ' "$MT_TEST_CALLS")"
-lacks "leak guard: data never surfaces" "dGxza2V5" "$out$(cat "$TMP/guard.err")"
-kubectl get secret $SEC -n $SRC -o jsonpath='{.data.tls\.key}' >/dev/null 2>&1; rc=$?
-check "leak guard: the fake itself refuses a non-canary .data read" 98 "$rc"
+secret $SRC $SEC 100 100
+check "allowed: resourceVersion" 100 "$(_mt_secret_meta $SRC $SEC '{.metadata.resourceVersion}' 2>&1)"
+check "allowed: reflected-version annotation" 100 "$(_mt_secret_meta $SRC $SEC '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflected-version}' 2>&1)"
+_mt_jsonpath_metadata_only '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflection-auto-namespaces-selector}{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflection-allowed-namespaces-selector}'; check "allowed: concatenated metadata fields" 0 "$?"
+_mt_jsonpath_metadata_only '{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflection-auto-enabled}{"\n"}{end}'; check "allowed: verify-reflector listing form" 0 "$?"
+_mt_jsonpath_metadata_only '{range .items[*]}{.data.x}{"\n"}{end}'; check "listing form with a data field is still refused" 1 "$?"
+_mt_jsonpath_metadata_only '{.data.stamp}'; check "canary stamp path refused without the canary allowance" 1 "$?"
+_mt_jsonpath_metadata_only '{.data.stamp}' true; check "canary stamp path admitted with the allowance" 0 "$?"
 out=$(_mt_secret_meta infra-auth reflector-canary '{.data.stamp}' 2>&1); rc=$?
-check "leak guard: canary .data read still allowed (MISSING here, not refused)" MISSING "$out"
+check "canary .data.stamp read allowed (MISSING here, not refused)" MISSING "$out"
+
+# --- MISSING vs UNREADABLE come from the --ignore-not-found -o name probe ---
+reset
+secret $SRC $SEC 100
+touch "$MT_TEST_STATE/$SRC.$SEC.unreadable"
+check "unreadable source: token" UNREADABLE "$(_mt_secret_meta $SRC $SEC '{.metadata.resourceVersion}' 2>&1)"
+has "unreadable source: classifier probe used" "--ignore-not-found -o name" "$(cat "$MT_TEST_CALLS")"
+reset
+check "absent source: token" MISSING "$(_mt_secret_meta $SRC $SEC '{.metadata.resourceVersion}' 2>&1)"
+has "absent source: classifier probe used" "--ignore-not-found -o name" "$(cat "$MT_TEST_CALLS")"
 
 # --- one lagging namespace: fails and the message names exactly it ----------
 reset
@@ -255,6 +307,22 @@ check "canary apply fail: rc" 1 "$rc"
 has "canary apply fail: explains" "could not apply" "$out"
 check "canary apply fail: no secret reads attempted" 0 "$(grep -c ' get secret ' "$MT_TEST_CALLS")"
 check "canary apply fail: tracker restored" false "$_mt_deploy_changed"
+
+# --- canary: openssl missing/failing must fail the canary, never degrade ------
+reset canary-ok
+printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/openssl"; chmod +x "$TMP/bin/openssl"
+out=$(mt_reflector_canary infra-cert-manager infra-auth 0 2>&1); rc=$?
+rm -f "$TMP/bin/openssl"
+check "openssl fails: rc" 1 "$rc"
+has "openssl fails: explains" "cannot build an unguessable stamp" "$out"
+check "openssl fails: nothing applied" 0 "$(grep -c ' apply ' "$MT_TEST_CALLS")"
+check "openssl fails: tracker untouched" false "$_mt_deploy_changed"
+reset canary-ok
+printf '#!/usr/bin/env bash\necho abc\n' > "$TMP/bin/openssl"; chmod +x "$TMP/bin/openssl"
+out=$(mt_reflector_canary infra-cert-manager infra-auth 0 2>&1); rc=$?
+rm -f "$TMP/bin/openssl"
+check "openssl short output: rc" 1 "$rc"
+check "openssl short output: nothing applied" 0 "$(grep -c ' apply ' "$MT_TEST_CALLS")"
 
 echo "mt-wait-for-reflection: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

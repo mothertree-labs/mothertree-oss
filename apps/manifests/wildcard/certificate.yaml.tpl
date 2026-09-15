@@ -67,8 +67,10 @@ spec:
       # mt_wait_for_reflection and on demand by scripts/verify-reflector.
       # Literal namespace names only: the controller treats each entry as a
       # full-match REGULAR EXPRESSION, so a `.` or `*` silently widens the copy
-      # (verify-reflector rejects entries outside [a-z0-9-]). NEVER add
-      # reflection-allowed-namespaces-selector or
+      # (verify-reflector rejects entries outside [a-z0-9-]). auto-namespaces is
+      # where the controller pushes copies, allowed-namespaces is who may hold
+      # one: keep both IDENTICAL (verify-reflector fails on a mismatch). NEVER
+      # add reflection-allowed-namespaces-selector or
       # reflection-auto-namespaces-selector here either: a namespace matches
       # when it is in the list OR matches the selector (issue #673).
       reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
