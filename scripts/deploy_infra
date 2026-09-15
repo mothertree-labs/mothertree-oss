@@ -88,6 +88,7 @@ if mt_is_prod_like; then
 fi
 
 source "${REPO_ROOT}/scripts/lib/notify.sh"
+source "${REPO_ROOT}/scripts/lib/prometheus-crds.sh"
 mt_deploy_start "deploy_infra"
 
 mt_require_commands kubectl helm helmfile yq jq curl openssl git shasum
@@ -332,6 +333,23 @@ if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "$
 else
   # Remove stale Secret if SES was previously configured but isn't now.
   kubectl delete secret ses-credentials -n "$NS_MONITORING" --ignore-not-found=true >/dev/null 2>&1 || true
+fi
+
+# =============================================================================
+# prometheus-operator CRDs (before the kube-prometheus-stack helm sync)
+# =============================================================================
+# Helm installs a chart's CRDs once (first install, from the chart's `crds`
+# subchart) and never upgrades them, and nothing here re-applied them since —
+# so every kube-prometheus-stack major that bumps prometheus-operator left the
+# live CRDs on the schema of the chart that first installed the cluster, with
+# the new operator's fields silently pruned. Server-side apply the CRD set the
+# pinned chart's operator ships (version derived from the chart's appVersion,
+# see scripts/lib/prometheus-crds.sh). Idempotent; harmless on a cold cluster.
+# Must run before the sync so the new operator never starts against stale
+# CRDs; a failure here aborts the deploy before helmfile touches anything.
+if ! mt_apply_prometheus_crds "$REPO_ROOT/apps/helmfile.yaml.gotmpl"; then
+  print_error "prometheus-operator CRD pre-apply failed — not running the tier=system helmfile sync"
+  exit 1
 fi
 
 # Deploy system components via helmfile

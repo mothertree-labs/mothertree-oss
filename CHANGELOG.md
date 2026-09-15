@@ -7,6 +7,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **kube-prometheus-stack 58.7.2 → 91.4.0** (33 chart majors; prometheus-operator
+  v0.73.2 → v0.94.0, Prometheus 2.52 → 3.14, Alertmanager 0.27 → 0.34, Grafana
+  10.4 → 13.2, kube-state-metrics 2.12 → 2.20, node-exporter 1.8 → 1.12). One
+  shot rather than staged: no intermediate major needs a state migration, CRD
+  changes are cumulative, and every stage would have cost a full dev + prod
+  cycle. Rendered against our committed values for dev and prod, the Prometheus
+  and Alertmanager objects keep their names, storage specs and (prod) the SES
+  credentials mount, so the StatefulSets and PVCs are untouched; the Grafana
+  Deployment, its admin Secret, the dashboard/datasource sidecars, all three
+  ingresses and every one of our rule groups, ServiceMonitors and Probes
+  render as before. Two things do change shape: the chart now renders each
+  `additionalPrometheusRulesMap` entry as its own `PrometheusRule` (58 wrapped
+  them in one `List`), and the chart's own Grafana test pod and the PSP-era
+  Grafana Role/RoleBinding are gone.
+
+  **Why the CRD step below is the real content of this change.** Helm installs
+  a chart's CRDs once, on first install, and never upgrades them — and nothing
+  in the repo re-applied them since. Every operator bump between 58 and 91
+  shipped new CRD schemas; against the frozen ones, fields the new operator
+  reads are silently pruned on write. `deploy_infra` now server-side applies
+  the CRD set of the pinned chart's operator immediately before the
+  tier=system `helmfile sync` (`scripts/lib/prometheus-crds.sh`,
+  `mt_apply_prometheus_crds`). The operator tag is derived from the chart pin
+  (`helmfile.yaml.gotmpl` `version:` → chart `appVersion`), so there is no
+  second pin to drift and a Renovate bump of the chart line is the only edit.
+  All ten manifests are downloaded and validated before the first apply — a
+  failed download aborts the deploy with the cluster untouched and helmfile
+  never runs — and the step prints the operator version plus the
+  `controller-gen` annotation of the Prometheus CRD before and after, so the
+  deploy log shows the schema advancing. `--force-conflicts` because the live
+  CRDs are owned by `helm/Apply`; field manager `mt-deploy-crds` makes the
+  ownership visible. Idempotent; harmless on a cold cluster. Unit-tested with
+  fake kubectl/helm/curl (`scripts/lib/tests/prometheus-crds.test.sh`).
+
+  **Prometheus 3.** Our PromQL was checked against the 3.0 migration list: no
+  `holt_winters`, no `le`/`quantile` matchers (only `by (le)` grouping), no
+  regex that depends on `.` not matching a newline, no range selector under
+  5m. Prometheus 3 validates the scrape `Content-Type` strictly; every
+  exporter we scrape sends a valid one, but as belt and braces the Prometheus
+  now carries a default scrape class with
+  `fallbackScrapeProtocol: PrometheusText0.0.4`, which applies to every scrape
+  resource that does not set its own (the operator has no Prometheus-wide
+  field for this; the scrape class is how it is expressed).
+
+  **One-way door.** A TSDB written by Prometheus 3 is readable only by ≥ 2.55.
+  **Rollback recipe**: `helm rollback kube-prometheus-stack -n <monitoring
+  namespace>` *plus* `prometheus.prometheusSpec.image.tag: v2.55.1` (the last
+  2.x, which reads the v3 TSDB) — revert the chart pin in a PR carrying that
+  override so the rollback deploys through CI. Leave the v0.94 CRDs in place:
+  they are backward compatible with the old operator, and deleting a CRD
+  deletes every object of that kind. Alertmanager route matching still uses
+  `match`/`match_re` (deprecated, accepted by 0.34); converting to `matchers`
+  is a follow-up, not part of this upgrade.
 - The web-search gate is now **fatal on prod and prod-eu, advisory on dev**,
   derived from `MT_ENV` in `deploy-llm-webui.sh`. When the gate was made advisory
   it was made advisory *everywhere*, which was the safe default at the time but
