@@ -6,7 +6,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Reflector propagation gate** (#673). Each tenant's wildcard TLS Secret is
+  issued once by cert-manager and copied by the `emberstack/reflector` controller
+  into every namespace that serves it — every per-tenant ingress, Stalwart's
+  required volume, Keycloak's auth ingress in `infra-auth`. The copies are
+  ordinary Secrets that persist with or without the controller, so a dead or
+  wedged reflector was invisible: every deploy stayed green, and only when the
+  source renewed would the consumers keep the stale copy — an expired
+  certificate weeks later, noticed at best by `IngressCertExpiringSoon` 14 days
+  ahead and only where alert delivery works. Nothing in the deploy path proved
+  the controller was propagating.
+
+  The controller's own sync rule is an exact equality — a mirror is rewritten
+  iff its `reflector.v1.k8s.emberstack.com/reflected-version` annotation differs
+  from the source's `metadata.resourceVersion` (unchanged between the chart
+  versions we run) — so "in sync" needs no hashing. New in `scripts/lib/common.sh`:
+  `mt_wait_for_reflection` (every listed namespace must hold the Secret with a
+  matching `reflected-version`; on timeout it names each lagging namespace with
+  its stale version or MISSING and the source version) and `mt_reflector_canary`
+  (applies a `reflector-canary` Secret with a fresh stamp and requires the
+  mirror to carry the same version *and* stamp — proof the controller is
+  propagating right now, not just that old copies exist). Only Secret metadata
+  is ever read; Secret data never enters a variable or a log line.
+  - `deploy_infra` runs the canary right after the system DaemonSet gate
+    (`infra-cert-manager` → `infra-auth`, which exists on a cold start) and
+    fails closed with the fix named.
+  - `create_env` waits for `wildcard-tls-<tenant>` to be mirrored in sync into
+    every namespace in its reflector annotation once the certificate wait is
+    over; a lagging or missing mirror aborts the deploy. When the source Secret
+    itself does not exist yet (a slow first issuance — cert-manager's latency,
+    already warned about loudly above) the gate is skipped with a warning, so
+    the pre-existing warn-and-continue for brand-new tenants is preserved.
+  - `ci/scripts/ci-create-test-users.sh` replaces its warn-only "reflected
+    secret present" check with the same in-sync wait, fail closed.
+  - New `scripts/verify-reflector -e <env> [-t <tenant>] [--passive]`: the canary
+    plus the in-sync check of every auto-reflected source in the cluster (or one
+    tenant's), with the target list taken from the source's own annotation, so
+    only a kubeconfig is needed. A `*-namespaces-selector` annotation or an empty
+    namespace list is a failure — the controller reflects into the listed
+    namespaces *or* any matching a selector, so a selector silently widens where
+    the private key is copied (the certificate templates now carry a comment
+    forbidding it). `scripts/check-health` runs it with `--passive`, so a health
+    check never writes a Secret.
+  - Unit test `scripts/lib/tests/mt-wait-for-reflection.test.sh` (fake kubectl,
+    no cluster) covers in-sync, lagging, missing, unannotated, unreadable,
+    source-missing, catch-up mid-wait, renewal mid-wait, and the canary paths.
+
 ### Changed
+- `emberstack/reflector` chart 7.1.288 → 10.0.65 (there is no 8.x; 9.x moved to
+  .NET 9, 10.x to .NET 10 and the ES.FX "Ignite" framework). Diffing the chart's
+  own values and the rendered manifests between the two versions: the image
+  becomes the fully qualified `docker.io/emberstack/kubernetes-reflector`, the
+  container runs with `readOnlyRootFilesystem: true`, the health probes move
+  from `/healthz` on port 25080 to `/health/live` and `/health/ready` on port
+  **8080** (the `healthcheck:` values key is gone), and the TLS-verify env var is
+  renamed; RBAC is byte-identical, there are no CRDs, and the same four objects
+  are rendered. Nothing in this repo referenced port 25080. The reflection
+  annotations and the sync rule the new gate relies on are unchanged, and the
+  gate was landed first on the old chart so it is proven against a known-good
+  controller; the pin is a separate, independently revertable commit. New
+  `apps/values/reflector.yaml` sets only the qualified image repository and
+  modest resources (50m/64Mi requests, 200m/256Mi limits). The first deploy
+  replaces the reflector pod once; the canary then proves the new controller
+  propagates before anything else is deployed.
 - The web-search gate is now **fatal on prod and prod-eu, advisory on dev**,
   derived from `MT_ENV` in `deploy-llm-webui.sh`. When the gate was made advisory
   it was made advisory *everywhere*, which was the safe default at the time but

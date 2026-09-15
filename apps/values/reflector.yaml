@@ -1,0 +1,16 @@
+# emberstack/reflector — everything else is the chart's upstream default,
+# which `wait: true` in the helmfile validates on every sync (a crash-looping
+# controller fails the deploy; a wedged one is caught by the canary in
+# deploy_infra, #673).
+image:
+  repository: docker.io/emberstack/kubernetes-reflector
+
+# Single replica, watch-driven, no leader election; sized from the chart's
+# own footprint (a small .NET service) — the same envelope as cert-manager.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
