@@ -80,6 +80,12 @@
         "/^apps/(manifests|values|environments|templates)/.+\\.ya?ml(?:\\.tpl|\\.gotmpl)?$/",
         "/^apps/deploy-[^/]+\\.sh$/",
         "/^scripts/lib/nextcloud-db\\.sh$/",
+        // `kubectl run --image=postgres:<tag>` throwaway psql pods (#684). These
+        // three files were outside every pattern, so their pins drifted to 15
+        // and 16 while the dashboard showed a single "postgres 17 -> 18" item.
+        "/^scripts/lib/common\\.sh$/",
+        "/^scripts/destroy-dev-cluster\\.sh$/",
+        "/^ci/scripts/ci-e2e-diagnostics\\.sh$/",
         "/^apps/scripts/perf/build-k6-image\\.sh$/",
         "/^apps/loki-manual\\.yaml$/",
         "/^docs/.+\\.ya?ml(?:\\.tpl)?$/",
@@ -96,6 +102,15 @@
         // the real pin unmanaged and 10 minor versions behind (0.49.0 vs
         // 0.59.0), so a Renovate bump there was a no-op.
         "\\nK6_IMAGE=\\$\\{K6_IMAGE:-(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)\\}",
+        // `kubectl run ... --image=postgres:<major>[.<minor>]-alpine` pins in
+        // scripts/lib/common.sh (mt_psql, mt_pgbouncer_verify_db),
+        // scripts/destroy-dev-cluster.sh and ci/scripts/ci-e2e-diagnostics.sh
+        // (#684). Deliberately narrow: depName is the literal `postgres` and the
+        // tag must end in `-alpine`, so a Renovate bump can never swap the
+        // client pod onto a non-alpine tag, and the `--image=` prefix cannot
+        // overlap with the `image:` matchString above (different separator, no
+        // leading `--`). RE2-safe: no lookaround, no backreferences.
+        "--image=[\"']?(?<depName>postgres):(?<currentValue>[0-9]+(?:\\.[0-9]+)*-alpine)[\"']?",
       ],
       "datasourceTemplate": "docker",
     },
