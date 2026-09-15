@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+#
+# Reflector propagation check — prove that emberstack/kubernetes-reflector is
+# mirroring Secrets RIGHT NOW, and that every wildcard TLS mirror in the
+# cluster is in sync with its source.
+#
+# Why: each tenant's wildcard-tls-<tenant> Secret is issued once by
+# cert-manager and mirrored by the reflector controller into every namespace
+# that serves it (ingresses, Stalwart's required volume, Keycloak's auth
+# ingress). Mirrors are ordinary Secrets that persist with or without the
+# controller, so a dead reflector is invisible until the source renews and the
+# consumers keep the stale copy — the tenant serves an expired cert weeks later
+# and only IngressCertExpiringSoon (14 days ahead, where alert delivery works)
+# would notice. Issue #673.
+#
+# Two checks:
+#   1. ACTIVE canary (mt_reflector_canary): apply reflector-canary in the
+#      cert-manager namespace with a fresh stamp and require it to be mirrored
+#      into infra-auth — reflected-version == source resourceVersion AND the
+#      same stamp — within the timeout.
+#   2. PASSIVE: every auto-reflected source Secret in the cluster (or, with -t,
+#      the tenant's wildcard-tls-<tenant> in tn-<tenant>-matrix) must be
+#      mirrored into every namespace its reflection-auto-namespaces annotation
+#      lists, in sync (mt_wait_for_reflection). The target list is read from
+#      the annotation — the very list the controller acts on, rendered by
+#      create_env from TENANT_NAMESPACES — so no tenant config or secrets file
+#      is needed; a kubeconfig is enough (runs against prod from CI or a
+#      laptop). A source carrying a *-namespaces-selector annotation, or an
+#      EMPTY auto-namespaces list (which the controller reads as "every
+#      namespace"), is a failure: list-or-selector semantics silently widen
+#      where the private key is copied.
+#
+# Only Secret METADATA is read (one jsonpath field per call; never -o json or
+# -o yaml on a Secret): Secret data never enters a variable or a log line.
+#
+# Usage:
+#   ./scripts/verify-reflector -e <env> [-t <tenant>] [--passive]
+#       uses $KUBECONFIG, or <repo>/kubeconfig.<env>.yaml
+#   --passive   skip the canary (no Secret is written) and run only the
+#               per-source mirror check — what scripts/check-health uses, so a
+#               health check never writes to the cluster. Without the canary
+#               there is no positive control for the listing, so an empty
+#               source list is "cannot evaluate" (exit 2), never a pass.
+# Environment:
+#   REFLECTOR_VERIFY_TIMEOUT   seconds to wait per check (default 90)
+# Exit codes: 0 propagating and every mirror in sync; 1 canary failed, a mirror
+# is lagging/missing, or a source is misconfigured; 2 could not evaluate
+# (no kubeconfig, Secret listing failed or empty in --passive mode).
+set -euo pipefail
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${REPO_ROOT}/scripts/lib/common.sh"
+
+NS_CM="${NS_CERTMANAGER:-infra-cert-manager}"
+NS_CANARY_TARGET="${NS_AUTH:-infra-auth}"
+CANARY_NAME="reflector-canary"
+ANN='reflector\.v1\.k8s\.emberstack\.com'
+
+# --- source discovery --------------------------------------------------------
+# Both producers print one line per source, tab-separated:
+#   <namespace> <name> <auto-namespaces> <allowed-namespaces> <selector annotations, concatenated>
+# so the verdict loop below is the same for the cluster-wide and the -t case.
+
+# _list_sources: every Secret with reflection-auto-enabled=true, cluster-wide.
+# The canary is listed too and stripped by the caller AFTER using it as the
+# positive control that the listing works (it was just applied, so it must
+# be there — an empty listing is a broken query, not an empty cluster).
+# The jsonpath is checked against the same metadata-only allowlist as
+# _mt_secret_meta before it is sent: this is the one read that bypasses that
+# helper, and it must never grow a data field.
+_list_sources() {
+    local path
+    path='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-enabled}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces-selector}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces-selector}{"\n"}{end}'
+    if ! _mt_jsonpath_metadata_only "$path"; then
+        print_error "internal: the Secret listing jsonpath is not metadata-only — refusing to run it" >&2
+        return 2
+    fi
+    kubectl get secrets -A -o jsonpath="$path" \
+        | awk -F'\t' '$3 == "true" { print }'
+}
+
+# _tenant_source <tenant>: the tenant's wildcard source in the same shape.
+# Prints nothing and returns 1 if the Secret is MISSING, 2 if UNREADABLE.
+_tenant_source() {
+    local tenant="$1" ns="tn-${1}-matrix" name="wildcard-tls-${1}" rv auto allowed selectors
+    rv=$(_mt_secret_meta "$ns" "$name" '{.metadata.resourceVersion}')
+    case "$rv" in
+        MISSING)    return 1 ;;
+        UNREADABLE) return 2 ;;
+    esac
+    auto=$(_mt_secret_meta "$ns" "$name" '{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces}')
+    allowed=$(_mt_secret_meta "$ns" "$name" '{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces}')
+    selectors=$(_mt_secret_meta "$ns" "$name" '{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces-selector}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces-selector}')
+    printf '%s\t%s\t%s\t%s\t%s\n' "$ns" "$name" "$auto" "$allowed" "$selectors"
+}
+
+# _bad_namespace_entry <csv>: prints the first entry that is not a plain
+# namespace name and returns 0; returns 1 when every entry is [a-z0-9-].
+# The controller treats every list entry as a full-match REGULAR EXPRESSION,
+# so a `.` or `*` in an entry silently widens where the private key is
+# copied — such an entry is a misconfigured source, not a target to wait for.
+_bad_namespace_entry() {
+    local -a entries=()
+    local entry
+    IFS=',' read -r -a entries <<< "$1"
+    for entry in "${entries[@]}"; do
+        entry="${entry//[[:space:]]/}"
+        [ -z "$entry" ] && continue
+        case "$entry" in
+            *[!a-z0-9-]*) printf '%s\n' "$entry"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# --- main --------------------------------------------------------------------
+main() {
+    source "${REPO_ROOT}/scripts/lib/args.sh"
+    mt_usage() {
+        echo "Usage: $0 -e <env> [-t <tenant>] [--passive]"
+        echo ""
+        echo "Prove the reflector controller is propagating (canary) and that every"
+        echo "wildcard TLS mirror is in sync with its source (all tenants, or one)."
+        echo "  --passive   skip the canary (writes nothing); mirrors only"
+    }
+    mt_parse_args "$@"
+    mt_require_env
+    if [ -z "${KUBECONFIG:-}" ]; then
+        if [ -f "${REPO_ROOT}/kubeconfig.${MT_ENV}.yaml" ]; then
+            export KUBECONFIG="${REPO_ROOT}/kubeconfig.${MT_ENV}.yaml"
+        else
+            print_error "KUBECONFIG is not set and ${REPO_ROOT}/kubeconfig.${MT_ENV}.yaml does not exist"
+            exit 2
+        fi
+    fi
+    mt_require_commands kubectl openssl   # openssl: canary stamp entropy
+    local timeout="${REFLECTOR_VERIFY_TIMEOUT:-90}"
+    local tenant="${MT_TENANT:-}"
+    local passive=false
+    if mt_has_flag "--passive"; then passive=true; fi
+    print_status "Reflector check: env=${MT_ENV} tenant=${tenant:-<all>} timeout=${timeout}s mode=$([ "$passive" = true ] && echo passive || echo canary+passive)"
+
+    local failures=0
+
+    # 1. Active canary — is the controller propagating at all? (skipped with
+    #    --passive: nothing may be written from a health check)
+    if [ "$passive" = true ]; then
+        print_status "Canary skipped (--passive): only existing mirrors are checked, nothing is written"
+    elif ! mt_reflector_canary "$NS_CM" "$NS_CANARY_TARGET" "$timeout"; then
+        failures=$((failures + 1))
+    fi
+
+    # 2. Passive — are the real mirrors in sync?
+    local sources rc=0
+    if [ -n "$tenant" ]; then
+        sources=$(_tenant_source "$tenant") || rc=$?
+        case "$rc" in
+            1) print_error "No Secret wildcard-tls-${tenant} in tn-${tenant}-matrix — has create_env run for this tenant on ${MT_ENV}?"; exit 1 ;;
+            2) print_error "Cannot read tn-${tenant}-matrix/wildcard-tls-${tenant} — cannot evaluate"; exit 2 ;;
+        esac
+    else
+        sources=$(_list_sources) || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            print_error "Listing auto-reflected Secrets failed (rc=$rc) — cannot evaluate"
+            exit 2
+        fi
+        # Positive control (canary mode): the canary applied a moment ago must
+        # show up, or the listing itself is broken and an empty result proves
+        # nothing. In --passive mode there is no such control, so an empty
+        # list cannot be told apart from a broken query: fail to evaluate.
+        if [ "$passive" != true ] && ! printf '%s\n' "$sources" | awk -F'\t' -v ns="$NS_CM" -v n="$CANARY_NAME" '$1 == ns && $2 == n { found = 1 } END { exit !found }'; then
+            print_error "Secret listing did not return ${NS_CM}/${CANARY_NAME}, which was just applied — the query is broken, refusing to report on an empty list"
+            exit 2
+        fi
+        sources=$(printf '%s\n' "$sources" | awk -F'\t' -v n="$CANARY_NAME" '$2 != n')
+        if [ -z "$sources" ]; then
+            if [ "$passive" = true ]; then
+                print_error "No auto-reflected source Secrets found on ${MT_ENV} and no canary to prove the listing works (--passive) — cannot evaluate; run without --passive, or pass -t <tenant>"
+                exit 2
+            fi
+            print_warning "No auto-reflected source Secrets besides the canary on ${MT_ENV} — no tenant deployed yet? The passive check has nothing to verify."
+        fi
+    fi
+
+    local ns name targets allowed selectors checked=0 bad
+    while IFS=$'\t' read -r ns name targets allowed selectors; do
+        [ -n "$ns" ] || continue
+        checked=$((checked + 1))
+        if [ -n "$selectors" ]; then
+            print_error "$ns/$name carries a *-namespaces-selector annotation — forbidden: the controller reflects into the listed namespaces OR any matching the selector (see apps/manifests/wildcard/certificate.yaml.tpl)"
+            failures=$((failures + 1))
+            continue
+        fi
+        # Both lists are checked the same way: auto-namespaces is where the
+        # controller PUSHES copies, allowed-namespaces is who may HOLD one.
+        # An empty list means every namespace to the controller.
+        if [ -z "$targets" ]; then
+            print_error "$ns/$name has reflection-auto-enabled but an empty reflection-auto-namespaces list — the controller reads that as EVERY namespace; refusing to guess a target list"
+            failures=$((failures + 1))
+            continue
+        fi
+        if [ -z "$allowed" ]; then
+            print_error "$ns/$name has an empty reflection-allowed-namespaces list — the controller lets EVERY namespace hold a copy; refusing"
+            failures=$((failures + 1))
+            continue
+        fi
+        if bad=$(_bad_namespace_entry "$targets"); then
+            print_error "$ns/$name reflection-auto-namespaces lists '$bad' — not a plain namespace name ([a-z0-9-]); the controller reads entries as full-match regular expressions, so this may reflect the key into unintended namespaces (see apps/manifests/wildcard/certificate.yaml.tpl)"
+            failures=$((failures + 1))
+            continue
+        fi
+        if bad=$(_bad_namespace_entry "$allowed"); then
+            print_error "$ns/$name reflection-allowed-namespaces lists '$bad' — not a plain namespace name ([a-z0-9-]); the controller reads entries as full-match regular expressions (see apps/manifests/wildcard/certificate.yaml.tpl)"
+            failures=$((failures + 1))
+            continue
+        fi
+        if [ "${targets//[[:space:]]/}" != "${allowed//[[:space:]]/}" ]; then
+            print_error "$ns/$name: reflection-auto-namespaces ($targets) differs from reflection-allowed-namespaces ($allowed) — create_env renders both from TENANT_NAMESPACES and they must be identical (a wider allowed list lets extra namespaces hold the key)"
+            failures=$((failures + 1))
+            continue
+        fi
+        print_status "Checking $ns/$name -> $targets"
+        if ! mt_wait_for_reflection "$ns" "$name" "$targets" "$timeout"; then
+            failures=$((failures + 1))
+        fi
+    done <<< "$sources"
+
+    if [ "$failures" -gt 0 ]; then
+        print_error "Reflector check FAILED on ${MT_ENV}: ${failures} problem(s) across the canary and ${checked} source Secret(s)"
+        exit 1
+    fi
+    if [ "$passive" = true ]; then
+        print_success "Reflector check passed on ${MT_ENV} (passive): ${checked} source Secret(s) in sync"
+    else
+        print_success "Reflector check passed on ${MT_ENV}: canary propagated, ${checked} source Secret(s) in sync"
+    fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

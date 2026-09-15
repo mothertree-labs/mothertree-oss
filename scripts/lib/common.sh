@@ -19,6 +19,9 @@
 #   mt_kubectl_probe    — in-cluster probe with an explicit OK/MISSING/UNKNOWN
 #                         verdict (issue #623); transports mt_probe_exec /
 #                         mt_probe_job; mt_kubectl_logs = retried log fetch
+#   mt_wait_for_reflection / mt_reflector_canary
+#                       — reflector propagation gates: mirrors in sync with their
+#                         source, controller proven live by a canary (issue #673)
 
 # Guard against double-sourcing
 if [ "${_MT_COMMON_LOADED:-}" = "1" ]; then
@@ -1871,4 +1874,255 @@ mt_coredns_rewrite_require() {
            print_warning "    kubectl -n kube-system get configmap coredns-custom -o yaml"
            return 0 ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# Reflector propagation gates (emberstack/kubernetes-reflector) — issue #673.
+#
+# Each tenant's wildcard TLS Secret is issued once by cert-manager (in the
+# tenant's matrix namespace) and MIRRORED by the reflector controller into
+# every namespace that serves it: every per-tenant ingress, Stalwart's required
+# volume mount, Keycloak's auth ingress in infra-auth. The failure mode is
+# silent: mirrors are ordinary Secrets that persist with or without the
+# controller, so a dead or wedged reflector leaves every consumer on the LAST
+# copy — and the tenant serves an expired certificate weeks after the source
+# was renewed. Nothing in the deploy path proved the controller was actually
+# propagating; these helpers do.
+#
+# Sync rule, verbatim from the controller (Mirroring/Core/ResourceMirror.cs,
+# identical at chart 7.1.288 and 10.0.65): a mirror is rewritten iff its
+# annotation  reflector.v1.k8s.emberstack.com/reflected-version  differs from
+# the SOURCE's metadata.resourceVersion. So "in sync" is exact string equality
+# of those two — no hashing, no data comparison. Only Secret METADATA is read
+# here (one jsonpath field per call, never -o json/yaml on a Secret): Secret
+# data never enters a variable or a log line. The canary compares a stamp it
+# generated itself.
+# ---------------------------------------------------------------------------
+
+# _mt_jsonpath_metadata_only <jsonpath> [allow-canary-stamp=false]
+# POSITIVE allowlist, decided at the LEAF. After deleting the exact output
+# literals `{range .items[*]}`, `{end}`, `{"\t"}`, `{"\n"}` (the cluster-wide
+# listing in verify-reflector), the remainder must consist ONLY of `{…}`
+# actions, and every action must be exactly one of:
+#   {.metadata.resourceVersion}  {.metadata.name}  {.metadata.namespace}
+#   {.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/<[a-z-]+>}
+#   {.data.stamp}   — only when the second argument is "true" (the canary)
+# Anything else is refused: a bare `{.metadata.annotations}` or `{.metadata.*}`
+# (they include kubectl.kubernetes.io/last-applied-configuration, which for a
+# client-side-applied Secret carries the WHOLE object including .data —
+# dev-cert-cache.sh restores wildcard-tls-<tenant> with `kubectl apply`),
+# `{.metadata.labels.x}`, any other field, any `$`/`@`/`..`/`[` form, and any
+# text outside braces (a brace-less `resourceVersion` would be echoed as
+# literal text by kubectl and read as "equal everywhere"). An empty path is
+# refused too. Returns 0 allowed / 1 refused.
+_mt_jsonpath_metadata_only() {
+    local rest="$1" allow_stamp="${2:-false}" lit action leaf
+    lit='{range .items[*]}';  rest="${rest//"$lit"/}"
+    lit='{end}';              rest="${rest//"$lit"/}"
+    lit='{"\t"}';             rest="${rest//"$lit"/}"
+    lit='{"\n"}';             rest="${rest//"$lit"/}"
+    [ -n "$rest" ] || return 1
+    while [ -n "$rest" ]; do
+        [ "${rest:0:1}" = "{" ] || return 1          # text outside braces
+        action="${rest%%\}*}"
+        [ "$action" != "$rest" ] || return 1         # unterminated action
+        action="${action}}"
+        rest="${rest#"$action"}"
+        case "$action" in
+            '{.metadata.resourceVersion}'|'{.metadata.name}'|'{.metadata.namespace}') ;;
+            '{.data.stamp}') [ "$allow_stamp" = true ] || return 1 ;;
+            '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/'*)
+                leaf="${action#'{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/'}"
+                leaf="${leaf%\}}"
+                [ -n "$leaf" ] || return 1
+                case "$leaf" in *[!a-z-]*) return 1 ;; esac ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# _mt_secret_meta <namespace> <secret> <jsonpath>
+# Prints the field, or the token MISSING (NotFound) / UNREADABLE (any other
+# kubectl failure, or a refused path). Always returns 0; callers interpret the
+# token. A field the object lacks (e.g. a missing annotation) prints as an
+# empty line.
+#
+# Leak guard: this helper is generic and the Secrets it is pointed at hold the
+# tenant's PRIVATE KEY, so the path must pass _mt_jsonpath_metadata_only; the
+# only data read admitted is `{.data.stamp}` on `reflector-canary` (name AND
+# exact path — a stamp we generated). A refused path reports UNREADABLE (fail
+# closed) with the reason on stderr and kubectl is never invoked.
+# kubectl's stderr is discarded (a warning on stderr with rc 0 must never
+# become part of a resourceVersion, and a jsonpath EXECUTION error prints the
+# whole object including .data); on a non-zero rc the object is classified by
+# a second metadata-only call, `--ignore-not-found -o name`, and when it does
+# exist a fixed diagnosis is printed instead of kubectl's output.
+_mt_secret_meta() {
+    local ns="$1" name="$2" path="$3" out rc=0 allow_stamp=false
+    [ "$name" = "reflector-canary" ] && allow_stamp=true
+    if ! _mt_jsonpath_metadata_only "$path" "$allow_stamp"; then
+        print_error "_mt_secret_meta: refusing jsonpath '$path' on Secret $ns/$name — only metadata fields may be read here" >&2
+        echo UNREADABLE
+        return 0
+    fi
+    out=$(kubectl get secret "$name" -n "$ns" -o jsonpath="$path" 2>/dev/null) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        local probe prc=0
+        probe=$(kubectl get secret "$name" -n "$ns" --ignore-not-found -o name 2>/dev/null) || prc=$?
+        if [ "$prc" -eq 0 ] && [ -z "$probe" ]; then
+            echo MISSING
+        else
+            if [ "$prc" -eq 0 ]; then
+                print_error "kubectl get failed for an existing Secret $ns/$name (RBAC or jsonpath error) — re-run \`kubectl get secret $name -n $ns -o jsonpath='$path'\` by hand" >&2
+            fi
+            echo UNREADABLE
+        fi
+        return 0
+    fi
+    printf '%s\n' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# mt_wait_for_reflection — wait until a Secret's mirrors are in sync with it.
+#
+# Usage: mt_wait_for_reflection <src_ns> <secret> <target_namespaces> [timeout=90]
+#   <target_namespaces> is comma-separated (the shape of TENANT_NAMESPACES in
+#   create_env and of the reflection-auto-namespaces annotation); whitespace
+#   around entries is ignored.
+#
+# Polls every MT_REFLECTION_POLL_INTERVAL seconds (default 5). The source's
+# resourceVersion is re-read every round, so a renewal that lands mid-wait is
+# waited for rather than misread. Returns 0 once EVERY target namespace holds
+# <secret> with reflected-version == source resourceVersion. On timeout prints
+# one print_error naming every lagging namespace with its state — the stale
+# reflected-version it carries, or MISSING / UNANNOTATED (present but never
+# written by the controller) / UNREADABLE — plus the source rv, then a second
+# line naming the fix, and returns 1. A source that is itself MISSING or
+# UNREADABLE keeps polling until the timeout (cert-manager may still be
+# writing it) and then fails pointing at issuance, not at the controller.
+# ---------------------------------------------------------------------------
+mt_wait_for_reflection() {
+    local src_ns="${1:?mt_wait_for_reflection: source namespace required}"
+    local secret="${2:?mt_wait_for_reflection: secret name required}"
+    local targets_csv="${3:?mt_wait_for_reflection: target namespaces required (comma-separated)}"
+    local timeout="${4:-90}"
+    local interval="${MT_REFLECTION_POLL_INTERVAL:-5}"
+    local rv_path='{.metadata.resourceVersion}'
+    local ref_path='{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflected-version}'
+
+    local -a raw=() targets=()
+    local ns
+    IFS=',' read -r -a raw <<< "$targets_csv"
+    for ns in "${raw[@]}"; do
+        ns="${ns//[[:space:]]/}"
+        [ -n "$ns" ] && targets+=("$ns")
+    done
+    if [ "${#targets[@]}" -eq 0 ]; then
+        print_error "mt_wait_for_reflection: empty target namespace list for $src_ns/$secret — nothing to verify is a failure, not a pass"
+        return 1
+    fi
+
+    local start=$SECONDS elapsed=0 src_rv lagging mirror_rv
+    while true; do
+        src_rv=$(_mt_secret_meta "$src_ns" "$secret" "$rv_path")
+        lagging=""
+        case "$src_rv" in
+            MISSING|UNREADABLE|"")
+                lagging="source:${src_rv:-NO-RV}" ;;
+            *)
+                for ns in "${targets[@]}"; do
+                    mirror_rv=$(_mt_secret_meta "$ns" "$secret" "$ref_path")
+                    [ -n "$mirror_rv" ] || mirror_rv=UNANNOTATED
+                    [ "$mirror_rv" = "$src_rv" ] || lagging="${lagging:+$lagging }${ns}:${mirror_rv}"
+                done ;;
+        esac
+        if [ -z "$lagging" ]; then
+            print_success "Reflected $src_ns/$secret (rv $src_rv) in sync in ${#targets[@]} namespace(s): ${targets[*]} (${elapsed}s)"
+            return 0
+        fi
+        elapsed=$((SECONDS - start))
+        if [ "$elapsed" -ge "$timeout" ]; then
+            print_error "reflector lag after ${timeout}s for $src_ns/$secret: $lagging (src rv=${src_rv:-NO-RV})"
+            case "$src_rv" in
+                MISSING|UNREADABLE|"")
+                    print_error "The SOURCE Secret $src_ns/$secret is $src_rv — an issuance problem, not the reflector: kubectl -n $src_ns get certificate,secret" ;;
+                *)
+                    print_error "reflector is not propagating: check kubectl -n ${NS_CERTMANAGER:-infra-cert-manager} logs deploy/reflector (and that the pod is Running)" ;;
+            esac
+            return 1
+        fi
+        echo "  Waiting for reflection of $src_ns/$secret: $lagging (${elapsed}s/${timeout}s)"
+        sleep "$interval"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# mt_reflector_canary — ACTIVE proof that the controller is propagating now,
+# not merely that old mirrors exist.
+#
+# Usage: mt_reflector_canary <src_ns> <target_ns> [timeout=90]
+#
+# Applies an Opaque Secret `reflector-canary` in <src_ns>, annotated to
+# auto-reflect into <target_ns> only, with data.stamp = the current epoch
+# seconds plus 64 random bits (unguessable, so a stale or forged mirror can
+# never match by accident) — every run is a real change the controller has to
+# carry. Then
+# requires the mirror in <target_ns> to reach reflected-version == source
+# resourceVersion AND to carry the same stamp within <timeout>. Returns 0 when
+# proven, 1 otherwise with the fix named.
+#
+# Uses mt_apply (heredoc — never a pipe, #644) but leaves the change tracker
+# exactly as it found it: the canary differs on EVERY deploy by design and must
+# never be what makes a later mt_restart_if_changed roll a workload (#682).
+# ---------------------------------------------------------------------------
+mt_reflector_canary() {
+    local src_ns="${1:?mt_reflector_canary: source namespace required}"
+    local target_ns="${2:?mt_reflector_canary: target namespace required}"
+    local timeout="${3:-90}"
+    local name="reflector-canary" stamp stamp_b64 prev_changed=false rc=0 rnd
+    # A failed/missing openssl must fail the canary, never degrade to `epoch-`.
+    rnd=$(openssl rand -hex 8 2>/dev/null) && [ "${#rnd}" -eq 16 ] || {
+        print_error "Reflector canary: openssl rand failed — cannot build an unguessable stamp (is openssl installed?)"
+        return 1
+    }
+    stamp="$(date +%s)-${rnd}"
+    stamp_b64=$(printf '%s' "$stamp" | base64 | tr -d '\n')
+    if mt_has_changes; then prev_changed=true; fi
+
+    print_status "Reflector canary: applying $src_ns/$name (stamp $stamp) for reflection into $target_ns"
+    mt_apply kubectl apply -f - <<EOF || rc=$?
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${name}
+  namespace: ${src_ns}
+  annotations:
+    reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "${target_ns}"
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "${target_ns}"
+type: Opaque
+data:
+  stamp: ${stamp_b64}
+EOF
+    [ "$prev_changed" = true ] || mt_reset_change_tracker
+    if [ "$rc" -ne 0 ]; then
+        print_error "Reflector canary: could not apply $src_ns/$name (kubectl rc=$rc) — cannot prove propagation"
+        return 1
+    fi
+
+    mt_wait_for_reflection "$src_ns" "$name" "$target_ns" "$timeout" || return 1
+
+    # Belt and braces: the annotation says the controller wrote this version;
+    # the stamp proves the DATA came with it. Compared, never printed.
+    local mirrored
+    mirrored=$(_mt_secret_meta "$target_ns" "$name" '{.data.stamp}')
+    if [ "$mirrored" != "$stamp_b64" ]; then
+        print_error "Reflector canary: $target_ns/$name carries the source's reflected-version but not stamp $stamp — the controller updated annotations without the data"
+        print_error "reflector is not propagating: check kubectl -n ${src_ns} logs deploy/reflector"
+        return 1
+    fi
+    print_success "Reflector canary: $target_ns/$name reflected-version matches source and stamp $stamp mirrored"
+    return 0
 }
