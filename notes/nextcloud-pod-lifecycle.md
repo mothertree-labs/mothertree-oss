@@ -84,7 +84,7 @@ Critical operations:
 
 ### Deploy-Time Jobs
 
-**nextcloud-db-init** (postgres:16 image): Creates database + user + grants. Runs once per deploy.
+**nextcloud-db-init** (postgres:18 image): Creates database + user + grants. Runs once per deploy.
 
 **nextcloud-oidc-config** (bitnami/kubectl image): Waits for pod Ready, then exec's into the pod to install/configure apps via occ commands. Installs user_oidc, calendar, richdocuments, external, files_linkeditor, guest_bridge, sharebymail. Configures OIDC provider, share settings, theming.
 

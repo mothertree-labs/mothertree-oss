@@ -7,6 +7,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **PostgreSQL client images 17 → 18, client pods only** (#684). Every
+  throwaway `psql` pod the deploy and CI scripts spin up now runs
+  `postgres:18-alpine`: the Nextcloud probe Job image (`MT_NC_PROBE_IMAGE` in
+  `scripts/lib/nextcloud-db.sh`), `mt_psql` and `mt_pgbouncer_verify_db` in
+  `scripts/lib/common.sh` (the latter was still on 15), the Roundcube/PgBouncer
+  introspection pods in `ci/scripts/ci-e2e-diagnostics.sh` (15) and the
+  tenant-DB list/drop pods in `scripts/destroy-dev-cluster.sh` (16). The
+  PostgreSQL VMs stay on **17** — the server upgrade is a separate, operator-run
+  job (#685). A newer client against an older server is the supported direction,
+  and psql 18 changes nothing in the flags these scripts use (`-c`, `-tAc`,
+  `--csv`, `ON_ERROR_STOP`); PgBouncer is protocol-agnostic in between.
+  `-alpine` because the pull is smaller on the memory-tight dev pool; the
+  db-init Job manifests keep the `postgres:18` tags they already had.
+
+  **Why three of them were behind at all**: Renovate only saw `image:` lines in
+  manifests/values plus the `MT_NC_PROBE_IMAGE` constant. The `kubectl run
+  --image=` pins in `scripts/lib/common.sh`, `scripts/destroy-dev-cluster.sh`
+  and `ci/scripts/ci-e2e-diagnostics.sh` sat in files outside the image
+  manager's `managerFilePatterns`, in a form no matchString recognised — so they
+  drifted to 15 and 16 while the dashboard reported a single "postgres 17 → 18"
+  item. The image custom manager in `renovate.json5` now covers those three
+  files and has a matchString for the `--image=postgres:<tag>-alpine` form
+  (narrow on purpose: literal `postgres`, `-alpine` suffix required, RE2-safe),
+  so the next major surfaces once, in one place.
+
+  **Terraform `postgres_version` default 16 → 17**: the variable in `phase1`
+  and `modules/postgres-server` only feeds cloud-init on a PostgreSQL VM's
+  first boot, and the instance ignores later metadata changes, so this is inert
+  for every existing environment. But a freshly provisioned VM would have been
+  initialised on 16 before Ansible — which manages the running major from the
+  private infra config and defaults to 17 — took over. The default now matches
+  Ansible's.
 - The web-search gate is now **fatal on prod and prod-eu, advisory on dev**,
   derived from `MT_ENV` in `deploy-llm-webui.sh`. When the gate was made advisory
   it was made advisory *everywhere*, which was the safe default at the time but

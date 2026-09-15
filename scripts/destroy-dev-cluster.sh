@@ -195,7 +195,7 @@ if [ "$DRY_RUN" = "true" ]; then
       -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d || true)
     if [ -n "$PG_PASSWORD" ]; then
       "${KUBECTL[@]}" run psql-list-tenants --rm -i --restart=Never \
-        --image=postgres:16 --quiet -n default \
+        --image=postgres:18-alpine --quiet -n default \
         --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
         --env "PGUSER=postgres" \
         --env "PGPASSWORD=$PG_PASSWORD" \
@@ -368,7 +368,7 @@ if [ "$CLUSTER_EXISTS" = "true" ]; then
   TENANT_DBS=""
   LIST_RC=0
   LIST_OUT=$("${KUBECTL[@]}" run psql-list-tenants --rm -i --restart=Never \
-    --image=postgres:16 --quiet -n default \
+    --image=postgres:18-alpine --quiet -n default \
     --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
     --env "PGUSER=postgres" \
     --env "PGPASSWORD=$PG_PASSWORD" \
@@ -393,7 +393,7 @@ if [ "$CLUSTER_EXISTS" = "true" ]; then
       # DROP DATABASE cannot run inside a transaction block, so each DROP must
       # be its own psql -c invocation (one auto-commit transaction each).
       "${KUBECTL[@]}" run psql-drop --rm -i --restart=Never \
-        --image=postgres:16 --quiet -n default \
+        --image=postgres:18-alpine --quiet -n default \
         --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
         --env "PGUSER=postgres" \
         --env "PGPASSWORD=$PG_PASSWORD" \

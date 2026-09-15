@@ -56,7 +56,17 @@ variable "tailscale_auth_key" {
 variable "postgres_version" {
   description = "PostgreSQL major version to install"
   type        = string
-  default     = "16"
+  # Consumed only by cloud-init (user-data.yaml) on the VM's FIRST boot, and
+  # the instance ignores later metadata changes (lifecycle.ignore_changes in
+  # modules/postgres-server), so changing this never touches an existing VM.
+  # The major that actually runs on every environment is managed by Ansible
+  # (pg_version, fed from the private infra config's .postgresql.version).
+  # Keep this equal to Ansible's default so a fresh VM is not initialised on
+  # an older major than the one Ansible then installs and manages. When
+  # REPLACING a VM whose data volume survives, set it to the major already
+  # under /mnt/pgdata on that volume: cloud-init only adopts an existing
+  # cluster directory for the exact major it is given.
+  default = "17"
 }
 
 variable "tags" {

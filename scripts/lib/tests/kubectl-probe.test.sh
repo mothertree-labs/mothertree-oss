@@ -79,7 +79,7 @@ check "no-pod transport rc" 2 "$rc"; check "no-pod verdict" UNKNOWN "$MT_PROBE_V
 
 # --- job transport -----------------------------------------------------------
 scenario job-ok
-mt_kubectl_probe "t" 3 mt_probe_job infra-db nc-probe postgres:17-alpine \
+mt_kubectl_probe "t" 3 mt_probe_job infra-db nc-probe postgres:18-alpine \
     --env-from-secret "PGPASSWORD=postgres-credentials/postgres-password" --env "NC_DB=nextcloud_x" --timeout 5 \
     -- sh -c 'echo "a b"' >/dev/null; rc=$?
 check "job-ok rc" 0 "$rc"; check "job-ok verdict" OK "$MT_PROBE_VERDICT"
