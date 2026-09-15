@@ -29,17 +29,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reads are silently pruned on write. `deploy_infra` now server-side applies
   the CRD set of the pinned chart's operator immediately before the
   tier=system `helmfile sync` (`scripts/lib/prometheus-crds.sh`,
-  `mt_apply_prometheus_crds`). The operator tag is derived from the chart pin
-  (`helmfile.yaml.gotmpl` `version:` → chart `appVersion`), so there is no
-  second pin to drift and a Renovate bump of the chart line is the only edit.
-  All ten manifests are downloaded and validated before the first apply — a
-  failed download aborts the deploy with the cluster untouched and helmfile
-  never runs — and the step prints the operator version plus the
-  `controller-gen` annotation of the Prometheus CRD before and after, so the
-  deploy log shows the schema advancing. `--force-conflicts` because the live
-  CRDs are owned by `helm/Apply`; field manager `mt-deploy-crds` makes the
-  ownership visible. Idempotent; harmless on a cold cluster. Unit-tested with
-  fake kubectl/helm/curl (`scripts/lib/tests/prometheus-crds.test.sh`).
+  `mt_apply_prometheus_crds`). The CRDs come from the chart artifact itself:
+  the step `helm pull`s the pinned version (`helmfile.yaml.gotmpl` `version:`)
+  and applies `charts/crds/crds/crd-<kind>.yaml` from it — the upstream
+  operator files, shipped inside the chart — so the CRDs are bound to the
+  exact artifact helm is about to install, with no operator-tag indirection,
+  no second host to trust and no checksum to maintain. A Renovate bump of the
+  chart line is the only edit. The pull and every one of the ten expected
+  CRD files are validated before the first apply (a missing or extra kind, or
+  a file that is not the CRD it should be, aborts with the cluster untouched
+  and helmfile never runs), and the step prints the chart's operator version
+  plus the `controller-gen` annotation of the Prometheus CRD before and
+  after, so the deploy log shows the schema advancing. `--force-conflicts`
+  because the live CRDs are owned by `helm/Apply`; field manager
+  `mt-deploy-crds` makes the ownership visible. Idempotent; harmless on a cold
+  cluster. Unit-tested with fake kubectl/helm
+  (`scripts/lib/tests/prometheus-crds.test.sh`).
 
   **Prometheus 3.** Our PromQL was checked against the 3.0 migration list: no
   `holt_winters`, no `le`/`quantile` matchers (only `by (le)` grouping), no

@@ -342,9 +342,9 @@ fi
 # subchart) and never upgrades them, and nothing here re-applied them since —
 # so every kube-prometheus-stack major that bumps prometheus-operator left the
 # live CRDs on the schema of the chart that first installed the cluster, with
-# the new operator's fields silently pruned. Server-side apply the CRD set the
-# pinned chart's operator ships (version derived from the chart's appVersion,
-# see scripts/lib/prometheus-crds.sh). Idempotent; harmless on a cold cluster.
+# the new operator's fields silently pruned. Server-side apply the CRDs from
+# the pinned chart artifact itself (helm pull, charts/crds/crds/ — see
+# scripts/lib/prometheus-crds.sh). Idempotent; harmless on a cold cluster.
 # Must run before the sync so the new operator never starts against stale
 # CRDs; a failure here aborts the deploy before helmfile touches anything.
 if ! mt_apply_prometheus_crds "$REPO_ROOT/apps/helmfile.yaml.gotmpl"; then
