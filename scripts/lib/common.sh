@@ -453,7 +453,7 @@ mt_pg_password() {
 }
 
 # Run psql against the external PG VM via PgBouncer.
-# Uses a temporary pod with the postgres:17-alpine image.
+# Uses a temporary pod with the postgres:18-alpine image.
 # Usage: mt_psql [-d dbname] -c "SQL..."
 #        echo "SQL" | mt_psql [-d dbname]
 mt_psql() {
@@ -466,7 +466,7 @@ mt_psql() {
     fi
     kubectl run -i --rm "psql-$(date +%s)" \
         --namespace="$ns" \
-        --image=postgres:17-alpine \
+        --image=postgres:18-alpine \
         --restart=Never \
         --env="PGPASSWORD=$pg_pass" \
         --command -- psql -h pgbouncer -U postgres -v ON_ERROR_STOP=1 "$@" 2>/dev/null
@@ -523,7 +523,7 @@ mt_pgbouncer_verify_db() {
     # one can trigger a fresh real server login rather than the cached error.
     local out rc=0
     out=$(kubectl run "pgb-verify-$$-${RANDOM}" --rm -i --restart=Never \
-        --image=postgres:15-alpine --quiet -n "$pod_ns" --pod-running-timeout=240s \
+        --image=postgres:18-alpine --quiet -n "$pod_ns" --pod-running-timeout=240s \
         --env "PGPASSWORD=$db_password" \
         --env "PGCONNECT_TIMEOUT=5" \
         --env "PGB_IPS=$pod_ips" \

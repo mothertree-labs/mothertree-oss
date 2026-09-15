@@ -305,9 +305,9 @@ elif [[ ! "$E2E_TENANT" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
   # (defends against SQL/identifier injection — mirrors dev-bringup's guard).
   echo "    (suspicious tenant name '$E2E_TENANT' — skipping DB introspection)"
 else
-  echo ">>> Introspecting roundcube_${E2E_TENANT} via PgBouncer (postgres:15-alpine throwaway pod):"
+  echo ">>> Introspecting roundcube_${E2E_TENANT} via PgBouncer (postgres:18-alpine throwaway pod):"
   _rc_db_out="$(kubectl run "rc-diag-db-${_diag_suffix}" --rm -i --restart=Never \
-    --image=postgres:15-alpine --quiet -n default --pod-running-timeout=120s \
+    --image=postgres:18-alpine --quiet -n default --pod-running-timeout=120s \
     --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
     --env "PGUSER=postgres" \
     --env "PGPASSWORD=$_pg_pwd" \
@@ -338,7 +338,7 @@ if [[ -z "$_pg_pwd" ]]; then
 else
   echo ">>> SHOW DATABASES / POOLS / SERVERS (surfaces a stale/negative cached roundcube entry):"
   _pgb_out="$(kubectl run "rc-diag-pgb-${_diag_suffix}" --rm -i --restart=Never \
-    --image=postgres:15-alpine --quiet -n default --pod-running-timeout=120s \
+    --image=postgres:18-alpine --quiet -n default --pod-running-timeout=120s \
     --env "PGHOST=pgbouncer.infra-db.svc.cluster.local" \
     --env "PGUSER=postgres" \
     --env "PGPASSWORD=$_pg_pwd" \
