@@ -9,14 +9,17 @@
 #   <ns>.<name>.reflected   its reflected-version annotation (absent = unannotated)
 #   <ns>.<name>.stamp       its data.stamp (base64, as the API would return it)
 #   <ns>.<name>.unreadable  any read fails with a non-NotFound error
+#   <ns>.<name>.jsonpath-error  the jsonpath read fails and dumps the WHOLE object
+#                           (data included) on stderr, while -o name succeeds
 #   stderr-warning          every read also prints a kubectl warning on stderr (rc 0)
 #   flip-at / flip-ns       after N `get secret` calls, copy <flip-ns>.*.reflected.later
 #                           over .reflected (a controller catching up mid-wait)
 # and refuses whole-object reads (-o json/yaml) of a Secret and any jsonpath
-# outside the metadata-only allowlist (same rule as _mt_jsonpath_metadata_only;
-# `{.data.stamp}` admitted on the canary only): the gates must only ever pull
-# metadata fields, so Secret data can never leak into a log. `--ignore-not-found
-# -o name` (the MISSING/UNREADABLE classifier) prints secret/<name> or nothing.
+# outside the leaf-positive allowlist (same rule as _mt_jsonpath_metadata_only:
+# only resourceVersion / name / namespace / our own annotations, and
+# `{.data.stamp}` on the canary only): the gates must only ever pull metadata
+# fields, so Secret data can never leak into a log. `--ignore-not-found -o name`
+# (the MISSING/UNREADABLE classifier) prints secret/<name> or nothing.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,12 +51,25 @@ case " $* " in
             exit 0 ;;
         esac
         path=${7#jsonpath=}
-        # Same allowlist as _mt_jsonpath_metadata_only in common.sh.
+        # Same leaf-positive allowlist as _mt_jsonpath_metadata_only in common.sh.
+        refuse() { echo "fake-kubectl: non-metadata jsonpath on Secret $ns/$name refused: $path" >&2; exit 98; }
         rest="$path"
-        lit='{.metadata.'; rest="${rest//"$lit"/}"; lit='{range .items[*]}'; rest="${rest//"$lit"/}"; lit='{end}'; rest="${rest//"$lit"/}"
+        lit='{range .items[*]}'; rest="${rest//"$lit"/}"; lit='{end}'; rest="${rest//"$lit"/}"
         lit='{"\t"}'; rest="${rest//"$lit"/}"; lit='{"\n"}'; rest="${rest//"$lit"/}"
-        [ "$name" = reflector-canary ] && { lit='{.data.stamp}'; rest="${rest//"$lit"/}"; }
-        case "$rest" in *'{'*|*'['*|*'@'*|*'$'*|*'..'*|*[[:space:]]*) echo "fake-kubectl: non-metadata jsonpath on Secret $ns/$name refused: $path" >&2; exit 98 ;; esac
+        [ -n "$rest" ] || refuse
+        while [ -n "$rest" ]; do
+            [ "${rest:0:1}" = "{" ] || refuse
+            action="${rest%%\}*}"; [ "$action" != "$rest" ] || refuse; action="${action}}"; rest="${rest#"$action"}"
+            case "$action" in
+                '{.metadata.resourceVersion}'|'{.metadata.name}'|'{.metadata.namespace}') ;;
+                '{.data.stamp}') [ "$name" = reflector-canary ] || refuse ;;
+                '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/'*)
+                    leaf="${action#'{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/'}"; leaf="${leaf%\}}"
+                    [ -n "$leaf" ] || refuse; case "$leaf" in *[!a-z-]*) refuse ;; esac ;;
+                *) refuse ;;
+            esac
+        done
+        [ -f "$S/$ns.$name.jsonpath-error" ] && { echo "error: error executing jsonpath \"$path\": {\"kind\":\"Secret\",\"data\":{\"tls.key\":\"dGxza2V5\"}}" >&2; exit 1; }
         n=$(bump getsecret)
         if [ -f "$S/flip-at" ] && [ "$n" -ge "$(cat "$S/flip-at")" ]; then
             fns=$(cat "$S/flip-ns")
@@ -160,18 +176,51 @@ refused $SRC $SEC '{.metadata.name}{.data.x}'
 refused $SRC $SEC '{.metadata.annotations..x}'
 refused $SRC $SEC '{.data.stamp}'                       # exact canary path, wrong name
 refused tn-evil-mail reflector-canary '{.data.anything}'  # canary name, wrong path
-# Allowed forms: the ones the gates actually use.
+# Round 4: metadata that carries data by another route, and non-leaf forms.
+refused $SRC $SEC '{.metadata.annotations}'                # includes last-applied-configuration
+refused $SRC $SEC '{.metadata.*}'
+refused $SRC $SEC '{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}'
+refused $SRC $SEC 'resourceVersion'                        # no braces: literal text, "equal everywhere"
+refused $SRC $SEC '{.metadata.name}garbage'
+refused $SRC $SEC '{.metadata.labels.x}'
+refused $SRC $SEC '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/}'          # empty leaf
+refused $SRC $SEC '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflected-version.x}'
+refused $SRC $SEC '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/Reflected}'  # not [a-z-]
+refused $SRC $SEC '{.metadata.resourceVersion'             # unterminated
+refused $SRC $SEC ''                                       # empty path
+refused $SRC $SEC '{{.metadata.name}'
+# Allowed forms: EVERY path the repo actually uses (grep _mt_secret_meta + verify-reflector).
+ANN='reflector\.v1\.k8s\.emberstack\.com'
 reset
 secret $SRC $SEC 100 100
-check "allowed: resourceVersion" 100 "$(_mt_secret_meta $SRC $SEC '{.metadata.resourceVersion}' 2>&1)"
-check "allowed: reflected-version annotation" 100 "$(_mt_secret_meta $SRC $SEC '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflected-version}' 2>&1)"
-_mt_jsonpath_metadata_only '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflection-auto-namespaces-selector}{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflection-allowed-namespaces-selector}'; check "allowed: concatenated metadata fields" 0 "$?"
-_mt_jsonpath_metadata_only '{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflection-auto-enabled}{"\n"}{end}'; check "allowed: verify-reflector listing form" 0 "$?"
+check "allowed: create_env/common resourceVersion" 100 "$(_mt_secret_meta $SRC $SEC '{.metadata.resourceVersion}' 2>&1)"
+check "allowed: common reflected-version annotation" 100 "$(_mt_secret_meta $SRC $SEC '{.metadata.annotations.'"$ANN"'/reflected-version}' 2>&1)"
+_mt_jsonpath_metadata_only '{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces}'; check "allowed: verify-reflector auto-namespaces" 0 "$?"
+_mt_jsonpath_metadata_only '{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces}'; check "allowed: verify-reflector allowed-namespaces" 0 "$?"
+_mt_jsonpath_metadata_only '{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces-selector}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces-selector}'; check "allowed: verify-reflector concatenated selectors" 0 "$?"
+_mt_jsonpath_metadata_only '{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-enabled}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces-selector}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces-selector}{"\n"}{end}'; check "allowed: verify-reflector listing path (verbatim)" 0 "$?"
 _mt_jsonpath_metadata_only '{range .items[*]}{.data.x}{"\n"}{end}'; check "listing form with a data field is still refused" 1 "$?"
+_mt_jsonpath_metadata_only '{range .items[*]}{.metadata.annotations}{"\n"}{end}'; check "listing form with bare annotations is refused" 1 "$?"
 _mt_jsonpath_metadata_only '{.data.stamp}'; check "canary stamp path refused without the canary allowance" 1 "$?"
 _mt_jsonpath_metadata_only '{.data.stamp}' true; check "canary stamp path admitted with the allowance" 0 "$?"
 out=$(_mt_secret_meta infra-auth reflector-canary '{.data.stamp}' 2>&1); rc=$?
 check "canary .data.stamp read allowed (MISSING here, not refused)" MISSING "$out"
+
+# --- jsonpath execution error on an EXISTING Secret: fixed diagnosis, no dump --
+reset
+secret $SRC $SEC 100
+touch "$MT_TEST_STATE/$SRC.$SEC.jsonpath-error"
+out=$(_mt_secret_meta $SRC $SEC '{.metadata.resourceVersion}' 2>"$TMP/diag.err"); rc=$?
+check "exec error: rc" 0 "$rc"
+check "exec error: token" UNREADABLE "$out"
+has "exec error: fixed diagnosis" "kubectl get failed for an existing Secret $SRC/$SEC" "$(cat "$TMP/diag.err")"
+has "exec error: names the by-hand command" "kubectl get secret $SEC -n $SRC -o jsonpath=" "$(cat "$TMP/diag.err")"
+lacks "exec error: kubectl's dump never surfaces" "dGxza2V5" "$out$(cat "$TMP/diag.err")"
+lacks "exec error: kubectl's dump never surfaces (2)" "tls.key" "$out$(cat "$TMP/diag.err")"
+out=$(mt_wait_for_reflection $SRC $SEC "tn-x-mail" 0 2>&1); rc=$?
+check "exec error via the gate: rc" 1 "$rc"
+lacks "exec error via the gate: dump never surfaces" "dGxza2V5" "$out"
+has "exec error via the gate: source UNREADABLE" "source:UNREADABLE" "$out"
 
 # --- MISSING vs UNREADABLE come from the --ignore-not-found -o name probe ---
 reset

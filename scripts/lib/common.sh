@@ -1900,29 +1900,45 @@ mt_coredns_rewrite_require() {
 # ---------------------------------------------------------------------------
 
 # _mt_jsonpath_metadata_only <jsonpath> [allow-canary-stamp=false]
-# ALLOWLIST for the jsonpath a Secret may be read with. After deleting every
-# `{.metadata.` opener, the exact output literals `{range .items[*]}`,
-# `{end}`, `{"\t"}`, `{"\n"}` (the cluster-wide listing in verify-reflector),
-# and — only when the second argument is "true" — the exact `{.data.stamp}`,
-# nothing structural may remain: any `{`, `[`, `@`, `$`, `..` or whitespace
-# left over is a construct that can reach Secret data (`{.data}`, `{$.data.x}`,
-# `{@.data.x}`, `{.data["tls.key"]}`, `{..tls\.key}`, `{ .data.x}`,
-# `{["data"]["x"]}`, a concatenated `{.metadata.name}{.data.x}`) and the
-# path is refused. A denylist on `{.data.` was bypassable by every other
-# spelling; this admits only what the gates actually use. Returns 0/1.
+# POSITIVE allowlist, decided at the LEAF. After deleting the exact output
+# literals `{range .items[*]}`, `{end}`, `{"\t"}`, `{"\n"}` (the cluster-wide
+# listing in verify-reflector), the remainder must consist ONLY of `{…}`
+# actions, and every action must be exactly one of:
+#   {.metadata.resourceVersion}  {.metadata.name}  {.metadata.namespace}
+#   {.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/<[a-z-]+>}
+#   {.data.stamp}   — only when the second argument is "true" (the canary)
+# Anything else is refused: a bare `{.metadata.annotations}` or `{.metadata.*}`
+# (they include kubectl.kubernetes.io/last-applied-configuration, which for a
+# client-side-applied Secret carries the WHOLE object including .data —
+# dev-cert-cache.sh restores wildcard-tls-<tenant> with `kubectl apply`),
+# `{.metadata.labels.x}`, any other field, any `$`/`@`/`..`/`[` form, and any
+# text outside braces (a brace-less `resourceVersion` would be echoed as
+# literal text by kubectl and read as "equal everywhere"). An empty path is
+# refused too. Returns 0 allowed / 1 refused.
 _mt_jsonpath_metadata_only() {
-    local rest="$1" allow_stamp="${2:-false}" lit
-    lit='{.metadata.';        rest="${rest//"$lit"/}"
+    local rest="$1" allow_stamp="${2:-false}" lit action leaf
     lit='{range .items[*]}';  rest="${rest//"$lit"/}"
     lit='{end}';              rest="${rest//"$lit"/}"
     lit='{"\t"}';             rest="${rest//"$lit"/}"
     lit='{"\n"}';             rest="${rest//"$lit"/}"
-    if [ "$allow_stamp" = true ]; then
-        lit='{.data.stamp}';  rest="${rest//"$lit"/}"
-    fi
-    case "$rest" in
-        *'{'*|*'['*|*'@'*|*'$'*|*'..'*|*[[:space:]]*) return 1 ;;
-    esac
+    [ -n "$rest" ] || return 1
+    while [ -n "$rest" ]; do
+        [ "${rest:0:1}" = "{" ] || return 1          # text outside braces
+        action="${rest%%\}*}"
+        [ "$action" != "$rest" ] || return 1         # unterminated action
+        action="${action}}"
+        rest="${rest#"$action"}"
+        case "$action" in
+            '{.metadata.resourceVersion}'|'{.metadata.name}'|'{.metadata.namespace}') ;;
+            '{.data.stamp}') [ "$allow_stamp" = true ] || return 1 ;;
+            '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/'*)
+                leaf="${action#'{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/'}"
+                leaf="${leaf%\}}"
+                [ -n "$leaf" ] || return 1
+                case "$leaf" in *[!a-z-]*) return 1 ;; esac ;;
+            *) return 1 ;;
+        esac
+    done
     return 0
 }
 
@@ -1938,8 +1954,10 @@ _mt_jsonpath_metadata_only() {
 # exact path — a stamp we generated). A refused path reports UNREADABLE (fail
 # closed) with the reason on stderr and kubectl is never invoked.
 # kubectl's stderr is discarded (a warning on stderr with rc 0 must never
-# become part of a resourceVersion); on a non-zero rc the object is classified
-# by a second metadata-only call, `--ignore-not-found -o name`.
+# become part of a resourceVersion, and a jsonpath EXECUTION error prints the
+# whole object including .data); on a non-zero rc the object is classified by
+# a second metadata-only call, `--ignore-not-found -o name`, and when it does
+# exist a fixed diagnosis is printed instead of kubectl's output.
 _mt_secret_meta() {
     local ns="$1" name="$2" path="$3" out rc=0 allow_stamp=false
     [ "$name" = "reflector-canary" ] && allow_stamp=true
@@ -1952,7 +1970,14 @@ _mt_secret_meta() {
     if [ "$rc" -ne 0 ]; then
         local probe prc=0
         probe=$(kubectl get secret "$name" -n "$ns" --ignore-not-found -o name 2>/dev/null) || prc=$?
-        if [ "$prc" -eq 0 ] && [ -z "$probe" ]; then echo MISSING; else echo UNREADABLE; fi
+        if [ "$prc" -eq 0 ] && [ -z "$probe" ]; then
+            echo MISSING
+        else
+            if [ "$prc" -eq 0 ]; then
+                print_error "kubectl get failed for an existing Secret $ns/$name (RBAC or jsonpath error) — re-run \`kubectl get secret $name -n $ns -o jsonpath='$path'\` by hand" >&2
+            fi
+            echo UNREADABLE
+        fi
         return 0
     fi
     printf '%s\n' "$out"
