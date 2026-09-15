@@ -194,7 +194,11 @@ _mt_prometheus_crd_file_ok() {
 # ---------------------------------------------------------------------------
 mt_prometheus_crds_cleanup() {
   if [ -n "$_MT_PROM_CRDS_TMPDIR" ]; then
-    rm -rf "$_MT_PROM_CRDS_TMPDIR"
+    # Never fail here: this also runs from deploy_infra's EXIT trap under
+    # errexit, where a failing rm would abort the handler before the deploy
+    # notification is sent and replace the script's exit code with 1.
+    rm -rf "$_MT_PROM_CRDS_TMPDIR" \
+      || print_warning "could not remove CRD temp dir $_MT_PROM_CRDS_TMPDIR (left for the stale sweep)"
     _MT_PROM_CRDS_TMPDIR=""
   fi
 }
