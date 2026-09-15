@@ -68,10 +68,11 @@ spec:
             mountPath: /app/mt_settings.py
             subPath: mt_settings.py
             readOnly: true
-          # Two subPath file mounts rather than a directory mount: subPath
-          # mounts are snapshots, so an in-place ConfigMap edit cannot reach a
-          # running pod without a rollout (mt_apply restarts on change). The
-          # container runtime creates the missing /app/mt_patches parent for a
+          # Two subPath file mounts rather than a directory mount: an in-place
+          # ConfigMap edit cannot reach a running container; it is picked up on
+          # the next container restart or rollout (kubelet re-resolves subPath
+          # on container restart; mt_apply restarts on change). The container
+          # runtime creates the missing /app/mt_patches parent for a
           # bind-mount destination (runc libcontainer createIfNotExists);
           # proved locally with docker single-file mounts.
           - name: mt-patches
@@ -82,6 +83,8 @@ spec:
             mountPath: /app/mt_patches/apps.py
             subPath: apps.py
             readOnly: true
+          - name: tmp
+            mountPath: /tmp
           env:
           # ConfigMap mounts are read-only; stop CPython trying to write
           # __pycache__ next to mt_settings.py / mt_patches/.
@@ -181,16 +184,26 @@ spec:
               memory: 400Mi
             limits:
               memory: 1Gi
-          # Run as the image's own unprivileged user (USER 1001:127, no passwd
-          # entry). Root was only ever needed for the pre-5.x in-place file
-          # patching; nothing under /app needs write, worker heartbeat files
-          # go to /tmp (world-writable in the image).
+          # Pod Security "restricted" (pod-level user/seccomp, see below).
+          # Root filesystem is read-only: nothing under /app needs write and
+          # gunicorn's worker heartbeat files go to the /tmp emptyDir.
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 1001
-            runAsGroup: 127
             allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+      # Run as the image's own unprivileged user (USER 1001:127, no passwd
+      # entry). Root was only ever needed for the pre-5.x in-place file patching.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 127
+        seccompProfile:
+          type: RuntimeDefault
       volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 512Mi
       - name: storage-backends
         configMap:
           name: storage-backends

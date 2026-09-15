@@ -139,10 +139,13 @@ class PinnedLinkContext(dict):
 
 
 def _mask_email(value):
-    """'alice@example.com' -> 'a***@example.com'; never returns the local part."""
+    """Show at most the first character of the local part, and only when the
+    local part is longer than one character: 'alice@example.com' ->
+    'a***@example.com', 'a@x' -> '***@x'. Never returns the local part."""
     value = str(value)
     local, sep, domain = value.partition("@")
-    return f"{local[:1]}***@{domain}" if sep else f"{local[:1]}***"
+    head = local[:1] if len(local) > 1 else ""
+    return f"{head}***@{domain}" if sep else f"{head}***"
 
 
 def _check_signature(func, expected, label):
@@ -194,21 +197,25 @@ def install(document_cls, account_portal_url):
             _pinned.reset(token)
 
     def send_email(self, subject, emails, context=None, language=None):
+        # Materialise once: upstream passes a list today, but if it ever passed
+        # a generator the guard below would exhaust it and send_mail would
+        # quietly send to nobody. The list is what goes downstream.
+        recipients = list(emails)
         pin = _pinned.get()
         if pin is not None:
             invitee, link = pin
-            if list(emails) != [invitee]:
+            if recipients != [invitee]:
                 # send_invitation_email started emailing someone other than the
                 # invitee while our pin was active: upstream semantics changed.
                 # Addresses are masked; this message can land in pod logs.
                 raise PatchError(
                     "send_email recipients while an invitation pin is active: "
-                    f"{len(list(emails))} recipient(s) "
-                    f"{[_mask_email(e) for e in emails]}, expected exactly "
+                    f"{len(recipients)} recipient(s) "
+                    f"{[_mask_email(e) for e in recipients]}, expected exactly "
                     f"[{_mask_email(invitee)!r}]"
                 )
             context = PinnedLinkContext(context, link)
-        return original_send_email(self, subject, emails, context, language)
+        return original_send_email(self, subject, recipients, context, language)
 
     send_invitation_email.__wrapped__ = original_send_invitation_email
     send_email.__wrapped__ = original_send_email

@@ -85,7 +85,9 @@ spec:
               mountPath: /app/mt_settings.py
               subPath: mt_settings.py
               readOnly: true
-            # subPath file mounts, see backend-deployment.yaml for why.
+            # subPath file mounts (an in-place ConfigMap edit cannot reach a
+            # running container; picked up on the next container restart or
+            # rollout), see backend-deployment.yaml.
             - name: mt-patches
               mountPath: /app/mt_patches/__init__.py
               subPath: __init__.py
@@ -94,6 +96,8 @@ spec:
               mountPath: /app/mt_patches/apps.py
               subPath: apps.py
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           # Short-lived job, but it runs the full Django app-import (boto3 +
           # malware_detection). On a cold/contended dev cluster a 100m CPU request
           # got starved during concurrent tenant deploys, stretching the import
@@ -105,13 +109,23 @@ spec:
               memory: 256Mi
             limits:
               memory: 512Mi
-          # Image's own unprivileged user; migrate needs no writes under /app.
+          # Pod Security "restricted"; migrate needs no writes under /app.
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 1001
-            runAsGroup: 127
             allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+      # Image's own unprivileged user (USER 1001:127).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 127
+        seccompProfile:
+          type: RuntimeDefault
       volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi
         - name: storage-backends
           configMap:
             name: storage-backends

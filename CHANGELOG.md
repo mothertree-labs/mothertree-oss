@@ -51,7 +51,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `allowPrivilegeEscalation: false`), and gunicorn gets `--no-control-socket`
   because gunicorn 26 would otherwise try to create `$HOME/.gunicorn` (HOME is
   `/` for that user). The `mt_patches` files are two `subPath` mounts, so an
-  in-place ConfigMap edit cannot reach a running pod without a rollout.
+  in-place ConfigMap edit cannot reach a running container; it is picked up on
+  the next container restart or rollout. Both workloads also carry the Pod
+  Security "restricted" fields the repo already uses elsewhere
+  (`seccompProfile: RuntimeDefault`, `capabilities.drop: [ALL]`) and a
+  read-only root filesystem with an `emptyDir` at `/tmp` for gunicorn's
+  worker heartbeat files (proved locally with `docker run --read-only`).
 - **Docs frontend web root moved to `/app`** (impress 4.8, nginx-unprivileged
   image with its own entrypoint): the `save-status.js` and
   `logo-email.png` ConfigMap mounts now land at `/app/static` and
