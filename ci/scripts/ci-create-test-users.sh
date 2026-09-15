@@ -109,12 +109,17 @@ if ! kubectl wait --for=condition=Ready \
   kubectl describe certificate/wildcard-tls -n "$NS_MATRIX" 2>&1 | sed 's/^/  /' || true
 fi
 
-# Gate 2: reflected wildcard secret exists where Keycloak's ingress reads it.
-echo "Checking reflected secret wildcard-tls-${E2E_TENANT} in ${NS_AUTH}..."
-if kubectl get secret "wildcard-tls-${E2E_TENANT}" -n "$NS_AUTH" >/dev/null 2>&1; then
-  echo "  reflected secret present"
-else
-  echo "  WARNING: reflected secret wildcard-tls-${E2E_TENANT} NOT found in ${NS_AUTH} (reflector may not have mirrored yet)"
+# Gate 2: the wildcard Secret must be REFLECTED into infra-auth, where
+# Keycloak's auth ingress reads it, and be IN SYNC with the source
+# (reflected-version == source resourceVersion) — not merely present. Mirrors
+# outlive the reflector controller, so "present" proved nothing (#673). Fail
+# closed: a stale or missing mirror means the auth host serves the wrong cert
+# and every OIDC login below fails anyway, just less legibly.
+echo "Waiting for reflected secret wildcard-tls-${E2E_TENANT} in ${NS_AUTH} to be in sync with ${NS_MATRIX}..."
+if ! mt_wait_for_reflection "$NS_MATRIX" "wildcard-tls-${E2E_TENANT}" "$NS_AUTH" 90; then
+  echo "ERROR: wildcard-tls-${E2E_TENANT} is not reflected into ${NS_AUTH} in sync with its source in ${NS_MATRIX}"
+  echo "       Check the reflector controller: kubectl -n infra-cert-manager logs deploy/reflector"
+  exit 1
 fi
 
 # Gate 3: in-cluster Keycloak OIDC discovery on the tenant realm (not master).

@@ -51,6 +51,14 @@ spec:
 ${CERT_SAN_LINES}
   secretTemplate:
     annotations:
+      # Reflector copies this Secret (the wildcard PRIVATE KEY) into exactly the
+      # namespaces listed below — a LITERAL comma-separated list rendered from
+      # TENANT_NAMESPACES in create_env, verified in sync after issuance by
+      # mt_wait_for_reflection and on demand by scripts/verify-reflector.
+      # NEVER add reflection-allowed-namespaces-selector or
+      # reflection-auto-namespaces-selector here: the controller matches a
+      # namespace when it is in the list OR matches the selector, so a selector
+      # silently widens where the key is copied (issue #673).
       reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
       reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "${TENANT_NAMESPACES}"
       reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
