@@ -200,6 +200,12 @@ def install(document_cls, account_portal_url):
         # Materialise once: upstream passes a list today, but if it ever passed
         # a generator the guard below would exhaust it and send_mail would
         # quietly send to nobody. The list is what goes downstream.
+        if isinstance(emails, (str, bytes)):
+            # list("a@b.c") would yield per-character "recipients" that
+            # upstream's SMTPException handler swallows: fail loudly instead.
+            raise PatchError(
+                "send_email recipients must be an iterable of addresses, not a string"
+            )
         recipients = list(emails)
         pin = _pinned.get()
         if pin is not None:
