@@ -64,7 +64,7 @@ resources:
 # install job below — a newer installed version than the runtime image causes
 # the app-version 503 crash-loop (Nextcloud refuses downgrades).
 image:
-  tag: 32.0.14-apache
+  tag: 32.0.15-apache
 
 # No PVC — use chart-default emptyDir for /var/www/html
 # Identity values (instanceid, passwordsalt, secret) are persisted in a K8s Secret
@@ -214,7 +214,7 @@ nextcloud:
     - name: seed-identity
       # IMPORTANT: Must match the chart's main container image (pinned via the
       # top-level `image.tag` in this file) and the install-job image.
-      image: nextcloud:32.0.14-apache
+      image: nextcloud:32.0.15-apache
       command: ["/bin/sh", "/scripts/identity-init.sh"]
       env:
         - name: NC_INSTANCE_ID

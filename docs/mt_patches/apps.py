@@ -72,7 +72,7 @@ from django.utils.html import escape
 logger = logging.getLogger("mt_patches")
 
 # The exact upstream signatures this module was written against
-# (core/models.py, lasuite/impress-backend v5.6.1). Compared verbatim.
+# (core/models.py, lasuite/impress-backend v5.7.0). Compared verbatim.
 EXPECTED_SEND_INVITATION_SIGNATURE = "(self, email, role, sender, language=None)"
 EXPECTED_SEND_EMAIL_SIGNATURE = "(self, subject, emails, context=None, language=None)"
 

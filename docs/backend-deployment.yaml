@@ -33,7 +33,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: lasuite/impress-backend:v5.6.1
+          image: lasuite/impress-backend:v5.7.0
           # Customizations no longer rewrite files in the image at start-up.
           # DJANGO_SETTINGS_MODULE=mt_settings (docs-config) loads /app/mt_settings.py,
           # a subclass of upstream's Production that adds MediaMiddleware, the
