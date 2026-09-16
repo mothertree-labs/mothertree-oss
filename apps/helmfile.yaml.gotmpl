@@ -260,7 +260,7 @@ releases:
   - name: matrix-synapse
     namespace: {{ requiredEnv "NS_MATRIX" }}
     chart: ananace/matrix-synapse
-    version: 3.12.36
+    version: 3.12.38
     needs:
       - {{ requiredEnv "NS_INGRESS_INTERNAL" }}/ingress-nginx-internal
     labels:
