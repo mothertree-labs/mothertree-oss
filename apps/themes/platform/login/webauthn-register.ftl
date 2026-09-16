@@ -126,8 +126,31 @@
             });
         </script>
 
-        <script type="text/javascript" src="${url.resourcesCommonPath}/node_modules/jquery/dist/jquery.min.js"></script>
+        <#--
+            WebAuthn registration. Self-contained on purpose: Keycloak 26 ships no
+            global base64url (or jquery) under ${url.resourcesCommonPath}/node_modules/
+            — its own webauthnRegister.js imports rfc4648 as an ES module — so the
+            old script tags 404'd and "Register Passkey" threw
+            "base64url is not defined". Covered by e2e/keycloak-theme/, which runs
+            this page against the pinned Keycloak image.
+        -->
         <script type="text/javascript">
+            function base64urlToBytes(value) {
+                var base64 = value.replace(/-/g, '+').replace(/_/g, '/');
+                while (base64.length % 4) base64 += '=';
+                var binary = atob(base64);
+                var bytes = new Uint8Array(binary.length);
+                for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                return bytes;
+            }
+
+            function bytesToBase64url(buffer) {
+                var bytes = new Uint8Array(buffer);
+                var binary = '';
+                for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            }
+
             function registerWebAuthn() {
                 var challenge = "${challenge}";
                 var userid = "${userid}";
@@ -154,16 +177,16 @@
                     for (var i = 0; i < excludeCredentialIdsList.length; i++) {
                         excludeCredentials.push({
                             type: "public-key",
-                            id: base64url.decode(excludeCredentialIdsList[i], {loose: true})
+                            id: base64urlToBytes(excludeCredentialIdsList[i])
                         });
                     }
                 }
 
                 var publicKey = {
-                    challenge: base64url.decode(challenge, {loose: true}),
+                    challenge: base64urlToBytes(challenge),
                     rp: {id: rpId, name: rpEntityName},
                     user: {
-                        id: base64url.decode(userid, {loose: true}),
+                        id: base64urlToBytes(userid),
                         name: username,
                         displayName: username
                     },
@@ -185,8 +208,8 @@
                         var attestationObject = result.response.attestationObject;
                         var publicKeyCredentialId = result.id;
 
-                        document.getElementById('clientDataJSON').value = base64url.encode(new Uint8Array(clientDataJSON), {pad: false});
-                        document.getElementById('attestationObject').value = base64url.encode(new Uint8Array(attestationObject), {pad: false});
+                        document.getElementById('clientDataJSON').value = bytesToBase64url(clientDataJSON);
+                        document.getElementById('attestationObject').value = bytesToBase64url(attestationObject);
                         document.getElementById('publicKeyCredentialId').value = publicKeyCredentialId;
                         document.getElementById('authenticatorLabel').value = initLabel;
 
@@ -201,7 +224,6 @@
                     });
             }
         </script>
-        <script type="text/javascript" src="${url.resourcesCommonPath}/node_modules/base64url/dist/base64url.min.js"></script>
         <script type="text/javascript">
             // Build the /switch-to-magic-link URL from the mt-setup-info cookie (set by /beginSetup).
             // Returns the URL string, or null if the cookie is missing/invalid.
