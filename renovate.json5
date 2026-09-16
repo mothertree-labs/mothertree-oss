@@ -174,6 +174,46 @@
       "datasourceTemplate": "github-releases",
       "extractVersionTemplate": "^v(?<version>.+)$",
     },
+
+    // 6. Bare `tag:` pins that have NO sibling `repository:`, opted in with a
+    //    `# renovate: datasource=... depName=...` marker on the line directly
+    //    above the `tag:`.
+    //
+    //    Why it exists (#711): apps/values/nextcloud.yaml.gotmpl pins the chart's
+    //    main container as a bare `tag:` because the chart already supplies
+    //    `image.repository`. With no repository there was no datasource, so NO
+    //    manager matched that line at all -- not #1 (wants an inline
+    //    `image: repo/name:tag`) and not #2 (wants `repository:` + `tag:`). The
+    //    Sept 2026 bump therefore moved the install job and the seed-identity
+    //    init container to 32.0.15 and silently left the runtime image at
+    //    32.0.14. Nextcloud refuses downgrades, so the pod enters the app-version
+    //    503 crash-loop -- and dev cold bringup runs the install job on every PR
+    //    pipeline, so the skew fires in CI, not just in prod.
+    //
+    //    Sibling of #2, same file scope on purpose. They cannot double-manage a
+    //    line: #2 requires the line immediately before `tag:` to be
+    //    `repository:`, this one requires it to be the marker comment, and only
+    //    one line can immediately precede. Mutually exclusive by construction.
+    //
+    //    The MARKER is what limits scope, not the glob -- this manager is opt-in.
+    //    The other bare `tag:` under apps/values/ (keycloak.yaml:74,
+    //    `23.0.7-debian-12-r3`) deliberately gets no marker: that file is in no
+    //    helmfile `values:` list, and its bitnami-shaped tag has no relation to
+    //    the live `quay.io/keycloak/keycloak:26.7.3` deployed by the codecentric
+    //    chart. Managing it would open PRs against a file nothing reads.
+    //
+    //    RE2-safe (#553): named groups and character classes only. No lookahead,
+    //    no lookbehind, no backreferences. `datasource` and `depName` come from
+    //    the capture groups, so there is deliberately no *Template sibling for
+    //    either -- one source per field.
+    {
+      "customType": "regex",
+      "description": "Marker-annotated bare Helm-values image.tag (no sibling repository:)",
+      "managerFilePatterns": ["/^apps/values/.+\\.ya?ml(?:\\.gotmpl)?$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z][a-z0-9-]*) depName=(?<depName>[a-z0-9][a-z0-9._/\\-]*)[ \\t]*\\n[ \\t]*tag:[ \\t]*[\"']?(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)[\"']?",
+      ],
+    },
   ],
 
   "packageRules": [
