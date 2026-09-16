@@ -33,10 +33,31 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
-SCRIPT="$REPO/scripts/check-health"
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
+
+# check-health derives REPO_ROOT from its own invocation path and, since #673,
+# runs `$REPO_ROOT/scripts/verify-reflector --passive` as Check 7. That gate
+# talks to the cluster on its own account and is covered by its own suite
+# (scripts/tests/test-verify-reflector.sh, 181 assertions); teaching this fake
+# kubectl the reflector wire format as well would duplicate it and make THIS
+# suite break whenever that format changes.
+#
+# So: run the REAL check-health (a symlink, so BASH_SOURCE is still the file
+# under test) through a temp REPO_ROOT whose scripts/lib is the real one and
+# whose verify-reflector is a stub returning MT_TEST_REFLECTOR_RC. Default 0,
+# which restores this suite's contract that the exit code reflects Check 6
+# alone; a case below sets it to 1 to pin that Check 7 is counted when it fails.
+mkdir -p "$TMP/repo/scripts"
+ln -s "$REPO/scripts/lib"          "$TMP/repo/scripts/lib"
+ln -s "$REPO/scripts/check-health" "$TMP/repo/scripts/check-health"
+cat > "$TMP/repo/scripts/verify-reflector" <<'STUB'
+#!/usr/bin/env bash
+exit "${MT_TEST_REFLECTOR_RC:-0}"
+STUB
+chmod +x "$TMP/repo/scripts/verify-reflector"
+SCRIPT="$TMP/repo/scripts/check-health"
 export MT_TEST_CALLS="$TMP/calls" MT_TEST_STDOUT="$TMP/stdout" MT_TEST_RC="$TMP/rc"
 export MT_TEST_NAMESPACES="infra-monitoring infra-cert-manager infra-db"
 # Answers the five kinds of call Check 1-6 make. Everything but the alert API
@@ -221,6 +242,19 @@ OUT=$("${CLEAN_ENV[@]}" -u ALERT_DEADMAN PATH="$TMP/bin:$PATH" KUBECONFIG="$TMP/
 check "kubectl fails: exit 1" 1 "$RC"
 contains "kubectl fails: reported" "Could not query the Prometheus alert API" "$OUT"
 lacks "kubectl fails: does not pass" "All checks passed" "$OUT"
+
+# --- Check 7 is counted, so stubbing it above cannot hide a broken gate -----
+# Without this the default MT_TEST_REFLECTOR_RC=0 would make the stub
+# indistinguishable from check-health having dropped Check 7 altogether.
+run "$(body "$DEADMEN")"
+check "reflector gate passing: exit 0" 0 "$RC"
+contains "reflector gate passing: mirrors reported in sync" "Wildcard TLS mirrors in sync" "$OUT"
+
+: > "$MT_TEST_CALLS"; printf '%s' "$(body "$DEADMEN")" > "$MT_TEST_STDOUT"; echo 0 > "$MT_TEST_RC"
+OUT=$(MT_TEST_REFLECTOR_RC=1 "${CLEAN_ENV[@]}" -u ALERT_DEADMAN PATH="$TMP/bin:$PATH"           KUBECONFIG="$TMP/kubeconfig" bash "$SCRIPT" -e test 2>&1); RC=$?
+check "reflector gate failing: exit 1" 1 "$RC"
+contains "reflector gate failing: counted as an issue" "1 issue(s) found" "$OUT"
+lacks "reflector gate failing: does not claim all passed" "All checks passed" "$OUT"
 
 echo "check-health-alerts: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
