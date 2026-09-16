@@ -191,9 +191,14 @@
     //    pipeline, so the skew fires in CI, not just in prod.
     //
     //    Sibling of #2, same file scope on purpose. They cannot double-manage a
-    //    line: #2 requires the line immediately before `tag:` to be
-    //    `repository:`, this one requires it to be the marker comment, and only
-    //    one line can immediately precede. Mutually exclusive by construction.
+    //    line, but NOT for the reason you might assume: #2's separator is
+    //    `\s*\n\s*`, and `\s` matches newlines, so #2 spans blank lines
+    //    between `repository:` and `tag:` -- it makes no adjacency guarantee.
+    //    What actually separates them is that `#` is not whitespace: a comment
+    //    line between `repository:` and `tag:` breaks #2, and this manager
+    //    REQUIRES that comment. The exclusion is real, but it rests on the
+    //    marker being a non-whitespace line, not on adjacency. Verified both
+    //    ways against the live pattern.
     //
     //    The MARKER is what limits scope, not the glob -- this manager is opt-in.
     //    The other bare `tag:` under apps/values/ (keycloak.yaml:74,
