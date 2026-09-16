@@ -188,6 +188,14 @@ mt_apply kubectl apply -f <(kubectl -n "$NS_DOCS" create configmap docs-email-as
 # Harmless while migrations were no-ops. The 4.4.0 -> 5.6.1 upgrade put six
 # of them in that window, one adding a NOT NULL column. Do not move the
 # backend apply back above this block.
+#
+# The move also made a second invariant load-bearing: the two Job applies
+# below must stay PLAIN `kubectl apply`, never mt_apply. mt_delete_job_wait
+# deletes then applies, so a Job always reports "created" and always diffs as
+# a change. Here -- ahead of both mt_has_changes gates -- that would flag a
+# change on every deploy and spuriously rollout-restart backend, frontend and
+# y-provider every time. At the old position, after both gates, it would have
+# been nearly harmless.
 # ---------------------------------------------------------------------------
 # Step 7: Initialize/verify database (idempotent)
 # The db-init job runs in NS_DOCS (where docs-secrets is) and connects to PostgreSQL cross-namespace
