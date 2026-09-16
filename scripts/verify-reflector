@@ -25,13 +25,16 @@
 #      the annotation — the very list the controller acts on, rendered by
 #      create_env from TENANT_NAMESPACES — so no tenant config or secrets file
 #      is needed; a kubeconfig is enough (runs against prod from CI or a
-#      laptop). A source carrying a *-namespaces-selector annotation, or an
-#      EMPTY auto-namespaces list (which the controller reads as "every
-#      namespace"), is a failure: list-or-selector semantics silently widen
-#      where the private key is copied.
+#      laptop). A source is a failure when it carries a *-namespaces-selector
+#      annotation, when either namespace list is EMPTY (the controller reads
+#      that as "every namespace"), when a list entry is not a plain namespace
+#      name (entries are full-match regular expressions, so `.` or `*` widens
+#      the copy), or when auto-namespaces and allowed-namespaces disagree.
+#      All of it guards the same thing: where the private key may be copied.
 #
-# Only Secret METADATA is read (one jsonpath field per call; never -o json or
-# -o yaml on a Secret): Secret data never enters a variable or a log line.
+# Only Secret METADATA is read (an allowlisted set of metadata jsonpaths —
+# never -o json or -o yaml on a Secret): Secret data never enters a variable
+# or a log line.
 #
 # Usage:
 #   ./scripts/verify-reflector -e <env> [-t <tenant>] [--passive]
@@ -56,9 +59,35 @@ CANARY_NAME="reflector-canary"
 ANN='reflector\.v1\.k8s\.emberstack\.com'
 
 # --- source discovery --------------------------------------------------------
-# Both producers print one line per source, tab-separated:
-#   <namespace> <name> <auto-namespaces> <allowed-namespaces> <selector annotations, concatenated>
-# so the verdict loop below is the same for the cluster-wide and the -t case.
+# WIRE FORMAT. Both producers print one line per source with EXACTLY
+# _MT_REFLECTOR_ROW_FIELDS tab-separated fields, in this order:
+#   1 namespace  2 name  3 auto-namespaces  4 allowed-namespaces
+#   5 selector annotations (the two *-namespaces-selector values concatenated)
+# and _reflector_check_rows asserts that count. It is asserted because getting
+# it wrong is silent and looks like a real finding: _list_sources' jsonpath
+# also selects reflection-auto-enabled (to filter on), so it renders SIX
+# columns; while the awk below passed all six through, the consumer's five
+# `read` variables absorbed them shifted by one — auto-namespaces landed in
+# `allowed`, allowed-namespaces landed in `selectors`, and every healthy
+# source was reported as "carries a *-namespaces-selector annotation" on the
+# all-tenants path (pipeline 2233's check-health). The awk now emits the five
+# documented fields and drops the filter column.
+#
+# An empty field is sent as _MT_REFLECTOR_EMPTY, never as nothing: tab is IFS
+# *whitespace*, so bash collapses runs of tabs and strips trailing ones, and an
+# empty middle or last field would shift every column after it — the same class
+# of bug as above. _reflector_source_ok decodes the placeholder back to empty.
+_MT_REFLECTOR_ROW_FIELDS=5
+_MT_REFLECTOR_EMPTY='-'
+
+# _reflector_row <ns> <name> <auto> <allowed> <selectors>
+# One wire-format row; ${x:-$_MT_REFLECTOR_EMPTY} substitutes the placeholder
+# for a field that is unset OR empty.
+_reflector_row() {
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "${1:-$_MT_REFLECTOR_EMPTY}" "${2:-$_MT_REFLECTOR_EMPTY}" "${3:-$_MT_REFLECTOR_EMPTY}" \
+        "${4:-$_MT_REFLECTOR_EMPTY}" "${5:-$_MT_REFLECTOR_EMPTY}"
+}
 
 # _list_sources: every Secret with reflection-auto-enabled=true, cluster-wide.
 # The canary is listed too and stripped by the caller AFTER using it as the
@@ -67,6 +96,8 @@ ANN='reflector\.v1\.k8s\.emberstack\.com'
 # The jsonpath is checked against the same metadata-only allowlist as
 # _mt_secret_meta before it is sent: this is the one read that bypasses that
 # helper, and it must never grow a data field.
+# awk (unlike bash `read`) does not collapse runs of its field separator, so
+# it sees all six rendered columns even when some are empty.
 _list_sources() {
     local path
     path='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-enabled}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces-selector}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces-selector}{"\n"}{end}'
@@ -75,22 +106,37 @@ _list_sources() {
         return 2
     fi
     kubectl get secrets -A -o jsonpath="$path" \
-        | awk -F'\t' '$3 == "true" { print }'
+        | awk -F'\t' -v e="$_MT_REFLECTOR_EMPTY" '
+            $3 == "true" {
+                ns    = ($1 == "" ? e : $1)
+                name  = ($2 == "" ? e : $2)
+                auto  = ($4 == "" ? e : $4)
+                allow = ($5 == "" ? e : $5)
+                sel   = ($6 == "" ? e : $6)
+                print ns "\t" name "\t" auto "\t" allow "\t" sel
+            }'
 }
 
 # _tenant_source <tenant>: the tenant's wildcard source in the same shape.
-# Prints nothing and returns 1 if the Secret is MISSING, 2 if UNREADABLE.
+# Prints nothing and returns 1 if the Secret is MISSING, 2 if UNREADABLE —
+# including when it vanishes or becomes unreadable BETWEEN the reads below.
+# _mt_secret_meta reports those as the tokens MISSING / UNREADABLE, and a token
+# left in a field would be read as a namespace list or a selector annotation
+# ("carries a *-namespaces-selector annotation" for a Secret that is simply
+# gone), so every field is classified here instead.
 _tenant_source() {
-    local tenant="$1" ns="tn-${1}-matrix" name="wildcard-tls-${1}" rv auto allowed selectors
+    local tenant="$1" ns="tn-${1}-matrix" name="wildcard-tls-${1}" rv auto allowed selectors field
     rv=$(_mt_secret_meta "$ns" "$name" '{.metadata.resourceVersion}')
-    case "$rv" in
-        MISSING)    return 1 ;;
-        UNREADABLE) return 2 ;;
-    esac
     auto=$(_mt_secret_meta "$ns" "$name" '{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces}')
     allowed=$(_mt_secret_meta "$ns" "$name" '{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces}')
     selectors=$(_mt_secret_meta "$ns" "$name" '{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces-selector}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces-selector}')
-    printf '%s\t%s\t%s\t%s\t%s\n' "$ns" "$name" "$auto" "$allowed" "$selectors"
+    for field in "$rv" "$auto" "$allowed" "$selectors"; do
+        case "$field" in
+            MISSING)    return 1 ;;
+            UNREADABLE) return 2 ;;
+        esac
+    done
+    _reflector_row "$ns" "$name" "$auto" "$allowed" "$selectors"
 }
 
 # _bad_namespace_entry <csv>: prints the first entry that is not a plain
@@ -110,6 +156,97 @@ _bad_namespace_entry() {
         esac
     done
     return 1
+}
+
+# _reflector_source_ok <ns> <name> <auto> <allowed> <selectors>
+# Decodes the wire placeholder and validates one source. Returns 0 when the
+# source is well formed (its mirrors may be checked), or 1 after printing what
+# is wrong with it. Decoding comes FIRST: the placeholder `-` would otherwise
+# pass the namespace charset check and be waited on as a namespace named `-`.
+_reflector_source_ok() {
+    local ns="$1" name="$2" targets="$3" allowed="$4" selectors="$5" bad
+    [ "$ns" != "$_MT_REFLECTOR_EMPTY" ] || ns=""
+    [ "$name" != "$_MT_REFLECTOR_EMPTY" ] || name=""
+    [ "$targets" != "$_MT_REFLECTOR_EMPTY" ] || targets=""
+    [ "$allowed" != "$_MT_REFLECTOR_EMPTY" ] || allowed=""
+    [ "$selectors" != "$_MT_REFLECTOR_EMPTY" ] || selectors=""
+
+    if [ -z "$ns" ] || [ -z "$name" ]; then
+        print_error "internal: a source row carries no namespace/name — refusing to report on it"
+        return 1
+    fi
+    if [ -n "$selectors" ]; then
+        print_error "$ns/$name carries a *-namespaces-selector annotation — forbidden: the controller reflects into the listed namespaces OR any matching the selector (see apps/manifests/wildcard/certificate.yaml.tpl)"
+        return 1
+    fi
+    # Both lists are checked the same way: auto-namespaces is where the
+    # controller PUSHES copies, allowed-namespaces is who may HOLD one.
+    # An empty list means every namespace to the controller.
+    if [ -z "$targets" ]; then
+        print_error "$ns/$name has reflection-auto-enabled but an empty reflection-auto-namespaces list — the controller reads that as EVERY namespace; refusing to guess a target list"
+        return 1
+    fi
+    if [ -z "$allowed" ]; then
+        print_error "$ns/$name has an empty reflection-allowed-namespaces list — the controller lets EVERY namespace hold a copy; refusing"
+        return 1
+    fi
+    if bad=$(_bad_namespace_entry "$targets"); then
+        print_error "$ns/$name reflection-auto-namespaces lists '$bad' — not a plain namespace name ([a-z0-9-]); the controller reads entries as full-match regular expressions, so this may reflect the key into unintended namespaces (see apps/manifests/wildcard/certificate.yaml.tpl)"
+        return 1
+    fi
+    if bad=$(_bad_namespace_entry "$allowed"); then
+        print_error "$ns/$name reflection-allowed-namespaces lists '$bad' — not a plain namespace name ([a-z0-9-]); the controller reads entries as full-match regular expressions (see apps/manifests/wildcard/certificate.yaml.tpl)"
+        return 1
+    fi
+    if [ "${targets//[[:space:]]/}" != "${allowed//[[:space:]]/}" ]; then
+        print_error "$ns/$name: reflection-auto-namespaces ($targets) differs from reflection-allowed-namespaces ($allowed) — create_env renders both from TENANT_NAMESPACES and they must be identical (a wider allowed list lets extra namespaces hold the key)"
+        return 1
+    fi
+    return 0
+}
+
+# _reflector_check_rows <timeout> — reads wire-format rows on stdin, validates
+# each source and waits for its mirrors. Sets MT_REFLECTOR_CHECKED and
+# MT_REFLECTOR_FAILURES (globals rather than stdout, which carries findings).
+# A row whose field count is not the documented one is an internal error, not a
+# finding about the Secret: report it and never guess which column is which.
+_reflector_check_rows() {
+    local timeout="$1" line rest
+    local -a row=()
+    MT_REFLECTOR_CHECKED=0
+    MT_REFLECTOR_FAILURES=0
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        # Split on tab WITHOUT collapsing. `read -a` with IFS=tab cannot be
+        # used: tab is IFS *whitespace*, so bash merges runs of tabs and drops
+        # a trailing empty field — a SIX-column row whose last column is empty
+        # (exactly what the old producer emitted for a Secret with no selector
+        # annotation) would arrive as five values and sail through the count
+        # check below with every value shifted one place. That is the bug this
+        # consumer exists to make impossible, so the splitter has to be exact.
+        row=()
+        rest="$line"
+        while [ "$rest" != "${rest#*$'\t'}" ]; do
+            row+=("${rest%%$'\t'*}")
+            rest="${rest#*$'\t'}"
+        done
+        row+=("$rest")
+        if [ "${#row[@]}" -ne "$_MT_REFLECTOR_ROW_FIELDS" ]; then
+            print_error "internal: a source row has ${#row[@]} field(s), expected ${_MT_REFLECTOR_ROW_FIELDS} — the row producer and this consumer disagree; refusing to guess which column is which"
+            MT_REFLECTOR_FAILURES=$((MT_REFLECTOR_FAILURES + 1))
+            continue
+        fi
+        MT_REFLECTOR_CHECKED=$((MT_REFLECTOR_CHECKED + 1))
+        if ! _reflector_source_ok "${row[@]}"; then
+            MT_REFLECTOR_FAILURES=$((MT_REFLECTOR_FAILURES + 1))
+            continue
+        fi
+        print_status "Checking ${row[0]}/${row[1]} -> ${row[2]}"
+        if ! mt_wait_for_reflection "${row[0]}" "${row[1]}" "${row[2]}" "$timeout"; then
+            MT_REFLECTOR_FAILURES=$((MT_REFLECTOR_FAILURES + 1))
+        fi
+    done
+    return 0
 }
 
 # --- main --------------------------------------------------------------------
@@ -181,48 +318,9 @@ main() {
         fi
     fi
 
-    local ns name targets allowed selectors checked=0 bad
-    while IFS=$'\t' read -r ns name targets allowed selectors; do
-        [ -n "$ns" ] || continue
-        checked=$((checked + 1))
-        if [ -n "$selectors" ]; then
-            print_error "$ns/$name carries a *-namespaces-selector annotation — forbidden: the controller reflects into the listed namespaces OR any matching the selector (see apps/manifests/wildcard/certificate.yaml.tpl)"
-            failures=$((failures + 1))
-            continue
-        fi
-        # Both lists are checked the same way: auto-namespaces is where the
-        # controller PUSHES copies, allowed-namespaces is who may HOLD one.
-        # An empty list means every namespace to the controller.
-        if [ -z "$targets" ]; then
-            print_error "$ns/$name has reflection-auto-enabled but an empty reflection-auto-namespaces list — the controller reads that as EVERY namespace; refusing to guess a target list"
-            failures=$((failures + 1))
-            continue
-        fi
-        if [ -z "$allowed" ]; then
-            print_error "$ns/$name has an empty reflection-allowed-namespaces list — the controller lets EVERY namespace hold a copy; refusing"
-            failures=$((failures + 1))
-            continue
-        fi
-        if bad=$(_bad_namespace_entry "$targets"); then
-            print_error "$ns/$name reflection-auto-namespaces lists '$bad' — not a plain namespace name ([a-z0-9-]); the controller reads entries as full-match regular expressions, so this may reflect the key into unintended namespaces (see apps/manifests/wildcard/certificate.yaml.tpl)"
-            failures=$((failures + 1))
-            continue
-        fi
-        if bad=$(_bad_namespace_entry "$allowed"); then
-            print_error "$ns/$name reflection-allowed-namespaces lists '$bad' — not a plain namespace name ([a-z0-9-]); the controller reads entries as full-match regular expressions (see apps/manifests/wildcard/certificate.yaml.tpl)"
-            failures=$((failures + 1))
-            continue
-        fi
-        if [ "${targets//[[:space:]]/}" != "${allowed//[[:space:]]/}" ]; then
-            print_error "$ns/$name: reflection-auto-namespaces ($targets) differs from reflection-allowed-namespaces ($allowed) — create_env renders both from TENANT_NAMESPACES and they must be identical (a wider allowed list lets extra namespaces hold the key)"
-            failures=$((failures + 1))
-            continue
-        fi
-        print_status "Checking $ns/$name -> $targets"
-        if ! mt_wait_for_reflection "$ns" "$name" "$targets" "$timeout"; then
-            failures=$((failures + 1))
-        fi
-    done <<< "$sources"
+    _reflector_check_rows "$timeout" <<< "$sources"
+    failures=$((failures + MT_REFLECTOR_FAILURES))
+    local checked="$MT_REFLECTOR_CHECKED"
 
     if [ "$failures" -gt 0 ]; then
         print_error "Reflector check FAILED on ${MT_ENV}: ${failures} problem(s) across the canary and ${checked} source Secret(s)"
