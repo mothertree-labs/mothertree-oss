@@ -156,7 +156,7 @@ print_success "Application ConfigMap created"
 # =============================================================================
 # Install npm dependencies via init container approach
 # =============================================================================
-# The deployment uses node:22-alpine as base image with the app code mounted
+# The deployment uses node:24-alpine as base image with the app code mounted
 # from a ConfigMap. We need an init container to install npm dependencies.
 # For v1, we create a separate ConfigMap with an install script.
 print_status "Creating npm install script ConfigMap..."

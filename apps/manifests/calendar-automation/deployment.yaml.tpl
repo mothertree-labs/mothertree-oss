@@ -58,7 +58,7 @@ spec:
           type: RuntimeDefault
       initContainers:
       - name: npm-install
-        image: node:22-alpine
+        image: node:24-alpine
         command: ["sh", "/install/install.sh"]
         env:
         - name: HOME
@@ -82,7 +82,7 @@ spec:
           readOnly: true
       containers:
       - name: calendar-automation
-        image: node:22-alpine
+        image: node:24-alpine
         command: ["node", "/app/server.js"]
         securityContext:
           allowPrivilegeEscalation: false

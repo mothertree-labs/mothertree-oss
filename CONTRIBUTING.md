@@ -97,8 +97,8 @@ Most tools are **not available** via `dnf` in compatible versions. Install from 
 # System packages (available via dnf)
 sudo dnf install -y jq gettext openssl curl git
 
-# Node.js 22 LTS (via NodeSource)
-curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
+# Node.js 24 LTS (via NodeSource)
+curl -fsSL https://rpm.nodesource.com/setup_24.x | sudo bash -
 sudo dnf install -y nodejs
 
 # kubectl
@@ -152,8 +152,8 @@ sudo dnf install -y bind-utils swaks postgresql docker-ce
 # System packages
 sudo apt-get update && sudo apt-get install -y jq gettext-base openssl curl git
 
-# Node.js 22 LTS (via NodeSource)
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
+# Node.js 24 LTS (via NodeSource)
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash -
 sudo apt-get install -y nodejs
 
 # kubectl

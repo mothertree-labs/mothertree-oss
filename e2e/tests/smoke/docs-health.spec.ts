@@ -68,4 +68,28 @@ test.describe('Smoke — Docs Backend Health', () => {
       'Expected an image content-type for the email logo, got: ' + contentType
     ).toContain('image/png');
   });
+
+  test('save-status script is served by the frontend', async ({ request }) => {
+    // FRONTEND_JS_URL points at /static/save-status.js, served from the
+    // save-status-scripts ConfigMap mounted into the frontend nginx (web root
+    // /app since impress 4.8). If the mount lands outside the web root the
+    // script silently 404s and the keepalive save fix stops applying.
+    const response = await request.get(`${urls.docs}/static/save-status.js`);
+
+    if (response.status() === 0) {
+      test.skip(true, 'Docs not reachable (DNS or connection error)');
+    }
+
+    expect(
+      response.status(),
+      'Expected /static/save-status.js to be served. ' +
+      'Check the save-status-scripts ConfigMap and its /app/static mount in the frontend deployment.'
+    ).toBe(200);
+
+    const contentType = response.headers()['content-type'] || '';
+    expect(
+      contentType,
+      'Expected a JavaScript content-type for save-status.js, got: ' + contentType
+    ).toContain('javascript');
+  });
 });

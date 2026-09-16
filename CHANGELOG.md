@@ -6,7 +6,309 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `calendar-automation-tests` step in `.woodpecker/validate.yaml`. The
+  17-assertion `node --test server.test.js` suite in `apps/calendar-automation`
+  had no CI step at all — its only coverage was e2e — so a broken unit test
+  would only have surfaced when someone ran it by hand. The step has the same
+  shape as `account-portal-tests` (`npm ci --ignore-scripts && npm test` after
+  `npm-check`, in its own directory so it can run alongside the portal steps).
+  It runs on the CI host's Node (20 today, tracked in #686) and passes there
+  too: the suite is source-inspection over `server.js` and imports only Node
+  builtins, so it does not depend on `require(esm)`.
+
+### Removed
+- `apps/calendar-automation/Dockerfile` (#674). It was never built:
+  `ci/scripts/build-image.sh` knows only admin-portal, account-portal,
+  roundcube and perf, nothing else in the repo referenced it, and the service
+  actually runs on the stock `node` image declared in
+  `apps/manifests/calendar-automation/deployment.yaml.tpl` with its code
+  mounted from a ConfigMap. Keeping it meant two runtime definitions that could
+  drift (and Renovate's `dockerfile` manager offering a second, meaningless
+  bump for it). One runtime definition, not two. Its companion
+  `apps/calendar-automation/.dockerignore` goes with it — nothing else read it.
+
 ### Changed
+- **La Suite Docs (impress) 4.4.0 → 5.6.1** (`docs/backend-deployment.yaml`,
+  `docs/migrations-job.yaml`, `docs/frontend-deployment.yaml.tpl`,
+  `docs/y-provider-deployment.yaml`; tracking issue #606). This is a **schema
+  one-way door**: the `docs-migrations` Job applies core migrations 0028–0033
+  per tenant, and 0030 adds a NOT NULL `is_first_connection` column to the
+  user table, so a plain image-pin revert afterwards 500s every new login
+  (4.4.0 inserts users without that column). 0028 and 0032 also drop data
+  (templates, link-trace masking). **Rollback is forward-only**: take a
+  `pg_dump` of every `docs_<tenant>` database before merging; to go back,
+  either restore the dump, or — with the 5.x image still running — run
+  `python manage.py migrate core 0027` in a backend pod and only then revert
+  the pins. The deploy pipeline does not dump automatically.
+- **Docs customizations rewritten to fail closed** (`docs/mt_settings.py`,
+  `docs/mt_patches/`, ConfigMap `docs-mt-python`). Until now the backend
+  container regex-edited `impress/settings.py` at start-up (MediaMiddleware +
+  Linode storage backend) and `docs/patch_invitation.py` string-matched
+  `core/models.py` to redirect invitation emails to the account portal's
+  guest landing. Both failed *open*: on 4.8.x the invitation patch printed a
+  WARNING, exited 0, and shipped the plain document link (#606). Now
+  `DJANGO_SETTINGS_MODULE=mt_settings` loads a django-configurations subclass
+  of upstream `Production` that prepends the middleware, swaps the default
+  storage backend and appends the `mt_patches` app; that app's
+  `AppConfig.ready()` wraps `Document.send_invitation_email` /
+  `Document.send_email` (exact `inspect.signature` match required), pins the
+  guest-landing `link` through upstream's `context.update`, and runs a
+  send-path self-test with `send_mail` captured before the first request.
+  Any drift — a renamed method, a refactor that stops honouring the context,
+  a missing `ACCOUNT_PORTAL_URL` or `DJANGO_EMAIL_URL_APP` — raises at
+  start-up, the gunicorn worker does not boot and the pod never becomes
+  Ready, instead of silently sending the wrong link. Exactly one
+  `[mt_patches] ok` line is logged per worker. The `pip install boto3` at
+  container start is gone (the 5.x image is `uv`-built with boto3 in
+  `/app/.venv`; the old line targeted the wrong interpreter), as is the
+  `Site` domain hack in `apps/deploy-docs.sh`: email links now come from
+  `DJANGO_EMAIL_URL_APP` (docs-config), the setting upstream added in 4.5.
+  `docs/storage_backends.py` is deleted: it was an unreferenced duplicate of
+  the copy inside `docs/storage-backends-configmap.yaml` (the only one ever
+  mounted) that still carried a runtime `pip install boto3==1.35.99` attempt.
+  With no in-place patching left, the backend Deployment and the migrations
+  Job **no longer run as root**: both now run as the image's own user
+  (`runAsNonRoot`, `runAsUser: 1001`, `runAsGroup: 127`,
+  `allowPrivilegeEscalation: false`), and gunicorn gets `--no-control-socket`
+  because gunicorn 26 would otherwise try to create `$HOME/.gunicorn` (HOME is
+  `/` for that user). The `mt_patches` files are two `subPath` mounts, so an
+  in-place ConfigMap edit cannot reach a running container; it is picked up on
+  the next container restart or rollout. Both workloads also carry the Pod
+  Security "restricted" fields the repo already uses elsewhere
+  (`seccompProfile: RuntimeDefault`, `capabilities.drop: [ALL]`) and a
+  read-only root filesystem with an `emptyDir` at `/tmp` for gunicorn's
+  worker heartbeat files (proved locally with `docker run --read-only`).
+- **Docs frontend web root moved to `/app`** (impress 4.8, nginx-unprivileged
+  image with its own entrypoint): the `save-status.js` and
+  `logo-email.png` ConfigMap mounts now land at `/app/static` and
+  `/app/email-assets`, which do not exist in the image and so shadow nothing;
+  the explicit `command:` override is dropped in favour of the image's
+  entrypoint. `e2e/tests/smoke/docs-health.spec.ts` gains a
+  `/static/save-status.js` 200 assertion next to the existing logo check, so
+  a future root move cannot 404 either asset silently again.
+- **PostgreSQL client images 17 → 18, client pods only** (#684). Every
+  throwaway `psql` pod the deploy and CI scripts spin up now runs
+  `postgres:18-alpine`: the Nextcloud probe Job image (`MT_NC_PROBE_IMAGE` in
+  `scripts/lib/nextcloud-db.sh`), `mt_psql` and `mt_pgbouncer_verify_db` in
+  `scripts/lib/common.sh` (the latter was still on 15), the Roundcube/PgBouncer
+  introspection pods in `ci/scripts/ci-e2e-diagnostics.sh` (15) and the
+  tenant-DB list/drop pods in `scripts/destroy-dev-cluster.sh` (16). The
+  PostgreSQL VMs stay on **17** — the server upgrade is a separate, operator-run
+  job (#685). A newer client against an older server is the supported direction,
+  and psql 18 changes nothing in the flags these scripts use (`-c`, `-tAc`,
+  `--csv`, `ON_ERROR_STOP`); PgBouncer is protocol-agnostic in between.
+  `-alpine` because the pull is smaller on the memory-tight dev pool; the
+  db-init Job manifests keep the `postgres:18` tags they already had.
+
+  **Why three of them were behind at all**: Renovate only saw `image:` lines in
+  manifests/values plus the `MT_NC_PROBE_IMAGE` constant. The `kubectl run
+  --image=` pins in `scripts/lib/common.sh`, `scripts/destroy-dev-cluster.sh`
+  and `ci/scripts/ci-e2e-diagnostics.sh` sat in files outside the image
+  manager's `managerFilePatterns`, in a form no matchString recognised — so they
+  drifted to 15 and 16 while the dashboard reported a single "postgres 17 → 18"
+  item. The image custom manager in `renovate.json5` now covers those three
+  files and has a matchString for the `--image=postgres:<tag>-alpine` form
+  (narrow on purpose: literal `postgres`, `-alpine` suffix required, RE2-safe),
+  so the next major surfaces once, in one place.
+
+  **Terraform `postgres_version` default 16 → 17**: the variable in `phase1`
+  and `modules/postgres-server` only feeds cloud-init on a PostgreSQL VM's
+  first boot, and the instance ignores later metadata changes, so this is inert
+  for every existing environment. But a freshly provisioned VM would have been
+  initialised on 16 before Ansible — which manages the running major from the
+  private infra config and defaults to 17 — took over. The default now matches
+  Ansible's.
+- Node.js runtime 22 → 24 LTS for the admin portal, the account portal and
+  calendar-automation (#674, #404, #65). Both portal `Dockerfile`s move to
+  `node:24-alpine`; calendar-automation's real runtime is the stock image in
+  `apps/manifests/calendar-automation/deployment.yaml.tpl` (the `npm-install`
+  init container and the main container), and its `engines.node` is now
+  `>=22.12` — the first release with unflagged `require(esm)`, which
+  `require('imapflow')` / `require('ical.js')` from CommonJS already rely on,
+  so the interop the old Dependabot comment feared was already load-bearing and
+  green on 22. Pre-flight on `node:24-alpine` (Node 24.21.0, npm 11.19.0,
+  Alpine 3.24.1 — the same Alpine minor as `node:22-alpine`, so the
+  musl/OpenSSL layer does not move): admin portal 105/105 Jest tests, account
+  portal 133/133, calendar-automation 17/17; `npm run build:css` and
+  `npm prune --production` clean in both portals; `require()` of
+  `connect-redis`, `nodemailer`, `express-rate-limit` and `openid-client`
+  resolves from CommonJS before and after the prune; calendar-automation's
+  `server.js` passes `node --check`, its ESM deps resolve, and starting it
+  without config exits with the expected
+  `[FATAL] Required environment variable IMAP_HOST` (env validation, not an
+  import error). No new `DeprecationWarning` / `ExperimentalWarning`: the only
+  runtime warning is calendar-automation's pre-existing
+  `MODULE_TYPELESS_PACKAGE_JSON` on `server.test.js`, identical on Node 20 and
+  24. Its lockfile has no native or install-script packages, which corrects the
+  tier-2 note below that held calendar-automation back on 22 because of "native
+  dependencies". 24 rather than 26: 24 is Active LTS today (Maintenance from
+  2026-10-20, EOL 2028-04-30) while 26 is not LTS until 2026-10-28, and the
+  surface is identical, so 24 → 26 later is the same one-token change; 22 is
+  EOL 2027-04-30. The Dependabot `semver-major` ignore for `node` on both
+  portal Dockerfiles stays — it is what keeps 25/26 from arriving unreviewed —
+  but its comment is corrected: the 20→25 breakage it cited was openid-client
+  5→6 and the connect-redis export shape (#404), not Node. The first prod
+  deploy rolls the two portals (new image tags) and calendar-automation (image
+  change in the Deployment spec) once. `CONTRIBUTING.md`'s workstation setup
+  now installs Node.js 24 LTS from NodeSource to match; the CI VM itself is
+  still on 20 and is tracked separately in #686.
+- **Reflector propagation gate** (#673). Each tenant's wildcard TLS Secret is
+  issued once by cert-manager and copied by the `emberstack/reflector` controller
+  into every namespace that serves it — every per-tenant ingress, Stalwart's
+  required volume, Keycloak's auth ingress in `infra-auth`. The copies are
+  ordinary Secrets that persist with or without the controller, so a dead or
+  wedged reflector was invisible: every deploy stayed green, and only when the
+  source renewed would the consumers keep the stale copy — an expired
+  certificate weeks later, noticed at best by `IngressCertExpiringSoon` 14 days
+  ahead and only where alert delivery works. Nothing in the deploy path proved
+  the controller was propagating.
+
+  The controller's own sync rule is an exact equality — a mirror is rewritten
+  iff its `reflector.v1.k8s.emberstack.com/reflected-version` annotation differs
+  from the source's `metadata.resourceVersion` (unchanged between the chart
+  versions we run) — so "in sync" needs no hashing. New in `scripts/lib/common.sh`:
+  `mt_wait_for_reflection` (every listed namespace must hold the Secret with a
+  matching `reflected-version`; on timeout it names each lagging namespace with
+  its stale version or MISSING and the source version) and `mt_reflector_canary`
+  (applies a `reflector-canary` Secret with a fresh stamp and requires the
+  mirror to carry the same version *and* stamp — proof the controller is
+  propagating right now, not just that old copies exist). Only Secret metadata
+  is ever read; Secret data never enters a variable or a log line.
+  - `deploy_infra` runs the canary right after the system DaemonSet gate
+    (`infra-cert-manager` → `infra-auth`, which exists on a cold start) and
+    fails closed with the fix named.
+  - `create_env` waits for `wildcard-tls-<tenant>` to be mirrored in sync into
+    every namespace in its reflector annotation once the certificate wait is
+    over; a lagging or missing mirror aborts the deploy. When the source Secret
+    itself does not exist yet (a slow first issuance — cert-manager's latency,
+    already warned about loudly above) the gate is skipped with a warning, so
+    the pre-existing warn-and-continue for brand-new tenants is preserved.
+  - `ci/scripts/ci-create-test-users.sh` replaces its warn-only "reflected
+    secret present" check with the same in-sync wait, fail closed.
+  - New `scripts/verify-reflector -e <env> [-t <tenant>] [--passive]`: the canary
+    plus the in-sync check of every auto-reflected source in the cluster (or one
+    tenant's), with the target list taken from the source's own annotation, so
+    only a kubeconfig is needed. A `*-namespaces-selector` annotation or an empty
+    namespace list is a failure — the controller reflects into the listed
+    namespaces *or* any matching a selector, so a selector silently widens where
+    the private key is copied (the certificate templates now carry a comment
+    forbidding it). `scripts/check-health` runs it with `--passive`, so a health
+    check never writes a Secret.
+  - Unit test `scripts/lib/tests/mt-wait-for-reflection.test.sh` (fake kubectl,
+    no cluster) covers in-sync, lagging, missing, unannotated, unreadable,
+    source-missing, catch-up mid-wait, renewal mid-wait, and the canary paths.
+
+### Changed
+- `emberstack/reflector` chart 7.1.288 → 10.0.65 (there is no 8.x; 9.x moved to
+  .NET 9, 10.x to .NET 10 and the ES.FX "Ignite" framework). Diffing the chart's
+  own values and the rendered manifests between the two versions: the image
+  becomes the fully qualified `docker.io/emberstack/kubernetes-reflector`, the
+  container runs with `readOnlyRootFilesystem: true`, the health probes move
+  from `/healthz` on port 25080 to `/health/live` and `/health/ready` on port
+  **8080** (the `healthcheck:` values key is gone), and the TLS-verify env var is
+  renamed; RBAC is byte-identical, there are no CRDs, and the same four objects
+  are rendered. Nothing in this repo referenced port 25080. The reflection
+  annotations and the sync rule the new gate relies on are unchanged, and the
+  gate was landed first on the old chart so it is proven against a known-good
+  controller; the pin is a separate, independently revertable commit. New
+  `apps/values/reflector.yaml` sets only the qualified image repository and
+  resources (50m/64Mi requests; 200m CPU and a deliberately roomy 512Mi memory
+  limit, because the controller caches every watched Secret and ConfigMap
+  cluster-wide and an OOM loop between deploys would be the very failure mode
+  above). The canary stamp carries 64 random bits so a stale or forged mirror
+  can never match by accident, and the metadata reader refuses `.data` on any
+  Secret but the canary. The first deploy
+  replaces the reflector pod once; the canary then proves the new controller
+  propagates before anything else is deployed.
+- **kube-prometheus-stack 58.7.2 → 91.4.0** (33 chart majors; prometheus-operator
+  v0.73.2 → v0.94.0, Prometheus 2.52 → 3.14, Alertmanager 0.27 → 0.34, Grafana
+  10.4 → 13.2, kube-state-metrics 2.12 → 2.20, node-exporter 1.8 → 1.12). One
+  shot rather than staged: no intermediate major needs a state migration, CRD
+  changes are cumulative, and every stage would have cost a full dev + prod
+  cycle. Rendered against our committed values for dev and prod, the Prometheus
+  and Alertmanager objects keep their names, storage specs and (prod) the SES
+  credentials mount, so the StatefulSets and PVCs are untouched; the Grafana
+  Deployment, its admin Secret, the dashboard/datasource sidecars, all three
+  ingresses and every one of our rule groups, ServiceMonitors and Probes
+  render as before. Two things do change shape: the chart now renders each
+  `additionalPrometheusRulesMap` entry as its own `PrometheusRule` (58 wrapped
+  them in one `List`), and the chart's own Grafana test pod and the PSP-era
+  Grafana Role/RoleBinding are gone.
+
+  **Why the CRD step below is the real content of this change.** Helm installs
+  a chart's CRDs once, on first install, and never upgrades them — and nothing
+  in the repo re-applied them since. Every operator bump between 58 and 91
+  shipped new CRD schemas; against the frozen ones, fields the new operator
+  reads are silently pruned on write. `deploy_infra` now server-side applies
+  the CRD set of the pinned chart's operator immediately before the
+  tier=system `helmfile sync` (`scripts/lib/prometheus-crds.sh`,
+  `mt_apply_prometheus_crds`). The CRDs come from the chart artifact itself:
+  the step `helm pull`s the pinned version (`helmfile.yaml.gotmpl` `version:`)
+  and applies `charts/crds/crds/crd-<kind>.yaml` from it — the upstream
+  operator files, shipped inside the chart — so the CRDs are bound to the
+  exact artifact helm is about to install, with no operator-tag indirection,
+  no second host to trust and no checksum to maintain. A Renovate bump of the
+  chart line is the only edit. The pull and every one of the ten expected
+  CRD files are validated before the first apply (a missing or extra kind, or
+  a file that is not the CRD it should be, aborts with the cluster untouched
+  and helmfile never runs), and the step prints the chart's operator version
+  plus the `controller-gen` annotation of the Prometheus CRD before and
+  after, so the deploy log shows the schema advancing. `--force-conflicts`
+  because the live CRDs are owned by `helm/Apply`; field manager
+  `mt-deploy-crds` makes the ownership visible. Idempotent; harmless on a cold
+  cluster. Unit-tested with fake kubectl/helm
+  (`scripts/lib/tests/prometheus-crds.test.sh`).
+
+  **Prometheus 3.** Our PromQL was checked against the 3.0 migration list: no
+  `holt_winters`, no `le`/`quantile` matchers (only `by (le)` grouping), no
+  regex that depends on `.` not matching a newline, no range selector under
+  5m. Prometheus 3 validates the scrape `Content-Type` strictly; every
+  exporter we scrape sends a valid one, but as belt and braces the Prometheus
+  now carries a default scrape class with
+  `fallbackScrapeProtocol: PrometheusText0.0.4`, which applies to every scrape
+  resource that does not set its own (the operator has no Prometheus-wide
+  field for this; the scrape class is how it is expressed).
+
+  **The health gate had to stop shelling into Prometheus.** From chart 85 the
+  Prometheus and node-exporter images are distroless, and Grafana 13 and
+  kube-state-metrics have no shell either — so `scripts/infra-health-gate`,
+  which read the Prometheus API with `kubectl exec … wget`, died on the
+  upgraded cluster with `exec: "wget": executable file not found in $PATH` and
+  could never have passed again. Both readers now go through the API server's
+  service proxy (`mt_prom_http` / `mt_prom_query` in `scripts/lib/common.sh`),
+  which assumes nothing inside the container and re-resolves the Service on
+  every call, so a Prometheus pod still rolling during the gate's settle window
+  no longer strands it on a stale pod name. `scripts/check-health` read the
+  alert API the same way and had quietly degraded to "SKIP — Could not query
+  Prometheus API" while still reporting "All checks passed"; an unreadable
+  alert API is now a counted issue. That check also had to learn the difference
+  between the two kinds of firing alert, since making it work again is what
+  made them visible: `warning`/`critical` are counted as before, while
+  `none`/`info` (the chart's Watchdog and InfoInhibitor, our AlertChannelHeartbeat,
+  and upstream's advisory rules) are listed but not counted — counting the
+  always-on ones would have made the script report issues on every run forever.
+  Their *absence* is now the issue instead: Watchdog and AlertChannelHeartbeat
+  fire continuously by design, so a missing one means the alert path is broken.
+  `scripts/email-probe-metrics` reads
+  through the same helper (an empty result there now means "the probe reports
+  nothing", which the old reader could not distinguish from "could not ask").
+  `scripts/verify-alerting` is unaffected — Alertmanager 0.34 still ships
+  busybox and amtool. The same audit found `apps/deploy-loki.sh`, whose three
+  health probes shell into the Loki pod the same way and are equally broken;
+  that is **not** fallout from this chart — Loki is deployed from raw manifests
+  with its own image pin — and the script is operator-only, run by nothing in
+  CI, so it is left as a follow-up with a comment at the call site.
+
+  **One-way door.** A TSDB written by Prometheus 3 is readable only by ≥ 2.55.
+  **Rollback recipe**: `helm rollback kube-prometheus-stack -n <monitoring
+  namespace>` *plus* `prometheus.prometheusSpec.image.tag: v2.55.1` (the last
+  2.x, which reads the v3 TSDB) — revert the chart pin in a PR carrying that
+  override so the rollback deploys through CI. Leave the v0.94 CRDs in place:
+  they are backward compatible with the old operator, and deleting a CRD
+  deletes every object of that kind. Alertmanager route matching still uses
+  `match`/`match_re` (deprecated, accepted by 0.34); converting to `matchers`
+  is a follow-up, not part of this upgrade.
 - The web-search gate is now **fatal on prod and prod-eu, advisory on dev**,
   derived from `MT_ENV` in `deploy-llm-webui.sh`. When the gate was made advisory
   it was made advisory *everywhere*, which was the safe default at the time but

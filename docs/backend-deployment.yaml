@@ -33,45 +33,22 @@ spec:
     spec:
       containers:
         - name: backend
-          image: lasuite/impress-backend:v4.4.0
+          image: lasuite/impress-backend:v5.6.1
+          # Customizations no longer rewrite files in the image at start-up.
+          # DJANGO_SETTINGS_MODULE=mt_settings (docs-config) loads /app/mt_settings.py,
+          # a subclass of upstream's Production that adds MediaMiddleware, the
+          # Linode storage backend and the mt_patches app (invitation-email
+          # link); all three are mounted read-only from ConfigMaps below and
+          # fail closed at import if upstream drifts. gunicorn's config file is
+          # still shipped by the image (upstream's default CMD is uvicorn).
+          # --no-control-socket: gunicorn 26 would otherwise create
+          # $HOME/.gunicorn/gunicorn.ctl, and HOME is / for the image's
+          # unprivileged user ("Control server error: Permission denied");
+          # nothing here uses the control interface.
           command: ["/bin/sh", "-c"]
           args:
             - |
-              pip install --no-cache-dir 'boto3==1.42.17' && \
-              python << 'EOF'
-              import os
-              import re
-              import sys
-              
-              # Read the settings file
-              with open('/app/impress/settings.py', 'r') as f:
-                  content = f.read()
-              
-              # Check if already patched
-              if 'impress.middleware.MediaMiddleware' in content:
-                  print("Already patched")
-                  sys.exit(0)
-              
-              # Find MIDDLEWARE list and insert our middleware at the beginning
-              pattern = r'(MIDDLEWARE = \[)'
-              replacement = r'\1\n        "impress.middleware.MediaMiddleware",'
-              content = re.sub(pattern, replacement, content, count=1)
-              
-              # Also patch the STORAGES configuration to use our custom backend
-              if 'STORAGES_DEFAULT_BACKEND' in os.environ:
-                  storages_pattern = r'("default":\s*\{[^}]*"BACKEND":\s*)"storages\.backends\.s3\.S3Storage"'
-                  custom_backend = os.environ.get('STORAGES_DEFAULT_BACKEND', 'storages.backends.s3.S3Storage')
-                  content = re.sub(storages_pattern, f'\\1"{custom_backend}"', content, count=1)
-                  print(f"Patched STORAGES to use {custom_backend}")
-              
-              # Write back
-              with open('/app/impress/settings.py', 'w') as f:
-                  f.write(content)
-              
-              print("Patched settings.py with MediaMiddleware and custom storage backend")
-              EOF
-              python /app/patches/patch_invitation.py && \
-              exec gunicorn -c /usr/local/etc/gunicorn/impress.py --workers ${DOCS_GUNICORN_WORKERS} --timeout 30 impress.wsgi:application
+              exec gunicorn -c /usr/local/etc/gunicorn/impress.py --no-control-socket --workers ${DOCS_GUNICORN_WORKERS} --timeout 30 impress.wsgi:application
           ports:
           - containerPort: 8000
             name: http
@@ -87,11 +64,32 @@ spec:
           - name: media-middleware
             mountPath: /app/impress/middleware.py
             subPath: middleware.py
-          - name: invitation-patch
-            mountPath: /app/patches/patch_invitation.py
-            subPath: patch_invitation.py
+          - name: mt-settings
+            mountPath: /app/mt_settings.py
+            subPath: mt_settings.py
             readOnly: true
+          # Two subPath file mounts rather than a directory mount: an in-place
+          # ConfigMap edit cannot reach a running container; it is picked up on
+          # the next container restart or rollout (kubelet re-resolves subPath
+          # on container restart; mt_apply restarts on change). The container
+          # runtime creates the missing /app/mt_patches parent for a
+          # bind-mount destination (runc libcontainer createIfNotExists);
+          # proved locally with docker single-file mounts.
+          - name: mt-patches
+            mountPath: /app/mt_patches/__init__.py
+            subPath: __init__.py
+            readOnly: true
+          - name: mt-patches
+            mountPath: /app/mt_patches/apps.py
+            subPath: apps.py
+            readOnly: true
+          - name: tmp
+            mountPath: /tmp
           env:
+          # ConfigMap mounts are read-only; stop CPython trying to write
+          # __pycache__ next to mt_settings.py / mt_patches/.
+          - name: PYTHONDONTWRITEBYTECODE
+            value: "1"
           - name: DJANGO_SECRET_KEY
             valueFrom:
               secretKeyRef:
@@ -127,8 +125,6 @@ spec:
               secretKeyRef:
                 name: docs-secrets
                 key: OIDC_RP_CLIENT_SECRET
-          - name: DEFAULT_FILE_STORAGE
-            value: "storage_backends.LinodeS3Boto3Storage"
           # SMTP credentials — tenant Stalwart submission listener on port 588.
           # Secret is written by scripts/provision-smtp-service-accounts.
           # `optional: true` lets the pod start on a fresh tenant before the
@@ -188,9 +184,26 @@ spec:
               memory: 400Mi
             limits:
               memory: 1Gi
+          # Pod Security "restricted" (pod-level user/seccomp, see below).
+          # Root filesystem is read-only: nothing under /app needs write and
+          # gunicorn's worker heartbeat files go to the /tmp emptyDir.
           securityContext:
-            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+      # Run as the image's own unprivileged user (USER 1001:127, no passwd
+      # entry). Root was only ever needed for the pre-5.x in-place file patching.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 127
+        seccompProfile:
+          type: RuntimeDefault
       volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 512Mi
       - name: storage-backends
         configMap:
           name: storage-backends
@@ -200,7 +213,18 @@ spec:
           items:
             - key: middleware.py
               path: middleware.py
-      - name: invitation-patch
+      - name: mt-settings
         configMap:
-          name: docs-invitation-patch
+          name: docs-mt-python
+          items:
+            - key: mt_settings.py
+              path: mt_settings.py
+      - name: mt-patches
+        configMap:
+          name: docs-mt-python
+          items:
+            - key: __init__.py
+              path: __init__.py
+            - key: apps.py
+              path: apps.py
       restartPolicy: Always

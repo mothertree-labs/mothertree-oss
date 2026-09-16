@@ -19,6 +19,9 @@
 #   mt_kubectl_probe    — in-cluster probe with an explicit OK/MISSING/UNKNOWN
 #                         verdict (issue #623); transports mt_probe_exec /
 #                         mt_probe_job; mt_kubectl_logs = retried log fetch
+#   mt_wait_for_reflection / mt_reflector_canary
+#                       — reflector propagation gates: mirrors in sync with their
+#                         source, controller proven live by a canary (issue #673)
 
 # Guard against double-sourcing
 if [ "${_MT_COMMON_LOADED:-}" = "1" ]; then
@@ -52,6 +55,27 @@ print_warning() {
 
 print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# ---------------------------------------------------------------------------
+# _mt_log_safe <value> — render an untrusted value safe to interpolate into a
+# log line. Every print_* above is `echo -e`, so a value carrying raw control
+# bytes (ESC) or a literal \e can erase the line it is on, repaint it, or
+# author a whole extra line — a forged [SUCCESS] in a CI log of a public repo.
+# Anything read out of a Secret's annotations is untrusted: unlike a name or a
+# namespace, the API server puts no character constraints on annotation values.
+#
+# Strips control characters, then escapes backslashes so `echo -e` cannot
+# expand what is left. This `tr -d` range behaves identically under BSD and GNU
+# tr. Inside awk use gsub(/[^[:print:]]/, "?", …) instead: an explicit
+# [\000-\037\177] range is NOT portable there — under BWK awk it matches
+# between every character and leaves ESC intact (verified).
+#
+# Scrub at the point of DISPLAY only. Comparisons must use the raw value, or
+# two different values could be made to look equal.
+# ---------------------------------------------------------------------------
+_mt_log_safe() {
+    printf '%s' "${1-}" | tr -d '\000-\037\177' | sed 's/\\/\\\\/g'
 }
 
 # ---------------------------------------------------------------------------
@@ -453,7 +477,7 @@ mt_pg_password() {
 }
 
 # Run psql against the external PG VM via PgBouncer.
-# Uses a temporary pod with the postgres:17-alpine image.
+# Uses a temporary pod running the postgres alpine client image pinned below.
 # Usage: mt_psql [-d dbname] -c "SQL..."
 #        echo "SQL" | mt_psql [-d dbname]
 mt_psql() {
@@ -466,7 +490,7 @@ mt_psql() {
     fi
     kubectl run -i --rm "psql-$(date +%s)" \
         --namespace="$ns" \
-        --image=postgres:17-alpine \
+        --image=postgres:18-alpine \
         --restart=Never \
         --env="PGPASSWORD=$pg_pass" \
         --command -- psql -h pgbouncer -U postgres -v ON_ERROR_STOP=1 "$@" 2>/dev/null
@@ -523,7 +547,7 @@ mt_pgbouncer_verify_db() {
     # one can trigger a fresh real server login rather than the cached error.
     local out rc=0
     out=$(kubectl run "pgb-verify-$$-${RANDOM}" --rm -i --restart=Never \
-        --image=postgres:15-alpine --quiet -n "$pod_ns" --pod-running-timeout=240s \
+        --image=postgres:18-alpine --quiet -n "$pod_ns" --pod-running-timeout=240s \
         --env "PGPASSWORD=$db_password" \
         --env "PGCONNECT_TIMEOUT=5" \
         --env "PGB_IPS=$pod_ips" \
@@ -1871,4 +1895,463 @@ mt_coredns_rewrite_require() {
            print_warning "    kubectl -n kube-system get configmap coredns-custom -o yaml"
            return 0 ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# Reflector propagation gates (emberstack/kubernetes-reflector) — issue #673.
+#
+# Each tenant's wildcard TLS Secret is issued once by cert-manager (in the
+# tenant's matrix namespace) and MIRRORED by the reflector controller into
+# every namespace that serves it: every per-tenant ingress, Stalwart's required
+# volume mount, Keycloak's auth ingress in infra-auth. The failure mode is
+# silent: mirrors are ordinary Secrets that persist with or without the
+# controller, so a dead or wedged reflector leaves every consumer on the LAST
+# copy — and the tenant serves an expired certificate weeks after the source
+# was renewed. Nothing in the deploy path proved the controller was actually
+# propagating; these helpers do.
+#
+# Sync rule, verbatim from the controller (Mirroring/Core/ResourceMirror.cs,
+# identical at chart 7.1.288 and 10.0.65): a mirror is rewritten iff its
+# annotation  reflector.v1.k8s.emberstack.com/reflected-version  differs from
+# the SOURCE's metadata.resourceVersion. So "in sync" is exact string equality
+# of those two — no hashing, no data comparison. Only Secret METADATA is read
+# here (one jsonpath field per call, never -o json/yaml on a Secret): Secret
+# data never enters a variable or a log line. The canary compares a stamp it
+# generated itself.
+# ---------------------------------------------------------------------------
+
+# _mt_jsonpath_metadata_only <jsonpath> [allow-canary-stamp=false]
+# POSITIVE allowlist, decided at the LEAF. After deleting the exact output
+# literals `{range .items[*]}`, `{end}`, `{"\t"}`, `{"\n"}` (the cluster-wide
+# listing in verify-reflector), the remainder must consist ONLY of `{…}`
+# actions, and every action must be exactly one of:
+#   {.metadata.resourceVersion}  {.metadata.name}  {.metadata.namespace}
+#   {.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/<[a-z-]+>}
+#   {.data.stamp}   — only when the second argument is "true" (the canary)
+# The quoted output literal {"MTROW"} is stripped too: verify-reflector puts it
+# at the head of every record so a value containing a newline cannot forge one.
+# Anything else is refused: a bare `{.metadata.annotations}` or `{.metadata.*}`
+# (they include kubectl.kubernetes.io/last-applied-configuration, which for a
+# client-side-applied Secret carries the WHOLE object including .data —
+# dev-cert-cache.sh restores wildcard-tls-<tenant> with `kubectl apply`),
+# `{.metadata.labels.x}`, any other field, any `$`/`@`/`..`/`[` form, and any
+# text outside braces (a brace-less `resourceVersion` would be echoed as
+# literal text by kubectl and read as "equal everywhere"). An empty path is
+# refused too. Returns 0 allowed / 1 refused.
+_mt_jsonpath_metadata_only() {
+    local rest="$1" allow_stamp="${2:-false}" action leaf fields=0
+    [ -n "$rest" ] || return 1
+    # Every action is consumed left to right, literals included. They must NOT
+    # be deleted up front: deleting them first splices what surrounded them, so
+    # {.metadata.na{"MTROW"}me} and {.met{"\t"}adata.name} would each collapse
+    # into an allowlisted action and be admitted.
+    while [ -n "$rest" ]; do
+        [ "${rest:0:1}" = "{" ] || return 1          # text outside braces
+        action="${rest%%\}*}"
+        [ "$action" != "$rest" ] || return 1         # unterminated action
+        action="${action}}"
+        rest="${rest#"$action"}"
+        case "$action" in
+            # Output literals: structure, not a field — they select nothing.
+            '{range .items[*]}'|'{end}'|'{"\t"}'|'{"\n"}'|'{"MTROW"}') continue ;;
+            '{.metadata.resourceVersion}'|'{.metadata.name}'|'{.metadata.namespace}') ;;
+            '{.data.stamp}') [ "$allow_stamp" = true ] || return 1 ;;
+            '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/'*)
+                leaf="${action#'{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/'}"
+                leaf="${leaf%\}}"
+                [ -n "$leaf" ] || return 1
+                case "$leaf" in *[!a-z-]*) return 1 ;; esac ;;
+            *) return 1 ;;
+        esac
+        fields=$((fields + 1))
+    done
+    # A path of literals alone reads no field at all: refuse it rather than
+    # send a degenerate query.
+    [ "$fields" -gt 0 ] || return 1
+    return 0
+}
+
+# _mt_secret_meta <namespace> <secret> <jsonpath>
+# Prints the field, or the token MISSING (NotFound) / UNREADABLE (any other
+# kubectl failure, or a refused path). Always returns 0; callers interpret the
+# token. A field the object lacks (e.g. a missing annotation) prints as an
+# empty line.
+#
+# Leak guard: this helper is generic and the Secrets it is pointed at hold the
+# tenant's PRIVATE KEY, so the path must pass _mt_jsonpath_metadata_only; the
+# only data read admitted is `{.data.stamp}` on `reflector-canary` (name AND
+# exact path — a stamp we generated). A refused path reports UNREADABLE (fail
+# closed) with the reason on stderr and kubectl is never invoked.
+# kubectl's stderr is discarded (a warning on stderr with rc 0 must never
+# become part of a resourceVersion, and a jsonpath EXECUTION error prints the
+# whole object including .data); on a non-zero rc the object is classified by
+# a second metadata-only call, `--ignore-not-found -o name`, and when it does
+# exist a fixed diagnosis is printed instead of kubectl's output.
+_mt_secret_meta() {
+    local ns="$1" name="$2" path="$3" out rc=0 allow_stamp=false
+    [ "$name" = "reflector-canary" ] && allow_stamp=true
+    if ! _mt_jsonpath_metadata_only "$path" "$allow_stamp"; then
+        # Every value here is scrubbed, $path included. Unlike the hint at the
+        # kubectl-failure branch below, this branch fires BECAUSE $path failed
+        # the allowlist, so it is arbitrary caller data, not an allowlisted
+        # literal. Doubling a backslash in a refusal message is harmless; this
+        # string is naming what was rejected, not offering a copy-paste command.
+        print_error "_mt_secret_meta: refusing jsonpath '$(_mt_log_safe "$path")' on Secret $(_mt_log_safe "$ns")/$(_mt_log_safe "$name") — only metadata fields may be read here" >&2
+        echo UNREADABLE
+        return 0
+    fi
+    out=$(kubectl get secret "$name" -n "$ns" -o jsonpath="$path" 2>/dev/null) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        local probe prc=0
+        probe=$(kubectl get secret "$name" -n "$ns" --ignore-not-found -o name 2>/dev/null) || prc=$?
+        if [ "$prc" -eq 0 ] && [ -z "$probe" ]; then
+            echo MISSING
+        else
+            if [ "$prc" -eq 0 ]; then
+                print_error "kubectl get failed for an existing Secret $(_mt_log_safe "$ns")/$(_mt_log_safe "$name") (RBAC or jsonpath error) — re-run \`kubectl get secret $(_mt_log_safe "$name") -n $(_mt_log_safe "$ns") -o jsonpath='$path'\` by hand" >&2
+            fi
+            echo UNREADABLE
+        fi
+        return 0
+    fi
+    printf '%s\n' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# _mt_split_annotation_list <value> — populate MT_LIST_ENTRIES with exactly the
+# entries the CONTROLLER acts on. Upstream, verbatim
+# (Mirroring/Core/MirroringPropertiesExtensions.cs @ v10.0.65, PatternListMatch):
+#
+#   if (string.IsNullOrEmpty(patternList)) return true;
+#   var regexPatterns = patternList.Split([","], StringSplitOptions.RemoveEmptyEntries);
+#   return regexPatterns.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim())
+#
+# Three things follow, and this helper reproduces all three:
+#   * The comma is the ONLY separator. A newline is an ordinary character that
+#     lands INSIDE an entry and is then removed by Trim() — so
+#     "a,\nb,c" is three targets to the controller, not one.
+#   * Empty and whitespace-only entries are dropped (RemoveEmptyEntries plus
+#     the IsNullOrWhiteSpace filter), so skipping them here matches upstream.
+#   * Each entry is trimmed at both ends.
+#
+# `read -r -a` must NEVER be used for this: it stops at the first NEWLINE, so
+# every entry after one was invisible to validation and to the mirror wait,
+# while the controller happily copied the key there. With both annotations
+# carrying the same multi-line value — the symmetric case create_env renders —
+# the equality check passed too and the gate reported "in sync".
+#
+# OWNS THE GLOBAL `MT_LIST_ENTRIES` and overwrites it on every call: read it
+# immediately, and do not use that name for anything else. (It is a plain
+# global rather than a `declare -g` one because these scripts run under
+# `#!/bin/bash`, which on macOS is bash 3.2, where `declare -g` is invalid.)
+#
+# Whitespace: bash's [[:space:]] and .NET's char.IsWhiteSpace are not
+# guaranteed to coincide, so the trim here and the controller's Trim() can
+# disagree at the margins. That difference has NO WIDENING DIRECTION, because
+# trimming only ever removes characters and no control character is a .NET
+# regex metacharacter: the controller's pattern can only match FEWER
+# namespaces than this gate polls, never more. Where .NET trims something bash
+# keeps (NBSP, U+2007, U+202F), the entry stays non-DNS-1123,
+# _bad_namespace_entry flags it and the gate fails closed. The worst case is a
+# lag this gate reports that the controller would not have caused — never a
+# namespace holding the key that the gate failed to look at.
+# ---------------------------------------------------------------------------
+_mt_split_annotation_list() {
+    local rest="${1-}" entry
+    MT_LIST_ENTRIES=()
+    while :; do
+        entry="${rest%%,*}"
+        entry="${entry#"${entry%%[![:space:]]*}"}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        [ -n "$entry" ] && MT_LIST_ENTRIES+=("$entry")
+        case "$rest" in
+            *,*) rest="${rest#*,}" ;;
+            *)   break ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
+# mt_wait_for_reflection — wait until a Secret's mirrors are in sync with it.
+#
+# Usage: mt_wait_for_reflection <src_ns> <secret> <target_namespaces> [timeout=90]
+#   <target_namespaces> is comma-separated (the shape of TENANT_NAMESPACES in
+#   create_env and of the reflection-auto-namespaces annotation); whitespace
+#   around entries is ignored. Callers are expected to have validated the
+#   entries (scripts/verify-reflector does, with _bad_namespace_entry); values
+#   that reach a log line here are scrubbed with _mt_log_safe regardless.
+#
+# Polls every MT_REFLECTION_POLL_INTERVAL seconds (default 5). The source's
+# resourceVersion is re-read every round, so a renewal that lands mid-wait is
+# waited for rather than misread. Returns 0 once EVERY target namespace holds
+# <secret> with reflected-version == source resourceVersion. On timeout prints
+# one print_error naming every lagging namespace with its state — the stale
+# reflected-version it carries, or MISSING / UNANNOTATED (present but never
+# written by the controller) / UNREADABLE — plus the source rv, then a second
+# line naming the fix, and returns 1. A source that is itself MISSING or
+# UNREADABLE keeps polling until the timeout (cert-manager may still be
+# writing it) and then fails pointing at issuance, not at the controller.
+# ---------------------------------------------------------------------------
+mt_wait_for_reflection() {
+    local src_ns="${1:?mt_wait_for_reflection: source namespace required}"
+    local secret="${2:?mt_wait_for_reflection: secret name required}"
+    local targets_csv="${3:?mt_wait_for_reflection: target namespaces required (comma-separated)}"
+    local timeout="${4:-90}"
+    local interval="${MT_REFLECTION_POLL_INTERVAL:-5}"
+    local rv_path='{.metadata.resourceVersion}'
+    local ref_path='{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflected-version}'
+
+    local -a targets=()
+    local ns
+    # Split the way the controller does — commas only, across the WHOLE value,
+    # newlines included (see _mt_split_annotation_list).
+    _mt_split_annotation_list "$targets_csv"
+    for ns in ${MT_LIST_ENTRIES[@]+"${MT_LIST_ENTRIES[@]}"}; do
+        targets+=("$ns")
+    done
+    if [ "${#targets[@]}" -eq 0 ]; then
+        print_error "mt_wait_for_reflection: empty target namespace list for $src_ns/$secret — nothing to verify is a failure, not a pass"
+        return 1
+    fi
+
+    local start=$SECONDS elapsed=0 src_rv lagging mirror_rv
+    while true; do
+        src_rv=$(_mt_secret_meta "$src_ns" "$secret" "$rv_path")
+        lagging=""
+        case "$src_rv" in
+            MISSING|UNREADABLE|"")
+                lagging="source:${src_rv:-NO-RV}" ;;
+            *)
+                for ns in "${targets[@]}"; do
+                    mirror_rv=$(_mt_secret_meta "$ns" "$secret" "$ref_path")
+                    [ -n "$mirror_rv" ] || mirror_rv=UNANNOTATED
+                    # Compare RAW, display SCRUBBED: mirror_rv is an
+                    # annotation read fresh from the cluster and is
+                    # unconstrained, so it reaches print_error/echo below.
+                    [ "$mirror_rv" = "$src_rv" ] || lagging="${lagging:+$lagging }$(_mt_log_safe "$ns"):$(_mt_log_safe "$mirror_rv")"
+                done ;;
+        esac
+        if [ -z "$lagging" ]; then
+            # targets[*] is scrubbed too: every caller today either builds
+            # the list itself or validates it first, but that is an implicit
+            # contract on a shared helper, and honouring it costs nothing.
+            print_success "Reflected $src_ns/$secret (rv $src_rv) in sync in ${#targets[@]} namespace(s): $(_mt_log_safe "${targets[*]}") (${elapsed}s)"
+            return 0
+        fi
+        elapsed=$((SECONDS - start))
+        if [ "$elapsed" -ge "$timeout" ]; then
+            print_error "reflector lag after ${timeout}s for $src_ns/$secret: $lagging (src rv=${src_rv:-NO-RV})"
+            case "$src_rv" in
+                MISSING|UNREADABLE|"")
+                    print_error "The SOURCE Secret $src_ns/$secret is $src_rv — an issuance problem, not the reflector: kubectl -n $src_ns get certificate,secret" ;;
+                *)
+                    print_error "reflector is not propagating: check kubectl -n ${NS_CERTMANAGER:-infra-cert-manager} logs deploy/reflector (and that the pod is Running)" ;;
+            esac
+            return 1
+        fi
+        echo "  Waiting for reflection of $src_ns/$secret: $lagging (${elapsed}s/${timeout}s)"
+        sleep "$interval"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# mt_reflector_canary — ACTIVE proof that the controller is propagating now,
+# not merely that old mirrors exist.
+#
+# Usage: mt_reflector_canary <src_ns> <target_ns> [timeout=90]
+#
+# Applies an Opaque Secret `reflector-canary` in <src_ns>, annotated to
+# auto-reflect into <target_ns> only, with data.stamp = the current epoch
+# seconds plus 64 random bits (unguessable, so a stale or forged mirror can
+# never match by accident) — every run is a real change the controller has to
+# carry. Then
+# requires the mirror in <target_ns> to reach reflected-version == source
+# resourceVersion AND to carry the same stamp within <timeout>. Returns 0 when
+# proven, 1 otherwise with the fix named.
+#
+# Uses mt_apply (heredoc — never a pipe, #644) but leaves the change tracker
+# exactly as it found it: the canary differs on EVERY deploy by design and must
+# never be what makes a later mt_restart_if_changed roll a workload (#682).
+# ---------------------------------------------------------------------------
+mt_reflector_canary() {
+    local src_ns="${1:?mt_reflector_canary: source namespace required}"
+    local target_ns="${2:?mt_reflector_canary: target namespace required}"
+    local timeout="${3:-90}"
+    local name="reflector-canary" stamp stamp_b64 prev_changed=false rc=0 rnd
+    # A failed/missing openssl must fail the canary, never degrade to `epoch-`.
+    rnd=$(openssl rand -hex 8 2>/dev/null) && [ "${#rnd}" -eq 16 ] || {
+        print_error "Reflector canary: openssl rand failed — cannot build an unguessable stamp (is openssl installed?)"
+        return 1
+    }
+    stamp="$(date +%s)-${rnd}"
+    stamp_b64=$(printf '%s' "$stamp" | base64 | tr -d '\n')
+    if mt_has_changes; then prev_changed=true; fi
+
+    print_status "Reflector canary: applying $src_ns/$name (stamp $stamp) for reflection into $target_ns"
+    mt_apply kubectl apply -f - <<EOF || rc=$?
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${name}
+  namespace: ${src_ns}
+  annotations:
+    reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "${target_ns}"
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "${target_ns}"
+type: Opaque
+data:
+  stamp: ${stamp_b64}
+EOF
+    [ "$prev_changed" = true ] || mt_reset_change_tracker
+    if [ "$rc" -ne 0 ]; then
+        print_error "Reflector canary: could not apply $src_ns/$name (kubectl rc=$rc) — cannot prove propagation"
+        return 1
+    fi
+
+    mt_wait_for_reflection "$src_ns" "$name" "$target_ns" "$timeout" || return 1
+
+    # Belt and braces: the annotation says the controller wrote this version;
+    # the stamp proves the DATA came with it. Compared, never printed.
+    local mirrored
+    mirrored=$(_mt_secret_meta "$target_ns" "$name" '{.data.stamp}')
+    if [ "$mirrored" != "$stamp_b64" ]; then
+        print_error "Reflector canary: $target_ns/$name carries the source's reflected-version but not stamp $stamp — the controller updated annotations without the data"
+        print_error "reflector is not propagating: check kubectl -n ${src_ns} logs deploy/reflector"
+        return 1
+    fi
+    print_success "Reflector canary: $target_ns/$name reflected-version matches source and stamp $stamp mirrored"
+    return 0
+}
+
+# ===========================================================================
+# Prometheus HTTP access — mt_prom_http / mt_prom_query
+# ===========================================================================
+# Read the in-cluster Prometheus API through the API server's **service
+# proxy**, assuming nothing inside the target container:
+#
+#   kubectl get --raw /api/v1/namespaces/<ns>/services/<svc>:<port>/proxy/<path>
+#
+# Why not `kubectl exec ... wget` (what these callers used until now):
+# kube-prometheus-stack 85 moved Prometheus (and node-exporter) to distroless
+# images, and Grafana/kube-state-metrics have no shell either. There is no
+# `wget` and no `/bin/sh` in the Prometheus container any more, so every exec
+# reader died with `exec: "wget": executable file not found in $PATH` the
+# moment the chart was upgraded — a class of breakage that returns on any
+# future image diet.
+#
+# Why the *service* proxy rather than the pod proxy (both avoid the container):
+# callers re-sample for minutes right after a deploy, exactly when Prometheus
+# may still be rolling. A service proxy re-resolves ready endpoints on every
+# call; a pod name captured up front goes stale the moment the pod is
+# replaced. No port-forward either: nothing to background, nothing to leak.
+#
+# Requires `services/proxy` GET on the namespace (the cluster-admin kubeconfigs
+# deploys use have it) and `jq` for mt_prom_query.
+#
+# Defaults follow the chart's stable object name (release `kube-prometheus-stack`
+# == chart name, so `<release>-prometheus`); override via the environment
+# rather than passing a literal at each call site.
+MT_PROM_SERVICE="${MT_PROM_SERVICE:-kube-prometheus-stack-prometheus}"
+MT_PROM_PORT="${MT_PROM_PORT:-9090}"
+
+# ---------------------------------------------------------------------------
+# mt_prom_http <ns> <service> <port> <path>
+# Prints the raw response body on stdout. Returns 1 when the request could not
+# be made or was rejected — kubectl's own stderr is echoed so the caller's log
+# says *why* (NotFound service, Forbidden, BadRequest, API unreachable).
+# <path> is the API path inside Prometheus, e.g. `api/v1/alerts` or
+# `api/v1/query?query=<urlencoded>`; a leading slash is optional.
+# Diagnostics go to stderr: callers capture stdout with $(...).
+#
+# ns/svc/port are validated before anything is built from them. MT_PROM_SERVICE
+# and MT_PROM_PORT are documented environment overrides, and the proxy path is
+# a plain string concatenation: a service name like `../../../../apis/...`
+# would otherwise walk straight out of the service-proxy subtree and let a
+# caller GET an arbitrary API-server resource. DNS-1123 label charset for the
+# names, digits for the port — which is all a real Service can ever be.
+#
+# The response is buffered whole into a shell variable. There is no streaming
+# cap available here (a cap would have to truncate, and a truncated body parses
+# as a failure anyway, which is what the callers already do). Measured bound on
+# the two paths actually used: `api/v1/alerts` on a dev cluster is ~6.5 KB for
+# 9 alerts (~725 B/alert), so even a pathological hundreds-of-alerts storm
+# stays in the low hundreds of KB; instant-query bodies are bounded by the
+# series count of the specific queries in scripts/infra-health-gate, which are
+# all namespace-filtered kube-state-metrics selectors. Anything that could
+# return an unbounded series count (a bare `{__name__=~".+"}`) must not be
+# passed through here.
+# ---------------------------------------------------------------------------
+mt_prom_http() {
+    local ns="${1:?mt_prom_http: namespace}" svc="${2:?mt_prom_http: service}"
+    local port="${3:?mt_prom_http: port}" path="${4:?mt_prom_http: path}"
+    local body errf rc=0
+    local dns1123='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+    if ! [[ "$ns" =~ $dns1123 ]] || ! [[ "$svc" =~ $dns1123 ]] || ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        print_error "mt_prom_http: refusing a non-Service target: ns=${ns} service=${svc} port=${port}" >&2
+        return 1
+    fi
+    path="${path#/}"
+    errf=$(mktemp "${TMPDIR:-/tmp}/mt-prom-http.XXXXXX") || {
+        print_error "mt_prom_http: mktemp failed" >&2
+        return 1
+    }
+    # Self-clearing so it cannot fire on an unrelated function's return with
+    # $errf out of scope (a bash RETURN trap is global state, not local).
+    trap 'rm -f "${errf:-}"; trap - RETURN' RETURN
+    # --request-timeout: kubectl's default is 0 == wait forever. infra-health-gate
+    # is a FATAL CI gate that issues 6 of these per sample and re-samples for
+    # INFRA_GATE_SETTLE_SECONDS, so an unresponsive API server or a Prometheus
+    # stuck in WAL replay would hang the pipeline instead of failing it.
+    if ! body=$(kubectl --request-timeout=30s get --raw "/api/v1/namespaces/${ns}/services/${svc}:${port}/proxy/${path}" 2>"$errf"); then
+        rc=1
+        print_error "Prometheus API request failed: ${path%%\?*} (service ${svc}:${port} in ${ns})" >&2
+        sed 's/^/  /' "$errf" >&2
+    fi
+    [ "$rc" -eq 0 ] || return 1
+    printf '%s\n' "$body"
+}
+
+# ---------------------------------------------------------------------------
+# mt_prom_query <ns> <service> <port> <promql>
+# Prints the instant-query result array (.data.result, compact JSON) on stdout.
+# Returns 1 if the request failed OR the body is not a successful Prometheus
+# response — so a caller can never mistake "could not ask" for "no series".
+#
+# Note the request and the query are one round trip through the API server: a
+# syntactically invalid PromQL comes back as a kubectl `BadRequest`, not as a
+# JSON error body, so the failure message deliberately does not claim to know
+# which it was. The body check below still catches a 200 that is not a
+# successful Prometheus response (an HTML error page from a proxy, say).
+# ---------------------------------------------------------------------------
+mt_prom_query() {
+    local ns="${1:?mt_prom_query: namespace}" svc="${2:?mt_prom_query: service}"
+    local port="${3:?mt_prom_query: port}" promql="${4:?mt_prom_query: promql}"
+    local encoded raw status
+    if ! encoded=$(printf '%s' "$promql" | jq -sRr @uri); then
+        print_error "Prometheus query failed: could not URL-encode the query: ${promql}" >&2
+        return 1
+    fi
+    if ! raw=$(mt_prom_http "$ns" "$svc" "$port" "api/v1/query?query=${encoded}"); then
+        print_error "Prometheus query failed (unreachable, denied, or invalid PromQL — see above): ${promql}" >&2
+        return 1
+    fi
+    status=$(jq -r '.status // "error"' <<< "$raw" 2>/dev/null) || status="error"
+    if [ "$status" != "success" ]; then
+        print_error "Prometheus query failed (response was not a successful Prometheus result): ${promql}" >&2
+        printf '%s\n' "$raw" | head -3 | sed 's/^/  /' >&2
+        return 1
+    fi
+    # .data.result must exist AND be an array. A plain `jq -c .data.result` on a
+    # body without it prints `null`, which is rc 0 and `jq length` == 0 — read by
+    # scripts/infra-health-gate as "no series", i.e. the gate passes vacuously.
+    # `error()` makes jq exit non-zero instead. An empty array stays rc 0: that
+    # is a legitimate "asked, nothing matched" and must not be a failure.
+    local result
+    if ! result=$(jq -ce 'if (.data.result|type) == "array" then .data.result else error("no result array") end' <<< "$raw" 2>/dev/null); then
+        print_error "Prometheus query failed (successful response carried no .data.result array): ${promql}" >&2
+        printf '%s\n' "$raw" | head -3 | sed 's/^/  /' >&2
+        return 1
+    fi
+    printf '%s\n' "$result"
 }

@@ -22,7 +22,7 @@ import {
  * Flow: emailTest (e2e-mailrt) creates a document via the Docs API and
  * invites emailRecv (e2e-mailrcv), who has a Stalwart mailbox but no Docs
  * account, so the backend takes the invitation path (send_invitation_email,
- * which patch_invitation.py rewrites to the account portal guest landing).
+ * which the mt_patches Django app routes to the account portal guest landing).
  * The test then reads the delivered email over IMAP and verifies both the
  * link and the logo.
  */
@@ -161,7 +161,8 @@ test.describe('Docs — Invitation Email', () => {
       expect(
         linkMatch,
         'Expected the invitation email to contain a /guest-landing link. ' +
-          'Check ACCOUNT_PORTAL_URL in docs-config and patch_invitation.py.',
+          'Check ACCOUNT_PORTAL_URL in docs-config and docs/mt_patches/apps.py ' +
+          '(the backend log should show "[mt_patches] ok").',
       ).toBeTruthy();
       const inviteLink = linkMatch![0];
       // Log host+path only — the query string carries the invitee address

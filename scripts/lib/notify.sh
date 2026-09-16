@@ -222,6 +222,14 @@ _mt_notify_context() {
 _mt_deploy_exit_handler() {
   local exit_code=$?
   local elapsed=""
+  # Temp-dir hygiene for libraries that deliberately install no EXIT trap of
+  # their own (this handler owns EXIT for the whole deploy script). Bash runs
+  # the EXIT trap on SIGTERM too, so a cancelled pipeline cleans up as well.
+  # Each cleanup removes only what this process created and is a no-op when
+  # the library was never sourced or never ran.
+  if declare -F mt_prometheus_crds_cleanup >/dev/null 2>&1; then
+    mt_prometheus_crds_cleanup
+  fi
   if [ -n "${_MT_DEPLOY_START_TS:-}" ]; then
     local end_ts
     end_ts=$(date +%s)

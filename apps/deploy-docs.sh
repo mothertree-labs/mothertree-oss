@@ -138,7 +138,8 @@ mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO
 poll_pod_ready "$NS_DOCS" "io.kompose.service=redis" 60 5 || true
 print_success "Redis service deployed to namespace $NS_DOCS"
 
-# Step 6: Apply Docs manifests (backend, frontend, ingress) to tenant namespace
+# Step 6: Apply Docs ConfigMaps (storage backends, save-status, docs-config,
+# mt_settings/mt_patches, email assets)
 print_status "Applying Docs manifests to namespace $NS_DOCS..."
 print_status "Using environment: DOCS_HOST=$DOCS_HOST, AUTH_HOST=$AUTH_HOST"
 print_status "Database user: $TENANT_DB_USER, Database: $DOCS_DB_NAME"
@@ -149,10 +150,21 @@ mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/env-d-yprovider-configmap.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/docs-config.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 
-# Create invitation patch ConfigMap (patches Docs email links to go through the account portal guest landing)
-mt_apply kubectl apply -f <(kubectl -n "$NS_DOCS" create configmap docs-invitation-patch \
-  --from-file=patch_invitation.py="$REPO_ROOT/docs/patch_invitation.py" \
+# Python customizations ConfigMap: mt_settings.py (settings subclass selected by
+# DJANGO_SETTINGS_MODULE=mt_settings in docs-config) and the mt_patches Django
+# app (invitation-email links through the account portal guest landing). Both
+# fail closed at import if the upstream image drifts, so a change here must
+# restart the backend — hence mt_apply.
+for f in docs/mt_settings.py docs/mt_patches/__init__.py docs/mt_patches/apps.py; do
+  [ -f "$REPO_ROOT/$f" ] || { print_error "Missing $f (required by the docs backend)"; exit 1; }
+done
+mt_apply kubectl apply -f <(kubectl -n "$NS_DOCS" create configmap docs-mt-python \
+  --from-file=mt_settings.py="$REPO_ROOT/docs/mt_settings.py" \
+  --from-file=__init__.py="$REPO_ROOT/docs/mt_patches/__init__.py" \
+  --from-file=apps.py="$REPO_ROOT/docs/mt_patches/apps.py" \
   --dry-run=client -o yaml)
+# The pre-5.x text-patching ConfigMap is no longer mounted; drop it if present.
+kubectl -n "$NS_DOCS" delete configmap docs-invitation-patch --ignore-not-found
 
 # Email assets ConfigMap — logo served by the frontend at /email-assets/logo-email.png
 # (referenced by DJANGO_EMAIL_LOGO_IMG in docs-config for invitation emails)
@@ -160,87 +172,32 @@ mt_apply kubectl apply -f <(kubectl -n "$NS_DOCS" create configmap docs-email-as
   --from-file=logo-email.png="$REPO_ROOT/docs/assets/logo-email.png" \
   --dry-run=client -o yaml)
 
-# Update backend deployment to reference PostgreSQL in db namespace
-# Uses envsubst for replica count from tenant config
-mt_apply kubectl apply -f <(envsubst '${DOCS_BACKEND_MIN_REPLICAS} ${DOCS_GUNICORN_WORKERS}' < "$REPO_ROOT/docs/backend-deployment.yaml" | \
-  sed "s/namespace: docs/namespace: $NS_DOCS/g" | \
-  sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g")
-mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/backend-service.yaml")
-
-# Deploy frontend with environment-specific configuration (includes replica count)
-mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/frontend-deployment.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
-mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/frontend-service.yaml")
-mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
-# Static asset cache ingress (/_next/static/ with immutable cache headers)
-mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/static-cache-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
-# Y-Provider ingress with document ID-based consistent hashing for WebSocket scaling
-# Use explicit variable list to preserve nginx $request_uri variable
-mt_apply kubectl apply -f <(envsubst '${DOCS_HOST} ${TENANT_NAME}' < "$REPO_ROOT/docs/yprovider-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
-print_success "Docs manifests applied successfully to namespace $NS_DOCS"
-
-# Step 7: Restart deployments to pick up ConfigMap changes, then wait for ready (PARALLEL)
-if mt_has_changes; then
-    print_status "Restarting backend and frontend to pick up ConfigMap changes..."
-    kubectl -n "$NS_DOCS" rollout restart deployment/backend deployment/frontend
-    print_status "Waiting for Docs backend and frontend to be ready (parallel)..."
-    # Wait for both in parallel
-    kubectl -n "$NS_DOCS" rollout status deployment/backend --timeout=300s &
-    BACKEND_PID=$!
-    kubectl -n "$NS_DOCS" rollout status deployment/frontend --timeout=300s &
-    FRONTEND_PID=$!
-    wait $BACKEND_PID $FRONTEND_PID
-    print_success "Docs backend and frontend are ready"
-else
-    print_status "No config changes detected, skipping restart of deployment/backend deployment/frontend"
-fi
-
-# Step 8: Deploy/Update y-provider (declarative)
-print_status "Applying y-provider deployment and service to namespace $NS_DOCS..."
-mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/health-sidecar-configmap.yaml")
-# Uses envsubst for replica count from tenant config
-mt_apply kubectl apply -f <(envsubst '${YPROVIDER_MIN_REPLICAS}' < "$REPO_ROOT/docs/y-provider-deployment.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
-mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/y-provider-service.yaml")
-# Restart to ensure ConfigMap changes are picked up (wait in background, check later)
-if mt_has_changes; then
-    # Brief pause to avoid "restart already triggered within past second" race with backend/frontend restart
-    sleep 2
-    kubectl -n "$NS_DOCS" rollout restart deploy/docs-y-provider
-    kubectl -n "$NS_DOCS" rollout status deploy/docs-y-provider --timeout=300s &
-    YPROVIDER_PID=$!
-    # Wait for y-provider rollout to complete
-    wait $YPROVIDER_PID
-else
-    print_status "No config changes detected, skipping restart of deploy/docs-y-provider"
-fi
-# Quick sanity: short endpoint check (non-fatal; kube liveness covers steady state)
-print_status "Checking y-provider service endpoints..."
-if kubectl -n "$NS_DOCS" get endpoints y-provider -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | grep -qE '[0-9]'; then
-  kubectl -n "$NS_DOCS" get endpoints y-provider
-else
-  print_warning "y-provider endpoints not yet reported; rely on rollout status/liveness"
-fi
-print_success "y-provider applied successfully"
-
-# Step 8a: Deploy HorizontalPodAutoscalers (HPA) for auto-scaling (only if min != max replicas)
-if [ "$DOCS_BACKEND_MIN_REPLICAS" != "$DOCS_BACKEND_MAX_REPLICAS" ]; then
-  print_status "Deploying HPAs for docs backend, frontend, and y-provider..."
-  envsubst < "$REPO_ROOT/docs/backend-hpa.yaml.tpl" | kubectl apply -f -
-  envsubst < "$REPO_ROOT/docs/frontend-hpa.yaml.tpl" | kubectl apply -f -
-  envsubst < "$REPO_ROOT/docs/yprovider-hpa.yaml.tpl" | kubectl apply -f -
-  print_success "Docs HPAs deployed (CPU 80% threshold)"
-else
-  kubectl delete hpa backend-hpa -n "$NS_DOCS" --ignore-not-found >/dev/null 2>&1
-  kubectl delete hpa frontend-hpa -n "$NS_DOCS" --ignore-not-found >/dev/null 2>&1
-  kubectl delete hpa yprovider-hpa -n "$NS_DOCS" --ignore-not-found >/dev/null 2>&1
-  print_status "Docs: fixed replicas, HPAs removed"
-fi
-
-# Step 8b: Deploy Grafana dashboard for Docs monitoring
-print_status "Deploying Docs Grafana dashboard..."
-cat "$REPO_ROOT/apps/manifests/docs/docs-dashboard-configmap.yaml" | sed "s/namespace: monitoring/namespace: $NS_MONITORING/g" | kubectl apply -f -
-print_success "Docs Grafana dashboard deployed"
-
-# Step 9: Initialize/verify database (idempotent)
+# ---------------------------------------------------------------------------
+# ORDER IS LOAD-BEARING: the schema is made current BEFORE the new backend
+# image is applied.
+#
+# Applying the Deployment starts the rollout immediately, and the backend's
+# readinessProbe is /__lbheartbeat__, which returns 200 without touching the
+# database. So a new image applied ahead of its migrations goes into the
+# Service endpoints speaking a schema the database does not have yet, and
+# every login 500s until the migrations Job finishes. livenessProbe is
+# /__heartbeat__, which checks connectivity rather than schema, so the pod
+# stays green and never restarts out of that state; maxUnavailable: 0 means
+# the old pods keep serving the old schema alongside it.
+#
+# Harmless while migrations were no-ops. The 4.4.0 -> 5.6.1 upgrade put six
+# of them in that window, one adding a NOT NULL column. Do not move the
+# backend apply back above this block.
+#
+# The move also made a second invariant load-bearing: the two Job applies
+# below must stay PLAIN `kubectl apply`, never mt_apply. mt_delete_job_wait
+# deletes then applies, so a Job always reports "created" and always diffs as
+# a change. Here -- ahead of both mt_has_changes gates -- that would flag a
+# change on every deploy and spuriously rollout-restart backend, frontend and
+# y-provider every time. At the old position, after both gates, it would have
+# been nearly harmless.
+# ---------------------------------------------------------------------------
+# Step 7: Initialize/verify database (idempotent)
 # The db-init job runs in NS_DOCS (where docs-secrets is) and connects to PostgreSQL cross-namespace
 print_status "Ensuring docs role/database exist and privileges set..."
 
@@ -275,7 +232,7 @@ print_success "Database role/database verified"
 # NOTE: Database user passwords are managed on the external PG VM.
 # No in-cluster password sync needed — PgBouncer uses auth_query.
 
-# Step 10: Run database migrations
+# Step 8: Run database migrations
 print_status "Running Django database migrations..."
 mt_delete_job_wait "$NS_DOCS" docs-migrations || exit 1
 cat "$REPO_ROOT/docs/migrations-job.yaml" | \
@@ -292,27 +249,97 @@ if ! poll_job_complete "$NS_DOCS" "docs-migrations" 900 5; then
 fi
 print_success "Database migrations completed"
 
-# Step 10b: Set Django Site domain for email links
-print_status "Setting Django Site domain..."
-BACKEND_POD=$(kubectl -n "$NS_DOCS" get pods -l app=backend --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-if [ -n "$BACKEND_POD" ]; then
-    kubectl -n "$NS_DOCS" exec "$BACKEND_POD" -- python manage.py shell -c "
-from django.contrib.sites.models import Site
-site = Site.objects.get(pk=1)
-site.domain = 'https://${DOCS_HOST}'
-site.name = '${TENANT_DISPLAY_NAME:-MotherTree} Docs'
-site.save()
-print(f'Site domain set to: {site.domain}')
-" 2>/dev/null && print_success "Django Site domain configured" || print_warning "Failed to set Site domain (non-critical)"
+
+# Step 9: Apply the backend, frontend and ingress manifests
+# Update backend deployment to reference PostgreSQL in db namespace
+# Uses envsubst for replica count from tenant config
+mt_apply kubectl apply -f <(envsubst '${DOCS_BACKEND_MIN_REPLICAS} ${DOCS_GUNICORN_WORKERS}' < "$REPO_ROOT/docs/backend-deployment.yaml" | \
+  sed "s/namespace: docs/namespace: $NS_DOCS/g" | \
+  sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g")
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/backend-service.yaml")
+
+# Deploy frontend with environment-specific configuration (includes replica count)
+mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/frontend-deployment.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/frontend-service.yaml")
+mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
+# Static asset cache ingress (/_next/static/ with immutable cache headers)
+mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/static-cache-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
+# Y-Provider ingress with document ID-based consistent hashing for WebSocket scaling
+# Use explicit variable list to preserve nginx $request_uri variable
+mt_apply kubectl apply -f <(envsubst '${DOCS_HOST} ${TENANT_NAME}' < "$REPO_ROOT/docs/yprovider-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
+print_success "Docs manifests applied successfully to namespace $NS_DOCS"
+
+# Step 10: Restart deployments to pick up ConfigMap changes, then wait for ready (PARALLEL)
+if mt_has_changes; then
+    print_status "Restarting backend and frontend to pick up ConfigMap changes..."
+    kubectl -n "$NS_DOCS" rollout restart deployment/backend deployment/frontend
+    print_status "Waiting for Docs backend and frontend to be ready (parallel)..."
+    # Wait for both in parallel
+    kubectl -n "$NS_DOCS" rollout status deployment/backend --timeout=300s &
+    BACKEND_PID=$!
+    kubectl -n "$NS_DOCS" rollout status deployment/frontend --timeout=300s &
+    FRONTEND_PID=$!
+    wait $BACKEND_PID $FRONTEND_PID
+    print_success "Docs backend and frontend are ready"
 else
-    print_warning "No running backend pod found, skipping Site domain configuration"
+    print_status "No config changes detected, skipping restart of deployment/backend deployment/frontend"
 fi
 
-# Step 11: Keycloak realm import is done in create_env script after Keycloak is deployed
+# Step 11: Deploy/Update y-provider (declarative)
+print_status "Applying y-provider deployment and service to namespace $NS_DOCS..."
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/health-sidecar-configmap.yaml")
+# Uses envsubst for replica count from tenant config
+mt_apply kubectl apply -f <(envsubst '${YPROVIDER_MIN_REPLICAS}' < "$REPO_ROOT/docs/y-provider-deployment.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/y-provider-service.yaml")
+# Restart to ensure ConfigMap changes are picked up (wait in background, check later)
+if mt_has_changes; then
+    # Brief pause to avoid "restart already triggered within past second" race with backend/frontend restart
+    sleep 2
+    kubectl -n "$NS_DOCS" rollout restart deploy/docs-y-provider
+    kubectl -n "$NS_DOCS" rollout status deploy/docs-y-provider --timeout=300s &
+    YPROVIDER_PID=$!
+    # Wait for y-provider rollout to complete
+    wait $YPROVIDER_PID
+else
+    print_status "No config changes detected, skipping restart of deploy/docs-y-provider"
+fi
+# Quick sanity: short endpoint check (non-fatal; kube liveness covers steady state)
+print_status "Checking y-provider service endpoints..."
+if kubectl -n "$NS_DOCS" get endpoints y-provider -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | grep -qE '[0-9]'; then
+  kubectl -n "$NS_DOCS" get endpoints y-provider
+else
+  print_warning "y-provider endpoints not yet reported; rely on rollout status/liveness"
+fi
+print_success "y-provider applied successfully"
+
+# Step 11a: Deploy HorizontalPodAutoscalers (HPA) for auto-scaling (only if min != max replicas)
+if [ "$DOCS_BACKEND_MIN_REPLICAS" != "$DOCS_BACKEND_MAX_REPLICAS" ]; then
+  print_status "Deploying HPAs for docs backend, frontend, and y-provider..."
+  envsubst < "$REPO_ROOT/docs/backend-hpa.yaml.tpl" | kubectl apply -f -
+  envsubst < "$REPO_ROOT/docs/frontend-hpa.yaml.tpl" | kubectl apply -f -
+  envsubst < "$REPO_ROOT/docs/yprovider-hpa.yaml.tpl" | kubectl apply -f -
+  print_success "Docs HPAs deployed (CPU 80% threshold)"
+else
+  kubectl delete hpa backend-hpa -n "$NS_DOCS" --ignore-not-found >/dev/null 2>&1
+  kubectl delete hpa frontend-hpa -n "$NS_DOCS" --ignore-not-found >/dev/null 2>&1
+  kubectl delete hpa yprovider-hpa -n "$NS_DOCS" --ignore-not-found >/dev/null 2>&1
+  print_status "Docs: fixed replicas, HPAs removed"
+fi
+
+# Step 11b: Deploy Grafana dashboard for Docs monitoring
+print_status "Deploying Docs Grafana dashboard..."
+cat "$REPO_ROOT/apps/manifests/docs/docs-dashboard-configmap.yaml" | sed "s/namespace: monitoring/namespace: $NS_MONITORING/g" | kubectl apply -f -
+print_success "Docs Grafana dashboard deployed"
+
+
+# Email link base URL is DJANGO_EMAIL_URL_APP in docs-config (impress >= 4.5);
+# the django.contrib.sites row is no longer consulted, so no Site domain hack.
+
+# Step 12: Keycloak realm import is done in create_env script after Keycloak is deployed
 # (Keycloak is deployed via helmfile in create_env, after deploy-docs.sh completes)
 print_status "Skipping Keycloak realm import (done in create_env after Keycloak deployment)"
 
-# Step 12: Create superuser (skipped if manifest not present)
+# Step 13: Create superuser (skipped if manifest not present)
 if [ -f "$REPO_ROOT/docs/superuser-job.yaml" ]; then
   print_status "Creating superuser account..."
   cat "$REPO_ROOT/docs/superuser-job.yaml" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
@@ -325,7 +352,7 @@ else
   print_status "Skipping superuser creation (manifest not present)"
 fi
 
-# Step 13: Verify deployment
+# Step 14: Verify deployment
 print_status "Verifying Docs deployment..."
 
 # Show resource snapshot
@@ -336,7 +363,7 @@ echo ""
 echo "Resources in docs namespace ($NS_DOCS):"
 kubectl get deploy,svc,ingress -n "$NS_DOCS"
 
-# Step 14: Display access information
+# Step 15: Display access information
 print_success "LaSuite Docs deployment completed successfully!"
 echo ""
 echo "Access Information:"

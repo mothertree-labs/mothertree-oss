@@ -9,7 +9,13 @@ metadata:
 data:
   # Django settings
   DJANGO_ALLOWED_HOSTS: "${DOCS_HOST},*.${BASE_DOMAIN},backend"
-  DJANGO_SETTINGS_MODULE: "impress.settings"
+  # mt_settings (ConfigMap docs-mt-python, mounted at /app/mt_settings.py)
+  # subclasses upstream impress.settings.Production: MediaMiddleware first,
+  # storage_backends.LinodeS3Boto3Storage as the default storage, and the
+  # mt_patches app (invitation-email link). django-configurations picks the
+  # class named by DJANGO_CONFIGURATION from that module, so it must stay
+  # "Production".
+  DJANGO_SETTINGS_MODULE: "mt_settings"
   DJANGO_CONFIGURATION: "Production"
   DJANGO_DEBUG: "False"
   
@@ -39,9 +45,8 @@ data:
   AWS_S3_URL_PROTOCOL: "https:"
   MEDIA_BASE_URL: "https://${DOCS_HOST}"
   
-  # Linode Object Storage compatibility settings
-  # Override STORAGES backend using the specific environment variable name Impress expects
-  STORAGES_DEFAULT_BACKEND: "storage_backends.LinodeS3Boto3Storage"
+  # Linode Object Storage compatibility settings (the storage backend itself
+  # is selected in mt_settings.py, not by an environment variable)
   AWS_S3_DEFAULT_ACL: "private"
   AWS_S3_VERIFY: "False"
   AWS_S3_FILE_OVERWRITE: "False"
@@ -79,6 +84,10 @@ data:
   # Logo shown in invitation/share emails — served by the docs frontend from
   # the docs-email-assets ConfigMap (unset upstream default renders src="None")
   DJANGO_EMAIL_LOGO_IMG: "https://${DOCS_HOST}/email-assets/logo-email.png"
+  # Base URL for links in emails (impress >= 4.5). Without it upstream falls
+  # back to the django.contrib.sites domain, which nothing sets any more;
+  # mt_patches refuses to start if this is empty.
+  DJANGO_EMAIL_URL_APP: "https://${DOCS_HOST}"
   
   # Logging
   LOG_LEVEL: "INFO"

@@ -111,6 +111,18 @@ wait_for_loki() {
     fi
 }
 
+# KNOWN BROKEN on current Loki images, and deliberately left alone: the three
+# probes below shell into the Loki pod (`kubectl exec -- wget`), and
+# grafana/loki no longer ships wget, so they report "not responding" even when
+# Loki is healthy. Loki is deployed from these raw manifests with its own image
+# pin — it is NOT part of kube-prometheus-stack — and this script is
+# operator-only (nothing under ci/ or .woodpecker/ calls it), so the failure
+# never reaches a pipeline. The fix, when someone wants it, is the same one the
+# monitoring scripts took when kube-prometheus-stack 85 went distroless: read
+# through the API server's service proxy instead of the container, i.e.
+#   mt_prom_http-style: kubectl get --raw \
+#     "/api/v1/namespaces/$NAMESPACE/services/loki:3100/proxy/ready"
+# (see mt_prom_http in scripts/lib/common.sh).
 test_loki_health() {
     log_info "Testing Loki health..."
     

@@ -74,3 +74,14 @@ steps:
     commands:
       - ci/scripts/admin-portal-test.sh
     depends_on: [npm-check]
+
+  # calendar-automation's unit suite (`node --test server.test.js`) had no CI
+  # step at all; its only coverage was e2e. Same shape as account-portal-tests:
+  # own directory, so it can run alongside the portal steps after npm-check.
+  - name: calendar-automation-tests
+    image: bash
+    commands:
+      - cd apps/calendar-automation
+      - "[ -d node_modules ] || npm ci --ignore-scripts"
+      - npm test
+    depends_on: [npm-check]

@@ -30,7 +30,7 @@
 # Service).
 
 # The postgres image every probe Job runs. Kept as a literal for Renovate.
-MT_NC_PROBE_IMAGE="postgres:17-alpine"
+MT_NC_PROBE_IMAGE="postgres:18-alpine"
 
 # Tenant DB names are operator-controlled and always nextcloud_<tenant>
 # (lowercase + digits + underscore/hyphen). Refuse anything else before it can

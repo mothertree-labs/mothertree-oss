@@ -91,7 +91,7 @@ releases:
   - name: kube-prometheus-stack
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: prometheus-community/kube-prometheus-stack
-    version: 58.7.2
+    version: 91.4.0
     disableValidation: true
     needs:
       - {{ requiredEnv "NS_INGRESS" }}/ingress-nginx
@@ -177,15 +177,20 @@ releases:
       - values/cloud-firewall-controller.yaml.gotmpl
     createNamespace: false
 
-  # Reflector — mirrors secrets (e.g. wildcard TLS certs) across namespaces
+  # Reflector — mirrors secrets (e.g. wildcard TLS certs) across namespaces.
+  # Propagation is proven on every deploy_infra by a canary Secret and per tenant
+  # by create_env (mirror reflected-version == source resourceVersion, #673) —
+  # see mt_reflector_canary / mt_wait_for_reflection in scripts/lib/common.sh.
   - name: reflector
     namespace: infra-cert-manager
     chart: emberstack/reflector
-    version: 7.1.288
+    version: 10.0.65
     wait: true
     timeout: 300
     labels:
       tier: system
+    values:
+      - values/reflector.yaml
     createNamespace: false
 
   # =============================================================================
