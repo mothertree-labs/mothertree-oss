@@ -50,7 +50,7 @@ spec:
               mountPath: /root/.ollama
       containers:
         - name: ollama
-          image: ollama/ollama:0.34.0
+          image: ollama/ollama:0.34.1
           command:
             - /bin/sh
             - -c
