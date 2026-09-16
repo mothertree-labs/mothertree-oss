@@ -100,8 +100,10 @@ updates:
       base-images:
         patterns: ["*"]
     ignore:
-      # Pinned to node 22 LTS. Remove when ready to upgrade — tracking issue
-      # gates the next major; the prior 20→25 jump broke CJS/ESM interop.
+      # Pinned to node 24 LTS: majors (25, 26, …) are bumped deliberately in
+      # their own branch, not by Dependabot. The 20→25 incident that first
+      # motivated this pin was openid-client 5→6 and the connect-redis export
+      # shape, not Node itself — see #404.
       - dependency-name: "node"
         update-types: ["version-update:semver-major"]
 
@@ -118,8 +120,10 @@ updates:
       base-images:
         patterns: ["*"]
     ignore:
-      # Pinned to node 22 LTS. Remove when ready to upgrade — tracking issue
-      # gates the next major; the prior 20→25 jump broke CJS/ESM interop.
+      # Pinned to node 24 LTS: majors (25, 26, …) are bumped deliberately in
+      # their own branch, not by Dependabot. The 20→25 incident that first
+      # motivated this pin was openid-client 5→6 and the connect-redis export
+      # shape, not Node itself — see #404.
       - dependency-name: "node"
         update-types: ["version-update:semver-major"]
 

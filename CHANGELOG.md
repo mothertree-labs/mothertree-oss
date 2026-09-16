@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `calendar-automation-tests` step in `.woodpecker/validate.yaml`. The
+  17-assertion `node --test server.test.js` suite in `apps/calendar-automation`
+  had no CI step at all — its only coverage was e2e — so a broken unit test
+  would only have surfaced when someone ran it by hand. The step has the same
+  shape as `account-portal-tests` (`npm ci --ignore-scripts && npm test` after
+  `npm-check`, in its own directory so it can run alongside the portal steps).
+  It runs on the CI host's Node (20 today, tracked in #686) and passes there
+  too: the suite is source-inspection over `server.js` and imports only Node
+  builtins, so it does not depend on `require(esm)`.
+
+### Removed
+- `apps/calendar-automation/Dockerfile` (#674). It was never built:
+  `ci/scripts/build-image.sh` knows only admin-portal, account-portal,
+  roundcube and perf, nothing else in the repo referenced it, and the service
+  actually runs on the stock `node` image declared in
+  `apps/manifests/calendar-automation/deployment.yaml.tpl` with its code
+  mounted from a ConfigMap. Keeping it meant two runtime definitions that could
+  drift (and Renovate's `dockerfile` manager offering a second, meaningless
+  bump for it). One runtime definition, not two. Its companion
+  `apps/calendar-automation/.dockerignore` goes with it — nothing else read it.
+
 ### Changed
 - **La Suite Docs (impress) 4.4.0 → 5.6.1** (`docs/backend-deployment.yaml`,
   `docs/migrations-job.yaml`, `docs/frontend-deployment.yaml.tpl`,
@@ -97,6 +119,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   initialised on 16 before Ansible — which manages the running major from the
   private infra config and defaults to 17 — took over. The default now matches
   Ansible's.
+- Node.js runtime 22 → 24 LTS for the admin portal, the account portal and
+  calendar-automation (#674, #404, #65). Both portal `Dockerfile`s move to
+  `node:24-alpine`; calendar-automation's real runtime is the stock image in
+  `apps/manifests/calendar-automation/deployment.yaml.tpl` (the `npm-install`
+  init container and the main container), and its `engines.node` is now
+  `>=22.12` — the first release with unflagged `require(esm)`, which
+  `require('imapflow')` / `require('ical.js')` from CommonJS already rely on,
+  so the interop the old Dependabot comment feared was already load-bearing and
+  green on 22. Pre-flight on `node:24-alpine` (Node 24.21.0, npm 11.19.0,
+  Alpine 3.24.1 — the same Alpine minor as `node:22-alpine`, so the
+  musl/OpenSSL layer does not move): admin portal 105/105 Jest tests, account
+  portal 133/133, calendar-automation 17/17; `npm run build:css` and
+  `npm prune --production` clean in both portals; `require()` of
+  `connect-redis`, `nodemailer`, `express-rate-limit` and `openid-client`
+  resolves from CommonJS before and after the prune; calendar-automation's
+  `server.js` passes `node --check`, its ESM deps resolve, and starting it
+  without config exits with the expected
+  `[FATAL] Required environment variable IMAP_HOST` (env validation, not an
+  import error). No new `DeprecationWarning` / `ExperimentalWarning`: the only
+  runtime warning is calendar-automation's pre-existing
+  `MODULE_TYPELESS_PACKAGE_JSON` on `server.test.js`, identical on Node 20 and
+  24. Its lockfile has no native or install-script packages, which corrects the
+  tier-2 note below that held calendar-automation back on 22 because of "native
+  dependencies". 24 rather than 26: 24 is Active LTS today (Maintenance from
+  2026-10-20, EOL 2028-04-30) while 26 is not LTS until 2026-10-28, and the
+  surface is identical, so 24 → 26 later is the same one-token change; 22 is
+  EOL 2027-04-30. The Dependabot `semver-major` ignore for `node` on both
+  portal Dockerfiles stays — it is what keeps 25/26 from arriving unreviewed —
+  but its comment is corrected: the 20→25 breakage it cited was openid-client
+  5→6 and the connect-redis export shape (#404), not Node. The first prod
+  deploy rolls the two portals (new image tags) and calendar-automation (image
+  change in the Deployment spec) once. `CONTRIBUTING.md`'s workstation setup
+  now installs Node.js 24 LTS from NodeSource to match; the CI VM itself is
+  still on 20 and is tracked separately in #686.
 - The web-search gate is now **fatal on prod and prod-eu, advisory on dev**,
   derived from `MT_ENV` in `deploy-llm-webui.sh`. When the gate was made advisory
   it was made advisory *everywhere*, which was the safe default at the time but
