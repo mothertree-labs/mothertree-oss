@@ -91,7 +91,7 @@ releases:
   - name: kube-prometheus-stack
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: prometheus-community/kube-prometheus-stack
-    version: 91.4.0
+    version: 91.4.1
     disableValidation: true
     needs:
       - {{ requiredEnv "NS_INGRESS" }}/ingress-nginx
