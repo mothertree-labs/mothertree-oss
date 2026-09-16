@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **Keycloak 26.7.3 → 26.7.4** (`apps/values/keycloak-codecentric.yaml`), a security
+  release closing six CVEs. Two are **unauthenticated DoS against public
+  endpoints** — CVE-2026-79651 (locale-cache OOM) and CVE-2026-18212 (SAML
+  DEFLATE memory leak) — and CVE-2026-17526 (7.2) lets an impersonation role
+  escalate to realm admin. CVE-2026-74909 (8.1) is a policy-enforcer path
+  bypass, an incomplete-fix follow-up. CVE-2026-90997 is MySQL/MariaDB-only and
+  does not apply here. Rolling upgrade is supported: all 174 Liquibase changelog
+  files are byte-identical to 26.7.3, so there is no migration to serialise and
+  the scale-to-1 dance that minor/major upgrades need does not apply. The diff
+  does move Quarkus to 3.33.3.2 and three `model/jpa` providers, so watch the
+  first pod's datasource logs.
+
+
 ### Added
 - `calendar-automation-tests` step in `.woodpecker/validate.yaml`. The
   17-assertion `node --test server.test.js` suite in `apps/calendar-automation`
