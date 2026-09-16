@@ -41,6 +41,19 @@ echo "image: ${KEYCLOAK_IMAGE}"
 container="mt-kc-theme-test-${CI_PIPELINE_NUMBER:-local}-$$"
 admin_user="admin"
 admin_password="$(openssl rand -hex 24)"
+created_label="org.mothertree.kc-theme-test.created"
+
+# The EXIT trap does not run on SIGKILL (agent restart, killed step), which
+# would leave a Keycloak running on the CI VM. Sweep leftovers from earlier
+# runs; the age threshold spares a concurrent pipeline's live container.
+now="$(date +%s)"
+docker ps -a --filter "label=${created_label}" --format "{{.ID}} {{.Label \"${created_label}\"}}" |
+  while read -r id created; do
+    if [ -n "${created}" ] && [ $((now - created)) -gt 1800 ]; then
+      echo "Removing stale theme-test container ${id}"
+      docker rm -f "${id}" >/dev/null || true
+    fi
+  done
 
 cleanup() {
   local rc=$?
@@ -54,7 +67,12 @@ cleanup() {
 trap cleanup EXIT
 
 docker pull --quiet "${KEYCLOAK_IMAGE}" >/dev/null
+# Same hardening as vector-validate.sh, minus --network none (the browser needs
+# the published port). Keycloak runs as uid 1000 on unprivileged ports.
 docker run -d --name "${container}" \
+  --label "${created_label}=${now}" \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --pids-limit 1024 --memory 2g \
   -p 127.0.0.1::8080 -p 127.0.0.1::9000 \
   -e KC_BOOTSTRAP_ADMIN_USERNAME="${admin_user}" \
   -e KC_BOOTSTRAP_ADMIN_PASSWORD="${admin_password}" \
@@ -72,7 +90,7 @@ mgmt_port="$(host_port 9000)"
 
 echo "Waiting for Keycloak to become ready..."
 deadline=$((SECONDS + 240))
-until curl -sf "http://127.0.0.1:${mgmt_port}/health/ready" >/dev/null; do
+until curl -sf --max-time 5 "http://127.0.0.1:${mgmt_port}/health/ready" >/dev/null; do
   if [ "$(docker inspect -f '{{.State.Running}}' "${container}" 2>/dev/null)" != "true" ]; then
     echo "ERROR: Keycloak container exited during startup"
     exit 1
