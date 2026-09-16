@@ -2223,3 +2223,135 @@ EOF
     print_success "Reflector canary: $target_ns/$name reflected-version matches source and stamp $stamp mirrored"
     return 0
 }
+
+# ===========================================================================
+# Prometheus HTTP access — mt_prom_http / mt_prom_query
+# ===========================================================================
+# Read the in-cluster Prometheus API through the API server's **service
+# proxy**, assuming nothing inside the target container:
+#
+#   kubectl get --raw /api/v1/namespaces/<ns>/services/<svc>:<port>/proxy/<path>
+#
+# Why not `kubectl exec ... wget` (what these callers used until now):
+# kube-prometheus-stack 85 moved Prometheus (and node-exporter) to distroless
+# images, and Grafana/kube-state-metrics have no shell either. There is no
+# `wget` and no `/bin/sh` in the Prometheus container any more, so every exec
+# reader died with `exec: "wget": executable file not found in $PATH` the
+# moment the chart was upgraded — a class of breakage that returns on any
+# future image diet.
+#
+# Why the *service* proxy rather than the pod proxy (both avoid the container):
+# callers re-sample for minutes right after a deploy, exactly when Prometheus
+# may still be rolling. A service proxy re-resolves ready endpoints on every
+# call; a pod name captured up front goes stale the moment the pod is
+# replaced. No port-forward either: nothing to background, nothing to leak.
+#
+# Requires `services/proxy` GET on the namespace (the cluster-admin kubeconfigs
+# deploys use have it) and `jq` for mt_prom_query.
+#
+# Defaults follow the chart's stable object name (release `kube-prometheus-stack`
+# == chart name, so `<release>-prometheus`); override via the environment
+# rather than passing a literal at each call site.
+MT_PROM_SERVICE="${MT_PROM_SERVICE:-kube-prometheus-stack-prometheus}"
+MT_PROM_PORT="${MT_PROM_PORT:-9090}"
+
+# ---------------------------------------------------------------------------
+# mt_prom_http <ns> <service> <port> <path>
+# Prints the raw response body on stdout. Returns 1 when the request could not
+# be made or was rejected — kubectl's own stderr is echoed so the caller's log
+# says *why* (NotFound service, Forbidden, BadRequest, API unreachable).
+# <path> is the API path inside Prometheus, e.g. `api/v1/alerts` or
+# `api/v1/query?query=<urlencoded>`; a leading slash is optional.
+# Diagnostics go to stderr: callers capture stdout with $(...).
+#
+# ns/svc/port are validated before anything is built from them. MT_PROM_SERVICE
+# and MT_PROM_PORT are documented environment overrides, and the proxy path is
+# a plain string concatenation: a service name like `../../../../apis/...`
+# would otherwise walk straight out of the service-proxy subtree and let a
+# caller GET an arbitrary API-server resource. DNS-1123 label charset for the
+# names, digits for the port — which is all a real Service can ever be.
+#
+# The response is buffered whole into a shell variable. There is no streaming
+# cap available here (a cap would have to truncate, and a truncated body parses
+# as a failure anyway, which is what the callers already do). Measured bound on
+# the two paths actually used: `api/v1/alerts` on a dev cluster is ~6.5 KB for
+# 9 alerts (~725 B/alert), so even a pathological hundreds-of-alerts storm
+# stays in the low hundreds of KB; instant-query bodies are bounded by the
+# series count of the specific queries in scripts/infra-health-gate, which are
+# all namespace-filtered kube-state-metrics selectors. Anything that could
+# return an unbounded series count (a bare `{__name__=~".+"}`) must not be
+# passed through here.
+# ---------------------------------------------------------------------------
+mt_prom_http() {
+    local ns="${1:?mt_prom_http: namespace}" svc="${2:?mt_prom_http: service}"
+    local port="${3:?mt_prom_http: port}" path="${4:?mt_prom_http: path}"
+    local body errf rc=0
+    local dns1123='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+    if ! [[ "$ns" =~ $dns1123 ]] || ! [[ "$svc" =~ $dns1123 ]] || ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        print_error "mt_prom_http: refusing a non-Service target: ns=${ns} service=${svc} port=${port}" >&2
+        return 1
+    fi
+    path="${path#/}"
+    errf=$(mktemp "${TMPDIR:-/tmp}/mt-prom-http.XXXXXX") || {
+        print_error "mt_prom_http: mktemp failed" >&2
+        return 1
+    }
+    # Self-clearing so it cannot fire on an unrelated function's return with
+    # $errf out of scope (a bash RETURN trap is global state, not local).
+    trap 'rm -f "${errf:-}"; trap - RETURN' RETURN
+    # --request-timeout: kubectl's default is 0 == wait forever. infra-health-gate
+    # is a FATAL CI gate that issues 6 of these per sample and re-samples for
+    # INFRA_GATE_SETTLE_SECONDS, so an unresponsive API server or a Prometheus
+    # stuck in WAL replay would hang the pipeline instead of failing it.
+    if ! body=$(kubectl --request-timeout=30s get --raw "/api/v1/namespaces/${ns}/services/${svc}:${port}/proxy/${path}" 2>"$errf"); then
+        rc=1
+        print_error "Prometheus API request failed: ${path%%\?*} (service ${svc}:${port} in ${ns})" >&2
+        sed 's/^/  /' "$errf" >&2
+    fi
+    [ "$rc" -eq 0 ] || return 1
+    printf '%s\n' "$body"
+}
+
+# ---------------------------------------------------------------------------
+# mt_prom_query <ns> <service> <port> <promql>
+# Prints the instant-query result array (.data.result, compact JSON) on stdout.
+# Returns 1 if the request failed OR the body is not a successful Prometheus
+# response — so a caller can never mistake "could not ask" for "no series".
+#
+# Note the request and the query are one round trip through the API server: a
+# syntactically invalid PromQL comes back as a kubectl `BadRequest`, not as a
+# JSON error body, so the failure message deliberately does not claim to know
+# which it was. The body check below still catches a 200 that is not a
+# successful Prometheus response (an HTML error page from a proxy, say).
+# ---------------------------------------------------------------------------
+mt_prom_query() {
+    local ns="${1:?mt_prom_query: namespace}" svc="${2:?mt_prom_query: service}"
+    local port="${3:?mt_prom_query: port}" promql="${4:?mt_prom_query: promql}"
+    local encoded raw status
+    if ! encoded=$(printf '%s' "$promql" | jq -sRr @uri); then
+        print_error "Prometheus query failed: could not URL-encode the query: ${promql}" >&2
+        return 1
+    fi
+    if ! raw=$(mt_prom_http "$ns" "$svc" "$port" "api/v1/query?query=${encoded}"); then
+        print_error "Prometheus query failed (unreachable, denied, or invalid PromQL — see above): ${promql}" >&2
+        return 1
+    fi
+    status=$(jq -r '.status // "error"' <<< "$raw" 2>/dev/null) || status="error"
+    if [ "$status" != "success" ]; then
+        print_error "Prometheus query failed (response was not a successful Prometheus result): ${promql}" >&2
+        printf '%s\n' "$raw" | head -3 | sed 's/^/  /' >&2
+        return 1
+    fi
+    # .data.result must exist AND be an array. A plain `jq -c .data.result` on a
+    # body without it prints `null`, which is rc 0 and `jq length` == 0 — read by
+    # scripts/infra-health-gate as "no series", i.e. the gate passes vacuously.
+    # `error()` makes jq exit non-zero instead. An empty array stays rc 0: that
+    # is a legitimate "asked, nothing matched" and must not be a failure.
+    local result
+    if ! result=$(jq -ce 'if (.data.result|type) == "array" then .data.result else error("no result array") end' <<< "$raw" 2>/dev/null); then
+        print_error "Prometheus query failed (successful response carried no .data.result array): ${promql}" >&2
+        printf '%s\n' "$raw" | head -3 | sed 's/^/  /' >&2
+        return 1
+    fi
+    printf '%s\n' "$result"
+}

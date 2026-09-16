@@ -46,10 +46,13 @@ mt_usage() {
   echo "Usage: $0 -e <env>"
   echo ""
   echo "Fail if shared infra namespaces have crash-looping pods, unconverged DaemonSets"
-  echo "or Deployments. Reads Prometheus in infra-monitoring via kubectl exec."
+  echo "or Deployments. Reads Prometheus in infra-monitoring through the API server's"
+  echo "service proxy (nothing is executed inside the Prometheus container)."
   echo ""
   echo "Environment:"
   echo "  KUBECONFIG                  kubeconfig to use (default: <repo>/kubeconfig.<env>.yaml)"
+  echo "  MT_PROM_SERVICE             Prometheus Service name (default: kube-prometheus-stack-prometheus)"
+  echo "  MT_PROM_PORT                Prometheus Service port (default: 9090)"
   echo "  INFRA_GATE_NAMESPACES       PromQL regex of namespaces to check"
   echo "  INFRA_GATE_SETTLE_SECONDS   keep re-sampling this long while unhealthy (default 180)"
   echo "  INFRA_GATE_IGNORE           extended regex of pod/daemonset/deployment names to"
@@ -78,10 +81,15 @@ BAD_REASONS='CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfi
 print_status "Infra health gate: env=${MT_ENV} namespaces=~${NS_RE} settle=${SETTLE}s"
 [ -n "$IGNORE_RE" ] && print_warning "INFRA_GATE_IGNORE='${IGNORE_RE}' — matching resources are reported, not failed"
 
-PROM_POD=$(kubectl get pods -n "$NS_MON" -l app.kubernetes.io/name=prometheus \
-  -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null | awk '{print $1}') || PROM_POD=""
-if [ -z "$PROM_POD" ]; then
-  print_error "No running Prometheus pod in ${NS_MON} — cannot evaluate infra health"
+# Prometheus is read through the API server's service proxy (mt_prom_query in
+# scripts/lib/common.sh), not by executing anything in the pod: since chart 85
+# the Prometheus image is distroless — no shell, no wget — so the previous
+# `kubectl exec -- wget` reader could not run at all. The Service is resolved
+# per query, which also means a Prometheus pod still rolling during the settle
+# loop below does not strand the gate on a stale pod name.
+if ! kubectl get svc -n "$NS_MON" "$MT_PROM_SERVICE" >/dev/null 2>&1; then
+  print_error "No Service ${MT_PROM_SERVICE} in ${NS_MON} — cannot evaluate infra health"
+  print_error "Set MT_PROM_SERVICE if the Prometheus Service is named differently in this cluster."
   exit 2
 fi
 
@@ -89,19 +97,7 @@ fi
 # Errors go to stderr and return 1; callers `|| exit 2` so the gate can never
 # pass vacuously (this runs inside $(...), so stdout is captured).
 _prom_query() {
-  local promql="$1" encoded raw
-  encoded=$(printf '%s' "$promql" | jq -sRr @uri)
-  if ! raw=$(kubectl exec -n "$NS_MON" "$PROM_POD" -c prometheus -- \
-        wget -qO- "http://localhost:9090/api/v1/query?query=${encoded}" 2>/dev/null); then
-    print_error "Prometheus query failed (transport): ${promql}" >&2
-    return 1
-  fi
-  if [ "$(jq -r '.status // "error"' <<< "$raw" 2>/dev/null)" != "success" ]; then
-    print_error "Prometheus query failed: ${promql}" >&2
-    jq -r '.error // .' <<< "$raw" 2>/dev/null | head -3 >&2
-    return 1
-  fi
-  jq -c '.data.result' <<< "$raw"
+  mt_prom_query "$NS_MON" "$MT_PROM_SERVICE" "$MT_PROM_PORT" "$1"
 }
 
 # Preconditions — the gate must never pass vacuously:

@@ -221,6 +221,94 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Secret but the canary. The first deploy
   replaces the reflector pod once; the canary then proves the new controller
   propagates before anything else is deployed.
+- **kube-prometheus-stack 58.7.2 → 91.4.0** (33 chart majors; prometheus-operator
+  v0.73.2 → v0.94.0, Prometheus 2.52 → 3.14, Alertmanager 0.27 → 0.34, Grafana
+  10.4 → 13.2, kube-state-metrics 2.12 → 2.20, node-exporter 1.8 → 1.12). One
+  shot rather than staged: no intermediate major needs a state migration, CRD
+  changes are cumulative, and every stage would have cost a full dev + prod
+  cycle. Rendered against our committed values for dev and prod, the Prometheus
+  and Alertmanager objects keep their names, storage specs and (prod) the SES
+  credentials mount, so the StatefulSets and PVCs are untouched; the Grafana
+  Deployment, its admin Secret, the dashboard/datasource sidecars, all three
+  ingresses and every one of our rule groups, ServiceMonitors and Probes
+  render as before. Two things do change shape: the chart now renders each
+  `additionalPrometheusRulesMap` entry as its own `PrometheusRule` (58 wrapped
+  them in one `List`), and the chart's own Grafana test pod and the PSP-era
+  Grafana Role/RoleBinding are gone.
+
+  **Why the CRD step below is the real content of this change.** Helm installs
+  a chart's CRDs once, on first install, and never upgrades them — and nothing
+  in the repo re-applied them since. Every operator bump between 58 and 91
+  shipped new CRD schemas; against the frozen ones, fields the new operator
+  reads are silently pruned on write. `deploy_infra` now server-side applies
+  the CRD set of the pinned chart's operator immediately before the
+  tier=system `helmfile sync` (`scripts/lib/prometheus-crds.sh`,
+  `mt_apply_prometheus_crds`). The CRDs come from the chart artifact itself:
+  the step `helm pull`s the pinned version (`helmfile.yaml.gotmpl` `version:`)
+  and applies `charts/crds/crds/crd-<kind>.yaml` from it — the upstream
+  operator files, shipped inside the chart — so the CRDs are bound to the
+  exact artifact helm is about to install, with no operator-tag indirection,
+  no second host to trust and no checksum to maintain. A Renovate bump of the
+  chart line is the only edit. The pull and every one of the ten expected
+  CRD files are validated before the first apply (a missing or extra kind, or
+  a file that is not the CRD it should be, aborts with the cluster untouched
+  and helmfile never runs), and the step prints the chart's operator version
+  plus the `controller-gen` annotation of the Prometheus CRD before and
+  after, so the deploy log shows the schema advancing. `--force-conflicts`
+  because the live CRDs are owned by `helm/Apply`; field manager
+  `mt-deploy-crds` makes the ownership visible. Idempotent; harmless on a cold
+  cluster. Unit-tested with fake kubectl/helm
+  (`scripts/lib/tests/prometheus-crds.test.sh`).
+
+  **Prometheus 3.** Our PromQL was checked against the 3.0 migration list: no
+  `holt_winters`, no `le`/`quantile` matchers (only `by (le)` grouping), no
+  regex that depends on `.` not matching a newline, no range selector under
+  5m. Prometheus 3 validates the scrape `Content-Type` strictly; every
+  exporter we scrape sends a valid one, but as belt and braces the Prometheus
+  now carries a default scrape class with
+  `fallbackScrapeProtocol: PrometheusText0.0.4`, which applies to every scrape
+  resource that does not set its own (the operator has no Prometheus-wide
+  field for this; the scrape class is how it is expressed).
+
+  **The health gate had to stop shelling into Prometheus.** From chart 85 the
+  Prometheus and node-exporter images are distroless, and Grafana 13 and
+  kube-state-metrics have no shell either — so `scripts/infra-health-gate`,
+  which read the Prometheus API with `kubectl exec … wget`, died on the
+  upgraded cluster with `exec: "wget": executable file not found in $PATH` and
+  could never have passed again. Both readers now go through the API server's
+  service proxy (`mt_prom_http` / `mt_prom_query` in `scripts/lib/common.sh`),
+  which assumes nothing inside the container and re-resolves the Service on
+  every call, so a Prometheus pod still rolling during the gate's settle window
+  no longer strands it on a stale pod name. `scripts/check-health` read the
+  alert API the same way and had quietly degraded to "SKIP — Could not query
+  Prometheus API" while still reporting "All checks passed"; an unreadable
+  alert API is now a counted issue. That check also had to learn the difference
+  between the two kinds of firing alert, since making it work again is what
+  made them visible: `warning`/`critical` are counted as before, while
+  `none`/`info` (the chart's Watchdog and InfoInhibitor, our AlertChannelHeartbeat,
+  and upstream's advisory rules) are listed but not counted — counting the
+  always-on ones would have made the script report issues on every run forever.
+  Their *absence* is now the issue instead: Watchdog and AlertChannelHeartbeat
+  fire continuously by design, so a missing one means the alert path is broken.
+  `scripts/email-probe-metrics` reads
+  through the same helper (an empty result there now means "the probe reports
+  nothing", which the old reader could not distinguish from "could not ask").
+  `scripts/verify-alerting` is unaffected — Alertmanager 0.34 still ships
+  busybox and amtool. The same audit found `apps/deploy-loki.sh`, whose three
+  health probes shell into the Loki pod the same way and are equally broken;
+  that is **not** fallout from this chart — Loki is deployed from raw manifests
+  with its own image pin — and the script is operator-only, run by nothing in
+  CI, so it is left as a follow-up with a comment at the call site.
+
+  **One-way door.** A TSDB written by Prometheus 3 is readable only by ≥ 2.55.
+  **Rollback recipe**: `helm rollback kube-prometheus-stack -n <monitoring
+  namespace>` *plus* `prometheus.prometheusSpec.image.tag: v2.55.1` (the last
+  2.x, which reads the v3 TSDB) — revert the chart pin in a PR carrying that
+  override so the rollback deploys through CI. Leave the v0.94 CRDs in place:
+  they are backward compatible with the old operator, and deleting a CRD
+  deletes every object of that kind. Alertmanager route matching still uses
+  `match`/`match_re` (deprecated, accepted by 0.34); converting to `matchers`
+  is a follow-up, not part of this upgrade.
 - The web-search gate is now **fatal on prod and prod-eu, advisory on dev**,
   derived from `MT_ENV` in `deploy-llm-webui.sh`. When the gate was made advisory
   it was made advisory *everywhere*, which was the safe default at the time but

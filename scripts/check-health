@@ -52,6 +52,15 @@ if [ ! -f "$KUBECONFIG" ]; then
   print_error "Kubeconfig not found: $KUBECONFIG"
   exit 1
 fi
+# python3 is used by Check 6 (firing alerts), which without this guard reports
+# "the alert list could not be parsed" when python3 is simply absent — true,
+# but it names the wrong cause. Fail on the missing tool instead, by name.
+# jq is not called directly here (Check 6 reads the alert API with
+# mt_prom_http, which does not need it), but it is required so this script
+# declares the same toolchain as the other two Prometheus readers,
+# scripts/infra-health-gate and scripts/email-probe-metrics: any of them
+# growing an mt_prom_query call would otherwise fail late instead of here.
+mt_require_commands kubectl jq python3
 
 # Build namespace filter
 if [ -n "$TENANT" ]; then
@@ -175,38 +184,126 @@ fi
 # --- Check 6: Firing Prometheus alerts ---
 echo ""
 echo "--- Firing Prometheus alerts ---"
-PROM_POD=$(kubectl get pods -n infra-monitoring -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-if [ -n "$PROM_POD" ]; then
-  FIRING=$(kubectl exec -n infra-monitoring "$PROM_POD" -c prometheus -- \
-    wget -qO- 'http://localhost:9090/api/v1/alerts' 2>/dev/null || echo "")
-  if [ -n "$FIRING" ]; then
-    ALERT_COUNT=$(echo "$FIRING" | python3 -c "
-import sys, json
+# Read through the API server's service proxy (mt_prom_http): since
+# kube-prometheus-stack 85 the Prometheus image is distroless, so the old
+# `kubectl exec -- wget` reader cannot run and this check quietly downgraded to
+# "SKIP - Could not query Prometheus API" while still reporting "All checks
+# passed" — with alerts firing. An unreadable alert API is now an issue.
+#
+# Firing alerts are split by SEVERITY rather than by a name list, because on
+# this stack severity separates the two classes exactly: of the 63 alerts we
+# define, 62 are warning/critical and the only `info` one is our own
+# AlertChannelHeartbeat; `none` is used by nothing but the chart's Watchdog and
+# InfoInhibitor. So `none`/`info` == "not something to act on now" (that is
+# also what upstream means by it — the other `info` rules are advisory ones
+# like KubeNodePressure / KubeletTooManyPods), and everything else is counted.
+# Informational alerts are still listed, just not counted: counting the
+# always-on ones would make this script report issues on every run forever and
+# get it ignored, which is the silent-SKIP failure mode inverted.
+#
+# The always-on alerts are also checked for PRESENCE, which is the point of a
+# deadman: Watchdog (chart) and AlertChannelHeartbeat (ours) fire continuously
+# by design, so if either is missing the alert path itself is broken and that
+# IS an issue. InfoInhibitor is deliberately not required — it is a chart
+# inhibition helper that only fires while some info alert exists.
+# Overridable so an environment that does not ship one of them can adjust.
+# NOTE the override uses :- so it substitutes on unset OR empty: ALERT_DEADMAN=
+# falls back to the default and does NOT switch the check off. The only value
+# that disables it is a non-empty list of no names, i.e. ALERT_DEADMAN=","
+ALERT_DEADMAN="${ALERT_DEADMAN:-Watchdog,AlertChannelHeartbeat}"
+if FIRING=$(mt_prom_http infra-monitoring "$MT_PROM_SERVICE" "$MT_PROM_PORT" 'api/v1/alerts'); then
+    ALERT_SUMMARY=$(echo "$FIRING" | ALERT_DEADMAN="$ALERT_DEADMAN" python3 -c "
+import sys, json, os
 try:
     data = json.load(sys.stdin)
-    alerts = [a for a in data.get('data', {}).get('alerts', []) if a.get('state') == 'firing']
-    for a in alerts:
-        name = a.get('labels', {}).get('alertname', 'unknown')
-        ns = a.get('labels', {}).get('namespace', '')
-        sev = a.get('labels', {}).get('severity', '')
-        loc = f' ({ns})' if ns else ''
-        print(f'  [{sev}] {name}{loc}')
-    print(f'TOTAL:{len(alerts)}')
-except:
-    print('TOTAL:0')
-" 2>/dev/null || echo "TOTAL:0")
-    TOTAL=$(echo "$ALERT_COUNT" | grep "^TOTAL:" | cut -d: -f2)
-    if [ "${TOTAL:-0}" -gt 0 ]; then
-      echo "$ALERT_COUNT" | grep -v "^TOTAL:"
+    # mt_prom_http returns the body unvalidated (mt_prom_query validates, but
+    # this is not a query). Without this check, any 200 that is not a
+    # Prometheus alert response - an error body, a proxy's HTML page - makes
+    # the .get chain below yield an empty list and the script print 'No
+    # actionable alerts firing'. Before this check the run still exited 1,
+    # but only because the deadman check independently noticed nothing was
+    # firing - so it blamed the alert path instead of the unreadable body.
+    # This check is what makes the diagnosis correct, independent of
+    # ALERT_DEADMAN.
+    d = data.get('data')
+    if data.get('status') != 'success' or not isinstance(d, dict) or not isinstance(d.get('alerts'), list):
+        print('TOTAL:ERROR')
+        sys.exit(0)
+    firing = [a for a in d['alerts'] if a.get('state') == 'firing']
+    actionable, informational = [], []
+    for a in firing:
+        labels = a.get('labels', {})
+        name = labels.get('alertname', 'unknown')
+        sev = labels.get('severity', '')
+        ns = labels.get('namespace', '')
+        # Prometheus restricts label NAMES to a charset; label VALUES are
+        # arbitrary UTF-8 and may contain newlines. A newline here would inject
+        # a second line into the DETAIL:/INFO:/MISSING:/TOTAL: line protocol
+        # this prints, and the shell collects every TOTAL: match - a firing
+        # alert whose severity is critical+newline+TOTAL:0 made the shell's
+        # integer test fail with 'integer expression expected', take the else
+        # branch, and report no alerts at all. Sanitising before the severity
+        # test below also means an injected value can only ever fail the
+        # none/info membership test, i.e. be counted rather than hidden.
+        name, sev, ns = (str(v).replace('\n', ' ').replace('\r', ' ') for v in (name, sev, ns))
+        if sev in ('none', 'info'):
+            informational.append(name)
+        else:
+            loc = f' ({ns})' if ns else ''
+            actionable.append(f'  [{sev}] {name}{loc}')
+    for line in actionable:
+        print(f'DETAIL:{line}')
+    print('INFO:' + ','.join(sorted(set(informational))))
+    expected = [n for n in os.environ['ALERT_DEADMAN'].split(',') if n]
+    # Matched on (alertname, namespace), not on the name alone: both deadmen
+    # are cluster-wide vector(1) rules that carry NO namespace label at all
+    # (verified against the live dev cluster), so requiring the label to be
+    # absent stops a same-named alert from any other namespace - a tenant one,
+    # say - standing in for a deadman that is not actually firing. Nothing in
+    # apps/values sets enforcedNamespaceLabel, which is what would add one. An
+    # ALERT_DEADMAN override naming a namespaced alert would need this relaxed.
+    names = {(a.get('labels', {}).get('alertname'), a.get('labels', {}).get('namespace', '')) for a in firing}
+    print('MISSING:' + ','.join(n for n in expected if (n, '') not in names))
+    print(f'TOTAL:{len(actionable)}')
+except Exception:
+    # Never report 'no alerts' because the body could not be parsed.
+    print('TOTAL:ERROR')
+" 2>/dev/null || echo "TOTAL:ERROR")
+    TOTAL=$(echo "$ALERT_SUMMARY" | sed -n 's/^TOTAL://p')
+    # Validate, do not just compare: `[ "$TOTAL" -gt 0 ]` on a non-integer
+    # returns rc 2, and as an `if` condition that is not fatal under `set -e`
+    # — it silently takes the else branch and prints "No actionable alerts
+    # firing". The Python above sanitises label values so a second TOTAL: line
+    # cannot be injected; this keeps the shell side from depending on that.
+    # Anything that is not a plain non-negative integer (empty, multi-line,
+    # the literal ERROR) is treated as ERROR, which is a counted issue.
+    case "$TOTAL" in
+      ''|*[!0-9]*) TOTAL=ERROR ;;
+    esac
+    if [ "${TOTAL:-ERROR}" = "ERROR" ]; then
+      echo "ERROR - Prometheus answered but the alert list could not be parsed"
       ISSUES=$((ISSUES + 1))
     else
-      echo "OK - No alerts firing"
+      ALERT_INFO=$(echo "$ALERT_SUMMARY" | sed -n 's/^INFO://p')
+      ALERT_MISSING=$(echo "$ALERT_SUMMARY" | sed -n 's/^MISSING://p')
+      if [ "$TOTAL" -gt 0 ]; then
+        echo "$ALERT_SUMMARY" | sed -n 's/^DETAIL://p'
+        ISSUES=$((ISSUES + 1))
+      else
+        echo "OK - No actionable alerts firing"
+      fi
+      if [ -n "$ALERT_INFO" ]; then
+        echo "OK - always-on/informational, not counted: $ALERT_INFO"
+      fi
+      if [ -n "$ALERT_MISSING" ]; then
+        echo "ERROR - deadman alert(s) NOT firing: $ALERT_MISSING"
+        echo "        These fire continuously by design; their absence means the alert path is broken."
+        ISSUES=$((ISSUES + 1))
+      fi
     fi
-  else
-    echo "SKIP - Could not query Prometheus API"
-  fi
 else
-  echo "SKIP - Prometheus pod not found"
+  echo "ERROR - Could not query the Prometheus alert API (see above)"
+  ISSUES=$((ISSUES + 1))
 fi
 
 # --- Check 7: wildcard TLS mirrors in sync (reflector) ---

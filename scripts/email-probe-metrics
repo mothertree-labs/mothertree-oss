@@ -11,6 +11,8 @@
 set -euo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# Sourced for mt_prom_query (see query_prom below); brings print_* along too.
+source "${REPO}/scripts/lib/common.sh"
 MT_ENV="${1:-prod}"
 
 export KUBECONFIG="${KUBECONFIG:-$REPO/kubeconfig.$MT_ENV.yaml}"
@@ -19,36 +21,39 @@ if [ ! -f "$KUBECONFIG" ]; then
   exit 1
 fi
 
-PROM_POD=$(kubectl get pods -n infra-monitoring -l app.kubernetes.io/name=prometheus \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+mt_require_commands kubectl jq python3
 
-if [ -z "$PROM_POD" ]; then
-  echo "[ERROR] Cannot find Prometheus pod in infra-monitoring namespace" >&2
-  exit 1
-fi
-
+# Reads Prometheus through the API server's service proxy. It used to
+# `kubectl exec ... -- wget` into the Prometheus pod, which stopped working
+# when kube-prometheus-stack 85 made the image distroless (no shell, no wget).
+# mt_prom_query also URL-encodes the query and validates the response, so a
+# failure can never arrive here as an empty-but-successful answer.
+# Prints the instant-query result array; returns non-zero if it could not ask.
 query_prom() {
-  local query="$1"
-  kubectl exec -n infra-monitoring "$PROM_POD" -c prometheus -- \
-    wget -qO- "http://localhost:9090/api/v1/query?query=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$query'))")" 2>/dev/null
+  mt_prom_query infra-monitoring "$MT_PROM_SERVICE" "$MT_PROM_PORT" "$1"
 }
 
 echo "=== Email Probe Metrics (env: $MT_ENV) ==="
 echo ""
 
-# Collect all metrics in one pass
-METRICS_JSON=$(query_prom '{__name__=~"email_probe_.+"}')
-
-if [ -z "$METRICS_JSON" ] || [ "$METRICS_JSON" = "" ]; then
+# Collect all metrics in one pass. A failed query returns non-zero (the reason
+# is already on stderr); an empty result set is a successful `[]` and means the
+# probe is simply not reporting — the two are no longer indistinguishable.
+if ! METRICS_JSON=$(query_prom '{__name__=~"email_probe_.+"}'); then
   echo "[ERROR] Could not query Prometheus" >&2
   exit 1
 fi
 
-python3 -c "
+# The result JSON is piped in on stdin rather than interpolated into the
+# Python source. JSON does not escape a single quote, so a label value
+# containing three of them closed the triple-quoted literal this used to use
+# and the rest of that value was parsed as Python - and label values are
+# scraped data, not something this script controls. Demonstrated end to end
+# with a tenant label of ''' + __import__('os').system(...) + '''.
+printf '%s' "$METRICS_JSON" | python3 -c "
 import json, sys, time
 
-data = json.loads('''$METRICS_JSON''')
-results = data.get('data', {}).get('result', [])
+results = json.load(sys.stdin)
 
 if not results:
     print('No email_probe metrics found. Is the probe deployed?')

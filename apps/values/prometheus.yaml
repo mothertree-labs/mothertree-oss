@@ -26,6 +26,22 @@ prometheus:
         memory: 1280Mi
       limits:
         memory: 2Gi
+    # Prometheus 3 validates the scrape response Content-Type strictly: a blank
+    # or unparseable header is a failed scrape, where 2.x fell back to the
+    # classic text parser. Every exporter we scrape sends a valid one today
+    # (promhttp; the Jitsi exporter's CONTENT_TYPE_LATEST; email-probe's
+    # `text/plain; version=0.0.4`) — this is belt and braces so a sloppy header
+    # degrades to the 0.0.4 text parser instead of a down target. The operator
+    # has no Prometheus-wide field for it: `fallbackScrapeProtocol` lives on
+    # each scrape resource (ServiceMonitor/PodMonitor/Probe/ScrapeConfig) and
+    # on a scrape class, and the default scrape class applies to every scrape
+    # resource that does not set its own. Enum (operator CRD): PrometheusProto,
+    # OpenMetricsText0.0.1, OpenMetricsText1.0.0, PrometheusText0.0.4,
+    # PrometheusText1.0.0.
+    scrapeClasses:
+      - name: default
+        default: true
+        fallbackScrapeProtocol: PrometheusText0.0.4
   ingress:
     enabled: true
     ingressClassName: nginx-internal
