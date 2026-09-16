@@ -21,7 +21,7 @@
     "express-rate-limit": "8.7.0",
     "express-session": "1.19.0",
     "helmet": "8.3.0",
-    "nodemailer": "10.0.3",
+    "nodemailer": "10.0.9",
     "openid-client": "5.7.1",
     "passport": "0.7.0",
     "redis": "6.2.1"
