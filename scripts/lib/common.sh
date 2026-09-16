@@ -1907,6 +1907,8 @@ mt_coredns_rewrite_require() {
 #   {.metadata.resourceVersion}  {.metadata.name}  {.metadata.namespace}
 #   {.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/<[a-z-]+>}
 #   {.data.stamp}   — only when the second argument is "true" (the canary)
+# The quoted output literal {"MTROW"} is stripped too: verify-reflector puts it
+# at the head of every record so a value containing a newline cannot forge one.
 # Anything else is refused: a bare `{.metadata.annotations}` or `{.metadata.*}`
 # (they include kubectl.kubernetes.io/last-applied-configuration, which for a
 # client-side-applied Secret carries the WHOLE object including .data —
@@ -1921,6 +1923,7 @@ _mt_jsonpath_metadata_only() {
     lit='{end}';              rest="${rest//"$lit"/}"
     lit='{"\t"}';             rest="${rest//"$lit"/}"
     lit='{"\n"}';             rest="${rest//"$lit"/}"
+    lit='{"MTROW"}';          rest="${rest//"$lit"/}"
     [ -n "$rest" ] || return 1
     while [ -n "$rest" ]; do
         [ "${rest:0:1}" = "{" ] || return 1          # text outside braces

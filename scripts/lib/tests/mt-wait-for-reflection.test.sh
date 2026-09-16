@@ -200,6 +200,17 @@ _mt_jsonpath_metadata_only '{.metadata.annotations.'"$ANN"'/reflection-allowed-n
 _mt_jsonpath_metadata_only '{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces-selector}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces-selector}'; check "allowed: verify-reflector concatenated selectors" 0 "$?"
 _mt_jsonpath_metadata_only '{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-enabled}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-namespaces-selector}{.metadata.annotations.'"$ANN"'/reflection-allowed-namespaces-selector}{"\n"}{end}'; check "allowed: verify-reflector listing path (verbatim)" 0 "$?"
 _mt_jsonpath_metadata_only '{range .items[*]}{.data.x}{"\n"}{end}'; check "listing form with a data field is still refused" 1 "$?"
+# The {"MTROW"} record marker verify-reflector puts at the head of each listing
+# record must be admitted as an exact literal — and must not become a hole.
+# The marker ALONE is refused, deliberately: stripping it leaves nothing, and a
+# path that selects no field at all is a degenerate read the empty-path guard
+# rejects. What matters is that the marker is admitted *within* a real path
+# (next assertion) and admits nothing else beside it.
+_mt_jsonpath_metadata_only '{"MTROW"}'; check "the marker alone selects no field and is refused" 1 "$?"
+_mt_jsonpath_metadata_only '{range .items[*]}{"MTROW"}{"\t"}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.metadata.annotations.'"$ANN"'/reflection-auto-enabled}{"\n"}{end}'; check "allowed: verify-reflector identity-listing path (verbatim)" 0 "$?"
+_mt_jsonpath_metadata_only '{"MTROW"}{.data.x}'; check "MTROW does not admit a data field beside it" 1 "$?"
+_mt_jsonpath_metadata_only '{"MTROWX"}'; check "a near-miss marker is refused" 1 "$?"
+_mt_jsonpath_metadata_only '{"OTHER"}'; check "an arbitrary quoted literal is refused" 1 "$?"
 _mt_jsonpath_metadata_only '{range .items[*]}{.metadata.annotations}{"\n"}{end}'; check "listing form with bare annotations is refused" 1 "$?"
 _mt_jsonpath_metadata_only '{.data.stamp}'; check "canary stamp path refused without the canary allowance" 1 "$?"
 _mt_jsonpath_metadata_only '{.data.stamp}' true; check "canary stamp path admitted with the allowance" 0 "$?"
