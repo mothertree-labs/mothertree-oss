@@ -465,6 +465,22 @@ else
   done
 fi
 
+# Gate: the reflector controller must be PROPAGATING, not merely Running.
+# wildcard-tls-<tenant> is mirrored from each tenant's matrix namespace into
+# every namespace that serves it (ingresses, Stalwart's required volume,
+# Keycloak's auth ingress). Mirrors are plain Secrets that outlive the
+# controller, so a dead reflector is invisible until the source renews and the
+# consumers keep the stale copy — an expired cert weeks later (issue #673). The
+# active canary in mt_reflector_canary proves propagation end to end on every
+# deploy. Target = infra-auth: created above on a cold start, whereas tenant
+# namespaces may not exist yet (their mirrors are gated per tenant by
+# create_env). Fail closed — the fix is named by the helper.
+if ! mt_reflector_canary "$NS_CERTMANAGER" "$NS_AUTH" 90; then
+  print_error "Reflector propagation gate failed — aborting deploy_infra"
+  print_error "Fix: kubectl -n $NS_CERTMANAGER get pods -l app.kubernetes.io/name=reflector ; kubectl -n $NS_CERTMANAGER logs deploy/reflector ; then re-run ./scripts/deploy_infra -e $MT_ENV"
+  exit 1
+fi
+
 # Deploy matrix-alertmanager bridge (AlertManager -> Matrix room notifications).
 # Prod-like environments cannot get here without the token (fail-fast above),
 # and a failed bridge deploy is fatal there: an undeliverable alert channel is

@@ -14,6 +14,7 @@
 #   - Unbound PVCs
 #   - Certificates not ready
 #   - Currently firing Prometheus alerts
+#   - Wildcard TLS mirrors in sync with their sources (scripts/verify-reflector --passive; writes nothing)
 #
 # Exit codes:
 #   0 - All checks passed
@@ -206,6 +207,25 @@ except:
   fi
 else
   echo "SKIP - Prometheus pod not found"
+fi
+
+# --- Check 7: wildcard TLS mirrors in sync (reflector) ---
+# Mirrors outlive the reflector controller, so healthy pods and Ready
+# Certificates above say nothing about whether consumers hold the CURRENT
+# cert (#673). verify-reflector --passive compares every mirror's
+# reflected-version with its source and prints its own findings; --passive so
+# a health check never writes anything (the canary is for deploys and for a
+# standalone ./scripts/verify-reflector run).
+echo ""
+echo "--- Wildcard TLS mirrors in sync (reflector, passive) ---"
+REFLECTOR_ARGS=(-e "$MT_ENV")
+if [ -n "$TENANT" ]; then
+  REFLECTOR_ARGS+=(-t "$TENANT")
+fi
+if "$REPO_ROOT/scripts/verify-reflector" "${REFLECTOR_ARGS[@]}" --passive; then
+  echo "OK - Wildcard TLS mirrors in sync with their sources"
+else
+  ISSUES=$((ISSUES + 1))
 fi
 
 # --- Summary ---

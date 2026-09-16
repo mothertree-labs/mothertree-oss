@@ -407,6 +407,35 @@ fi
   || print_warning "dev-cert-cache backup skipped (non-fatal)"
 fi  # end DNS_EXTERNAL cert branch (HTTP-01 multi-SAN vs DNS-01 wildcard+apex)
 
+# Gate: the wildcard Secret must be REFLECTED into every namespace that serves
+# it — TENANT_NAMESPACES: every per-tenant ingress, Stalwart's required volume,
+# Keycloak's auth ingress in infra-auth — and be IN SYNC with the source
+# (reflected-version == source resourceVersion; both cert branches above render
+# the same reflector annotations). Mirrors are plain Secrets that persist
+# without the controller, so until now a dead reflector left this deploy green
+# while every consumer kept a stale copy (issue #673).
+#
+# Two cases, deliberately treated differently:
+#   - Source Secret ABSENT: cert-manager has not issued yet. That is issuance
+#     latency (a slow first Let's Encrypt order on a brand-new tenant), it is
+#     cert-manager's, and the waits above have already warned loudly about it.
+#     The pre-existing warn-and-continue behaviour is kept: the gate is
+#     skipped with a warning, and the mirrors are verified by the next deploy
+#     or by scripts/verify-reflector.
+#   - Source Secret PRESENT but a mirror lagging or missing: that is the
+#     silent reflector failure mode #673 targets — fail closed.
+# Only NotFound skips; any other read error lets the gate run (and fail closed
+# after its timeout if the source never becomes readable).
+_wildcard_src_rv=$(_mt_secret_meta "$NS_MATRIX" "wildcard-tls-${TENANT_NAME}" '{.metadata.resourceVersion}')
+if [ "$_wildcard_src_rv" = "MISSING" ]; then
+  print_warning "Reflection gate skipped: source Secret wildcard-tls-${TENANT_NAME} does not exist yet in $NS_MATRIX (certificate not issued — see the warnings above)"
+  print_warning "Mirrors in $TENANT_NAMESPACES will be verified by the next deploy, or now with: ./scripts/verify-reflector -e $MT_ENV -t $TENANT_NAME"
+elif ! mt_wait_for_reflection "$NS_MATRIX" "wildcard-tls-${TENANT_NAME}" "$TENANT_NAMESPACES" 90; then
+  print_error "TLS Secret wildcard-tls-${TENANT_NAME} is not reflected in sync into all of: $TENANT_NAMESPACES — aborting create_env"
+  exit 1
+fi
+unset _wildcard_src_rv
+
 # =============================================================================
 # Deploy NetworkPolicies for tenant isolation
 # =============================================================================
