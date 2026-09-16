@@ -63,7 +63,16 @@ resources:
 # this MUST stay in lock-step with the seed-identity init container and the
 # install job below — a newer installed version than the runtime image causes
 # the app-version 503 crash-loop (Nextcloud refuses downgrades).
+#
+# This is a bare `tag:` with no sibling `repository:` (the chart supplies the
+# repository), so until #711 no Renovate manager had a datasource to attach and
+# every Nextcloud bump moved the other two sites and silently skipped this one.
+# The marker below supplies datasource + depName; customManager #6 in
+# renovate.json5 binds it to the `tag:` value on the LINE IMMEDIATELY BELOW it.
+# Do not insert anything between the marker and `tag:` - the manager matches on
+# adjacency and would silently stop firing again.
 image:
+  # renovate: datasource=docker depName=nextcloud
   tag: 32.0.15-apache
 
 # No PVC — use chart-default emptyDir for /var/www/html
