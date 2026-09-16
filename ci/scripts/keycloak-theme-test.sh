@@ -49,7 +49,9 @@ created_label="org.mothertree.kc-theme-test.created"
 now="$(date +%s)"
 docker ps -a --filter "label=${created_label}" --format "{{.ID}} {{.Label \"${created_label}\"}}" |
   while read -r id created; do
-    if [ -n "${created}" ] && [ $((now - created)) -gt 1800 ]; then
+    # Digits only: bash evaluates a non-numeric label inside $(( )).
+    case "${created}" in '' | *[!0-9]*) continue ;; esac
+    if [ $((now - created)) -gt 1800 ]; then
       echo "Removing stale theme-test container ${id}"
       docker rm -f "${id}" >/dev/null || true
     fi
