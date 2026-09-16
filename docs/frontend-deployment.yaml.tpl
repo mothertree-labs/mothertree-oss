@@ -30,7 +30,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: lasuite/impress-frontend:v5.6.1
+          image: lasuite/impress-frontend:v5.7.0
           # No command override: the image's own ENTRYPOINT/CMD
           # (/usr/local/bin/entrypoint -> nginx -g 'daemon off;') listens on 8080.
           ports:
