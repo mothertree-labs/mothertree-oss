@@ -57,6 +57,7 @@ ID_CANARY="MTROW${T}infra-cert-manager${T}reflector-canary${T}true"
 ID_POISONED="MTROW${T}tn-x-matrix${T}wildcard-tls-x${T}true"
 # ...while poison inside reflection-auto-enabled can forge an EXTRA record.
 ID_FORGED="MTROW${T}infra-evil${T}forged${T}true"
+# ...used below to prove a forged identity is reported, not silently skipped.
 # A continuation line from a newline in some other annotation: no marker.
 ID_SPILL="SPILLED${T}junk${T}junk${T}true"
 
@@ -89,6 +90,7 @@ case " $* " in
         case "$path" in
             *resourceVersion*)                    cat "$MT_TEST_STATE/$ns.$name.rv" 2>/dev/null ;;
             *-selector*)                          cat "$MT_TEST_STATE/$ns.$name.sel" 2>/dev/null ;;
+            *reflection-auto-enabled\}*)          cat "$MT_TEST_STATE/$ns.$name.enabled" 2>/dev/null ;;
             *reflection-auto-namespaces\}*)       cat "$MT_TEST_STATE/$ns.$name.auto" 2>/dev/null ;;
             *reflection-allowed-namespaces\}*)    cat "$MT_TEST_STATE/$ns.$name.allowed" 2>/dev/null ;;
             *) echo "fake-kubectl: unscripted jsonpath $path" >&2; exit 99 ;;
@@ -195,9 +197,9 @@ check "driver: mixed → 2 checked" 2 "$MT_REFLECTOR_CHECKED"
 check "driver: only the healthy source was waited on" "tn-x-matrix/wildcard-tls-x->tn-x-mail" "$WAITED"
 has "driver: the selector source is the one flagged" "tn-y-matrix/wildcard-tls-y carries" "$out"
 reset
-run_ids "infra-evil${T}forged"
+run_ids "$(printf '%s\n' "$ID_FORGED" | awk -F'\t' '{print $2 "\t" $3}')"
 check "driver: a forged/absent identity → 1 failure" 1 "$MT_REFLECTOR_FAILURES"
-has "driver: ...reported distinguishably from a lagging mirror" "no longer exists" "$out"
+has "driver: ...reported distinguishably from a lagging mirror" "deleted or turned unreadable since" "$out"
 lacks "driver: ...not as a selector finding" "namespaces-selector" "$out"
 check "driver: ...and never waited" "" "$WAITED"
 run_ids "a${T}b${T}c"
@@ -232,7 +234,216 @@ reset; listing "$ID_POISONED"
 secret tn-x-matrix wildcard-tls-x 100 "$(printf 'tn-x-mail\tvtn-x-mail\te\nSPILLED')" "EVERY-NAMESPACE-I-WANT" ""
 run_ids "$(_list_source_ids)"
 check "injection: without a selector, still NOT healthy" 1 "$MT_REFLECTOR_FAILURES"
-has "injection: the forbidden allowed-namespaces is flagged" "EVERY-NAMESPACE-I-WANT" "$out"
+has "injection: the poisoned list itself is flagged as a bad entry" "reflection-auto-namespaces lists" "$out"
+lacks "injection: not dismissed as an internal parse error" "internal:" "$out"
+# ...and a Secret whose lists are clean but whose allowed list is forbidden is
+# still caught on the allowed list.
+reset; listing "$ID_POISONED"
+secret tn-x-matrix wildcard-tls-x 100 "tn-x-mail" "EVERY-NAMESPACE-I-WANT" ""
+run_ids "$(_list_source_ids)"
+check "a forbidden allowed-namespaces is a finding" 1 "$MT_REFLECTOR_FAILURES"
+has "...named on the allowed list" "EVERY-NAMESPACE-I-WANT" "$out"
+
+# --- the auto-enabled predicate: as permissive as the controller ------------
+# Upstream trims and parses a boolean, so these all auto-reflect and must be
+# checked; requiring the exact string "true" left them silently unchecked.
+for v in true True TRUE tRuE " true" "true " "  true  "; do
+    reset; listing "MTROW${T}tn-x-matrix${T}wildcard-tls-x${T}${v}"
+    check "auto-enabled [$v] is selected" "tn-x-matrix${T}wildcard-tls-x" "$(_list_source_ids)"
+    _reflector_is_auto_enabled "$v"; check "auto-enabled [$v] parses true in bash too" 0 "$?"
+done
+# Unambiguously not enabled: absent or false. These stay silent — the empty
+# case is nearly every Secret in the cluster.
+for v in "" "  " false False FALSE; do
+    reset; listing "MTROW${T}tn-x-matrix${T}wildcard-tls-x${T}${v}"
+    check "auto-enabled [$v] is silently not selected" "" "$(_list_source_ids)"
+    _reflector_is_auto_enabled "$v"; check "auto-enabled [$v] reads as not-enabled" 1 "$?"
+done
+# Neither true nor false: NOT silently dropped — surfaced as AMBIGUOUS.
+for v in yes 1 "true false" truthy "tru e"; do
+    reset; listing "MTROW${T}tn-x-matrix${T}wildcard-tls-x${T}${v}"
+    check "auto-enabled [$v] is surfaced as AMBIGUOUS" "AMBIGUOUS${T}tn-x-matrix${T}wildcard-tls-x" "$(_list_source_ids)"
+    _reflector_is_auto_enabled "$v"; check "auto-enabled [$v] reads as ambiguous" 2 "$?"
+done
+# ...and the driver counts it as unevaluable, names it, and checks nothing.
+reset; listing "MTROW${T}tn-x-matrix${T}wildcard-tls-x${T}yes"
+run_ids "$(_list_source_ids)"
+check "ambiguous: nothing checked" 0 "$MT_REFLECTOR_CHECKED"
+check "ambiguous: no finding" 0 "$MT_REFLECTOR_FAILURES"
+check "ambiguous: counted unevaluable" 1 "$MT_REFLECTOR_UNEVALUABLE"
+has "ambiguous: names the Secret" "tn-x-matrix/wildcard-tls-x" "$out"
+has "ambiguous: says why" "neither true nor false" "$out"
+check "ambiguous: never waited" "" "$WAITED"
+# The -t path reaches the same verdict through its own pre-check.
+export MT_ENV=test
+reset; secret tn-x-matrix wildcard-tls-x 100 "tn-x-mail" "tn-x-mail" ""
+echo yes > "$MT_TEST_STATE/tn-x-matrix.wildcard-tls-x.enabled"
+out=$(_reflector_tenant_id x 2>&1 >/dev/null); rc=$?
+check "-t: an ambiguous auto-enabled → rc 2 (cannot evaluate)" 2 "$rc"
+has "-t: ...and says why" "neither true nor false" "$out"
+
+# --- a malformed record fails closed AND names where to look (item 3) -------
+reset; listing "$ID_HEALTHY" "$ID_OTHER" "MTROW${T}tn-z-matrix${T}oops"
+err=$(_list_source_ids 2>&1 >/dev/null); rc=$?
+check "malformed: listing fails closed" 1 "$rc"
+has "malformed: names the line" "at line 3" "$err"
+has "malformed: names the Secret it follows" "tn-y-matrix/wildcard-tls-y" "$err"
+
+# --- canary identity: namespace AND name (item 1) ---------------------------
+# A tenant Secret that happens to be called reflector-canary must NOT be
+# dropped — dropping it would leave it silently unchecked.
+IDS_WITH_IMPOSTOR="$(printf 'infra-cert-manager\treflector-canary\ntn-x-matrix\treflector-canary\ntn-x-matrix\twildcard-tls-x')"
+printf '%s\n' "$IDS_WITH_IMPOSTOR" | _has_canary_id; check "canary: positive control finds the real canary" 0 "$?"
+check "canary: only the real canary is stripped" "tn-x-matrix${T}reflector-canary tn-x-matrix${T}wildcard-tls-x" "$(printf '%s\n' "$IDS_WITH_IMPOSTOR" | _strip_canary_id | tr '\n' ' ' | sed 's/ $//')"
+printf '%s\n' "tn-x-matrix${T}reflector-canary" | _has_canary_id; check "canary: an impostor does not satisfy the positive control" 1 "$?"
+check "canary: the real canary identity is recognised from the listing" "infra-cert-manager${T}reflector-canary" "$(reset; listing "$ID_CANARY"; _list_source_ids)"
+
+# --- the -t pre-check (item 6) ----------------------------------------------
+export MT_ENV=test
+reset; secret tn-x-matrix wildcard-tls-x 100 "tn-x-mail" "tn-x-mail" ""
+echo true > "$MT_TEST_STATE/tn-x-matrix.wildcard-tls-x.enabled"
+check "-t: healthy tenant yields its identity" "tn-x-matrix${T}wildcard-tls-x" "$(_reflector_tenant_id x 2>/dev/null)"
+reset
+out=$(_reflector_tenant_id x 2>&1 >/dev/null); rc=$?
+check "-t: absent Secret → rc 1" 1 "$rc"; has "-t: ...with the create_env wording" "has create_env run" "$out"
+lacks "-t: ...and never blames a listing it did not run" "listed as auto-reflected" "$out"
+reset; secret tn-x-matrix wildcard-tls-x 100 "tn-x-mail" "tn-x-mail" ""
+touch "$MT_TEST_STATE/tn-x-matrix.wildcard-tls-x.unreadable"
+_reflector_tenant_id x >/dev/null 2>&1; check "-t: unreadable Secret → rc 2" 2 "$?"
+reset; secret tn-x-matrix wildcard-tls-x 100 "tn-x-mail" "tn-x-mail" ""
+echo false > "$MT_TEST_STATE/tn-x-matrix.wildcard-tls-x.enabled"
+out=$(_reflector_tenant_id x 2>&1 >/dev/null); rc=$?
+check "-t: reflection disabled → rc 1" 1 "$rc"
+has "-t: ...says reflection is not enabled" "reflection-auto-enabled is not true" "$out"
+lacks "-t: ...and does not blame the controller" "not propagating" "$out"
+
+# --- an unreadable source is "cannot evaluate", not a finding (item 4) ------
+reset; secret tn-x-matrix wildcard-tls-x 100 "tn-x-mail" "tn-x-mail" ""
+touch "$MT_TEST_STATE/tn-x-matrix.wildcard-tls-x.unreadable"
+run_ids "tn-x-matrix${T}wildcard-tls-x"
+check "unevaluable: counted apart from findings" 0 "$MT_REFLECTOR_FAILURES"
+check "unevaluable: counted" 1 "$MT_REFLECTOR_UNEVALUABLE"
+has "unevaluable: says it cannot judge" "cannot judge whether its mirrors are in sync" "$out"
+reset
+run_ids "infra-evil${T}forged"
+check "deleted source is still a finding, not unevaluable" 1 "$MT_REFLECTOR_FAILURES"
+check "...and not counted as unevaluable" 0 "$MT_REFLECTOR_UNEVALUABLE"
+has "...with neutral wording (no listing is implied)" "deleted or turned unreadable since" "$out"
+
+# --- internal whitespace is flagged, not repaired (item 8) ------------------
+check "whitespace: an internal space is a bad entry" "tn-x mail" "$(_bad_namespace_entry 'tn-x mail')"
+_bad_namespace_entry '  tn-x-mail  ,  infra-auth  ' >/dev/null
+check "whitespace: ends are trimmed as the controller does" 1 "$?"
+
+# --- log-spoofing defence (item 7) ------------------------------------------
+EVIL_ENTRY="$(printf 'tn-x\033[2K\\e[32m[SUCCESS] all good')"
+safe=$(_reflector_safe "$EVIL_ENTRY")
+lacks "safe: raw escape byte removed" "$(printf '\033')" "$safe"
+has "safe: backslash escaped so echo -e cannot expand it" '\\e' "$safe"
+out=$(_reflector_source_ok tn-x-matrix wildcard-tls-x "$EVIL_ENTRY" "$EVIL_ENTRY" "" 2>&1)
+# print_error is `echo -e` with colour codes, so the line legitimately holds
+# escapes of its own; what must never survive is the INJECTED sequence.
+lacks "safe: the injected erase-line sequence never reaches the log" "$(printf '\033[2K')" "$out"
+lacks "safe: the injected colour sequence never reaches the log" "$(printf '\033[32m')" "$out"
+has "safe: the offending entry is still named" "SUCCESS" "$out"
+
+# --- the subshell guard ------------------------------------------------------
+( _reflector_check_ids 0 </dev/null ) >/dev/null 2>&1
+check "guard: the driver refuses to run in a subshell" 2 "$?"
+( _reflector_read_source tn-x-matrix wildcard-tls-x ) >/dev/null 2>&1
+check "guard: the reader refuses to run in a subshell" 2 "$?"
+
+# --- log forgery: assert on BYTES, not appearance (M1) ----------------------
+# A newline inside reflection-auto-enabled authors a complete second record
+# (marker, NF==4, a "true" flag), so field 2/3 of a listing record — the
+# identity — is attacker-controlled. print_* are `echo -e`, so a literal \e
+# becomes a real escape: a forged identity could erase the genuine error line
+# and print a green [SUCCESS] in its place.
+# ESC is 033 in `od -c`. print_error emits colour escapes of its own, so the
+# assertion is that the malicious run contains no MORE escapes than a benign
+# one producing the same number of lines, plus the injected sequences by name.
+count_esc() { od -c < "$1" | tr -s ' ' '\n' | grep -c '^033$' || true; }
+FORGED_NS="$(printf 'x\033[2K\\e[32m[SUCCESS] Reflector check passed on prod\\e[0m')"
+
+# bash path 1: a forged identity that resolves to nothing (driver :301)
+reset
+run_ids "benign-ns${T}benign-name"; cp "$TMP/ids.out" "$TMP/benign.out"
+run_ids "${FORGED_NS}${T}wildcard-tls-x"; cp "$TMP/ids.out" "$TMP/forged.out"
+check "forgery(bash, deleted-path): no extra ESC bytes vs a benign run" "$(count_esc "$TMP/benign.out")" "$(count_esc "$TMP/forged.out")"
+lacks "forgery(bash): the erase-line sequence never reaches the log" "$(printf '\033[2K')" "$(cat "$TMP/forged.out")"
+lacks "forgery(bash): the green SUCCESS sequence never reaches the log" "$(printf '\033[32m')" "$(cat "$TMP/forged.out")"
+has "forgery(bash): the forged identity is still reported" "was selected as auto-reflected" "$(cat "$TMP/forged.out")"
+
+# bash path 2: a forged identity whose read fails with an API error (driver :305)
+reset; secret "$FORGED_NS" wildcard-tls-x 100 "tn-x-mail" "tn-x-mail" ""
+touch "$MT_TEST_STATE/${FORGED_NS}.wildcard-tls-x.unreadable"
+run_ids "${FORGED_NS}${T}wildcard-tls-x"; cp "$TMP/ids.out" "$TMP/forged2.out"
+check "forgery(bash, unreadable-path): counted unevaluable" 1 "$MT_REFLECTOR_UNEVALUABLE"
+check "forgery(bash, unreadable-path): no extra ESC bytes" "$(count_esc "$TMP/benign.out")" "$(count_esc "$TMP/forged2.out")"
+lacks "forgery(bash, unreadable-path): erase-line sequence absent" "$(printf '\033[2K')" "$(cat "$TMP/forged2.out")"
+
+# awk path: the malformed-record message interpolates the PRECEDING identity.
+# awk printf writes raw — no colour codes — so here NO escape byte at all may
+# survive, which is the strongest form of the assertion.
+reset
+listing "MTROW${T}${FORGED_NS}${T}wildcard-tls-x${T}true" "MTROW${T}tn-z-matrix${T}oops"
+_list_source_ids 2>"$TMP/awk.err" >/dev/null; rc=$?
+check "forgery(awk): the malformed record still fails the listing closed" 1 "$rc"
+check "forgery(awk): NOT ONE escape byte survives to stderr" 0 "$(count_esc "$TMP/awk.err")"
+lacks "forgery(awk): erase-line sequence absent" "$(printf '\033[2K')" "$(cat "$TMP/awk.err")"
+has "forgery(awk): the offending position is still named" "malformed listing record at line 2" "$(cat "$TMP/awk.err")"
+has "forgery(awk): the preceding Secret is still named, scrubbed" "wildcard-tls-x" "$(cat "$TMP/awk.err")"
+# The scrubbing must not mangle an ordinary identity.
+reset; listing "MTROW${T}tn-y-matrix${T}wildcard-tls-y${T}true" "MTROW${T}tn-z-matrix${T}oops"
+_list_source_ids 2>"$TMP/awk2.err" >/dev/null
+has "awk: a clean identity is printed verbatim" "immediately after tn-y-matrix/wildcard-tls-y" "$(cat "$TMP/awk2.err")"
+
+# The ambiguous record carries attacker bytes too, and is scrubbed as well.
+reset; listing "MTROW${T}${FORGED_NS}${T}wildcard-tls-x${T}yes"
+run_ids "$(_list_source_ids)"; cp "$TMP/ids.out" "$TMP/amb.out"
+check "forgery(ambiguous): counted unevaluable" 1 "$MT_REFLECTOR_UNEVALUABLE"
+check "forgery(ambiguous): no extra ESC bytes" "$(count_esc "$TMP/benign.out")" "$(count_esc "$TMP/amb.out")"
+lacks "forgery(ambiguous): erase-line sequence absent" "$(printf '\033[2K')" "$(cat "$TMP/amb.out")"
+
+# --- HIGH: the SYMMETRIC multi-line list (the shape create_env renders) ------
+# Both annotations carry the same value, so the equality check passes; the old
+# `read -r -a` stopped at the first newline, so every entry after one was
+# neither validated nor polled while the controller copied the key there.
+MULTI="$(printf 'tn-x-mail,\ninfra-auth,kube-system')"
+reset; secret tn-x-matrix wildcard-tls-x 100 "$MULTI" "$MULTI" ""
+run_ids "tn-x-matrix${T}wildcard-tls-x"
+check "symmetric multi-line: still passes validation (all three are valid names)" 0 "$MT_REFLECTOR_FAILURES"
+check "symmetric multi-line: EVERY entry is polled, not just the first" "tn-x-matrix/wildcard-tls-x->${MULTI}" "$WAITED"
+has "symmetric multi-line: the namespaces hidden after the newline are named" "infra-auth,kube-system" "$out"
+# ...and an INVALID entry hidden after the newline is now caught.
+BADMULTI="$(printf 'tn-x-mail,\nkube-*,infra-auth')"
+reset; secret tn-x-matrix wildcard-tls-x 100 "$BADMULTI" "$BADMULTI" ""
+run_ids "tn-x-matrix${T}wildcard-tls-x"
+check "symmetric multi-line: a bad entry after the newline is a finding" 1 "$MT_REFLECTOR_FAILURES"
+has "symmetric multi-line: the hidden bad entry is named" "lists 'kube-*'" "$out"
+check "symmetric multi-line: nothing was polled" "" "$WAITED"
+# ...including one smuggling an escape sequence, which validation now reaches.
+ESCMULTI="$(printf 'tn-x-mail,\n\033[32mfake,infra-auth')"
+reset; secret tn-x-matrix wildcard-tls-x 100 "$ESCMULTI" "$ESCMULTI" ""
+run_ids "tn-x-matrix${T}wildcard-tls-x"; cp "$TMP/ids.out" "$TMP/escmulti.out"
+check "symmetric multi-line: a smuggled ESC entry is a finding" 1 "$MT_REFLECTOR_FAILURES"
+check "symmetric multi-line: and no extra ESC byte reaches the log" "$(count_esc "$TMP/benign.out")" "$(count_esc "$TMP/escmulti.out")"
+
+# --- MEDIUM: the SUCCESS path scrubs, asserted on bytes ---------------------
+# A value whose entries are all valid can still carry raw newlines and tabs —
+# they sit at entry boundaries and are trimmed away, so validation accepts
+# them while the raw value still reaches print_status at the "Checking" line.
+# Unscrubbed, `echo -e` would break that line in two.
+reset; secret tn-x-matrix wildcard-tls-x 100 "$MULTI" "$MULTI" ""
+run_ids "tn-x-matrix${T}wildcard-tls-x"; cp "$TMP/ids.out" "$TMP/success.out"
+check "success path: the whole run is ONE log line (no smuggled newline)" 1 "$(awk 'END{print NR}' "$TMP/success.out")"
+has "success path: the list is rendered without its control bytes" "-> tn-x-mail,infra-auth,kube-system" "$(cat "$TMP/success.out")"
+check "success path: not one raw newline inside the message" 1 "$(od -c < "$TMP/success.out" | tr -s ' ' '\n' | grep -c '^\\n$')"
+TABMULTI="$(printf 'tn-x-mail,\tinfra-auth')"
+reset; secret tn-x-matrix wildcard-tls-x 100 "$TABMULTI" "$TABMULTI" ""
+run_ids "tn-x-matrix${T}wildcard-tls-x"; cp "$TMP/ids.out" "$TMP/tab.out"
+check "success path: a smuggled TAB is stripped too" 0 "$(od -c < "$TMP/tab.out" | tr -s ' ' '\n' | grep -c '^\\t$')"
+has "success path: ...and the list still reads correctly" "-> tn-x-mail,infra-auth" "$(cat "$TMP/tab.out")"
 
 echo "test-verify-reflector.sh: passed $PASS, failed $FAIL"
 [ "$FAIL" -eq 0 ]

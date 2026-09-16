@@ -127,6 +127,39 @@ secret() {  # secret <ns> <name> <rv> [reflected] [stamp]
 }
 SRC=tn-x-matrix; SEC=wildcard-tls-x; TARGETS="tn-x-mail,tn-x-docs,infra-auth"
 
+# --- _mt_split_annotation_list: the controller's own list semantics ----------
+# Upstream (MirroringPropertiesExtensions.cs @ v10.0.65, PatternListMatch):
+#   patternList.Split([","], StringSplitOptions.RemoveEmptyEntries)
+#       .Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim())
+# so commas are the ONLY separator, a newline is an ordinary character inside
+# an entry that Trim() removes, and empty/whitespace-only entries are dropped.
+split_show() { _mt_split_annotation_list "$1"; printf '%s' "${MT_LIST_ENTRIES[*]-}"; }
+check "split: plain list" "a b c" "$(split_show 'a,b,c')"
+check "split: ends trimmed" "a b" "$(split_show '  a  ,  b  ')"
+check "split: empty and whitespace-only entries dropped" "a b" "$(split_show 'a,,  ,b,')"
+check "split: a single entry" "a" "$(split_show 'a')"
+check "split: an empty value yields nothing" "" "$(split_show '')"
+# THE regression: a newline is not a separator and must not end the parse.
+check "split: entries after a NEWLINE are still seen" "a b c" "$(split_show "$(printf 'a,\nb,c')")"
+check "split: a newline inside an entry is trimmed away" "a b" "$(split_show "$(printf 'a,\n  b  \n')")"
+check "split: a tab inside the separator run is trimmed" "a b" "$(split_show "$(printf 'a,\tb')")"
+# `read -r -a`, which this replaced, would have seen only the first line.
+check "split: control — read -r -a truncates at the newline" 1 "$(IFS=',' read -r -a _r <<< "$(printf 'a,\nb,c')"; echo "${#_r[@]}")"
+
+# --- the wait polls every entry of a multi-line list -------------------------
+reset
+secret $SRC $SEC 100; secret tn-x-mail $SEC 7 100; secret infra-auth $SEC 8 100; secret kube-system $SEC 9 100
+out=$(mt_wait_for_reflection $SRC $SEC "$(printf 'tn-x-mail,\ninfra-auth,kube-system')" 0 2>&1); rc=$?
+check "multi-line list: all three namespaces polled" 0 "$rc"
+has "multi-line list: says three" "in sync in 3 namespace(s)" "$out"
+has "multi-line list: names the one hidden after the newline" "infra-auth" "$out"
+has "multi-line list: names the third" "kube-system" "$out"
+reset
+secret $SRC $SEC 100; secret tn-x-mail $SEC 7 100; secret infra-auth $SEC 8 99
+out=$(mt_wait_for_reflection $SRC $SEC "$(printf 'tn-x-mail,\ninfra-auth')" 0 2>&1); rc=$?
+check "multi-line list: a lagging mirror after the newline is CAUGHT" 1 "$rc"
+has "multi-line list: named with its stale rv" "infra-auth:99" "$out"
+
 # --- every mirror in sync: passes ---------------------------------------------
 reset
 secret $SRC $SEC 100; secret tn-x-mail $SEC 7 100; secret tn-x-docs $SEC 8 100; secret infra-auth $SEC 9 100
@@ -211,6 +244,11 @@ _mt_jsonpath_metadata_only '{range .items[*]}{"MTROW"}{"\t"}{.metadata.namespace
 _mt_jsonpath_metadata_only '{"MTROW"}{.data.x}'; check "MTROW does not admit a data field beside it" 1 "$?"
 _mt_jsonpath_metadata_only '{"MTROWX"}'; check "a near-miss marker is refused" 1 "$?"
 _mt_jsonpath_metadata_only '{"OTHER"}'; check "an arbitrary quoted literal is refused" 1 "$?"
+# Literals must be consumed as TOKENS, not deleted up front: deleting first
+# splices what surrounded them into an allowlisted action.
+_mt_jsonpath_metadata_only '{.metadata.na{"MTROW"}me}'; check "a literal spliced inside a field name is refused" 1 "$?"
+_mt_jsonpath_metadata_only '{.met{"\t"}adata.name}'; check "a tab literal spliced inside a field name is refused" 1 "$?"
+_mt_jsonpath_metadata_only '{range .items[*]}{end}'; check "structure literals alone select no field and are refused" 1 "$?"
 _mt_jsonpath_metadata_only '{range .items[*]}{.metadata.annotations}{"\n"}{end}'; check "listing form with bare annotations is refused" 1 "$?"
 _mt_jsonpath_metadata_only '{.data.stamp}'; check "canary stamp path refused without the canary allowance" 1 "$?"
 _mt_jsonpath_metadata_only '{.data.stamp}' true; check "canary stamp path admitted with the allowance" 0 "$?"
@@ -308,6 +346,42 @@ secret $SRC $SEC 100
 out=$(mt_wait_for_reflection $SRC $SEC " , " 0 2>&1); rc=$?
 check "empty targets: rc" 1 "$rc"
 has "empty targets: explains" "empty target namespace list" "$out"
+
+# --- the LAG path scrubs an attacker-authored mirror annotation --------------
+# reflected-version is read fresh from the mirror Secret and the API server
+# puts no character constraints on an annotation value, so it reaches
+# print_error (which is `echo -e`) and the polling `echo`. Unscrubbed, a mirror
+# could erase the lag line and repaint it as a forged [SUCCESS].
+# ESC is 033 in `od -c`; print_error emits two colour escapes per line, so the
+# assertion is that the malicious run carries no MORE than the benign one.
+count_esc() { od -c < "$1" | tr -s ' ' '\n' | grep -c '^033$' || true; }
+reset
+secret $SRC $SEC 12345; secret tn-x-mail $SEC 7
+printf '99' > "$MT_TEST_STATE/tn-x-mail.$SEC.reflected"
+mt_wait_for_reflection $SRC $SEC "tn-x-mail" 0 > "$TMP/lag-benign.out" 2>&1
+PAYLOAD="$(printf '99\033[2K\r[SUCCESS] Reflected %s/%s (rv 12345) in sync in 3 namespace(s)' "$SRC" "$SEC")"
+reset
+secret $SRC $SEC 12345; secret tn-x-mail $SEC 7
+printf '%s' "$PAYLOAD" > "$MT_TEST_STATE/tn-x-mail.$SEC.reflected"
+mt_wait_for_reflection $SRC $SEC "tn-x-mail" 0 > "$TMP/lag-evil.out" 2>&1; rc=$?
+check "lag scrub: still reports the lag" 1 "$rc"
+check "lag scrub: no extra ESC bytes vs a benign lag" "$(count_esc "$TMP/lag-benign.out")" "$(count_esc "$TMP/lag-evil.out")"
+check "lag scrub: same number of log lines as a benign lag" "$(awk 'END{print NR}' "$TMP/lag-benign.out")" "$(awk 'END{print NR}' "$TMP/lag-evil.out")"
+lacks "lag scrub: the erase-line sequence never reaches the log" "$(printf '\033[2K')" "$(cat "$TMP/lag-evil.out")"
+lacks "lag scrub: no carriage return to repaint the line" "$(printf '\r')" "$(cat "$TMP/lag-evil.out")"
+has "lag scrub: the lagging namespace is still named" "tn-x-mail:" "$(cat "$TMP/lag-evil.out")"
+has "lag scrub: the source rv is still named" "src rv=12345" "$(cat "$TMP/lag-evil.out")"
+# A raw NEWLINE in the annotation must not author an extra line either.
+reset
+secret $SRC $SEC 12345; secret tn-x-mail $SEC 7
+printf '99\n[SUCCESS] forged line' > "$MT_TEST_STATE/tn-x-mail.$SEC.reflected"
+mt_wait_for_reflection $SRC $SEC "tn-x-mail" 0 > "$TMP/lag-nl.out" 2>&1
+check "lag scrub: a newline in the annotation authors no extra line" "$(awk 'END{print NR}' "$TMP/lag-benign.out")" "$(awk 'END{print NR}' "$TMP/lag-nl.out")"
+# ...and the SUCCESS line's target list is scrubbed on the same principle.
+reset
+secret $SRC $SEC 100; secret "tn-x-mail" $SEC 7 100
+out=$(mt_wait_for_reflection $SRC $SEC "$(printf 'tn-x-mail')" 0 2>&1)
+has "success line: renders the target list" "tn-x-mail" "$out"
 
 # --- canary: healthy controller ----------------------------------------------
 reset canary-ok

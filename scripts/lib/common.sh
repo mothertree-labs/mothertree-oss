@@ -58,6 +58,27 @@ print_error() {
 }
 
 # ---------------------------------------------------------------------------
+# _mt_log_safe <value> — render an untrusted value safe to interpolate into a
+# log line. Every print_* above is `echo -e`, so a value carrying raw control
+# bytes (ESC) or a literal \e can erase the line it is on, repaint it, or
+# author a whole extra line — a forged [SUCCESS] in a CI log of a public repo.
+# Anything read out of a Secret's annotations is untrusted: unlike a name or a
+# namespace, the API server puts no character constraints on annotation values.
+#
+# Strips control characters, then escapes backslashes so `echo -e` cannot
+# expand what is left. This `tr -d` range behaves identically under BSD and GNU
+# tr. Inside awk use gsub(/[^[:print:]]/, "?", …) instead: an explicit
+# [\000-\037\177] range is NOT portable there — under BWK awk it matches
+# between every character and leaves ESC intact (verified).
+#
+# Scrub at the point of DISPLAY only. Comparisons must use the raw value, or
+# two different values could be made to look equal.
+# ---------------------------------------------------------------------------
+_mt_log_safe() {
+    printf '%s' "${1-}" | tr -d '\000-\037\177' | sed 's/\\/\\\\/g'
+}
+
+# ---------------------------------------------------------------------------
 # mt_require_commands — verify required CLI tools are available
 # Usage: mt_require_commands kubectl helm yq
 # ---------------------------------------------------------------------------
@@ -1918,13 +1939,12 @@ mt_coredns_rewrite_require() {
 # literal text by kubectl and read as "equal everywhere"). An empty path is
 # refused too. Returns 0 allowed / 1 refused.
 _mt_jsonpath_metadata_only() {
-    local rest="$1" allow_stamp="${2:-false}" lit action leaf
-    lit='{range .items[*]}';  rest="${rest//"$lit"/}"
-    lit='{end}';              rest="${rest//"$lit"/}"
-    lit='{"\t"}';             rest="${rest//"$lit"/}"
-    lit='{"\n"}';             rest="${rest//"$lit"/}"
-    lit='{"MTROW"}';          rest="${rest//"$lit"/}"
+    local rest="$1" allow_stamp="${2:-false}" action leaf fields=0
     [ -n "$rest" ] || return 1
+    # Every action is consumed left to right, literals included. They must NOT
+    # be deleted up front: deleting them first splices what surrounded them, so
+    # {.metadata.na{"MTROW"}me} and {.met{"\t"}adata.name} would each collapse
+    # into an allowlisted action and be admitted.
     while [ -n "$rest" ]; do
         [ "${rest:0:1}" = "{" ] || return 1          # text outside braces
         action="${rest%%\}*}"
@@ -1932,6 +1952,8 @@ _mt_jsonpath_metadata_only() {
         action="${action}}"
         rest="${rest#"$action"}"
         case "$action" in
+            # Output literals: structure, not a field — they select nothing.
+            '{range .items[*]}'|'{end}'|'{"\t"}'|'{"\n"}'|'{"MTROW"}') continue ;;
             '{.metadata.resourceVersion}'|'{.metadata.name}'|'{.metadata.namespace}') ;;
             '{.data.stamp}') [ "$allow_stamp" = true ] || return 1 ;;
             '{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/'*)
@@ -1941,7 +1963,11 @@ _mt_jsonpath_metadata_only() {
                 case "$leaf" in *[!a-z-]*) return 1 ;; esac ;;
             *) return 1 ;;
         esac
+        fields=$((fields + 1))
     done
+    # A path of literals alone reads no field at all: refuse it rather than
+    # send a degenerate query.
+    [ "$fields" -gt 0 ] || return 1
     return 0
 }
 
@@ -1965,7 +1991,12 @@ _mt_secret_meta() {
     local ns="$1" name="$2" path="$3" out rc=0 allow_stamp=false
     [ "$name" = "reflector-canary" ] && allow_stamp=true
     if ! _mt_jsonpath_metadata_only "$path" "$allow_stamp"; then
-        print_error "_mt_secret_meta: refusing jsonpath '$path' on Secret $ns/$name — only metadata fields may be read here" >&2
+        # Every value here is scrubbed, $path included. Unlike the hint at the
+        # kubectl-failure branch below, this branch fires BECAUSE $path failed
+        # the allowlist, so it is arbitrary caller data, not an allowlisted
+        # literal. Doubling a backslash in a refusal message is harmless; this
+        # string is naming what was rejected, not offering a copy-paste command.
+        print_error "_mt_secret_meta: refusing jsonpath '$(_mt_log_safe "$path")' on Secret $(_mt_log_safe "$ns")/$(_mt_log_safe "$name") — only metadata fields may be read here" >&2
         echo UNREADABLE
         return 0
     fi
@@ -1977,7 +2008,7 @@ _mt_secret_meta() {
             echo MISSING
         else
             if [ "$prc" -eq 0 ]; then
-                print_error "kubectl get failed for an existing Secret $ns/$name (RBAC or jsonpath error) — re-run \`kubectl get secret $name -n $ns -o jsonpath='$path'\` by hand" >&2
+                print_error "kubectl get failed for an existing Secret $(_mt_log_safe "$ns")/$(_mt_log_safe "$name") (RBAC or jsonpath error) — re-run \`kubectl get secret $(_mt_log_safe "$name") -n $(_mt_log_safe "$ns") -o jsonpath='$path'\` by hand" >&2
             fi
             echo UNREADABLE
         fi
@@ -1987,12 +2018,68 @@ _mt_secret_meta() {
 }
 
 # ---------------------------------------------------------------------------
+# _mt_split_annotation_list <value> — populate MT_LIST_ENTRIES with exactly the
+# entries the CONTROLLER acts on. Upstream, verbatim
+# (Mirroring/Core/MirroringPropertiesExtensions.cs @ v10.0.65, PatternListMatch):
+#
+#   if (string.IsNullOrEmpty(patternList)) return true;
+#   var regexPatterns = patternList.Split([","], StringSplitOptions.RemoveEmptyEntries);
+#   return regexPatterns.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim())
+#
+# Three things follow, and this helper reproduces all three:
+#   * The comma is the ONLY separator. A newline is an ordinary character that
+#     lands INSIDE an entry and is then removed by Trim() — so
+#     "a,\nb,c" is three targets to the controller, not one.
+#   * Empty and whitespace-only entries are dropped (RemoveEmptyEntries plus
+#     the IsNullOrWhiteSpace filter), so skipping them here matches upstream.
+#   * Each entry is trimmed at both ends.
+#
+# `read -r -a` must NEVER be used for this: it stops at the first NEWLINE, so
+# every entry after one was invisible to validation and to the mirror wait,
+# while the controller happily copied the key there. With both annotations
+# carrying the same multi-line value — the symmetric case create_env renders —
+# the equality check passed too and the gate reported "in sync".
+#
+# OWNS THE GLOBAL `MT_LIST_ENTRIES` and overwrites it on every call: read it
+# immediately, and do not use that name for anything else. (It is a plain
+# global rather than a `declare -g` one because these scripts run under
+# `#!/bin/bash`, which on macOS is bash 3.2, where `declare -g` is invalid.)
+#
+# Whitespace: bash's [[:space:]] and .NET's char.IsWhiteSpace are not
+# guaranteed to coincide, so the trim here and the controller's Trim() can
+# disagree at the margins. That difference has NO WIDENING DIRECTION, because
+# trimming only ever removes characters and no control character is a .NET
+# regex metacharacter: the controller's pattern can only match FEWER
+# namespaces than this gate polls, never more. Where .NET trims something bash
+# keeps (NBSP, U+2007, U+202F), the entry stays non-DNS-1123,
+# _bad_namespace_entry flags it and the gate fails closed. The worst case is a
+# lag this gate reports that the controller would not have caused — never a
+# namespace holding the key that the gate failed to look at.
+# ---------------------------------------------------------------------------
+_mt_split_annotation_list() {
+    local rest="${1-}" entry
+    MT_LIST_ENTRIES=()
+    while :; do
+        entry="${rest%%,*}"
+        entry="${entry#"${entry%%[![:space:]]*}"}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        [ -n "$entry" ] && MT_LIST_ENTRIES+=("$entry")
+        case "$rest" in
+            *,*) rest="${rest#*,}" ;;
+            *)   break ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
 # mt_wait_for_reflection — wait until a Secret's mirrors are in sync with it.
 #
 # Usage: mt_wait_for_reflection <src_ns> <secret> <target_namespaces> [timeout=90]
 #   <target_namespaces> is comma-separated (the shape of TENANT_NAMESPACES in
 #   create_env and of the reflection-auto-namespaces annotation); whitespace
-#   around entries is ignored.
+#   around entries is ignored. Callers are expected to have validated the
+#   entries (scripts/verify-reflector does, with _bad_namespace_entry); values
+#   that reach a log line here are scrubbed with _mt_log_safe regardless.
 #
 # Polls every MT_REFLECTION_POLL_INTERVAL seconds (default 5). The source's
 # resourceVersion is re-read every round, so a renewal that lands mid-wait is
@@ -2014,12 +2101,13 @@ mt_wait_for_reflection() {
     local rv_path='{.metadata.resourceVersion}'
     local ref_path='{.metadata.annotations.reflector\.v1\.k8s\.emberstack\.com/reflected-version}'
 
-    local -a raw=() targets=()
+    local -a targets=()
     local ns
-    IFS=',' read -r -a raw <<< "$targets_csv"
-    for ns in "${raw[@]}"; do
-        ns="${ns//[[:space:]]/}"
-        [ -n "$ns" ] && targets+=("$ns")
+    # Split the way the controller does — commas only, across the WHOLE value,
+    # newlines included (see _mt_split_annotation_list).
+    _mt_split_annotation_list "$targets_csv"
+    for ns in ${MT_LIST_ENTRIES[@]+"${MT_LIST_ENTRIES[@]}"}; do
+        targets+=("$ns")
     done
     if [ "${#targets[@]}" -eq 0 ]; then
         print_error "mt_wait_for_reflection: empty target namespace list for $src_ns/$secret — nothing to verify is a failure, not a pass"
@@ -2037,11 +2125,17 @@ mt_wait_for_reflection() {
                 for ns in "${targets[@]}"; do
                     mirror_rv=$(_mt_secret_meta "$ns" "$secret" "$ref_path")
                     [ -n "$mirror_rv" ] || mirror_rv=UNANNOTATED
-                    [ "$mirror_rv" = "$src_rv" ] || lagging="${lagging:+$lagging }${ns}:${mirror_rv}"
+                    # Compare RAW, display SCRUBBED: mirror_rv is an
+                    # annotation read fresh from the cluster and is
+                    # unconstrained, so it reaches print_error/echo below.
+                    [ "$mirror_rv" = "$src_rv" ] || lagging="${lagging:+$lagging }$(_mt_log_safe "$ns"):$(_mt_log_safe "$mirror_rv")"
                 done ;;
         esac
         if [ -z "$lagging" ]; then
-            print_success "Reflected $src_ns/$secret (rv $src_rv) in sync in ${#targets[@]} namespace(s): ${targets[*]} (${elapsed}s)"
+            # targets[*] is scrubbed too: every caller today either builds
+            # the list itself or validates it first, but that is an implicit
+            # contract on a shared helper, and honouring it costs nothing.
+            print_success "Reflected $src_ns/$secret (rv $src_rv) in sync in ${#targets[@]} namespace(s): $(_mt_log_safe "${targets[*]}") (${elapsed}s)"
             return 0
         fi
         elapsed=$((SECONDS - start))
