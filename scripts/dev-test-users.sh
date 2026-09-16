@@ -124,9 +124,39 @@ fi
 # Keycloak admin API setup (same pattern as import-keycloak-realm.sh)
 # ============================================================================
 print_status "Setting up port-forward to Keycloak service..."
+
+# Check if port 8080 is already in use
+if command -v lsof >/dev/null 2>&1; then
+    PF_PROCESS=$(lsof -i :8080 -t 2>/dev/null || true)
+    if [ -n "$PF_PROCESS" ]; then
+        print_error "Port 8080 is already in use (PID: $PF_PROCESS)"
+        print_error "Process details:"
+        ps -p "$PF_PROCESS" -o pid,cmd --no-headers 2>/dev/null || true
+        print_error ""
+        print_error "Please stop the process using port 8080 and try again."
+        print_error "Or run: kill $PF_PROCESS"
+        exit 1
+    fi
+elif command -v ss >/dev/null 2>&1; then
+    if ss -tlnp | grep -q ':8080 '; then
+        print_error "Port 8080 is already in use"
+        print_error "Please free up port 8080 and try again"
+        ss -tlnp | grep ':8080 '
+        exit 1
+    fi
+fi
+
 kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http 8080:80 > /tmp/keycloak-pf.log 2>&1 &
 PF_PID=$!
 sleep 3
+
+# Verify port-forward started successfully
+if ! kill -0 $PF_PID 2>/dev/null; then
+    print_error "Failed to start port-forward to Keycloak"
+    print_error "Port-forward log:"
+    cat /tmp/keycloak-pf.log 2>/dev/null || true
+    exit 1
+fi
 
 KEYCLOAK_URL="http://localhost:8080"
 REALM="$TENANT_KEYCLOAK_REALM"
