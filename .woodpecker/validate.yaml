@@ -47,6 +47,20 @@ steps:
       - ci/scripts/vector-validate.sh
     depends_on: []
 
+  # Boots the Keycloak image pinned in apps/values/keycloak-codecentric.yaml with
+  # apps/themes/platform mounted and drives the theme's passkey registration page
+  # in Chromium with a virtual authenticator, clicking the page's own button.
+  # Catches a template calling into a Keycloak resource the image no longer
+  # ships (the dev-cluster e2e bypasses that page's script), and re-runs on
+  # every Keycloak bump PR.
+  - name: keycloak-theme-test
+    image: bash
+    environment:
+      CI: "true"
+    commands:
+      - ci/scripts/keycloak-theme-test.sh
+    depends_on: []
+
   - name: version-check
     image: bash
     commands:

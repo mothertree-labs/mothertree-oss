@@ -193,6 +193,7 @@ Deploy scripts use `mt_apply` (wraps `kubectl apply`, runs a server-side `kubect
 - **Test email**: `./scripts/test-email-system -e dev -t example`
 - **Check health**: `./scripts/check-health -e dev [-t example]`
 - **Verify endpoints**: `./scripts/verify-endpoints -e dev -t example`
+- **Keycloak theme (browser, no cluster)**: `ci/scripts/keycloak-theme-test.sh` — boots the pinned Keycloak image with `apps/themes/platform` mounted and runs `e2e/keycloak-theme/` (clicks the real passkey-registration button); `KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:<tag>` tries a candidate version. Runs in `validate`, so every Keycloak bump PR re-checks the theme.
 
 ## Mandatory OSS Compliance Check on Commits
 
