@@ -214,7 +214,7 @@ nextcloud:
     - name: seed-identity
       # IMPORTANT: Must match the chart's main container image (pinned via the
       # top-level `image.tag` in this file) and the install-job image.
-      image: nextcloud:32.0.14-apache
+      image: nextcloud:32.0.15-apache
       command: ["/bin/sh", "/scripts/identity-init.sh"]
       env:
         - name: NC_INSTANCE_ID

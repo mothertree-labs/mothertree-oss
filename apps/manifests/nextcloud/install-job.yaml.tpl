@@ -23,7 +23,7 @@ spec:
       serviceAccountName: nextcloud-install
       containers:
         - name: install
-          image: nextcloud:32.0.14-apache
+          image: nextcloud:32.0.15-apache
           imagePullPolicy: IfNotPresent
           env:
             - name: POSTGRES_HOST
