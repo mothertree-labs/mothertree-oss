@@ -64,7 +64,7 @@ resources:
 # install job below — a newer installed version than the runtime image causes
 # the app-version 503 crash-loop (Nextcloud refuses downgrades).
 image:
-  tag: 32.0.14-apache
+  tag: 32.0.15-apache
 
 # No PVC — use chart-default emptyDir for /var/www/html
 # Identity values (instanceid, passwordsalt, secret) are persisted in a K8s Secret
