@@ -56,6 +56,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   resource that does not set its own (the operator has no Prometheus-wide
   field for this; the scrape class is how it is expressed).
 
+  **The health gate had to stop shelling into Prometheus.** From chart 85 the
+  Prometheus and node-exporter images are distroless, and Grafana 13 and
+  kube-state-metrics have no shell either — so `scripts/infra-health-gate`,
+  which read the Prometheus API with `kubectl exec … wget`, died on the
+  upgraded cluster with `exec: "wget": executable file not found in $PATH` and
+  could never have passed again. Both readers now go through the API server's
+  service proxy (`mt_prom_http` / `mt_prom_query` in `scripts/lib/common.sh`),
+  which assumes nothing inside the container and re-resolves the Service on
+  every call, so a Prometheus pod still rolling during the gate's settle window
+  no longer strands it on a stale pod name. `scripts/check-health` read the
+  alert API the same way and had quietly degraded to "SKIP — Could not query
+  Prometheus API" while still reporting "All checks passed"; an unreadable
+  alert API is now a counted issue. That check also had to learn the difference
+  between the two kinds of firing alert, since making it work again is what
+  made them visible: `warning`/`critical` are counted as before, while
+  `none`/`info` (the chart's Watchdog and InfoInhibitor, our AlertChannelHeartbeat,
+  and upstream's advisory rules) are listed but not counted — counting the
+  always-on ones would have made the script report issues on every run forever.
+  Their *absence* is now the issue instead: Watchdog and AlertChannelHeartbeat
+  fire continuously by design, so a missing one means the alert path is broken.
+  `scripts/email-probe-metrics` reads
+  through the same helper (an empty result there now means "the probe reports
+  nothing", which the old reader could not distinguish from "could not ask").
+  `scripts/verify-alerting` is unaffected — Alertmanager 0.34 still ships
+  busybox and amtool. The same audit found `apps/deploy-loki.sh`, whose three
+  health probes shell into the Loki pod the same way and are equally broken;
+  that is **not** fallout from this chart — Loki is deployed from raw manifests
+  with its own image pin — and the script is operator-only, run by nothing in
+  CI, so it is left as a follow-up with a comment at the call site.
+
   **One-way door.** A TSDB written by Prometheus 3 is readable only by ≥ 2.55.
   **Rollback recipe**: `helm rollback kube-prometheus-stack -n <monitoring
   namespace>` *plus* `prometheus.prometheusSpec.image.tag: v2.55.1` (the last

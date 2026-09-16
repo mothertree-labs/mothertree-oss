@@ -59,6 +59,19 @@ AM_URL="http://localhost:9093"
 # "cannot evaluate", never as zero.
 
 # _am_exec <cmd...>: run inside the alertmanager container of $AM_POD.
+#
+# This still execs into the container, unlike scripts/check-health and
+# scripts/infra-health-gate, which had to stop (kube-prometheus-stack 85 made
+# the Prometheus image distroless). The CHANGELOG entry for that upgrade says
+# "scripts/verify-alerting is unaffected - Alertmanager 0.34 still ships
+# busybox and amtool"; that claim rests on exactly one image, so record it
+# here. Verified on a dev cluster: quay.io/prometheus/alertmanager:v0.34.0,
+# resolved digest sha256:690c7b525f4367aa91f73e2f91c632206d32e97c6384bdbf2fb7a861b420340d
+# - it has /bin/sh, wget and amtool. When the chart moves to an Alertmanager
+# whose image differs from that digest, re-check before trusting this path:
+# the failure is `exec: "wget": executable file not found in $PATH`, and the
+# fix is the same service-proxy reader the other two scripts now use
+# (mt_prom_http in scripts/lib/common.sh).
 _am_exec() {
     kubectl exec -n "$NS_MON" "$AM_POD" -c alertmanager -- "$@"
 }
