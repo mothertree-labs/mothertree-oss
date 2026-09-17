@@ -21,6 +21,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
 ### Added
+- **Guests reach files through the links owners actually share** (#718). An owner
+  who email-shares a document and then sends the link from their browser tab or
+  the sidebar's "Internal link" used to send the guest to a dead end: an email
+  share is bound to its token, and `files_sharing`'s `MountProvider` never mounts
+  TYPE_EMAIL shares, so `/f/<fileid>` and `/apps/files/files/<fileid>` resolved to
+  "not found" even after the guest signed in. `guest_bridge` now registers a
+  global middleware that redirects a signed-in user to `/s/<token>` when they
+  cannot see the file id themselves, an email share on it (or on a folder holding
+  it) is addressed to their uid, and the share manager still accepts the token.
+  Because the guest lands on the very share the owner controls, permissions,
+  expiry, password and revocation behave exactly as they do for the invite link,
+  and a revoked or expired share falls straight back to stock behaviour. Expired
+  shares are filtered out in SQL rather than handed to the share manager, which
+  rejects one by deleting it (bar the unsteerable case of a share expiring during
+  the request itself) — cascading to child shares, share events and reshare
+  promotion. Those rows are condemned either way (the expiry cron and any visit to
+  `/s/<token>` do the same), but a files view should not be the trigger, the less
+  so because the controllers it guards are `NoCSRFRequired`. Only the
+  caller's own shares are ever considered, so nobody can probe for other people's.
+  Verified against a real Nextcloud 32.0.15 for both entry points, folder-held
+  files, revoked and expired shares, mixed-case recipients, and non-recipients
+  (unchanged). Guests still do not see the file under "Shared with me" — that is
+  #720. New e2e: `e2e/tests/smoke/nextcloud-guest-internal-link.spec.ts`.
+
 - `calendar-automation-tests` step in `.woodpecker/validate.yaml`. The
   17-assertion `node --test server.test.js` suite in `apps/calendar-automation`
   had no CI step at all — its only coverage was e2e — so a broken unit test
@@ -30,6 +54,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   It runs on the CI host's Node (20 today, tracked in #686) and passes there
   too: the suite is source-inspection over `server.js` and imports only Node
   builtins, so it does not depend on `require(esm)`.
+
+### Fixed
+- **Custom Nextcloud app changes now reach running pods** (#718).
+  `apps/deploy-nextcloud.sh` repackages `files_linkeditor`, `jitsi_calendar` and
+  `guest_bridge` into the `nextcloud-custom-apps` ConfigMap on every deploy, but
+  nothing in the chart references it: the `seed-identity` init container only
+  unpacks it when a pod is created, so a deploy that changed app code left the
+  running pods on the old code until something else happened to change the pod
+  template. In production the pods were four hours older than the ConfigMap. The
+  deploy now hashes the staged app tree — paths and bytes, plus symlink targets
+  and the executable bit, all of which `rsync -a` preserves and `tar` ships — and
+  exports it as `NEXTCLOUD_CUSTOM_APPS_HASH`, which
+  `apps/values/nextcloud.yaml.gotmpl` renders into a
+  `mothertree.org/custom-apps-hash` pod annotation. Same mechanism as
+  `KEYCLOAK_THEME_HASH` for the Keycloak theme: helmfile rolls the Deployment
+  exactly when app content changed, atomically with the deploy, and a deploy that
+  dies after the ConfigMap is written is healed by the next sync rather than
+  recorded as done. It is a `requiredEnv`, so a manual
+  `helmfile -l name=nextcloud sync` fails rather than rendering an empty
+  annotation; `ci/scripts/lib/helmfile-lint-env.sh` carries the lint stub. The
+  hash is taken from the staged tree, not the tarball, whose gzip header embeds a
+  timestamp and would roll Nextcloud on every deploy.
 
 ### Removed
 - `apps/calendar-automation/Dockerfile` (#674). It was never built:

@@ -24,5 +24,7 @@ export ALERTMANAGER_EMAIL_TO="lint@example.com"
 export ALERTMANAGER_MATRIX_ROOM_ID="!lint:example.com"
 export HEALTHCHECKS_DEADMAN_URL="https://hc-ping.com/00000000-0000-0000-0000-000000000000"
 export SMTP_DOMAIN="example.com"
+# Nextcloud custom apps content hash (values/nextcloud.yaml.gotmpl); deploy-nextcloud.sh computes the real one.
+export NEXTCLOUD_CUSTOM_APPS_HASH="0000000000000000000000000000000000000000000000000000000000000000"
 # Keycloak theme content hash (values/keycloak-theme.yaml.gotmpl); deploy_infra computes the real one.
 export KEYCLOAK_THEME_HASH="0000000000000000000000000000000000000000000000000000000000000000"
