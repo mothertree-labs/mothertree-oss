@@ -19,7 +19,11 @@ use Psr\Log\LoggerInterface;
  * 2. Call the account portal API to provision/notify the user
  *    - New users: creates Keycloak account + sends passkey setup email
  *    - Existing users: sends share notification email (Issue #168)
- * 3. After setup, they log in via OIDC and the share resolves to their user
+ * 3. After setup, they log in via OIDC and open the share at /s/<token>
+ *
+ * The share stays bound to its token — an email share is never mounted into the
+ * recipient's Files. EmailShareLinkMiddleware covers the case where the guest
+ * arrives on an internal file link instead of the invite link (Issue #718).
  *
  * Does NOT interfere with:
  * - TYPE_LINK (3) — public links still work normally

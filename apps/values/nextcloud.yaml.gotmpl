@@ -82,6 +82,19 @@ image:
 persistence:
   enabled: false
 
+# Content hash of the custom apps (files_linkeditor, jitsi_calendar, guest_bridge)
+# that deploy-nextcloud.sh packages into the nextcloud-custom-apps ConfigMap. The
+# seed-identity init container only unpacks that ConfigMap when a pod is created,
+# and nothing else in the chart references it, so this annotation is what rolls the
+# pods when app code changes (#718) — same mechanism as the Keycloak theme's
+# mothertree.org/theme-hash. Deliberately not tied to the ConfigMap's bytes: its
+# tar.gz embeds a timestamp and would roll Nextcloud on every deploy.
+# requiredEnv: a manual `helmfile -l name=nextcloud sync` without it must fail
+# rather than render an empty annotation (which would roll the pods now and again
+# on the next deploy). Lint renders via ci/scripts/lib/helmfile-lint-env.sh.
+podAnnotations:
+  mothertree.org/custom-apps-hash: {{ requiredEnv "NEXTCLOUD_CUSTOM_APPS_HASH" | quote }}
+
 # Deployment strategy: RollingUpdate for zero-downtime deploys
 # (Only possible because we no longer use a ReadWriteOnce PVC)
 nextcloud:
