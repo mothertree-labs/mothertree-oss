@@ -32,7 +32,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   it) is addressed to their uid, and the share manager still accepts the token.
   Because the guest lands on the very share the owner controls, permissions,
   expiry, password and revocation behave exactly as they do for the invite link,
-  and a revoked or expired share falls straight back to stock behaviour. Only the
+  and a revoked or expired share falls straight back to stock behaviour. Expired
+  shares are filtered out in SQL rather than handed to the share manager, which
+  rejects one by deleting it (bar the unsteerable case of a share expiring during
+  the request itself) — cascading to child shares, share events and reshare
+  promotion. Those rows are condemned either way (the expiry cron and any visit to
+  `/s/<token>` do the same), but a files view should not be the trigger, the less
+  so because the controllers it guards are `NoCSRFRequired`. Only the
   caller's own shares are ever considered, so nobody can probe for other people's.
   Verified against a real Nextcloud 32.0.15 for both entry points, folder-held
   files, revoked and expired shares, mixed-case recipients, and non-recipients

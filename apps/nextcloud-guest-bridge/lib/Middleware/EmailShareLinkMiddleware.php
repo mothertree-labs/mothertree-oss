@@ -41,8 +41,14 @@ use Psr\Log\LoggerInterface;
  * the email address in the user's Keycloak token — the same identity the rest of the
  * platform is keyed on.
  *
- * Note that resolving a token through the share manager is what /s/<token> itself
- * does, including its side effect: an expired share is deleted as it is rejected.
+ * Two ordering constraints hold this together, and a refactor that reorders them
+ * would break it quietly:
+ *   - the "caller can already see it" check runs FIRST, so nothing is cached for
+ *     the session user before a share's node is resolved in the owner's context;
+ *   - expired shares are excluded in SQL, so the share manager is not asked to
+ *     reject one — which it does by deleting it (see runShareQuery). The window
+ *     it cannot cover is a share that expires between the query and its own
+ *     resolution, moments later, which no caller can steer.
  *
  * Security: only shares addressed to the caller are ever considered, so no one can
  * probe for other people's shares. The token reaches a session whose uid is the
@@ -217,9 +223,10 @@ class EmailShareLinkMiddleware extends Middleware {
 	 * file_source; (item_type, share_type) is indexed instead, which limits this to
 	 * folder email shares. The cap then bounds the work below, which a user could
 	 * otherwise inflate by addressing many folder shares to their own address. It
-	 * applies before containment is known, so a user holding more than the cap in
-	 * folder email shares reaches files through the newest ones; beyond that they
-	 * get the stock "not found" rather than a wrong answer.
+	 * applies before containment is known (expired shares are already excluded), so
+	 * a user holding more than the cap in live folder email shares reaches files
+	 * through the newest ones; beyond that they get the stock "not found" rather
+	 * than a wrong answer.
 	 *
 	 * Whether the file really sits inside one of them is settled by
 	 * resolveFolderShare(), which asks the share's own node — evaluated in the
@@ -233,14 +240,32 @@ class EmailShareLinkMiddleware extends Middleware {
 		return $this->runShareQuery($qb, $uid);
 	}
 
-	/** Shared tail of both lookups: recipient match, ordering and the cap. */
+	/**
+	 * Shared tail of both lookups: recipient match, expiry, ordering and the cap.
+	 *
+	 * Expired shares are filtered out in SQL rather than left for the share manager
+	 * to reject, because rejecting one is not read-only: checkShare() deletes it
+	 * first, and deleting a share cascades to its children, fires share events and
+	 * promotes reshares. Every one of those rows is already condemned — the expiry
+	 * cron and any visit to /s/<token> do the same — but a files view is not the
+	 * place to trigger it, the less so because the controllers it guards are
+	 * NoCSRFRequired and so reachable cross-origin. The predicate mirrors
+	 * Share::isExpired() exactly (expiration <= now is expired), and the format
+	 * matches what files_sharing's own ExpireSharesJob binds.
+	 */
 	private function runShareQuery(IQueryBuilder $qb, string $uid): array {
+		$now = (new \DateTime())->format('Y-m-d H:i:s');
+
 		$qb->select('token', 'file_source')
 			->from('share')
 			->andWhere($qb->expr()->eq('share_type', $qb->createNamedParameter(IShare::TYPE_EMAIL, IQueryBuilder::PARAM_INT)))
 			->andWhere($qb->expr()->eq(
 				$qb->func()->lower('share_with'),
 				$qb->createNamedParameter(mb_strtolower($uid))
+			))
+			->andWhere($qb->expr()->orX(
+				$qb->expr()->isNull('expiration'),
+				$qb->expr()->gt('expiration', $qb->createNamedParameter($now))
 			))
 			->orderBy('id', 'DESC')
 			->setMaxResults(self::MAX_CANDIDATE_SHARES);
