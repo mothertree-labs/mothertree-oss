@@ -140,44 +140,15 @@ header {
     font-size: 1.5rem;
 }
 
-/* === HIDE USERNAME/PASSWORD FORM BY DEFAULT === */
-/* Show when admin-login class is toggled via JavaScript */
-form#kc-form-login,
-form[id="kc-form-login"],
-#kc-form-login,
-.kc-login-form {
-    display: none !important;
-}
-
-/* Show form when admin-login mode is active */
-body.show-admin-login form#kc-form-login,
-body.show-admin-login form[id="kc-form-login"],
-body.show-admin-login #kc-form-login,
-body.show-admin-login .kc-login-form {
-    display: block !important;
-}
-
-#kc-form-options,
-#kc-form-buttons,
-input#username,
-input#password,
-input[name="username"],
-input[name="password"],
-label[for="username"],
-label[for="password"] {
-    display: none !important;
-}
-
-/* Show inputs when admin-login mode is active */
-body.show-admin-login input#username,
-body.show-admin-login input#password,
-body.show-admin-login input[name="username"],
-body.show-admin-login input[name="password"],
-body.show-admin-login label[for="username"],
-body.show-admin-login label[for="password"],
-body.show-admin-login #kc-form-buttons {
-    display: block !important;
-}
+/* No global hiding of form controls here. This stylesheet is loaded on EVERY
+   login page, including the Keycloak stock templates this theme does not
+   override (update-profile, verify-email, consent, OTP, ...), which keep their
+   submit buttons in #kc-form-buttons and use input#username. A former
+   "hide the username/password form" block here left guests on a profile form
+   with no Submit button. Pages that want something hidden hide it themselves
+   (login.ftl: .admin-login-form / .visible; login-reset-password.ftl: its own
+   <style> block). Stock-page buttons are guarded by
+   e2e/keycloak-theme/form-controls-visible.spec.ts. */
 
 /* Admin login toggle link */
 .admin-login-toggle {

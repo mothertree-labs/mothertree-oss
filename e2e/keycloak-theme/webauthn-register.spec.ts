@@ -1,11 +1,6 @@
 import { randomUUID } from 'crypto';
-import {
-  test,
-  expect,
-  request as playwrightRequest,
-  type APIRequestContext,
-  type APIResponse,
-} from '@playwright/test';
+import { test, expect, type APIRequestContext } from '@playwright/test';
+import { adminApi, ensureOk, KC_URL, REDIRECT_URI } from './helpers';
 
 /**
  * The passkey registration page (apps/themes/platform/login/webauthn-register.ftl)
@@ -28,53 +23,9 @@ import {
  * Run via ci/scripts/keycloak-theme-test.sh, which boots the pinned image.
  */
 
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} must be set — run this suite via ci/scripts/keycloak-theme-test.sh`);
-  }
-  return value;
-}
-
-const KC_URL = requiredEnv('KC_THEME_TEST_URL').replace(/\/$/, '');
-const ADMIN_USER = requiredEnv('KC_THEME_TEST_ADMIN_USER');
-const ADMIN_PASSWORD = requiredEnv('KC_THEME_TEST_ADMIN_PASSWORD');
-
 const REALM = 'theme-test';
 const CLIENT_ID = 'theme-test';
-// Never loaded: the test only watches for Keycloak's redirect to it (.invalid
-// never resolves, and page.route() does not see the redirect leg of a POST).
-const REDIRECT_URI = 'https://app.theme-test.invalid/callback';
 const USER = { email: 'guest@theme-test.invalid', password: randomUUID() };
-
-async function ensureOk(res: APIResponse, what: string): Promise<APIResponse> {
-  if (!res.ok()) {
-    throw new Error(`${what}: HTTP ${res.status()} ${await res.text()}`);
-  }
-  return res;
-}
-
-/** Admin REST client. Master-realm admin tokens live 60s, so mint one per phase. */
-async function adminApi(): Promise<APIRequestContext> {
-  const anon = await playwrightRequest.newContext({ baseURL: KC_URL });
-  const tokenRes = await ensureOk(
-    await anon.post('/realms/master/protocol/openid-connect/token', {
-      form: {
-        grant_type: 'password',
-        client_id: 'admin-cli',
-        username: ADMIN_USER,
-        password: ADMIN_PASSWORD,
-      },
-    }),
-    'admin token',
-  );
-  const { access_token: token } = await tokenRes.json();
-  await anon.dispose();
-  return playwrightRequest.newContext({
-    baseURL: KC_URL,
-    extraHTTPHeaders: { Authorization: `Bearer ${token}` },
-  });
-}
 
 /**
  * Realm on the platform login theme with the same passwordless policy

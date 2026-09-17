@@ -373,6 +373,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Dependabot docker entry, which is why Renovate offered it at all.
 
 ### Fixed
+- Guests could not get past Keycloak's "Update Account Information" page: it had
+  no Submit button (#166). `apps/themes/platform/login/resources/css/styles.css`
+  is loaded on every login page, and it hid `#kc-form-buttons`,
+  `#kc-form-options`, `#kc-form-login` and every `input#username` /
+  `input#password` with `display: none !important`, a leftover from an old
+  login form. Its "show again" rules keyed on a `body.show-admin-login` class
+  that nothing sets. The stock templates this theme does not override keep
+  their buttons in exactly those containers: update-profile, verify-email,
+  consent, OTP, update-email, IdP profile review and delete-account. Guests are
+  created without a first or last name, so every guest landed on the
+  update-profile form (`VERIFY_PROFILE`) with no way to continue except
+  pressing Enter. The block is removed. `login.ftl` already hides its admin
+  form itself, and its rendered page (accessibility tree and screenshot, before
+  and after opening the admin form) is byte-identical with and without the
+  block. The same rule also hid the email field on the theme's own
+  `login-reset-password.ftl`. That page is deliberately left unchanged: its
+  field is now hidden by the template itself (account recovery goes through
+  the portal).
+  New `e2e/keycloak-theme/form-controls-visible.spec.ts` (run by
+  `keycloak-theme-test` in `validate`) drives a nameless guest through the
+  profile page by clicking Submit, and grants consent by clicking Yes; both
+  fail on the old stylesheet. Shared Keycloak admin/login plumbing moved to
+  `e2e/keycloak-theme/helpers.ts`. Deploying rolls Keycloak once (theme-hash
+  annotation).
 - Tracked restarts in the infra tier never fired (#644). 30 call sites in
   `deploy-pgbouncer.sh`, `deploy-postfix.sh`, `deploy-tailscale-router.sh`,
   `deploy-tailscale-key-rotator.sh`, `deploy-metrics-federation.sh`,

@@ -181,6 +181,13 @@
             .card-pf { background: transparent !important; box-shadow: none !important; border: none !important; }
             #kc-info, #kc-info-wrapper { display: none !important; }
             .pf-c-login__footer, .login-pf-page-footer { background: transparent !important; }
+
+            /* Kept exactly as before the styles.css cleanup, which used to hide
+               this field globally. Account recovery goes through the portal;
+               changing what this page offers is a product decision, not a
+               styling fix. */
+            #kc-reset-password-form input#username,
+            #kc-reset-password-form label[for="username"] { display: none !important; }
         </style>
         <div class="platform-header">
             <h1 class="platform-title">${realm.displayName!"the platform"}</h1>
