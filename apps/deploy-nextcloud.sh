@@ -42,7 +42,7 @@ mt_load_tenant_config
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy-nextcloud"
 
-mt_require_commands kubectl helm envsubst openssl
+mt_require_commands kubectl helm envsubst openssl shasum
 
 # Helper: get a running, non-terminating, Ready Nextcloud pod name.
 # During rolling updates or HPA scale-up, not-yet-ready pods may appear in the
@@ -608,6 +608,40 @@ if [ -d "$REPO_ROOT/apps/nextcloud-guest-bridge" ]; then
     rsync -a "$REPO_ROOT/apps/nextcloud-guest-bridge/" "$CUSTOM_APPS_STAGING/guest_bridge/"
     CUSTOM_APPS_CHANGED=true
 fi
+
+# Rolling the pods on a custom apps change is driven by NEXTCLOUD_CUSTOM_APPS_HASH
+# (exported here, consumed as a pod annotation in values/nextcloud.yaml.gotmpl).
+# The running pods only unpack this ConfigMap in their seed-identity init container,
+# so without that annotation a pod started before the change keeps serving the old
+# app code until something else happens to alter the pod template — in production
+# the pods were hours older than the ConfigMap (#718). Same mechanism as
+# KEYCLOAK_THEME_HASH: helmfile then rolls the Deployment exactly when the apps
+# changed, atomically with the deploy, and a deploy that dies after the ConfigMap
+# is written is healed by the next sync rather than recorded as done.
+#
+# Hashed from the staged tree rather than the tarball, whose gzip header carries a
+# timestamp and would roll Nextcloud on every deploy. Paths and bytes, plus symlink
+# targets and the executable bit — rsync -a preserves both and tar ships them, so a
+# change to either has to reach the pods as much as a change to file contents does.
+unset NEXTCLOUD_CUSTOM_APPS_HASH
+if [ "$CUSTOM_APPS_CHANGED" = true ]; then
+    NEXTCLOUD_CUSTOM_APPS_HASH=$( cd "$CUSTOM_APPS_STAGING" && {
+        find . -type f ! -name '._*' -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256
+        find . -type f -perm -u+x ! -name '._*' -print0 | LC_ALL=C sort -z \
+            | xargs -0 -I{} printf 'mode+x %s\n' {}
+        find . -type l -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' _link; do
+            printf 'symlink %s -> %s\n' "$_link" "$(readlink "$_link")"
+        done
+    } | shasum -a 256 | cut -d' ' -f1 )
+    [[ "$NEXTCLOUD_CUSTOM_APPS_HASH" =~ ^[0-9a-f]{64}$ ]] \
+        || { print_error "Custom apps hash is not a sha256 (got '${NEXTCLOUD_CUSTOM_APPS_HASH}')"; exit 1; }
+    print_status "Custom apps content hash: ${NEXTCLOUD_CUSTOM_APPS_HASH:0:12}"
+else
+    # No custom apps to ship: still a defined value, because the annotation is a
+    # requiredEnv and an empty one would roll the pods now and again next time.
+    NEXTCLOUD_CUSTOM_APPS_HASH="none"
+fi
+export NEXTCLOUD_CUSTOM_APPS_HASH
 
 if [ "$CUSTOM_APPS_CHANGED" = true ]; then
     # Create tar.gz from the staging directory

@@ -53,10 +53,14 @@ kubectl delete -f "$REPO_ROOT/docs/y-provider-service.yaml" --ignore-not-found=t
 kubectl delete -f "$REPO_ROOT/docs/db-init-job.yaml" --ignore-not-found=true || true
 
 # Apps teardown. An unselected `helmfile destroy` renders EVERY release's values
-# up front, and values/keycloak-theme.yaml.gotmpl requires KEYCLOAK_THEME_HASH
-# (deploy_infra computes it; a destroy has nothing to hash), so give it the
-# placeholder or the whole Helm teardown is skipped before it starts.
+# up front, and two values files require a content hash their deploy script
+# computes (a destroy has nothing to hash): KEYCLOAK_THEME_HASH for
+# values/keycloak-theme.yaml.gotmpl and NEXTCLOUD_CUSTOM_APPS_HASH for
+# values/nextcloud.yaml.gotmpl. Give both the placeholder or the whole Helm
+# teardown is skipped before it starts — and the failure below is only a warning,
+# so releases would silently survive and leak their volumes.
 export KEYCLOAK_THEME_HASH="${KEYCLOAK_THEME_HASH:-0000000000000000000000000000000000000000000000000000000000000000}"
+export NEXTCLOUD_CUSTOM_APPS_HASH="${NEXTCLOUD_CUSTOM_APPS_HASH:-0000000000000000000000000000000000000000000000000000000000000000}"
 pushd "$REPO_ROOT/apps" >/dev/null
   helmfile -e "$MT_ENV" destroy \
     || print_warning "helmfile destroy failed — continuing with infra teardown (terraform removes the cluster anyway)"
