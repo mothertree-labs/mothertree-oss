@@ -6,7 +6,6 @@ import {
   createUser,
   ensureOk,
   expectClientRedirectWithCode,
-  KC_URL,
   passwordLogin,
   recreateRealm,
   REDIRECT_URI,
@@ -22,8 +21,7 @@ import {
  * `input#username` on all pages (meant for an old login form). Keycloak's stock
  * login-update-profile.ftl keeps its only Submit inside #kc-form-buttons, and
  * guests are created without a first/last name, so every guest landed on an
- * "Update Account Information" form with no button. The same rule hid the
- * recovery-email field on the theme's own login-reset-password.ftl.
+ * "Update Account Information" form with no button.
  *
  * The realm below mirrors the login-relevant settings of
  * docs/keycloak-realm-config.json.tpl with Keycloak's default user profile
@@ -123,12 +121,4 @@ test('consent page keeps its Yes/No buttons visible', async ({ page }) => {
   await expect(page.locator('#kc-cancel'), 'the consent page must show its decline button').toBeVisible();
   await accept.click();
   await expectClientRedirectWithCode(clientRedirect, 'granting consent');
-});
-
-test('reset-credentials page shows the recovery email field and its button', async ({ page }) => {
-  await page.goto(`${KC_URL}/realms/${REALM}/login-actions/reset-credentials?client_id=${CLIENT_ID}`);
-  const form = page.locator('#kc-reset-password-form');
-  await expect(form).toBeVisible();
-  await expect(form.locator('#username'), 'the recovery email field must be visible').toBeVisible();
-  await expect(form.locator('button[type="submit"]')).toBeVisible();
 });

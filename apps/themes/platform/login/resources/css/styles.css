@@ -145,9 +145,9 @@ header {
    override (update-profile, verify-email, consent, OTP, ...), which keep their
    submit buttons in #kc-form-buttons and use input#username. A former
    "hide the username/password form" block here left guests on a profile form
-   with no Submit button and hid the recovery-email field on
-   login-reset-password.ftl. login.ftl hides its admin form itself
-   (.admin-login-form / .visible). Guarded by
+   with no Submit button. Pages that want something hidden hide it themselves
+   (login.ftl: .admin-login-form / .visible; login-reset-password.ftl: its own
+   <style> block). Stock-page buttons are guarded by
    e2e/keycloak-theme/form-controls-visible.spec.ts. */
 
 /* Admin login toggle link */
