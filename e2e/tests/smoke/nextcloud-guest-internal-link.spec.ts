@@ -1,97 +1,72 @@
-import { randomBytes } from 'crypto';
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
-import { Page } from '@playwright/test';
+import { BrowserContext, Page } from '@playwright/test';
 import { handleNextcloudLogin, waitForNextcloudReady } from '../../helpers/nextcloud';
 import { keycloakLogin } from '../../helpers/auth';
+import { TEST_USERS } from '../../helpers/test-users';
 import { e2ePrefix } from '../../helpers/e2e-prefix';
-import {
-  completeGuestSetup,
-  deleteUser,
-  isKeycloakAdminConfigured,
-  KeycloakUser,
-  waitForUserByEmail,
-} from '../../helpers/keycloak-admin';
 
 /**
- * Guests reaching a file through the links an owner actually shares (Issue #718).
+ * Reaching a file through the links an owner actually shares (Issue #718).
  *
  * The owner's own links — the sidebar "Internal link" and the address bar while
  * editing — point at /f/<fileid> and /apps/files/files/<fileid>. An email share is
  * bound to its token and is never mounted into the recipient's Files, so those
- * links used to dead-end on "not found" even after the guest logged in. The
+ * links used to dead-end on "not found" even after the recipient signed in. The
  * guest_bridge middleware now redirects the recipient to that share's /s/<token>.
  *
- * Covered here, on one real share provisioned through the real guest path:
- *   1. the invite link (/guest-landing), which is the flow that already worked;
+ * The middleware's rule is "uid equals the share's recipient address", which holds
+ * for anyone an email share names; it does not special-case guests. So this drives
+ * the paths with signed-in test users, which keeps the Keycloak admin API — and its
+ * client secret — out of the e2e shards, where it is deliberately not available.
+ * That leaves one thing uncovered end to end: that sharing to an EXTERNAL address
+ * provisions a Keycloak guest through the account portal. nextcloud-guest-share.spec.ts
+ * covers the share side of it (the share is created, guest_bridge suppresses
+ * sharebymail's mail, a token is issued) but does not assert the Keycloak account
+ * appears; asserting that needs the admin API. Passkey setup is covered by
+ * e2e/keycloak-theme/.
+ *
+ * Covered here, on one real email share:
+ *   1. the invite link (/guest-landing), the flow that already worked;
  *   2. the address-bar link an owner is most likely to copy;
  *   3. a repeat visit to /f/<fileid> in the same session;
  *   4. a signed-in user who is NOT the recipient, who must not be redirected
  *      (the token would otherwise leak to them).
  */
-test.describe.serial('Smoke — Guest internal file links (Issue #718)', () => {
+test.describe.serial('Smoke — Internal file links for share recipients (Issue #718)', () => {
   test.setTimeout(180_000);
+
+  // The member owns the file. emailTest is the recipient: they have no access of
+  // their own, and the calendar specs already sign them into Nextcloud, so this
+  // adds no account that did not exist. admin is the bystander for the negative
+  // case — pipeline-scoped, so their Nextcloud account is ephemeral.
+  //
+  // NOT emailRecv: calendar-outbound-invite.spec.ts requires that address to have
+  // no Nextcloud account, so that Nextcloud treats it as an external attendee and
+  // sends an iMIP email instead of scheduling internally. Signing them in here
+  // would break that test for every later pipeline on the leased tenant, and
+  // emailRecv is fixed rather than pipeline-scoped, so it would not age out.
+  const recipient = TEST_USERS.emailTest;
+  const bystander = TEST_USERS.admin;
 
   const ts = Date.now();
   const fileName = `${e2ePrefix('ilink')}-${ts}.md`;
-  const guestEmail = `${e2ePrefix('ilink')}-${ts}@external-test.example`;
-  // Random, not derived from anything published: the guest's address contains ts,
-  // and this account is a real, sign-in-capable Keycloak user until afterAll
-  // removes it — and that cleanup is best-effort.
-  const guestPassword = `${randomBytes(24).toString('base64url')}-Pw1!`;
 
-  let shareId: string | undefined;
   let shareToken: string | undefined;
   let fileId: string | undefined;
-  let guestUser: KeycloakUser | undefined;
-  let ownerPage: Page;
 
-  test.afterAll(async () => {
-    if (ownerPage && shareId) {
-      await ocsApiCall(
-        ownerPage,
-        'DELETE',
-        `/apps/files_sharing/api/v1/shares/${shareId}`,
-      ).catch(() => {});
-    }
-    if (ownerPage) {
-      await deleteFile(ownerPage, fileName).catch(() => {});
-    }
-    if (guestUser) {
-      await deleteUser(guestUser);
-    }
-  });
-
-  test('prerequisites: Keycloak admin API is reachable', () => {
-    expect(
-      isKeycloakAdminConfigured() || !process.env.CI,
-      'E2E_KC_REALM and E2E_KC_CLIENT_SECRET must be set in CI — ci-resolve-tenant.sh maps ' +
-        'E2E_POOL<n>_KC_REALM / E2E_POOL<n>_KC_CLIENT_SECRET into the shard environment.',
-    ).toBeTruthy();
-    test.skip(!isKeycloakAdminConfigured(), 'Keycloak admin API not configured locally');
-  });
-
-  test('owner email-shares a document, which provisions the guest', async ({
-    memberPage,
-  }) => {
-    test.skip(!isKeycloakAdminConfigured(), 'Keycloak admin API not configured locally');
-    ownerPage = memberPage;
-
-    await ownerPage.goto(`${urls.files}/apps/files/`);
-    await ownerPage.waitForLoadState('networkidle').catch(() => {});
-    await handleNextcloudLogin(ownerPage);
-    await waitForNextcloudReady(ownerPage);
-
-    await uploadTestFile(ownerPage, fileName);
+  test('the owner email-shares a document', async ({ memberPage }) => {
+    await signInToNextcloud(memberPage);
+    await uploadTestFile(memberPage, fileName);
 
     const result = await ocsApiCall(
-      ownerPage,
+      memberPage,
       'POST',
       '/apps/files_sharing/api/v1/shares',
       {
         path: `/${fileName}`,
         shareType: 4, // IShare::TYPE_EMAIL
-        shareWith: guestEmail,
+        shareWith: recipient.email,
         permissions: 3, // read + update — the "can edit" a co-editor is given
       },
     );
@@ -101,7 +76,6 @@ test.describe.serial('Smoke — Guest internal file links (Issue #718)', () => {
       `Email share creation failed: ${JSON.stringify(result.body?.ocs?.meta || result.body).slice(0, 300)}`,
     ).toBe(200);
 
-    shareId = result.body?.ocs?.data?.id;
     shareToken = result.body?.ocs?.data?.token;
     fileId = String(result.body?.ocs?.data?.file_source ?? '');
     expect(shareToken, 'Email share must carry a token').toBeTruthy();
@@ -109,48 +83,35 @@ test.describe.serial('Smoke — Guest internal file links (Issue #718)', () => {
       fileId,
       'Email share response must carry the file id — it is what the owner-copied link contains',
     ).toMatch(/^\d+$/);
-
-    // guest_bridge calls the account portal, which creates the Keycloak guest.
-    const guest = await waitForUserByEmail(guestEmail);
-    guestUser = guest;
-
-    // A real guest completes setup by following the invite: passkey plus profile.
-    // We take them to the same end state through the admin API so the test can
-    // sign in with a password; the passkey pages have their own coverage.
-    await completeGuestSetup(guest, {
-      firstName: 'E2E',
-      lastName: 'Guest',
-      password: guestPassword,
-    });
   });
 
-  test('the invite link opens the file, authenticated as the guest', async ({ context }) => {
-    test.skip(!isKeycloakAdminConfigured(), 'Keycloak admin API not configured locally');
-    const guestContext = await context.browser()!.newContext({ ignoreHTTPSErrors: true });
+  test('the invite link opens the file, authenticated as the recipient', async ({
+    context,
+  }) => {
+    const recipientContext = await freshContext(context);
     try {
-      const page = await guestContext.newPage();
+      const page = await recipientContext.newPage();
       await page.goto(
-        `${urls.accountPortal}/guest-landing?email=${encodeURIComponent(guestEmail)}` +
+        `${urls.accountPortal}/guest-landing?email=${encodeURIComponent(recipient.email)}` +
           `&share=${encodeURIComponent(shareToken!)}`,
       );
-      await signInAsGuest(page, guestEmail, guestPassword);
-      await expectSharedFileVisible(page, shareToken!, fileName, guestEmail);
+      await signIn(page, recipient.username, recipient.password);
+      await expectSharedFileVisible(page, shareToken!, fileName, recipient.email);
     } finally {
-      await guestContext.close();
+      await recipientContext.close();
     }
   });
 
   test('the link an owner copies from the address bar also opens the file', async ({
     context,
   }) => {
-    test.skip(!isKeycloakAdminConfigured(), 'Keycloak admin API not configured locally');
-    const guestContext = await context.browser()!.newContext({ ignoreHTTPSErrors: true });
+    const recipientContext = await freshContext(context);
     try {
-      const page = await guestContext.newPage();
+      const page = await recipientContext.newPage();
       // What Nextcloud shows in the address bar while the owner has the file open.
       await page.goto(`${urls.files}/apps/files/files/${fileId}?dir=/&openfile=true`);
-      await signInAsGuest(page, guestEmail, guestPassword);
-      await expectSharedFileVisible(page, shareToken!, fileName, guestEmail);
+      await signIn(page, recipient.username, recipient.password);
+      await expectSharedFileVisible(page, shareToken!, fileName, recipient.email);
 
       // And again later in the same session, via the sidebar's "Internal link".
       await page.goto(`${urls.files}/f/${fileId}`);
@@ -161,42 +122,67 @@ test.describe.serial('Smoke — Guest internal file links (Issue #718)', () => {
           'per request and nothing is persisted on the first visit.',
       ).toContain(`/s/${shareToken}`);
     } finally {
-      await guestContext.close();
+      await recipientContext.close();
     }
   });
 
-  test('a signed-in non-recipient is not redirected to the share', async ({ adminPage }) => {
-    test.skip(!isKeycloakAdminConfigured(), 'Keycloak admin API not configured locally');
-    await adminPage.goto(`${urls.files}/apps/files/`);
-    await adminPage.waitForLoadState('networkidle').catch(() => {});
-    await handleNextcloudLogin(adminPage);
-    await waitForNextcloudReady(adminPage);
+  test('a signed-in non-recipient is not redirected to the share', async ({ context }) => {
+    const otherContext = await freshContext(context);
+    try {
+      const page = await otherContext.newPage();
+      await page.goto(`${urls.files}/f/${fileId}`);
+      await signIn(page, bystander.username, bystander.password);
+      await page.waitForLoadState('networkidle').catch(() => {});
 
-    await adminPage.goto(`${urls.files}/f/${fileId}`);
-    await adminPage.waitForLoadState('networkidle').catch(() => {});
+      expect(
+        page.url(),
+        'Only the recipient of an email share may be sent to its token. Redirecting anyone ' +
+          'else would hand them a working link to a file that was not shared with them.',
+      ).not.toContain('/s/');
+      expect(page.url()).not.toContain(shareToken!);
+    } finally {
+      await otherContext.close();
+    }
+  });
 
+  // Not afterAll: the fixture's page is closed by the time that runs, so the
+  // deletes there were swallowed and the file and its share leaked every run.
+  // Deleting the file removes its shares with it.
+  test('the owner deletes the shared file', async ({ memberPage }) => {
+    await signInToNextcloud(memberPage);
+    const status = await deleteFile(memberPage, fileName);
     expect(
-      adminPage.url(),
-      'Only the recipient of an email share may be sent to its token. Redirecting anyone ' +
-        'else would hand them a working link to a file that was not shared with them.',
-    ).not.toContain('/s/');
-    expect(adminPage.url()).not.toContain(shareToken!);
+      status,
+      `Cleanup DELETE of ${fileName} returned HTTP ${status} — the test file and its ` +
+        'email share are still on the tenant.',
+    ).toBeLessThan(400);
   });
 });
 
-/** Complete the Keycloak login the guest is sent to, then settle on the target page. */
-async function signInAsGuest(page: Page, email: string, password: string): Promise<void> {
+async function signInToNextcloud(page: Page): Promise<void> {
+  await page.goto(`${urls.files}/apps/files/`);
+  await page.waitForLoadState('networkidle').catch(() => {});
+  await handleNextcloudLogin(page);
+  await waitForNextcloudReady(page);
+}
+
+function freshContext(context: BrowserContext): Promise<BrowserContext> {
+  return context.browser()!.newContext({ ignoreHTTPSErrors: true });
+}
+
+/** Complete the Keycloak login we are sent to, then settle on the target page. */
+async function signIn(page: Page, username: string, password: string): Promise<void> {
   await page.waitForURL((url) => url.hostname.startsWith('auth.'), { timeout: 30_000 });
-  await keycloakLogin(page, email, password);
+  await keycloakLogin(page, username, password);
   await page.waitForLoadState('networkidle').catch(() => {});
 }
 
-/** The guest is on the share page, signed in as themselves, seeing the file. */
+/** The recipient is on the share page, signed in as themselves, seeing the file. */
 async function expectSharedFileVisible(
   page: Page,
   token: string,
   fileName: string,
-  guestEmail: string,
+  email: string,
 ): Promise<void> {
   await page.waitForURL((url) => url.pathname.includes(`/s/${token}`), { timeout: 30_000 });
   await page.waitForLoadState('networkidle').catch(() => {});
@@ -214,9 +200,9 @@ async function expectSharedFileVisible(
   });
   expect(
     (session.id || '').toLowerCase(),
-    `The guest must arrive signed in (OCS said HTTP ${session.status}). An anonymous ` +
+    `The recipient must arrive signed in (OCS said HTTP ${session.status}). An anonymous ` +
       'visitor is prompted for a name on the share page instead (Issue #167).',
-  ).toBe(guestEmail.toLowerCase());
+  ).toBe(email.toLowerCase());
 
   await expect(
     page.getByText(fileName, { exact: false }).first(),
@@ -268,7 +254,7 @@ async function uploadTestFile(page: Page, name: string): Promise<void> {
       {
         method: 'PUT',
         headers: { requesttoken: token, 'Content-Type': 'text/markdown' },
-        body: '# E2E guest internal link test\n\nShared for co-editing.\n',
+        body: '# E2E internal link test\n\nShared for co-editing.\n',
       },
     );
     return resp.status;
@@ -276,15 +262,14 @@ async function uploadTestFile(page: Page, name: string): Promise<void> {
   expect(status, `WebDAV PUT returned HTTP ${status}`).toBeLessThan(300);
 }
 
-async function deleteFile(page: Page, name: string): Promise<void> {
-  await page
-    .evaluate(async (fileName) => {
-      const token =
-        document.querySelector('head[data-requesttoken]')?.getAttribute('data-requesttoken') || '';
-      await fetch(
-        '/remote.php/dav/files/' + (window as any).OC.currentUser + '/' + fileName,
-        { method: 'DELETE', headers: { requesttoken: token } },
-      ).catch(() => {});
-    }, name)
-    .catch(() => {});
+async function deleteFile(page: Page, name: string): Promise<number> {
+  return page.evaluate(async (fileName) => {
+    const token =
+      document.querySelector('head[data-requesttoken]')?.getAttribute('data-requesttoken') || '';
+    const resp = await fetch(
+      '/remote.php/dav/files/' + (window as any).OC.currentUser + '/' + fileName,
+      { method: 'DELETE', headers: { requesttoken: token } },
+    );
+    return resp.status;
+  }, name);
 }
