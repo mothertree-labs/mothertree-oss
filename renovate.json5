@@ -13,10 +13,10 @@
 // Why: CVE-2026-18963 (Keycloak) sat unnoticed because the tag lives in
 // apps/values/keycloak-codecentric.yaml, which no Dependabot ecosystem parses.
 //
-// Policy: minor/patch bumps open PRs automatically (weekly), rate-limited to
-// 2 PRs/hour and batched into groups so a bot run cannot flood CI. MAJOR bumps only
-// appear on the Dependency Dashboard issue and need a checkbox tick — infra
-// majors (Postgres client, kube-prometheus-stack, Ollama…) want a human.
+// Policy: every minor/patch/digest bump lands in ONE weekly PR ("weekly batch",
+// last rule in packageRules). MAJOR bumps only appear on the Dependency Dashboard
+// issue and need a checkbox tick — infra majors (Postgres client,
+// kube-prometheus-stack, Ollama…) want a human — and then open as their own PR.
 //
 // Validate locally:
 //   npx --yes --package renovate@latest -- renovate-config-validator --strict renovate.json5
@@ -237,76 +237,17 @@
       "enabled": false,
     },
 
-    // ---- Low-risk batching --------------------------------------------------
-    // Every PR here costs a full dev deploy + 10 e2e shards against a 2-tenant
-    // lease pool, so PR COUNT is the real cost driver — grouping cuts it harder
-    // than any rate limit can. Only genuinely low-risk streams are batched;
-    // anything stateful or tenant-facing (postgres, redis, nextcloud, stalwart,
-    // postfix, pgbouncer, coturn, jitsi, impress, keycloak, tailscale, the LLM
-    // stack) deliberately stays one-PR-per-dep so a bad bump is easy to bisect.
-    //
-    // Each group is scoped to minor/patch/digest ONLY: a major must still land on
-    // the Dependency Dashboard on its own, so batching cannot smuggle one through
-    // or let one held major block the rest of its group.
-    //
-    // Each group is also prPriority -1 so that under the 2/hour cap these always
-    // yield to everything else. Without it a tooling bump can occupy a scarce
-    // slot ahead of an internet-facing component (Stalwart, ingress-nginx,
-    // Postfix, Synapse), which would trade burst-safety for CVE latency.
-    {
-      // Currently inert: every action is pinned to a bare major tag
-      // (actions/checkout@v4, ...), so Renovate only ever offers MAJOR updates
-      // for them and those stay dashboard-gated above. The rule is kept because
-      // it starts paying off the moment actions are SHA-pinned — which is the
-      // real supply-chain win here, since a bare tag can be re-pushed.
-      "description": "GitHub Actions: one PR for all of them (CI workflow only, never touches the deployed platform)",
-      "matchManagers": ["github-actions"],
-      "groupName": "github-actions",
-      "matchUpdateTypes": ["minor", "patch", "digest"],
-      "prPriority": -1,
-    },
-    {
-      // Generic base images and one CLI, all exercised by the normal dev deploy
-      // + e2e path. Deliberately EXCLUDED, each keeping its own PR:
-      //   alpine/k8s      — runs the tailscale-key-rotator (HEADSCALE_API_KEY),
-      //                     headscale-cleanup and acme-challenge-cleanup
-      //                     (CF_API_TOKEN) CronJobs. Cron-driven, so a bad bump
-      //                     fails silently at the next tick, not in CI.
-      //   alpine/kubectl  — only usage is inside the Jitsi JVB manifest.
-      //   chrll/microsocks— single-maintainer Docker Hub namespace, and the
-      //                     artifact is a SOCKS5 proxy; a digest bump there
-      //                     deserves its own review, not a batch.
-      //   bitnami/kubectl — pinned to :latest, so Renovate cannot version it at
-      //                     all; listing it would be false assurance. Pin it to
-      //                     a real tag to bring it under management.
-      "description": "Generic base/CLI images in one PR",
-      "matchPackageNames": [
-        "alpine",
-        "busybox",
-        "python",
-        "node",
-        "amazon/aws-cli",
-        "alpine/socat",
-      ],
-      "groupName": "base-images",
-      "matchUpdateTypes": ["minor", "patch", "digest"],
-      "prPriority": -1,
-    },
-    {
-      // Note: matrix-alertmanager-receiver uses calver, and the rule further
-      // down makes a year rollover (2026.x -> 2027.x) a MAJOR — so that update
-      // leaves this group and opens on its own. That is correct, just not what
-      // "grouped" might suggest.
-      "description": "Internal monitoring/alerting sidecars in one PR (not tenant-facing)",
-      "matchPackageNames": [
-        "prom/statsd-exporter",
-        "prom/pushgateway",
-        "metio/matrix-alertmanager-receiver",
-      ],
-      "groupName": "monitoring",
-      "matchUpdateTypes": ["minor", "patch", "digest"],
-      "prPriority": -1,
-    },
+    // Pins Renovate extracts but cannot actually version — listing them here so
+    // "it's managed" is never assumed. Pin them to real, comparable tags to bring
+    // them in:
+    //   bitnami/kubectl — pinned to `:latest`, so there is no version to compare.
+    //   alpine 3.24     — Docker Hub also carries date-style tags (20260805), so
+    //                     every candidate is dropped by maxMajorIncrement.
+    // Related: every GitHub Action is pinned to a bare major tag (actions/checkout
+    // @v7, github/codeql-action@v4 …), and a bare tag can be re-pushed. Renovate
+    // therefore only ever offers MAJOR updates for them, which stay dashboard-
+    // gated. SHA-pinning them is the real supply-chain win; their digest updates
+    // would then flow into the weekly batch below.
 
     // ---- Keycloak (CVE-2026-18963 class) --------------------------------------
     // Keycloak image + codecentric chart + magic-link jar move together so an
@@ -417,11 +358,58 @@
       ],
     },
 
-    // ---- Helm charts --------------------------------------------------------------------
+    // ---- Weekly batch (MUST stay the last rules) ------------------------------------------
+    // Every PR costs a full dev deploy + 10 e2e shards against a 2-tenant lease
+    // pool, so PR COUNT is the real cost driver. The Sept 2026 waves were
+    // consolidated into one PR by hand anyway (#600, #610); this makes Renovate
+    // do it: every minor/patch/digest bump goes into ONE branch,
+    // renovate/weekly-batch.
+    //
+    // Order matters: when several packageRules match, the LAST one wins, so this
+    // overrides the named groups above (keycloak, nextcloud, llm, …) for
+    // non-major bumps. Those groups still bind their MAJORS together, which is
+    // where lock-step actually matters.
+    //
+    // Majors stay out: they keep the dashboard gate and open as their own PR, so
+    // batching cannot smuggle one through.
+    //
+    // There is deliberately no helmfile `additionalBranchPrefix` any more: the
+    // prefix is part of the branch name, and Renovate groups by branch name, so
+    // it split every group that mixes a chart with an image (keycloakx landed in
+    // renovate/helm-keycloak, magic-link in renovate/keycloak).
+    //
+    // Trade-off: one bad bump holds the whole batch. Do NOT push a revert of it
+    // to the PR (Renovate stops updating a branch someone else committed to);
+    // add a temporary allowedVersions rule for that package instead, like the
+    // Stalwart freeze, and Renovate rebuilds the batch without it — Renovate
+    // rebuilds an existing batch branch mid-week, so the Wednesday schedule does
+    // not delay the unblock. Give every such hold a re-eval date and a tracking
+    // issue, as the Stalwart rule does: allowedVersions ALSO hides the package
+    // from the Dependency Dashboard, so an undated hold silently suppresses that
+    // package's security updates for good.
     {
-      "description": "Helm chart bumps: one PR per chart (deploy independently)",
-      "matchManagers": ["helmfile"],
-      "additionalBranchPrefix": "helm-",
+      "description": "ONE weekly PR for every minor/patch/digest bump",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "weekly batch",
+    },
+    {
+      // Their versionings above make every release (Jitsi stable-NNNNN) or a
+      // year rollover (the calver streams) a "major", and their rules opt out of
+      // the dashboard gate, so without this each would open a PR of its own.
+      // separateMajorMinor=false keeps that "major" off a separate
+      // renovate/major-weekly-batch branch.
+      "description": "Streams whose 'major' is just the next release ride the weekly batch too",
+      "matchPackageNames": [
+        "jitsi/web",
+        "jitsi/jicofo",
+        "jitsi/prosody",
+        "jitsi/jvb",
+        "ghcr.io/nordeck/jitsi-keycloak-adapter",
+        "searxng/searxng",
+        "metio/matrix-alertmanager-receiver",
+      ],
+      "groupName": "weekly batch",
+      "separateMajorMinor": false,
     },
   ],
 }
