@@ -142,15 +142,28 @@
     },
 
     // 4. Pandoc binary fetched by the Nextcloud install-pandoc init container.
-    //    Version appears three times across two lines; rewrite the whole match.
+    //    Binds the single `PANDOC_VERSION=` assignment in that init script; the
+    //    three occurrences of the version in the URL and tar path all expand
+    //    from it at runtime, so Renovate rewrites exactly one number.
+    //
+    //    It used to match all three occurrences in one multi-line regex and
+    //    rebuild them through an autoReplaceStringTemplate carrying a
+    //    `(?<between>...)` capture. That silently cannot work: the regex manager
+    //    keeps only the groups in Renovate's `validMatchFields` (depName,
+    //    packageName, currentValue, currentDigest, datasource, versioning,
+    //    extractVersion, registryUrl, depType, indentation) and discards the
+    //    rest, and autoReplaceStringTemplate is compiled against the *upgrade*
+    //    object, not the capture groups -- so `{{{between}}}` rendered as an
+    //    empty string, collapsing the `wget ... | tar xz ...` pipe onto one
+    //    mangled line. Renovate re-extracts after every autoreplace, found
+    //    nothing, and threw `update-failure`, which abandons the whole branch:
+    //    from #722 (weekly batch) that meant NO dependency PR opened at all.
+    //    Keep this manager free of non-validMatchFields capture groups.
     {
       "customType": "regex",
       "description": "Pandoc release tarball in Nextcloud init container",
       "managerFilePatterns": ["/^apps/values/nextcloud\\.yaml\\.gotmpl$/"],
-      "matchStrings": [
-        "jgm/pandoc/releases/download/(?<currentValue>\\d+(?:\\.\\d+)*)/pandoc-\\d+(?:\\.\\d+)*-linux-amd64\\.tar\\.gz(?<between>[^\\n]*\\n[^\\n]*?)pandoc-\\d+(?:\\.\\d+)*/bin/pandoc",
-      ],
-      "autoReplaceStringTemplate": "jgm/pandoc/releases/download/{{{newValue}}}/pandoc-{{{newValue}}}-linux-amd64.tar.gz{{{between}}}pandoc-{{{newValue}}}/bin/pandoc",
+      "matchStrings": ["PANDOC_VERSION=(?<currentValue>\\d+(?:\\.\\d+)*)"],
       "depNameTemplate": "jgm/pandoc",
       "datasourceTemplate": "github-releases",
     },
