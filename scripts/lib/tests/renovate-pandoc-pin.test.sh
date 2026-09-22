@@ -49,27 +49,62 @@ VALID = {"depName", "packageName", "currentValue", "currentDigest", "datasource"
          "packageFile", "packageFileDir", "newMajor", "newMinor", "newPatch",
          "newVersionMajor", "currentDigestShort", "newDigestShort", "updateType",
          "compatibility", "sourceUrl"}
+# Handlebars built-ins are not capture groups.
+HELPERS = {"if", "unless", "each", "with", "else", "lookup", "log", "this"}
 
-# Match the key together with its STRING VALUE, across newlines. Scanning line by
-# line was the first version of this check and it passed vacuously: splitting the
-# key and the value onto separate lines -- what any JSON5 reformat or a long
-# template produces naturally -- hid a `{{{between}}}` from it completely.
-KEY = re.compile(r'"autoReplaceStringTemplate"\s*:\s*"((?:[^"\\]|\\.)*)"', re.DOTALL)
-HBS = re.compile(r"\{\{\{?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}?\}\}")
+# Match the key with its string VALUE across newlines. Every relaxation below is a
+# shape that evaded an earlier version of this scanner while remaining legal JSON5
+# and passing renovate-config-validator:
+#   - the key need not be quoted, and may be single-quoted   (JSON5 identifier keys)
+#   - the value may be single-quoted
+#   - a block comment may sit between the key and its colon
+# Scanning line by line was the first version and missed a template wrapped onto
+# its own line -- hence re.DOTALL and the value-capturing group.
+KEY = re.compile(
+    r"""(?:"autoReplaceStringTemplate"|'autoReplaceStringTemplate'|autoReplaceStringTemplate)"""
+    r"""\s*(?:/\*.*?\*/\s*)?:\s*(?:/\*.*?\*/\s*)?"""
+    r'''(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')''',
+    re.DOTALL)
+EXPR = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
+TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
+
+def names(tpl):
+    """Every capture group a template reads, including block-helper arguments and
+    the head of a dotted path -- `{{#if between}}` and `{{between.x}}` both render
+    empty for a discarded group exactly as `{{{between}}}` does."""
+    out = set()
+    for body in EXPR.findall(tpl):
+        for tok in TOKEN.findall(body.strip("{}")):
+            head = tok.split(".")[0]
+            if head not in HELPERS:
+                out.add(head)
+    return out
 
 def offenders(text):
     # Strip whole-line // comments so commented-out prose cannot red the build. A
     # live key never begins a line with //, and trailing comments are preserved.
     text = re.sub(r"^\s*//.*$", "", text, flags=re.MULTILINE)
-    return {n for tpl in KEY.findall(text) for n in HBS.findall(tpl) if n not in VALID}
+    return {n for m in KEY.findall(text) for tpl in m if tpl for n in names(tpl) if n not in VALID}
 
 # Self-test. renovate.json5 currently carries no live autoReplaceStringTemplate at
 # all, so without this the assertion below would pass however broken the scanner
-# was. The fixture is the historical defect, verbatim in shape.
-FIXTURE = ('{ "autoReplaceStringTemplate":\n'
-           '    "jgm/pandoc/releases/download/{{{newValue}}}/x{{{between}}}y" }')
-if offenders(FIXTURE) != {"between"}:
-    sys.exit("self-test failed: the scanner no longer detects a discarded capture group")
+# was. Every fixture is a shape that once slipped through; each must be caught.
+FIXTURES = {
+    "quoted key, value wrapped onto its own line":
+        '{ "autoReplaceStringTemplate":\n    "x/{{{newValue}}}/y{{{between}}}z" }',
+    "JSON5 unquoted identifier key":
+        '{ autoReplaceStringTemplate: "x{{{between}}}y" }',
+    "single-quoted value":
+        '''{ "autoReplaceStringTemplate": 'x{{{between}}}y' }''',
+    "block helper and dotted path":
+        '{ "autoReplaceStringTemplate": "{{#if between}}{{between.x}}{{/if}}" }',
+    "block comment between key and colon":
+        '{ "autoReplaceStringTemplate" /* keep the tail */ : "x{{{between}}}y" }',
+}
+for label, fixture in FIXTURES.items():
+    if offenders(fixture) != {"between"}:
+        sys.exit("self-test failed: scanner no longer detects a discarded capture "
+                 "group in the %s shape" % label)
 
 sys.stdout.write(",".join(sorted(offenders(io.open("renovate.json5", encoding="utf-8").read()))))
 PYEOF
