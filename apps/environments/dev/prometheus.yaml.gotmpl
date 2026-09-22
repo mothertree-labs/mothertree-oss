@@ -27,13 +27,10 @@ prometheus:
 
 grafana:
   adminPassword: '{{ env "TF_VAR_grafana_admin_password" | default "changeme" }}'
-  # Match prod base values — actual usage ~260Mi, was exceeding the 256Mi limit.
-  resources:
-    requests:
-      cpu: 50m
-      memory: 320Mi
-    limits:
-      memory: 512Mi
+  # Grafana resources deliberately NOT overridden here: dev runs the same Grafana image as prod, so it
+  # needs the same envelope. This used to re-state the base values ("Match prod base values"), which
+  # silently went stale when the base was resized for Grafana 13.x — leaving dev on the old 512Mi limit
+  # that OOM-kills 13.x under an ordinary dashboard session. Inherit from apps/values/prometheus.yaml.
   ingress:
     hosts:
       - 'grafana.internal.{{ env "INFRA_ENV_DNS_LABEL" }}.{{ env "INFRA_DOMAIN" }}'
