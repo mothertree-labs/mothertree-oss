@@ -233,7 +233,7 @@ nextcloud:
           # into the URL -- a manager that has to rewrite three occurrences on
           # two lines needs a capture group Renovate discards, which corrupts
           # the file and fails the whole batch branch (see renovate.json5).
-          PANDOC_VERSION=3.6
+          PANDOC_VERSION="3.6"
           wget -qO- "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-amd64.tar.gz" \
             | tar xz --strip-components=2 -C /pandoc-bin "pandoc-${PANDOC_VERSION}/bin/pandoc"
       volumeMounts:

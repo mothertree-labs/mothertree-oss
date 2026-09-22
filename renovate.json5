@@ -163,7 +163,7 @@
       "customType": "regex",
       "description": "Pandoc release tarball in Nextcloud init container",
       "managerFilePatterns": ["/^apps/values/nextcloud\\.yaml\\.gotmpl$/"],
-      "matchStrings": ["PANDOC_VERSION=(?<currentValue>\\d+(?:\\.\\d+)*)"],
+      "matchStrings": ["PANDOC_VERSION=\"(?<currentValue>\\d+(?:\\.\\d+)*)\""],
       "depNameTemplate": "jgm/pandoc",
       "datasourceTemplate": "github-releases",
     },
