@@ -110,7 +110,7 @@ extraInitContainers: |
         # provider builds throw NoSuchMethodError on every magic-link REST call.
         # The JAR is loaded into the auth server, so pin it by SHA-256 (computed
         # from the Maven Central artifact and cross-checked against its .sha1).
-        ML_VERSION="0.75"
+        ML_VERSION="0.82"
         ML_SHA256="cf39e6b2c7f640af09d4a983554f1bd38aec3283313be25af40f58fe078fd5b7"
         echo "Downloading keycloak-magic-link provider v${ML_VERSION}..."
         wget -O /providers/keycloak-magic-link.jar \
