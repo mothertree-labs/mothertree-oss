@@ -108,13 +108,20 @@ grafana:
   adminPassword: "changeme"  # This should be set via environment variable
   persistence:
     enabled: false  # Disabled to reduce PVC count - dashboards are provisioned via ConfigMaps
-  # Memory INCREASED based on actual usage (~230Mi observed)
+  # Sized for Grafana 13.x, NOT the 10.4.1 these numbers were originally tuned against.
+  # kube-prometheus-stack 91 (#694) carried Grafana 10.4.1 -> 13.2.1, and the baseline tripled at the
+  # pod swap: 98-102Mi flat on 10.4.1 -> 299Mi immediately on 13.2.1, settling at ~336Mi RSS. The old
+  # 512Mi/320Mi (tuned when "~230Mi observed" was true) left only ~194Mi of headroom, and an ordinary
+  # admin dashboard session OOM-killed Grafana three times on 2026-09-16: a four-dashboard session
+  # pushed working_set 318Mi -> 507Mi, 5Mi under the limit, then over it.
+  # 1Gi leaves room for that query burst on top of the 13.x baseline; the request tracks steady state
+  # (~336Mi RSS + ~82Mi page cache) so the scheduler stops under-reserving.
   resources:
     requests:
       cpu: 50m
-      memory: 320Mi
+      memory: 448Mi
     limits:
-      memory: 512Mi
+      memory: 1Gi
   ingress:
     enabled: true
     ingressClassName: nginx-internal
@@ -257,8 +264,42 @@ additionalPrometheusRulesMap:
             annotations:
               summary: 'Container {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }} was OOM killed'
               description: 'Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }} was OOM killed.'
+            # kube_pod_container_status_last_terminated_reason is STICKY: it reports the last
+            # termination reason for the whole remaining lifetime of the pod, so on its own this
+            # alert latches on the first OOM and only clears when the pod is finally replaced.
+            # That left a 2026-09-16 Grafana OOM (an 11-minute incident) firing for 5 days.
+            # Two clauses bound it to a RECENT OOM, because "recent" has two different shapes:
+            #   1. restarted in place  — restartPolicy: Always, the container is restarted and the
+            #      restart counter moves. This is every Deployment/StatefulSet.
+            #   2. never restarted in place — restartPolicy: Never (the db-init Jobs and the
+            #      tailscale-key-rotator / acme-challenge-cleanup / headscale-cleanup CronJobs).
+            #      The counter stays at 0 forever, so clause 1 can never fire for them; a young pod
+            #      carrying an OOMKilled reason is the only signal. Without this clause a cleanup
+            #      Job that OOMs and then succeeds on a backoffLimit retry alerts NOTHING.
+            # Scoping note: this is deliberately ~1h-scoped rather than latched, so an overnight OOM
+            # that recovers is not still firing by morning — but it has no `for:` clause, so it
+            # re-fires on the first evaluation after EACH OOM. A container in a slow OOM loop
+            # therefore re-notifies per incident; it does not go silent. (KubeContainerHighRestartRate
+            # below is NOT the compensating control here — it reads the same restart counter, so it is
+            # blind to case 2 and never trips on a loop slower than 5 restarts/hour. A Job that fails
+            # outright is separately covered by the chart's KubeJobFailed.)
+            # Caveat on clause 2: its window runs from POD START, not from the OOM, so a
+            # never-restarted pod is covered for 3600s minus its age at the OOM — and not at all once
+            # it passes 1h. That is fine for the CronJobs above, whose activeDeadlineSeconds caps them
+            # at 300-1800s, but a long-running restartPolicy: Never Job that sets no
+            # activeDeadlineSeconds (the k6 perf Jobs) can OOM past the hour mark unseen.
             expr: |-
-              kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+              (
+                (kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1)
+                and on(namespace, pod, container)
+                (increase(kube_pod_container_status_restarts_total[1h]) > 0)
+              )
+              or
+              (
+                (kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1)
+                and on(namespace, pod)
+                ((time() - kube_pod_start_time) < 3600)
+              )
             labels:
               severity: warning
           - alert: KubeContainerHighRestartRate
