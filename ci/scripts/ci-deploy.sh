@@ -250,25 +250,15 @@ else
   TENANTS=("$E2E_TENANT")
   echo "Leased tenant for dev deploy: $E2E_TENANT"
 
-  # When prepping, ensure ALL tenants get their infra resources
-  # (TLS certs, Keycloak realms, namespaces) so per-app deploy
-  # steps work regardless of which pool is leased.
-  if [[ "$PREP_ONLY" == "true" ]]; then
-    for config_file in "$REPO_ROOT/config/tenants"/*/"${MT_ENV}.config.yaml"; do
-      [[ -f "$config_file" ]] || continue
-      tenant=$(basename "$(dirname "$config_file")")
-      [[ "$tenant" == ".example" ]] && continue
-      if [[ "$(yq '.tenant.infra_only // false' "$config_file")" == "true" ]]; then
-        continue
-      fi
-      # Deduplicate: skip if already in TENANTS (the pool tenant)
-      already=false
-      for t in "${TENANTS[@]}"; do [[ "$t" == "$tenant" ]] && already=true && break; done
-      if [ "$already" = "true" ]; then continue; fi
-      TENANTS+=("$tenant")
-      echo "Adding non-pool tenant to prep phase: $tenant"
-    done
-  fi
+  # Dev deploys ONLY the leased tenant — prep included. Every dev tenant is a
+  # pool tenant, so "the other tenants" are exactly the ones another pipeline
+  # may have leased and be deploying/testing right now. Prepping them here
+  # (added in #446 for the LLM step) ran a full create_env --prep-only —
+  # Docs restarts and migrations with THIS pipeline's code — inside the other
+  # pipeline's tenant, and raced its own deploy: pipeline 2337 died on
+  # `configmaps "health-sidecar-scripts" already exists` when 2336 created the
+  # same object in the same second. A tenant gets prepped by the pipeline
+  # that leases it. Guarded by scripts/tests/test-ci-leased-tenant-only.sh.
 fi
 
 if [[ ${#TENANTS[@]} -eq 0 ]]; then
