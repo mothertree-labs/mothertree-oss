@@ -70,6 +70,14 @@ multi-ecosystem-groups:
     # Merges with the per-ecosystem labels below rather than replacing them.
     labels:
       - "dependencies"
+    # Belongs HERE, not on an entry. GitHub rejected the whole file for having
+    # it on the npm entry: "open-pull-requests-limit should only be set on the
+    # associated multi-ecosystem group, not directly on updates that are part
+    # of a multi-ecosystem update group." Neither the JSON schema nor any
+    # validator catches that -- it is another server-side-only rule, like the
+    # `patterns` requirement above. Largely moot at one PR a week; kept because
+    # the npm entry carried 10 before consolidation.
+    open-pull-requests-limit: 10
 
 updates:
   # npm: both portals + calendar automation.
@@ -81,7 +89,6 @@ updates:
     multi-ecosystem-group: "weekly-deps"
     # REQUIRED alongside multi-ecosystem-group -- see the header note.
     patterns: ["*"]
-    open-pull-requests-limit: 10
     labels:
       - "npm"
     groups:
