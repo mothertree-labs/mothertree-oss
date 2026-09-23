@@ -228,8 +228,14 @@ nextcloud:
         - sh
         - -c
         - |
-          wget -qO- https://github.com/jgm/pandoc/releases/download/3.6/pandoc-3.6-linux-amd64.tar.gz \
-            | tar xz --strip-components=2 -C /pandoc-bin pandoc-3.6/bin/pandoc
+          # PANDOC_VERSION is the Renovate-managed pin for jgm/pandoc: one
+          # assignment, referenced three times below. Do NOT inline the version
+          # into the URL -- a manager that has to rewrite three occurrences on
+          # two lines needs a capture group Renovate discards, which corrupts
+          # the file and fails the whole batch branch (see renovate.json5).
+          PANDOC_VERSION="3.11"
+          wget -qO- "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-amd64.tar.gz" \
+            | tar xz --strip-components=2 -C /pandoc-bin "pandoc-${PANDOC_VERSION}/bin/pandoc"
       volumeMounts:
         - name: pandoc-bin
           mountPath: /pandoc-bin
