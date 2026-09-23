@@ -1,149 +1,163 @@
 version: 2
+
+# ONE pull request per week for every dependency Dependabot can see.
+#
+# This file used to declare the same ecosystem once per directory, which is one
+# PR per directory: three npm PRs on Monday (#723, #724, #725), three terraform
+# PRs on Tuesday, three docker PRs on Wednesday. Two keys collapse that to one:
+#
+#   * `directories` (plural) + a `groups` block  -> one PR per ecosystem,
+#     spanning every directory listed for it.
+#   * `multi-ecosystem-groups` + `multi-ecosystem-group` on each entry
+#     -> those per-ecosystem PRs merge into a single cross-ecosystem PR.
+#
+# Each entry joining the group MUST also carry an entry-level `patterns:`. This
+# is easy to miss and expensive to get wrong: the JSON schema at
+# json.schemastore.org/dependabot-2.0.json states the requirement only in the
+# `patterns` property DESCRIPTION, not in a conditional, so a config missing it
+# validates clean and is then rejected by GitHub. A rejected dependabot.yml does
+# not fall back to the old behaviour -- Dependabot stops for this repo entirely
+# and silently, security updates included. The schema DOES encode the
+# neighbouring rule ("Schedule is required UNLESS multi-ecosystem-group is
+# specified"), which is why the entries below carry no `schedule` of their own.
+#
+# The per-ecosystem `groups` blocks are kept as belt-and-braces, NOT as a
+# fallback -- there is no graceful degradation here and it would be wrong to
+# reason as if there were. These entries carry no `schedule` of their own, so if
+# the multi-ecosystem machinery were ignored they would be schedule-less and
+# invalid, not quietly demoted to per-ecosystem PRs. The blocks are
+# redundant-while-honoured; keep them because within-ecosystem grouping is then
+# stated explicitly rather than inferred, and remove them only alongside a
+# `schedule` on each entry.
+#
+# VERIFY AFTER MERGE. Schema-valid is not server-accepted, and a rejected
+# dependabot.yml fails silently: Insights -> Dependency graph -> Dependabot
+# should list the `weekly-deps` group with no config-error banner. If it does
+# not, revert -- do not debug it live, because version updates are stopped for
+# the whole repo meanwhile. Confirm again at the first Monday run that ONE PR
+# appears rather than three.
+#
+# Security updates are unaffected by any of this: they are repo-level, are not
+# folded into a multi-ecosystem group (version updates only), are not grouped
+# (`groups` defaults to applies-to: version-updates), and are explicitly exempt
+# from `open-pull-requests-limit`. A weekly PR blocked by one bad bump therefore
+# cannot stall a security fix. The carve-out that WOULD break that is
+# `target-branch`, which is deliberately absent. `ignore` rules, by contrast, DO
+# apply to security updates -- both rules below are verified inert in the
+# directories they newly reach.
+#
+# One PR also means one branch to freeze: dependabot-version-bump.yml pushes a
+# commit onto the bot branch, and Dependabot stops rebasing a branch carrying
+# foreign commits (#671). That used to freeze 1 of 9 PRs; it now freezes the
+# only one. It fires on any apps/{admin-portal,account-portal,docker/roundcube}
+# change, so this is the common path, not an edge case. Remedy: @dependabot
+# rebase.
+#
+# Trade-off, stated plainly: one PR means one bad bump blocks every other bump
+# in it, and each PR costs a full dev deploy plus ten e2e shards. That is the
+# same bargain renovate.json5 makes for image tags and charts -- see its header,
+# and the note there about using `allowedVersions` rather than pushing a revert
+# when one bump in a batch goes bad.
+#
+# Renovate owns everything Dependabot cannot parse (image tags in YAML, helmfile
+# charts, Ansible pins, heredocs). Keep the two from overlapping or the same
+# bump opens twice.
+multi-ecosystem-groups:
+  weekly-deps:
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # Merges with the per-ecosystem labels below rather than replacing them.
+    labels:
+      - "dependencies"
+
 updates:
-  # npm: Admin Portal
+  # npm: both portals + calendar automation.
   - package-ecosystem: "npm"
-    directory: "/apps/admin-portal"
-    schedule:
-      interval: "weekly"
-      day: "monday"
+    directories:
+      - "/apps/admin-portal"
+      - "/apps/account-portal"
+      - "/apps/calendar-automation"
+    multi-ecosystem-group: "weekly-deps"
+    # REQUIRED alongside multi-ecosystem-group -- see the header note.
+    patterns: ["*"]
     open-pull-requests-limit: 10
     labels:
-      - "dependencies"
       - "npm"
     groups:
       all-deps:
         patterns: ["*"]
     ignore:
+      # Affects the two portals only in practice: calendar-automation depends on
+      # ical.js, imapflow and node-fetch, and openid-client appears nowhere in
+      # its package-lock.json either, so hoisting this to a shared entry is
+      # inert there. openid-client >=6 is held deliberately -- see #404.
       - dependency-name: "openid-client"
         versions: [">=6"]
 
-  # npm: Account Portal
-  - package-ecosystem: "npm"
-    directory: "/apps/account-portal"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "npm"
-    groups:
-      all-deps:
-        patterns: ["*"]
-    ignore:
-      - dependency-name: "openid-client"
-        versions: [">=6"]
-
-  # npm: Calendar Automation
-  - package-ecosystem: "npm"
-    directory: "/apps/calendar-automation"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "npm"
-    groups:
-      all-deps:
-        patterns: ["*"]
-
-  # Terraform: Phase 1 (cluster, VPN, TURN)
+  # Terraform provider constraints.
+  #
+  # `/infra` is deliberately absent. It carried an entry but has zero files
+  # tracked in git -- what is on disk there is local state (.terraform/,
+  # terraform.tfstate, .terraform.lock.hcl, all gitignored), so Dependabot had
+  # nothing to read. Dropping it changes no coverage.
+  #
+  # Coverage gap, tracked in #699 and NOT closed here because it would open new
+  # updates rather than consolidate existing ones: `phase1-dev` has a tracked
+  # .terraform.lock.hcl, and modules/{headscale,helm-bootstrap,lke-cluster,
+  # postgres-server} have tracked .tf. None are watched.
+  #
+  # Adding them is one line here, but do not treat it as free: dependabot-core
+  # #15097 is an open SystemStackError in the terraform file fetcher that
+  # correlates with the number of .tf files fetched, and `/phase1` already
+  # pulls ~12 (its main.tf sources ../modules/{lke-cluster,headscale,
+  # postgres-server}). Now that terraform shares one PR with npm and docker, a
+  # terraform-side crash takes the whole run with it.
   - package-ecosystem: "terraform"
-    directory: "/phase1"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
+    directories:
+      - "/phase1"
+      - "/ci/terraform"
+    multi-ecosystem-group: "weekly-deps"
+    # REQUIRED alongside multi-ecosystem-group -- see the header note.
+    patterns: ["*"]
     labels:
-      - "dependencies"
       - "terraform"
     groups:
       all-providers:
         patterns: ["*"]
 
-  # Terraform: Infra (K8s infra layer)
-  - package-ecosystem: "terraform"
-    directory: "/infra"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-    labels:
-      - "dependencies"
-      - "terraform"
-    groups:
-      all-providers:
-        patterns: ["*"]
-
-  # Terraform: CI server
-  - package-ecosystem: "terraform"
-    directory: "/ci/terraform"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-    labels:
-      - "dependencies"
-      - "terraform"
-    groups:
-      all-providers:
-        patterns: ["*"]
-
-  # Docker: Admin Portal
+  # Base images for the three Dockerfiles that feed dependabot-version-bump.yml.
   - package-ecosystem: "docker"
-    directory: "/apps/admin-portal"
-    schedule:
-      interval: "weekly"
-      day: "wednesday"
+    directories:
+      - "/apps/admin-portal"
+      - "/apps/account-portal"
+      - "/apps/docker/roundcube"
+    multi-ecosystem-group: "weekly-deps"
+    # REQUIRED alongside multi-ecosystem-group -- see the header note.
+    patterns: ["*"]
     labels:
-      - "dependencies"
       - "docker"
     groups:
       base-images:
         patterns: ["*"]
     ignore:
-      # Pinned to node 24 LTS: majors (25, 26, …) are bumped deliberately in
-      # their own branch, not by Dependabot. The 20→25 incident that first
-      # motivated this pin was openid-client 5→6 and the connect-redis export
-      # shape, not Node itself — see #404.
+      # Portals are pinned to node 24 LTS: majors (25, 26, …) are bumped
+      # deliberately in their own branch, not by Dependabot. The 20->25 incident
+      # that first motivated this pin was openid-client 5->6 and the
+      # connect-redis export shape, not Node itself -- see #404.
+      #
+      # Name-scoped to `node`, so it does NOT reach Roundcube, whose Dockerfile
+      # is a single `FROM roundcube/roundcubemail:<tag>` with no node stage and
+      # no `node` token anywhere in it. Roundcube stays intentionally unpinned:
+      # upgrades including majors flow freely, and CI catches the common
+      # breakage (deploy-roundcube.sh fails fast if a new image's rollout does
+      # not go Ready, e.g. the 1.7 probe crash-loop fixed in #441; e2e covers
+      # login). Residual risk no per-branch gate can catch: a major bump's
+      # forward-only updatedb.sh migrating the SHARED dev Postgres and breaking
+      # other concurrent old-version branches (the session.changed->expires_at
+      # poison) -- review major Roundcube bumps with #430 in mind.
+      #
+      # If a node build stage is ever added to the Roundcube image, split it
+      # into its own entry rather than letting this ignore reach it.
       - dependency-name: "node"
         update-types: ["version-update:semver-major"]
-
-  # Docker: Account Portal
-  - package-ecosystem: "docker"
-    directory: "/apps/account-portal"
-    schedule:
-      interval: "weekly"
-      day: "wednesday"
-    labels:
-      - "dependencies"
-      - "docker"
-    groups:
-      base-images:
-        patterns: ["*"]
-    ignore:
-      # Pinned to node 24 LTS: majors (25, 26, …) are bumped deliberately in
-      # their own branch, not by Dependabot. The 20→25 incident that first
-      # motivated this pin was openid-client 5→6 and the connect-redis export
-      # shape, not Node itself — see #404.
-      - dependency-name: "node"
-        update-types: ["version-update:semver-major"]
-
-  # Docker: Roundcube
-  - package-ecosystem: "docker"
-    directory: "/apps/docker/roundcube"
-    schedule:
-      interval: "weekly"
-      day: "wednesday"
-    labels:
-      - "dependencies"
-      - "docker"
-    groups:
-      base-images:
-        patterns: ["*"]
-    # Roundcube is intentionally NOT pinned — upgrades (including majors) flow
-    # freely as Dependabot PRs. (Do not re-add an ignore here.) CI catches the
-    # common breakage: deploy-roundcube.sh fails fast if a new image's rollout
-    # doesn't go Ready (e.g. the 1.7 probe crash-loop fixed in #441) and e2e
-    # covers login. Residual risk a per-branch gate can NOT catch: a major bump's
-    # forward-only updatedb.sh migrating the SHARED dev Postgres and breaking
-    # other concurrent old-version branches (the session.changed→expires_at
-    # poison) — review major Roundcube bumps with issue #430 in mind.
