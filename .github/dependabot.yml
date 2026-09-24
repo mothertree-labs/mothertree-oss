@@ -133,10 +133,23 @@ updates:
   # rejects, and the phase1-dev edge stops drifting silently. The point is not
   # that more directories are watched but that they move TOGETHER in one PR.
   #
-  # modules/helm-bootstrap is deliberately NOT listed. It declares only
-  # `hashicorp/helm ~> 2.0`, shares no provider with anything, and no root
-  # sources it -- the only references are docs. Listing it would open a
-  # helm 2.x -> 3.x major stream against a module nothing calls.
+  # modules/helm-bootstrap is deliberately NOT listed. The discriminating
+  # reason is that NO ROOT SOURCES IT -- `hashicorp/helm` appears in zero root
+  # lock files, so it is never installed by anything. "Shares no provider" is
+  # not the criterion and would over-exclude: modules/lke-cluster declares
+  # `hashicorp/dns ~> 3.0` and phase1-dev declares `hashicorp/local ~> 2.0`,
+  # each unshared, and both are listed because a root calls them.
+  #
+  # Those two are also the honest cost of this change: they are new update
+  # streams (dns 3.x -> 4.x, local 2.x -> 3.x) that by definition cannot "move
+  # together" with anything. The first dns bump WILL arrive red, not merely may:
+  # `~> 3.0` already admits every 3.x release, so Dependabot proposes nothing
+  # until 4.0 exists, and `~> 4.0` necessarily excludes the locked 3.6.2. Modules
+  # carry no lock, phase1's lock pins dns 3.6.2 with `constraints = "~> 3.0"`,
+  # so a constraint bump with no lock update fails `terraform init` on a locked-
+  # provider mismatch. Fixing it is `init -upgrade` plus committing both roots'
+  # locks: the #504 pattern again. (phase1 and phase1-dev already drift on
+  # local -- 2.7.0 transitive vs 2.9.0 pinned.)
   #
   # `/infra` stays absent: zero files tracked in git -- what is on disk is local
   # state (.terraform/, terraform.tfstate). Note .terraform.lock.hcl IS tracked
@@ -157,7 +170,10 @@ updates:
   #
   #      Our shape resembles the reported repro: it used 8 sibling directories
   #      each with a required_providers block and one provider pinned in every
-  #      one; this list is 6 of exactly that shape, up from 2. It is NOT a
+  #      one; this list is 6 of broadly that shape, up from 2 -- though theirs
+  #      were flat siblings and ours sit at two tree depths across three parent
+  #      directories (root, ci/, modules/), and the crash
+  #      frame is path normalization, so topology may matter either way. It is NOT a
   #      function of .tf file count -- the reporter's traces are Ruby's default
   #      stack depth, not a finite repetition. So CHECK THE TERRAFORM JOB after
   #      merge, and revert this commit if it is failing.
@@ -166,11 +182,18 @@ updates:
   #      per-directory, so grouping guarantees one PR, not one atomic
   #      resolution -- and a directory silently missing from a bump looks the
   #      same as one that had nothing to bump. Check a terraform bump's diff
-  #      BEFORE merging, with two assertions rather than by eye:
-  #        git grep -A1 'linode/linode' -- '*.tf' | grep -c version
-  #          -> must print 6 (a dropped directory shows up as 5)
+  #      BEFORE merging, with an assertion rather than by eye:
   #        git grep -A1 'linode/linode' -- '*.tf' | grep -o '~> [0-9.]*' | sort -u
-  #          -> must print ONE line (a split bump shows up as 2)
+  #          -> must print ONE line. Two lines means a split bump, whether
+  #             Dependabot skipped a directory or bumped it separately: a
+  #             skipped directory KEEPS its declaration at the old constraint,
+  #             so counting lines would still say 6 and tell you nothing.
+  #
+  #      A different assertion catches the watch list itself drifting out of
+  #      sync -- run it when adding or removing a terraform directory, not on a
+  #      bump:
+  #        git grep -A1 'linode/linode' -- '*.tf' | grep -c version
+  #          -> must equal the number of linode-declaring entries listed below
   #      Merging is what breaks `init`, so the file's usual "verify after
   #      merge" idiom does not apply here.
   #
@@ -179,10 +202,13 @@ updates:
   #      in both roots (phase1 3.6.2, phase1-dev 3.6.1). Modules carry no lock
   #      file, so bumping that constraint updates no lock, and neither root's
   #      required_providers mentions dns. phase1 catches the mismatch via
-  #      terraform-validate; phase1-dev does not. New as far as repo history
-  #      shows: no dependabot[bot] commit has ever touched modules/*.tf or
-  #      phase1-dev/*.tf, and Renovate cannot reach them either -- it runs no
-  #      terraform manager.
+  #      terraform-validate; phase1-dev does not. This is genuinely new, and
+  #      provable from config rather than history: the previous `directories:`
+  #      list was exactly /phase1 and /ci/terraform, so Dependabot could not
+  #      have proposed anything for these paths, and Renovate cannot reach them
+  #      either (it runs no terraform manager). Do not try to establish this
+  #      with `git log --author=dependabot` -- in a shallow clone the graft root
+  #      reads as adding every file and returns a false hit.
   #
   # If the terraform updater starts crashing, revert the commit that added
   # these directories; it is deliberately self-contained.
