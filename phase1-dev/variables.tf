@@ -27,7 +27,7 @@ variable "linode_k8s_version" {
   # lke versions-list`) — LKE retires old versions, and a retired default
   # breaks every from-scratch dev rebuild (2026-08-18: 1.34 retired underneath
   # us; only 1.35/1.36 creatable).
-  default     = "1.36"
+  default = "1.36"
   validation {
     condition     = can(regex("^1\\.(2[4-9]|3[0-9])$", var.linode_k8s_version))
     error_message = "Kubernetes version must be between 1.24 and 1.39."
@@ -53,7 +53,7 @@ variable "linode_node_pools" {
   }))
   default = [
     {
-      type  = "g6-standard-4"
+      type = "g6-standard-4"
       # 4 nodes: at 3 the cluster ran 85-99% memory-requested and the kubelet
       # evicted LLM pods (ollama/open-webui usage exceeds requests) whenever
       # inference ran, taking down CoreDNS rollouts and flaking e2e. The pool

@@ -2,7 +2,8 @@
 //
 // Division of labour (avoid duplicate PRs):
 //   Dependabot (.github/dependabot.yml) owns: npm (portals, calendar-automation),
-//     terraform (phase1, ci/terraform), and the three Dockerfiles it
+//     terraform (the roots phase1, phase1-dev, ci/terraform -- Dependabot
+//     follows each root's ../modules sources itself), and the three Dockerfiles it
 //     already tracks (admin-portal, account-portal, docker/roundcube — these
 //     also feed .github/workflows/dependabot-version-bump.yml).
 //   Renovate owns: container image tags embedded in Helm values, helmfile
