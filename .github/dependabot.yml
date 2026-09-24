@@ -102,27 +102,42 @@ updates:
       - dependency-name: "openid-client"
         versions: [">=6"]
 
-  # Terraform provider constraints.
+  # Terraform provider constraints: every ROOT config, and only roots.
   #
-  # `/infra` is deliberately absent. It carried an entry but has zero files
-  # tracked in git -- what is on disk there is local state (.terraform/,
-  # terraform.tfstate, .terraform.lock.hcl, all gitignored), so Dependabot had
-  # nothing to read. Dropping it changes no coverage.
+  # Terraform intersects a provider constraint across a root and every module
+  # it calls. A bump that reaches the root but not its modules leaves the empty
+  # set and `terraform init` fails ("no available releases match") -- which is
+  # what #504 fixed by hand after the linode 3.9 -> 4.0 bump. The goal is that
+  # a root and its modules move in ONE PR, and two things make that hold:
   #
-  # Coverage gap, tracked in #699 and NOT closed here because it would open new
-  # updates rather than consolidate existing ones: `phase1-dev` has a tracked
-  # .terraform.lock.hcl, and modules/{headscale,helm-bootstrap,lke-cluster,
-  # postgres-server} have tracked .tf. None are watched.
+  #   * Dependabot's terraform updater follows `source = "../modules/..."`
+  #     from each root, parses the modules' required_providers and rewrites
+  #     them together with the root's .terraform.lock.hcl. Verified in the
+  #     /phase1 job log (2026-09-23): its dependency snapshot lists
+  #     hashicorp/dns and hashicorp/null, which are declared only under
+  #     modules/. So modules are NOT listed here -- doing so would fetch and
+  #     parse the same files twice -- and a module no root calls
+  #     (helm-bootstrap) is never installed by anything, so it is not either.
+  #   * CI enforces it regardless of what the updater does:
+  #     ci/scripts/terraform-validate.sh runs `terraform init -backend=false`
+  #     in every root listed below and terraform-provider-drift.sh fails the
+  #     PR when any provider is pinned at two different constraints anywhere
+  #     in the tree. A split bump is a red PR, never a merged one.
   #
-  # Adding them is one line here, but do not treat it as free: dependabot-core
-  # #15097 is an open SystemStackError in the terraform file fetcher that
-  # correlates with the number of .tf files fetched, and `/phase1` already
-  # pulls ~12 (its main.tf sources ../modules/{lke-cluster,headscale,
-  # postgres-server}). Now that terraform shares one PR with npm and docker, a
-  # terraform-side crash takes the whole run with it.
+  # `/infra` is absent: it has no tracked files (what is on disk is local
+  # state), so Dependabot would have nothing to read.
+  #
+  # dependabot-core #15097 (SystemStackError in the terraform file fetcher):
+  # the issue body blames the multi-directory `directories:` form, but the
+  # reporter's follow-up comments retract that. The trigger is a
+  # `source = "<path>"` inside a heredoc or comment that resolves back to a
+  # directory already being scanned; the regex-based fetcher follows it and
+  # recurses. If the terraform job ever dies that way, grep .tf heredocs and
+  # comments for `source =` -- do not shrink this list.
   - package-ecosystem: "terraform"
     directories:
       - "/phase1"
+      - "/phase1-dev"
       - "/ci/terraform"
     multi-ecosystem-group: "weekly-deps"
     # REQUIRED alongside multi-ecosystem-group -- see the header note.

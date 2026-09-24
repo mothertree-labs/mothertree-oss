@@ -3,12 +3,27 @@ set -euo pipefail
 
 echo "--- :terraform: Terraform Validate"
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$HERE/../.."
+
+# A provider pinned in more than one place must carry the same constraint
+# everywhere, or a root and a module it calls disagree and `terraform init`
+# resolves to the empty set (#504). Pure text, no network, so it runs first
+# and names the offending files even when init below would only say
+# "no available releases match".
+"$HERE/terraform-provider-drift.sh"
+
 FAIL=0
 
-for dir in phase1 infra ci/terraform; do
+# Every ROOT config an operator or CI runs. Modules are exercised through the
+# roots that call them: `init -backend=false` still installs modules and
+# intersects their provider constraints. A missing root is an error, not a
+# skip -- a silent skip is how phase1-dev went unvalidated for months.
+for dir in phase1 phase1-dev ci/terraform; do
   if [ ! -d "$dir" ]; then
-    echo "Skipping $dir (not found)"
-    continue
+    echo "^^^ +++"
+    echo "Terraform root $dir not found -- update the list in $0 if it moved"
+    exit 1
   fi
 
   echo "--- Validating $dir"
