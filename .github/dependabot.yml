@@ -102,28 +102,98 @@ updates:
       - dependency-name: "openid-client"
         versions: [">=6"]
 
-  # Terraform provider constraints.
+  # Terraform provider constraints -- every root, and every module a root calls.
   #
-  # `/infra` is deliberately absent. It carried an entry but has zero files
-  # tracked in git -- what is on disk there is local state (.terraform/,
-  # terraform.tfstate, .terraform.lock.hcl, all gitignored), so Dependabot had
-  # nothing to read. Dropping it changes no coverage.
+  # This list is a correctness requirement, not coverage for its own sake
+  # (#699). Terraform intersects a provider constraint across a root config AND
+  # every module that root calls, and `linode/linode` is declared independently
+  # in all six directories below, today all at `~> 4.0`. The intersecting edge
+  # is root <-> its own modules, NOT root <-> root: phase1 calls
+  # modules/{headscale,lke-cluster,postgres-server}; phase1-dev calls
+  # modules/lke-cluster; ci/terraform calls none. linode is the widest edge but
+  # not the only one -- `hashicorp/null ~> 3.0` is a second phase1 <->
+  # modules/postgres-server edge this now covers. Bump one side of an edge on
+  # its own and the constraint resolves to the empty set -- `terraform init`
+  # fails with "no available releases match". Not hypothetical: PR #504 fixed
+  # exactly this by hand for the linode 3.9 -> 4.0 bump.
   #
-  # Coverage gap, tracked in #699 and NOT closed here because it would open new
-  # updates rather than consolidate existing ones: `phase1-dev` has a tracked
-  # .terraform.lock.hcl, and modules/{headscale,helm-bootstrap,lke-cluster,
-  # postgres-server} have tracked .tf. None are watched.
+  # What CI already catches. ci/scripts/terraform-validate.sh runs on every PR
+  # (.woodpecker/validate.yaml, `event: pull_request`) and does
+  # `terraform init -backend=false` in phase1 and ci/terraform (infra is in the
+  # loop but always hits "Skipping infra (not found)" -- no tracked files). Module
+  # installation and provider selection still run under -backend=false, so a
+  # split bump on the phase1 edge DOES fail that step -- a red PR needing a
+  # hand-fix, the #504 pattern, not a silent break.
   #
-  # Adding them is one line here, but do not treat it as free: dependabot-core
-  # #15097 is an open SystemStackError in the terraform file fetcher that
-  # correlates with the number of .tf files fetched, and `/phase1` already
-  # pulls ~12 (its main.tf sources ../modules/{lke-cluster,headscale,
-  # postgres-server}). Now that terraform shares one PR with npm and docker, a
-  # terraform-side crash takes the whole run with it.
+  # The genuine blind spot is phase1-dev: it is NOT in that loop, and it calls
+  # modules/lke-cluster, so a constraint left behind on that edge stays
+  # invisible until an operator runs dev phase1.
+  #
+  # So this buys two things: Dependabot stops proposing split bumps that CI then
+  # rejects, and the phase1-dev edge stops drifting silently. The point is not
+  # that more directories are watched but that they move TOGETHER in one PR.
+  #
+  # modules/helm-bootstrap is deliberately NOT listed. It declares only
+  # `hashicorp/helm ~> 2.0`, shares no provider with anything, and no root
+  # sources it -- the only references are docs. Listing it would open a
+  # helm 2.x -> 3.x major stream against a module nothing calls.
+  #
+  # `/infra` stays absent: zero files tracked in git -- what is on disk is local
+  # state (.terraform/, terraform.tfstate). Note .terraform.lock.hcl IS tracked
+  # for phase1 and phase1-dev (.gitignore ignores the pattern, then un-ignores
+  # those two) and is NOT tracked for ci/terraform or the modules.
+  #
+  # TWO residual gaps this does not close, recorded so they are not mistaken
+  # for solved:
+  #
+  #   1. dependabot-core #15097 is an open, DETERMINISTIC SystemStackError in
+  #      the terraform FileFetcher, triggered by the multi-directory
+  #      `directories:` array itself. Read the issue before growing this list:
+  #      "The crash happens before any update can be attempted, so the entire
+  #      scheduled run aborts and no PRs are opened or refreshed." Terraform
+  #      shares the weekly-deps group with npm and docker, so if it fires the
+  #      WHOLE weekly batch silently produces nothing -- visible only as a
+  #      failed job at Insights -> Dependency graph -> Dependabot.
+  #
+  #      Our shape resembles the reported repro: it used 8 sibling directories
+  #      each with a required_providers block and one provider pinned in every
+  #      one; this list is 6 of exactly that shape, up from 2. It is NOT a
+  #      function of .tf file count -- the reporter's traces are Ruby's default
+  #      stack depth, not a finite repetition. So CHECK THE TERRAFORM JOB after
+  #      merge, and revert this commit if it is failing.
+  #
+  #      Separately, and regardless of #15097: `directories` resolution is
+  #      per-directory, so grouping guarantees one PR, not one atomic
+  #      resolution -- and a directory silently missing from a bump looks the
+  #      same as one that had nothing to bump. Check a terraform bump's diff
+  #      BEFORE merging, with two assertions rather than by eye:
+  #        git grep -A1 'linode/linode' -- '*.tf' | grep -c version
+  #          -> must print 6 (a dropped directory shows up as 5)
+  #        git grep -A1 'linode/linode' -- '*.tf' | grep -o '~> [0-9.]*' | sort -u
+  #          -> must print ONE line (a split bump shows up as 2)
+  #      Merging is what breaks `init`, so the file's usual "verify after
+  #      merge" idiom does not apply here.
+  #
+  #   2. A provider declared ONLY in a module is still not self-healing.
+  #      `hashicorp/dns ~> 3.0` lives only in modules/lke-cluster but is locked
+  #      in both roots (phase1 3.6.2, phase1-dev 3.6.1). Modules carry no lock
+  #      file, so bumping that constraint updates no lock, and neither root's
+  #      required_providers mentions dns. phase1 catches the mismatch via
+  #      terraform-validate; phase1-dev does not. New as far as repo history
+  #      shows: no dependabot[bot] commit has ever touched modules/*.tf or
+  #      phase1-dev/*.tf, and Renovate cannot reach them either -- it runs no
+  #      terraform manager.
+  #
+  # If the terraform updater starts crashing, revert the commit that added
+  # these directories; it is deliberately self-contained.
   - package-ecosystem: "terraform"
     directories:
       - "/phase1"
+      - "/phase1-dev"
       - "/ci/terraform"
+      - "/modules/headscale"
+      - "/modules/lke-cluster"
+      - "/modules/postgres-server"
     multi-ecosystem-group: "weekly-deps"
     # REQUIRED alongside multi-ecosystem-group -- see the header note.
     patterns: ["*"]
