@@ -92,8 +92,14 @@ persistence:
 # requiredEnv: a manual `helmfile -l name=nextcloud sync` without it must fail
 # rather than render an empty annotation (which would roll the pods now and again
 # on the next deploy). Lint renders via ci/scripts/lib/helmfile-lint-env.sh.
+#
+# app-versions-hash does the same for the app store apps (calendar, user_oidc,
+# richdocuments, ...): pods download them from the nextcloud-appstore-urls
+# ConfigMap only at start-up, so without it a version bump left old pods running
+# beside new ones that had already upgraded the DB, and the old ones went unready.
 podAnnotations:
   mothertree.org/custom-apps-hash: {{ requiredEnv "NEXTCLOUD_CUSTOM_APPS_HASH" | quote }}
+  mothertree.org/app-versions-hash: {{ requiredEnv "NEXTCLOUD_APP_VERSIONS_HASH" | quote }}
 
 # Deployment strategy: RollingUpdate for zero-downtime deploys
 # (Only possible because we no longer use a ReadWriteOnce PVC)

@@ -711,11 +711,17 @@ fi
 # emptyDir and are lost on pod restart. The init container downloads them from URLs
 # stored in this ConfigMap on every boot.
 #
-# Versions are pinned in app-versions.json (git-tracked manifest). This ensures ALL
-# pods — existing, restarted, HPA-scaled — always get the same app versions. Version
-# updates happen via PRs (automated by GitHub Action), not during deploys.
+# Versions are pinned in app-versions.json (git-tracked manifest), updated via PRs
+# (automated by GitHub Action), not during deploys. The ConfigMap is always rebuilt
+# from the manifest.
 #
-# The ConfigMap is always rebuilt from the manifest to ensure consistency.
+# Pinning alone does not keep the pods on one version: each pod reads this ConfigMap
+# only when it starts, so after a bump the running pods keep the old apps while any
+# pod created later (HPA scale-up, eviction) fetches the new ones and its
+# before-starting hook runs `occ upgrade`. The DB then records the new version and
+# every old pod fails readiness (disk/db mismatch) — in prod one of two pods sat
+# unready for hours after #740. NEXTCLOUD_APP_VERSIONS_HASH (below) rolls the
+# Deployment in the same sync that changes the ConfigMap.
 APP_VERSIONS_FILE="$REPO_ROOT/apps/manifests/nextcloud/app-versions.json"
 _build_app_urls_from_manifest() {
     # Build APP_ID|URL lines from app-versions.json
@@ -793,6 +799,35 @@ for a in apps:
         print_status "App store URLs ConfigMap already exists (preserving for version consistency)"
     fi
 fi
+
+# Hash what the pods will actually download — the live ConfigMap, whichever branch
+# above wrote (or preserved) it — and render it as a pod annotation
+# (values/nextcloud.yaml.gotmpl), so helmfile rolls every pod exactly when the app
+# versions change. Same mechanism as NEXTCLOUD_CUSTOM_APPS_HASH.
+unset NEXTCLOUD_APP_VERSIONS_HASH
+if ! _appstore_cm=$(kubectl get configmap nextcloud-appstore-urls -n "$NS_FILES" \
+        --ignore-not-found -o name 2>&1); then
+    print_error "Could not read ConfigMap nextcloud-appstore-urls: ${_appstore_cm}"
+    exit 1
+fi
+if [ -n "$_appstore_cm" ]; then
+    _appstore_urls=$(kubectl get configmap nextcloud-appstore-urls -n "$NS_FILES" \
+        -o jsonpath='{.data.app-urls}')
+    if [ -z "$_appstore_urls" ]; then
+        print_error "ConfigMap nextcloud-appstore-urls has no app-urls data"
+        exit 1
+    fi
+    NEXTCLOUD_APP_VERSIONS_HASH=$(printf '%s\n' "$_appstore_urls" | shasum -a 256 | cut -d' ' -f1)
+    [[ "$NEXTCLOUD_APP_VERSIONS_HASH" =~ ^[0-9a-f]{64}$ ]] \
+        || { print_error "App versions hash is not a sha256 (got '${NEXTCLOUD_APP_VERSIONS_HASH}')"; exit 1; }
+    print_status "App store versions hash: ${NEXTCLOUD_APP_VERSIONS_HASH:0:12}"
+else
+    # Legacy first deploy whose app store API lookup failed: nothing to pin yet.
+    # Still a defined value — the annotation is a requiredEnv.
+    NEXTCLOUD_APP_VERSIONS_HASH="none"
+fi
+unset _appstore_cm _appstore_urls
+export NEXTCLOUD_APP_VERSIONS_HASH
 
 # Step 6: Deploy Nextcloud via helmfile
 # Pre-upgrade: resolve HPA field manager conflict if present.
