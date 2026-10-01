@@ -56,6 +56,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   builtins, so it does not depend on `require(esm)`.
 
 ### Fixed
+- **Nextcloud app store version bumps now roll every pod** (#740 follow-up).
+  Pods download `calendar`, `user_oidc`, `richdocuments`, `external`,
+  `notify_push` and `integration_google` from the `nextcloud-appstore-urls`
+  ConfigMap only when they start, and nothing in the chart referenced it. After
+  #740 (calendar 6.5.4 → 6.6.1) the running pods kept 6.5.4; days later an HPA
+  scale-up created one pod with 6.6.1, its before-starting hook ran `occ upgrade`,
+  and the remaining old pod failed readiness (`calendar version mismatch:
+  disk=6.5.4 db=6.6.1`), leaving prod Nextcloud on one of two pods.
+  `apps/deploy-nextcloud.sh` now hashes the live ConfigMap's `app-urls` after
+  writing it and exports `NEXTCLOUD_APP_VERSIONS_HASH`, rendered by
+  `apps/values/nextcloud.yaml.gotmpl` as a `mothertree.org/app-versions-hash` pod
+  annotation, so helmfile rolls the Deployment in the same sync that changes the
+  versions. Same mechanism as `NEXTCLOUD_CUSTOM_APPS_HASH`; `requiredEnv`, with
+  placeholders in `ci/scripts/lib/helmfile-lint-env.sh` and `scripts/destroy_env`.
+  The first deploy after this change rolls Nextcloud in every tenant once (new
+  annotation).
 - **Custom Nextcloud app changes now reach running pods** (#718).
   `apps/deploy-nextcloud.sh` repackages `files_linkeditor`, `jitsi_calendar` and
   `guest_bridge` into the `nextcloud-custom-apps` ConfigMap on every deploy, but
