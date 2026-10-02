@@ -37,7 +37,7 @@ spec:
         - name: pgbouncer
           # edoburu/pgbouncer:v1.25.1-p0 — actively maintained, multi-arch (amd64+arm64)
           # https://hub.docker.com/r/edoburu/pgbouncer
-          image: edoburu/pgbouncer:v1.25.2-p0
+          image: edoburu/pgbouncer:v1.26.0-p0
           ports:
             - containerPort: 5432
               name: postgresql
@@ -97,7 +97,7 @@ spec:
         - name: tailscale
           # tailscale/tailscale — stable release, multi-arch (version pinned on the image: line below)
           # https://hub.docker.com/r/tailscale/tailscale
-          image: tailscale/tailscale:v1.102.4
+          image: tailscale/tailscale:v1.102.5
           restartPolicy: Always
           env:
             - name: POD_NAME
