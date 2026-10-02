@@ -112,7 +112,7 @@ extraInitContainers: |
         # two lines below exactly as they are: ci/scripts/magic-link-pin.sh
         # checks them in validate and re-pins ML_SHA256 on Renovate branches.
         ML_VERSION="0.88"
-        ML_SHA256="2f1a001bf8124e249d7817392b790bb3fe461f0ec39b7ac8bc43ee249a92c79b"
+        ML_SHA256="68800171572783f3528cddd895ba16f9563a5e3d5fc43232dbad3da3658a0d77"
         echo "Downloading keycloak-magic-link provider v${ML_VERSION}..."
         wget -O /providers/keycloak-magic-link.jar \
           "https://repo1.maven.org/maven2/io/phasetwo/keycloak/keycloak-magic-link/${ML_VERSION}/keycloak-magic-link-${ML_VERSION}.jar"
