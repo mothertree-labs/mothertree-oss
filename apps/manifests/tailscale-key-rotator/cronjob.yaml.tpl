@@ -38,7 +38,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: rotator
-              image: alpine/k8s:1.37.0
+              image: alpine/k8s:1.37.1
               command: ["bash", "/config/rotate.sh"]
               env:
                 - name: HEADSCALE_URL
