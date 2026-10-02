@@ -91,7 +91,7 @@ releases:
   - name: kube-prometheus-stack
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: prometheus-community/kube-prometheus-stack
-    version: 91.5.0
+    version: 91.8.2
     disableValidation: true
     needs:
       - {{ requiredEnv "NS_INGRESS" }}/ingress-nginx
@@ -125,7 +125,7 @@ releases:
   - name: prometheus-blackbox-exporter
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: prometheus-community/prometheus-blackbox-exporter
-    version: 11.18.0
+    version: 11.19.1
     labels:
       tier: system
     needs:
@@ -241,7 +241,7 @@ releases:
   - name: collabora-online
     namespace: {{ requiredEnv "NS_OFFICE" }}
     chart: collabora/collabora-online
-    version: 1.3.4
+    version: 1.3.5
     labels:
       tier: apps
       name: collabora-online
@@ -260,7 +260,7 @@ releases:
   - name: matrix-synapse
     namespace: {{ requiredEnv "NS_MATRIX" }}
     chart: ananace/matrix-synapse
-    version: 3.12.38
+    version: 3.12.39
     needs:
       - {{ requiredEnv "NS_INGRESS_INTERNAL" }}/ingress-nginx-internal
     labels:
@@ -275,7 +275,7 @@ releases:
   - name: element-web
     namespace: {{ requiredEnv "NS_MATRIX" }}
     chart: ananace/element-web
-    version: 1.4.43
+    version: 1.4.44
     needs:
       - {{ requiredEnv "NS_INGRESS" }}/ingress-nginx
     labels:
