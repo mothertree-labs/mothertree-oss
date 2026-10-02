@@ -1,0 +1,83 @@
+name: "Magic-link jar pin"
+
+# Renovate bumps ML_VERSION in apps/values/keycloak-codecentric.yaml but cannot
+# update ML_SHA256 next to it (no file digest for Maven, no postUpgradeTasks on
+# the hosted app). On every push to a Renovate branch this re-pins the hash —
+# after verifying the jar's PGP signature against phasetwo's key committed in
+# ci/keys/ — and commits the change back to the branch.
+#
+# - The script and the signer key are checked out from the default branch, not
+#   from the branch being fixed. This file itself is not: GitHub runs a push
+#   event's workflow from the pushed commit (and a dispatch's from the chosen ref),
+#   so a renovate/** branch controls these steps. Only writers and the Renovate
+#   app can push those branches, which bounds that to what they can already do.
+# - The commit is authored by github-actions[bot], which renovate.json5 lists in
+#   gitIgnoredAuthors, so Renovate keeps managing (rebasing, re-batching) the branch.
+# - Pushes made with GITHUB_TOKEN do not trigger workflows, so this cannot loop;
+#   they still fire the repo webhook, so Woodpecker runs a fresh pipeline. The
+#   pipeline for Renovate's own push fails fast in validate (magic-link-pin --check)
+#   instead of crash-looping Keycloak on the shared dev cluster.
+#
+# workflow_dispatch re-pins a branch by hand (e.g. one pushed before this existed).
+
+on:
+  push:
+    branches: ["renovate/**"]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "renovate/* branch to re-pin"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: magic-link-pin-${{ inputs.branch || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  repin:
+    runs-on: ubuntu-latest
+    env:
+      TARGET: ${{ inputs.branch || github.ref_name }}
+    steps:
+      - name: Only Renovate branches
+        run: |
+          case "$TARGET" in
+            renovate/*) echo "Re-pinning $TARGET" ;;
+            *) echo "::error::refusing to push to a non-Renovate branch"; exit 1 ;;
+          esac
+
+      - name: Checkout trusted tooling (default branch)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Checkout branch to fix
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET }}
+          path: target
+          # The token is only needed by the final push; keep it off disk until then.
+          persist-credentials: false
+
+      - name: Verify signature and re-pin ML_SHA256
+        run: trusted/ci/scripts/magic-link-pin.sh --fix target/apps/values/keycloak-codecentric.yaml
+
+      - name: Commit and push
+        working-directory: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git diff --quiet -- apps/values/keycloak-codecentric.yaml && { echo "Pin already correct"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          version=$(sed -nE 's/^[[:space:]]*ML_VERSION="([^"]*)".*/\1/p' apps/values/keycloak-codecentric.yaml)
+          git commit -m "chore(deps): pin keycloak-magic-link ${version} sha256" -- apps/values/keycloak-codecentric.yaml
+          # A plain push: if Renovate force-pushed in the meantime this fails, and
+          # that newer push runs this workflow again.
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" \
+            push origin "HEAD:refs/heads/${TARGET}"

@@ -46,6 +46,10 @@
   "semanticCommitType": "chore",
   "semanticCommitScope": "deps",
   "rebaseWhen": "conflicted",
+  // .github/workflows/magic-link-pin.yml commits the magic-link ML_SHA256 re-pin
+  // to Renovate branches as this author. Without this, Renovate would treat
+  // those branches as modified by someone else and stop updating them.
+  "gitIgnoredAuthors": ["41898282+github-actions[bot]@users.noreply.github.com"],
   "ignorePaths": [
     "**/node_modules/**",
     ".claude/**",
@@ -130,9 +134,11 @@
 
     // 3. Keycloak magic-link extension jar (Maven Central), pinned as
     //    ML_VERSION="x.y" + ML_SHA256="..." in the fetch init container.
-    //    Renovate bumps the version only; ML_SHA256 must be updated by hand
-    //    (see prBodyNotes in the keycloak rule) — the init container's checksum
-    //    gate refuses the jar and CI fails loudly until it is.
+    //    Renovate bumps the version only (no file digest for Maven, and the
+    //    hosted app runs no postUpgradeTasks). .github/workflows/magic-link-pin.yml
+    //    re-pins ML_SHA256 on renovate/** branches after verifying the release's
+    //    PGP signature, and the validate step `magic-link-pin` fails any branch
+    //    whose hash is stale before it can reach the dev cluster.
     {
       "customType": "regex",
       "description": "Keycloak magic-link extension version (Maven Central)",
@@ -273,7 +279,7 @@
       "groupName": "keycloak",
       "prPriority": 10,
       "prBodyNotes": [
-        "If this bumps `keycloak-magic-link`, also update `ML_SHA256` in `apps/values/keycloak-codecentric.yaml` (`curl -sL https://repo1.maven.org/maven2/io/phasetwo/keycloak/keycloak-magic-link/<ver>/keycloak-magic-link-<ver>.jar | sha256sum`, cross-check against the artifact's `.sha1`). The init container refuses the jar on mismatch, so CI fails until this is done.",
+        "If this bumps `keycloak-magic-link`, the `Magic-link jar pin` GitHub Action re-pins `ML_SHA256` in `apps/values/keycloak-codecentric.yaml` with a follow-up commit by github-actions[bot] (after verifying phasetwo's PGP signature). Until that commit lands, this branch's pipeline fails at the `magic-link-pin` validate step. If the Action could not verify the signature, check its log before pinning anything by hand.",
         "Check the magic-link release notes for the minimum Keycloak version (0.72+ is required on KC >= 26.6.3).",
       ],
     },
@@ -335,6 +341,18 @@
       "description": "Stalwart: frozen on 0.15.x until the v0.16 migration (#715)",
       "matchPackageNames": ["stalwartlabs/stalwart"],
       "allowedVersions": "/^v?0\\.15\\./",
+    },
+
+    // ---- Keycloak magic-link hold ------------------------------------------------------
+    // keycloak-magic-link 0.89 (2026-10-01) is built against Keycloak 26.8.0; we run
+    // 26.7.4 (0.85-0.88 declare 26.7.4). Hold below 0.89 until Keycloak moves to
+    // 26.8.x, tracked in #746. allowedVersions also hides magic-link from the
+    // Dependency Dashboard, so watch github.com/p2-inc/keycloak-magic-link/releases
+    // for security fixes. Re-evaluate by 2026-11-15; remove with the KC 26.8 bump.
+    {
+      "description": "keycloak-magic-link: below 0.89 until Keycloak 26.8 (#746)",
+      "matchPackageNames": ["io.phasetwo.keycloak:keycloak-magic-link"],
+      "allowedVersions": "/^0\\.([0-7]?[0-9]|8[0-8])$/",
     },
 
     // ---- LLM stack -------------------------------------------------------------------

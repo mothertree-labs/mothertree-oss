@@ -108,8 +108,9 @@ extraInitContainers: |
         # 0.72+ is required on Keycloak >= 26.6.3: KC renamed
         # Cors.allowedOrigins(AccessToken) -> checkAllowedOrigins(), and older
         # provider builds throw NoSuchMethodError on every magic-link REST call.
-        # The JAR is loaded into the auth server, so pin it by SHA-256 (computed
-        # from the Maven Central artifact and cross-checked against its .sha1).
+        # The JAR is loaded into the auth server, so pin it by SHA-256. Keep the
+        # two lines below exactly as they are: ci/scripts/magic-link-pin.sh
+        # checks them in validate and re-pins ML_SHA256 on Renovate branches.
         ML_VERSION="0.82"
         ML_SHA256="2f1a001bf8124e249d7817392b790bb3fe461f0ec39b7ac8bc43ee249a92c79b"
         echo "Downloading keycloak-magic-link provider v${ML_VERSION}..."

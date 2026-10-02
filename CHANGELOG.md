@@ -56,6 +56,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   builtins, so it does not depend on `require(esm)`.
 
 ### Fixed
+- **Renovate magic-link bumps no longer crash-loop Keycloak on dev.** Renovate
+  bumps `ML_VERSION` in `apps/values/keycloak-codecentric.yaml` but cannot update
+  `ML_SHA256`: hosted Renovate has no file digest for Maven and runs no
+  `postUpgradeTasks`. The weekly batch (#744, 0.82 → 0.88) deployed a stale hash
+  to the shared dev cluster. The init container refused the jar, the Keycloak
+  StatefulSet then never replaced the non-Ready pod, and every pipeline timed out
+  in `deploy-dev-prep` (#2385–#2387), which also kept #743 off prod.
+  - New `ci/scripts/magic-link-pin.sh`.
+    - `--check` runs as the `magic-link-pin` validate step on every pipeline. It
+      downloads the pinned jar, cross-checks it against Maven Central's `.sha1`,
+      and fails before anything is deployed if `ML_SHA256` is stale.
+    - `--fix` verifies the release's PGP signature against phasetwo's key
+      (committed as `ci/keys/phasetwo-bot.asc`, fingerprint
+      `51E5BAA1B195629172C33395BC6B4EADEB514AFD`) and rewrites the hash.
+  - New `.github/workflows/magic-link-pin.yml` runs `--fix` on every push to
+    `renovate/**`, using the script and key from the default branch, and commits
+    the re-pin as github-actions[bot]. `renovate.json5` lists that author in
+    `gitIgnoredAuthors`, so Renovate keeps managing the branch.
+  - magic-link is held below 0.89 until Keycloak 26.8 (#746): 0.89 is built
+    against Keycloak 26.8.0.
+  - Unit tests: `scripts/tests/magic-link-pin.test.sh` (offline, throwaway
+    signing key).
 - **Nextcloud app store version bumps now roll every pod** (#740 follow-up).
   Pods download `calendar`, `user_oidc`, `richdocuments`, `external`,
   `notify_push` and `integration_google` from the `nextcloud-appstore-urls`

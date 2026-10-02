@@ -61,6 +61,17 @@ steps:
       - ci/scripts/keycloak-theme-test.sh
     depends_on: []
 
+  # The Keycloak magic-link jar is pinned as ML_VERSION + ML_SHA256. Renovate
+  # bumps only the version; a stale hash used to surface as a Keycloak
+  # crash-loop on shared dev that timed out every pipeline's deploy-dev-prep.
+  # Downloads the pinned jar from Maven Central and fails here instead. On
+  # renovate/** branches .github/workflows/magic-link-pin.yml fixes the hash.
+  - name: magic-link-pin
+    image: bash
+    commands:
+      - ci/scripts/magic-link-pin.sh --check
+    depends_on: []
+
   - name: version-check
     image: bash
     commands:
