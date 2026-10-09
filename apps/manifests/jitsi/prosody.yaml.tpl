@@ -18,17 +18,20 @@ spec:
         app: jitsi-prosody
         component: prosody
     spec:
+      # Rootless since stable-11146: the images run as user s6 (uid/gid 1000).
+      # Numeric ids are required, runAsNonRoot cannot verify a named USER.
       securityContext:
-        runAsNonRoot: false  # Prosody image requires root for s6-overlay init
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
       - name: prosody
-        image: jitsi/prosody:stable-11031
+        image: ghcr.io/jitsi/prosody:stable-11248
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
-            add: ["SETUID", "SETGID", "CHOWN", "FOWNER", "DAC_OVERRIDE"]
             drop: ["ALL"]
         ports:
         - containerPort: 5222
@@ -132,8 +135,11 @@ spec:
         volumeMounts:
         - name: prosody-config
           mountPath: /config
+        # Data dir moved from /config/data to /var/lib/prosody in stable-11146
         - name: prosody-data
-          mountPath: /config/data
+          mountPath: /var/lib/prosody
+        - name: run
+          mountPath: /run
         livenessProbe:
           exec:
             command:
@@ -164,6 +170,8 @@ spec:
         emptyDir: {}
       - name: prosody-data
         emptyDir: {}  # Changed from PVC to reduce volume count - XMPP state rebuilds on restart
+      - name: run
+        emptyDir: {}
 
 ---
 apiVersion: v1

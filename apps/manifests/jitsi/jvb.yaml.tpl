@@ -78,7 +78,6 @@ spec:
                 app: jitsi-jvb
             topologyKey: "kubernetes.io/hostname"
       securityContext:
-        runAsNonRoot: false  # JVB image requires root for s6-overlay init
         seccompProfile:
           type: RuntimeDefault
       # Init container to discover node's external IP (cloud K8s returns internal IP for status.hostIP)
@@ -132,11 +131,15 @@ spec:
           mountPath: /shared
       containers:
       - name: jvb
-        image: jitsi/jvb:stable-11031
+        image: ghcr.io/jitsi/jvb:stable-11248
+        # Rootless since stable-11146: the image runs as user s6 (uid/gid 1000).
+        # Numeric ids are required, runAsNonRoot cannot verify a named USER.
         securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
           allowPrivilegeEscalation: false
           capabilities:
-            add: ["SETUID", "SETGID", "CHOWN", "FOWNER"]
             drop: ["ALL"]
         # Read external IP from init container and set environment variables
         command:
@@ -214,6 +217,12 @@ spec:
         - name: shared-data
           mountPath: /shared
           readOnly: true
+        # /config is root-owned in the image; the command above writes
+        # custom-jvb.conf there and the image copies it to /run/jvb/config.
+        - name: jvb-config
+          mountPath: /config
+        - name: run
+          mountPath: /run
         ports:
         - containerPort: ${JVB_PORT}
           hostPort: ${JVB_PORT}  # Binds to node's port for direct UDP media access
@@ -270,6 +279,10 @@ spec:
             memory: 2Gi
       volumes:
       - name: shared-data
+        emptyDir: {}
+      - name: jvb-config
+        emptyDir: {}
+      - name: run
         emptyDir: {}
 
 ---

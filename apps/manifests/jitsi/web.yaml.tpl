@@ -22,23 +22,26 @@ spec:
         app: jitsi-web
         component: web
     spec:
+      # Rootless since stable-11146: the images run as user s6 (uid/gid 1000).
+      # Numeric ids are required, runAsNonRoot cannot verify a named USER.
       securityContext:
-        runAsNonRoot: false  # Jitsi web image requires root for s6-overlay init
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
       - name: web
-        image: jitsi/web:stable-11031
+        image: ghcr.io/jitsi/web:stable-11248
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
-            add: ["SETUID", "SETGID", "CHOWN", "FOWNER"]
             drop: ["ALL"]
+        # Unprivileged port since stable-11146 (was 80). HTTPS is terminated at
+        # the ingress (DISABLE_HTTPS=1), so the image's 8443 is not exposed.
         ports:
-        - containerPort: 80
+        - containerPort: 8000
           name: http
-        - containerPort: 443
-          name: https
         env:
         - name: PUBLIC_URL
           value: "https://${JITSI_HOST}"
@@ -75,14 +78,21 @@ spec:
         # ADAPTER_INTERNAL_URL moved below POD_NAMESPACE (uses FQDN for nginx resolver)
         - name: ENABLE_SCTP
           value: "true"
-        - name: ENABLE_COLIBRI_WEBSOCKET
-          value: "false"
         - name: JVB_PREFER_SCTP
           value: "true"
         - name: ENABLE_XMPP_WEBSOCKET
           value: "false"
         - name: TZ
           value: "UTC"
+        # In-place ICE restart (make-before-break) instead of a full session
+        # restart when a client's media connection fails, e.g. on a Wi-Fi <->
+        # cellular switch. The second flag lets the native apps restart ICE
+        # proactively on an OS network-change event. Jicofo (enable-ice-restart)
+        # and JVB (ice.restart.enabled) default to on.
+        - name: ENABLE_ICE_RESTART
+          value: "true"
+        - name: ENABLE_ICE_RESTART_ON_NETWORK_CHANGE
+          value: "true"
         - name: DISABLE_HTTPS
           value: "1"
         - name: ENABLE_HTTP_REDIRECT
@@ -105,6 +115,9 @@ spec:
         volumeMounts:
         - name: web-config
           mountPath: /config
+        # Rendered config.js and nginx config live under /run/web (non-root writable)
+        - name: run
+          mountPath: /run
         - name: custom-config
           mountPath: /config/custom-config.js
           subPath: custom-config.js
@@ -125,11 +138,11 @@ spec:
         livenessProbe:
           httpGet:
             path: /
-            port: 80
+            port: http
         readinessProbe:
           httpGet:
             path: /
-            port: 80
+            port: http
         # Memory tuned based on actual usage (~17Mi observed)
         resources:
           requests:
@@ -139,6 +152,8 @@ spec:
             memory: 128Mi
       volumes:
       - name: web-config
+        emptyDir: {}
+      - name: run
         emptyDir: {}
       - name: custom-config
         configMap:
@@ -182,11 +197,10 @@ metadata:
 spec:
   type: ClusterIP
   ports:
+  # Named targetPort: old pods (80) and new pods (8000) both stay reachable
+  # during the rollout.
   - port: 80
     name: http
-    targetPort: 80
-  - port: 443
-    name: https
-    targetPort: 443
+    targetPort: http
   selector:
     app: jitsi-web
