@@ -285,11 +285,14 @@
     },
 
     // ---- Jitsi -------------------------------------------------------------------
-    // jitsi/{web,jicofo,prosody,jvb} use `stable-NNNNN` tags and must match.
+    // ghcr.io/jitsi/{web,jicofo,prosody,jvb} use `stable-NNNNN[-N]` tags and must
+    // match. Upstream moved publishing from Docker Hub to GHCR in stable-11146; the
+    // Docker Hub repos stopped at stable-11031, so Renovate saw no new releases.
+    // `-N` is an upstream re-release of the same stable (e.g. stable-11146-2).
     {
-      "description": "Jitsi stable-NNNNN tags: single numeric stream, keep the four images in lock-step",
-      "matchPackageNames": ["jitsi/web", "jitsi/jicofo", "jitsi/prosody", "jitsi/jvb"],
-      "versioning": "regex:^stable-(?<major>\\d+)$",
+      "description": "Jitsi stable-NNNNN[-N] tags: single numeric stream, keep the four images in lock-step",
+      "matchPackageNames": ["ghcr.io/jitsi/web", "ghcr.io/jitsi/jicofo", "ghcr.io/jitsi/prosody", "ghcr.io/jitsi/jvb"],
+      "versioning": "regex:^stable-(?<major>\\d+)(-(?<patch>\\d+))?$",
       "groupName": "jitsi",
       "dependencyDashboardApproval": false,
     },
@@ -432,10 +435,10 @@
       // renovate/major-weekly-batch branch.
       "description": "Streams whose 'major' is just the next release ride the weekly batch too",
       "matchPackageNames": [
-        "jitsi/web",
-        "jitsi/jicofo",
-        "jitsi/prosody",
-        "jitsi/jvb",
+        "ghcr.io/jitsi/web",
+        "ghcr.io/jitsi/jicofo",
+        "ghcr.io/jitsi/prosody",
+        "ghcr.io/jitsi/jvb",
         "ghcr.io/nordeck/jitsi-keycloak-adapter",
         "searxng/searxng",
         "metio/matrix-alertmanager-receiver",

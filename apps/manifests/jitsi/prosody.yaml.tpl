@@ -18,17 +18,20 @@ spec:
         app: jitsi-prosody
         component: prosody
     spec:
+      # Rootless since stable-11146: the images run as user s6 (uid/gid 1000).
+      # Numeric ids are required, runAsNonRoot cannot verify a named USER.
       securityContext:
-        runAsNonRoot: false  # Prosody image requires root for s6-overlay init
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
       - name: prosody
-        image: jitsi/prosody:stable-11031
+        image: ghcr.io/jitsi/prosody:stable-11248
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
-            add: ["SETUID", "SETGID", "CHOWN", "FOWNER", "DAC_OVERRIDE"]
             drop: ["ALL"]
         ports:
         - containerPort: 5222
@@ -42,6 +45,11 @@ spec:
         - containerPort: 5281
           name: bosh-secure
         env:
+        # /run is an emptyDir, which Kubernetes creates root-owned and world-writable
+        # without the sticky bit; the rootless s6-overlay refuses that unless told
+        # otherwise (same setting as the jitsi-contrib/jitsi-helm chart).
+        - name: S6_YES_I_WANT_A_WORLD_WRITABLE_RUN_BECAUSE_KUBERNETES
+          value: "1"
         - name: PUBLIC_URL
           value: "https://${JITSI_HOST}"
         - name: XMPP_DOMAIN
@@ -132,8 +140,11 @@ spec:
         volumeMounts:
         - name: prosody-config
           mountPath: /config
+        # Data dir moved from /config/data to /var/lib/prosody in stable-11146
         - name: prosody-data
-          mountPath: /config/data
+          mountPath: /var/lib/prosody
+        - name: run
+          mountPath: /run
         livenessProbe:
           exec:
             command:
@@ -164,6 +175,8 @@ spec:
         emptyDir: {}
       - name: prosody-data
         emptyDir: {}  # Changed from PVC to reduce volume count - XMPP state rebuilds on restart
+      - name: run
+        emptyDir: {}
 
 ---
 apiVersion: v1

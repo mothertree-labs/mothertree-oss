@@ -78,7 +78,6 @@ spec:
                 app: jitsi-jvb
             topologyKey: "kubernetes.io/hostname"
       securityContext:
-        runAsNonRoot: false  # JVB image requires root for s6-overlay init
         seccompProfile:
           type: RuntimeDefault
       # Init container to discover node's external IP (cloud K8s returns internal IP for status.hostIP)
@@ -132,11 +131,15 @@ spec:
           mountPath: /shared
       containers:
       - name: jvb
-        image: jitsi/jvb:stable-11031
+        image: ghcr.io/jitsi/jvb:stable-11248
+        # Rootless since stable-11146: the image runs as user s6 (uid/gid 1000).
+        # Numeric ids are required, runAsNonRoot cannot verify a named USER.
         securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
           allowPrivilegeEscalation: false
           capabilities:
-            add: ["SETUID", "SETGID", "CHOWN", "FOWNER"]
             drop: ["ALL"]
         # Read external IP from init container and set environment variables
         command:
@@ -214,6 +217,12 @@ spec:
         - name: shared-data
           mountPath: /shared
           readOnly: true
+        # /config is root-owned in the image; the command above writes
+        # custom-jvb.conf there and the image copies it to /run/jvb/config.
+        - name: jvb-config
+          mountPath: /config
+        - name: run
+          mountPath: /run
         ports:
         - containerPort: ${JVB_PORT}
           hostPort: ${JVB_PORT}  # Binds to node's port for direct UDP media access
@@ -222,6 +231,11 @@ spec:
         - containerPort: 8080
           name: http
         env:
+        # /run is an emptyDir, which Kubernetes creates root-owned and world-writable
+        # without the sticky bit; the rootless s6-overlay refuses that unless told
+        # otherwise (same setting as the jitsi-contrib/jitsi-helm chart).
+        - name: S6_YES_I_WANT_A_WORLD_WRITABLE_RUN_BECAUSE_KUBERNETES
+          value: "1"
         - name: POD_IP
           valueFrom:
             fieldRef:
@@ -270,6 +284,10 @@ spec:
             memory: 2Gi
       volumes:
       - name: shared-data
+        emptyDir: {}
+      - name: jvb-config
+        emptyDir: {}
+      - name: run
         emptyDir: {}
 
 ---
