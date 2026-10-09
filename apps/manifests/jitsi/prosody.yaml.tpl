@@ -45,6 +45,11 @@ spec:
         - containerPort: 5281
           name: bosh-secure
         env:
+        # /run is an emptyDir, which Kubernetes creates root-owned and world-writable
+        # without the sticky bit; the rootless s6-overlay refuses that unless told
+        # otherwise (same setting as the jitsi-contrib/jitsi-helm chart).
+        - name: S6_YES_I_WANT_A_WORLD_WRITABLE_RUN_BECAUSE_KUBERNETES
+          value: "1"
         - name: PUBLIC_URL
           value: "https://${JITSI_HOST}"
         - name: XMPP_DOMAIN

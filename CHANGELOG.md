@@ -143,7 +143,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Containers are **rootless** (uid/gid 1000). They now run with
     `runAsNonRoot`, numeric ids and no added capabilities, and each gets a
     writable `/run` emptyDir. JVB also gets one at `/config` for
-    `custom-jvb.conf`.
+    `custom-jvb.conf`. Kubernetes creates emptyDirs world-writable without the
+    sticky bit, which rootless s6-overlay rejects, so every container sets
+    `S6_YES_I_WANT_A_WORLD_WRITABLE_RUN_BECAUSE_KUBERNETES=1` (as the
+    jitsi-contrib/jitsi-helm chart does).
   - Web listens on **8000** instead of 80. The Service uses a named
     `targetPort`, so old and new pods are both reachable mid-rollout.
   - Rendered web config moved to `/run/web/config`. The custom `meet.conf`
