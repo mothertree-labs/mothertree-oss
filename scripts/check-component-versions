@@ -98,7 +98,7 @@ echo "=== Docker Image Versions ==="
 echo ""
 
 # Jitsi (from manifests)
-CURRENT_JITSI=$(extract_image_tag "jitsi/prosody" "$REPO/apps/manifests/jitsi/prosody.yaml.tpl")
+CURRENT_JITSI=$(extract_image_tag "ghcr.io/jitsi/prosody" "$REPO/apps/manifests/jitsi/prosody.yaml.tpl")
 LATEST_JITSI=$(curl -s "https://api.github.com/repos/jitsi/docker-jitsi-meet/releases/latest" 2>/dev/null | extract_tag || echo "unknown")
 print_status "Jitsi" "$CURRENT_JITSI" "$LATEST_JITSI"
 

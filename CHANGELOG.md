@@ -127,6 +127,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `apps/calendar-automation/.dockerignore` goes with it — nothing else read it.
 
 ### Changed
+- **Jitsi stable-11031 → stable-11248, with in-place ICE restart enabled**
+  (`apps/manifests/jitsi/`). When a participant's media connection fails, for
+  example on a Wi-Fi ↔ cellular switch, the client now asks the bridge for
+  fresh ICE credentials on the existing session (make-before-break) instead of
+  tearing the session down and being re-invited. DTLS, SSRCs and session state
+  survive, and the client falls back to the old full restart after 15 s.
+  `ENABLE_ICE_RESTART_ON_NETWORK_CHANGE` also lets the native apps restart ICE
+  as soon as the OS reports a network change. Browsers still need about 15 s to
+  declare the connection failed, so this shortens but does not remove the gap.
+  Upstream changes that needed manifest work:
+  - Images moved from Docker Hub to **`ghcr.io/jitsi/*`**. Docker Hub stopped at
+    stable-11031, which is why Renovate never offered this bump; `renovate.json5`
+    now tracks the GHCR names and accepts `stable-NNNNN-N` re-releases.
+  - Containers are **rootless** (uid/gid 1000). They now run with
+    `runAsNonRoot`, numeric ids and no added capabilities, and each gets a
+    writable `/run` emptyDir. JVB also gets one at `/config` for
+    `custom-jvb.conf`. Kubernetes creates emptyDirs world-writable without the
+    sticky bit, which rootless s6-overlay rejects, so every container sets
+    `S6_YES_I_WANT_A_WORLD_WRITABLE_RUN_BECAUSE_KUBERNETES=1` (as the
+    jitsi-contrib/jitsi-helm chart does).
+  - Web listens on **8000** instead of 80. The Service uses a named
+    `targetPort`, so old and new pods are both reachable mid-rollout.
+  - Rendered web config moved to `/run/web/config`. The custom `meet.conf`
+    template follows, and its colibri-websocket blocks are dropped (removed
+    upstream; we had them disabled).
+  - Prosody data moved from `/config/data` to `/var/lib/prosody`.
+
+  The prod deploy restarts Prosody, which ends calls in progress.
 - **La Suite Docs (impress) 4.4.0 → 5.6.1** (`docs/backend-deployment.yaml`,
   `docs/migrations-job.yaml`, `docs/frontend-deployment.yaml.tpl`,
   `docs/y-provider-deployment.yaml`; tracking issue #606). This is a **schema

@@ -22,22 +22,30 @@ spec:
         app: jitsi-jicofo
         component: jicofo
     spec:
+      # Rootless since stable-11146: the images run as user s6 (uid/gid 1000).
+      # Numeric ids are required, runAsNonRoot cannot verify a named USER.
       securityContext:
-        runAsNonRoot: false  # Jicofo image requires root for s6-overlay init
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
       - name: jicofo
-        image: jitsi/jicofo:stable-11031
+        image: ghcr.io/jitsi/jicofo:stable-11248
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
-            add: ["SETUID", "SETGID", "CHOWN", "FOWNER"]
             drop: ["ALL"]
         ports:
         - containerPort: 8888
           name: http
         env:
+        # /run is an emptyDir, which Kubernetes creates root-owned and world-writable
+        # without the sticky bit; the rootless s6-overlay refuses that unless told
+        # otherwise (same setting as the jitsi-contrib/jitsi-helm chart).
+        - name: S6_YES_I_WANT_A_WORLD_WRITABLE_RUN_BECAUSE_KUBERNETES
+          value: "1"
         - name: XMPP_SERVER
           value: "jitsi-prosody"
         - name: XMPP_DOMAIN
@@ -83,12 +91,19 @@ spec:
           tcpSocket:
             port: 8888
           periodSeconds: 10
+        # Rendered jicofo.conf lives under /run/jicofo (non-root writable)
+        volumeMounts:
+        - name: run
+          mountPath: /run
         resources:
           requests:
             cpu: 50m
             memory: 192Mi
           limits:
             memory: 1Gi
+      volumes:
+      - name: run
+        emptyDir: {}
 
 ---
 apiVersion: v1
