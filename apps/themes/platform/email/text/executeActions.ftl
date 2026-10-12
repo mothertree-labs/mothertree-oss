@@ -28,6 +28,17 @@
 <#-- Check if user has tenantEmail attribute AND is in swapped state (needs email swap before Keycloak action) -->
 <#if user.attributes?? && user.attributes.tenantEmail?? && attrVal(user.attributes.tenantEmail) != "" && user.email != attrVal(user.attributes.tenantEmail)>
     <#assign needsEmailSwap = true>
+</#if>
+<#-- Guests setting up a passkey also go through /beginSetup: it sets the mt-setup-info
+     cookie that lets webauthn-register.ftl offer email sign-in when the passkey can't be
+     created. The account portal stores beginSetupToken + setupUserId before sending. -->
+<#assign isGuestSetup = false>
+<#if isPasskeySetup && user.attributes?? && user.attributes.userType?? && attrVal(user.attributes.userType) == "guest"
+     && user.attributes.beginSetupToken?? && attrVal(user.attributes.beginSetupToken) != ""
+     && user.attributes.setupUserId?? && attrVal(user.attributes.setupUserId) != "">
+    <#assign isGuestSetup = true>
+</#if>
+<#if needsEmailSwap || isGuestSetup>
     <#assign linkDomain = link?keep_after("://")?keep_before("/")>
     <#assign adminDomain = linkDomain?replace("auth.", "account.")>
     <#assign beginSetupToken = "">
@@ -56,7 +67,7 @@ Account being recovered: ${attrVal(user.attributes.tenantEmail)}
 WHAT HAPPENS NEXT:
 Click the link below to register a new passkey for your account. Your old passkey has been removed for security.
 
-${setupLink}
+${setupLink?no_esc}
 
 This link will expire in ${linkExpirationFormatter(linkExpiration)}. If it expires, you can request a new recovery link from the login page.
 
@@ -82,7 +93,7 @@ Recovery email address: ${user.email}
 
 Click the link below to set a new password:
 
-${setupLink}
+${setupLink?no_esc}
 
 <#if isPasskeySetup>
 NEXT STEP: After resetting your password, you'll be prompted to register a new passkey for secure, passwordless login.
@@ -112,7 +123,7 @@ Your ${realmName} email will be: ${attrVal(user.attributes.tenantEmail)}
 
 Click the link below to set up your passkey:
 
-${setupLink}
+${setupLink?no_esc}
 
 This link will expire in ${linkExpirationFormatter(linkExpiration)}. If it expires, please contact your administrator for a new invitation.
 

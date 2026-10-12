@@ -56,6 +56,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   builtins, so it does not depend on `require(esm)`.
 
 ### Fixed
+- **Passkey registration works on older Safari, and guests get an email fallback
+  when it fails.** `webauthn-register.ftl` passed Keycloak's `"not specified"`
+  policy placeholder straight into `navigator.credentials.create()` as
+  `attestation: "not specified"`. Chromium ignores unknown enum values, but WebKit
+  treated these members as strict enums until late 2025 and rejected the call with
+  a bare `TypeError: Type error` before any prompt: a guest on Safari 15.3 could
+  not register. The page now leaves every unset member out, as Keycloak's own
+  `webauthnRegister.js` does. Guests also never had the "sign in with an email
+  link instead" option: it needs the `mt-setup-info` cookie set by `/beginSetup`,
+  and only invited members' setup emails went through it. The account portal now
+  stores a `beginSetupToken` on a guest before sending the setup email,
+  `executeActions.ftl` routes a guest's passkey-setup link through `/beginSetup`,
+  and a failed registration offers email sign-in on the page instead of posting
+  the error to Keycloak's dead-end error page. A guest who switches lands back on
+  the shared file or doc, not the account portal home. The plain-text setup email
+  no longer HTML-escapes `&` inside `/beginSetup` links. New hermetic theme spec
+  `e2e/keycloak-theme/webauthn-register-options.spec.ts` checks the options the
+  page hands to the browser (Chromium cannot reproduce the WebKit rejection).
 - **Renovate magic-link bumps no longer crash-loop Keycloak on dev.** Renovate
   bumps `ML_VERSION` in `apps/values/keycloak-codecentric.yaml` but cannot update
   `ML_SHA256`: hosted Renovate has no file digest for Maven and runs no

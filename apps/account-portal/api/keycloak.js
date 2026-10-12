@@ -656,29 +656,12 @@ async function createGuestUser({ email, firstName, lastName, redirectUri, skipEm
   // Send execute-actions-email for verification + passkey registration
   // (skipped when caller provides shareContext and sends its own contextual email)
   if (!skipEmail) {
-    const baseUrl = process.env.BASE_URL;
-    const finalRedirect = redirectUri || baseUrl;
-    const clientId = process.env.KEYCLOAK_CLIENT_ID || 'account-portal';
-    const executeActionsUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}/execute-actions-email`;
-
-    const emailResponse = await fetch(
-      `${executeActionsUrl}?lifespan=604800&redirect_uri=${encodeURIComponent(finalRedirect)}&client_id=${clientId}`,
-      {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(['VERIFY_EMAIL', 'webauthn-register-passwordless']),
-      }
-    );
-
-    if (!emailResponse.ok) {
-      const error = await emailResponse.text();
-      console.error('Failed to send guest registration email:', error);
-      // Don't throw - user is created, they can recover later
-    } else {
+    try {
+      await sendExecuteActionsEmail(userId, redirectUri);
       console.log('Guest registration email sent successfully');
+    } catch (err) {
+      console.error('Failed to send guest registration email:', err.message);
+      // Don't throw - user is created, they can recover later
     }
   } else {
     console.log('Skipping Keycloak execute-actions-email (caller will send contextual email)');
@@ -688,12 +671,53 @@ async function createGuestUser({ email, firstName, lastName, redirectUri, skipEm
 }
 
 /**
+ * Store a fresh beginSetup HMAC token (and the user id, which the email template
+ * cannot otherwise see) on a user, so executeActions.ftl routes the setup link
+ * through /beginSetup. That sets the mt-setup-info cookie webauthn-register.ftl
+ * needs to offer email sign-in when a passkey can't be created. The token only
+ * ever reaches the user inside that email. Guests only: the template routes only
+ * guests this way, and rewriting a member's attributes here could race the
+ * invite/recovery flows that own them (tenantEmail, isRecoveryFlow).
+ */
+async function storeBeginSetupToken(userId, token) {
+  const userUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users/${userId}`;
+  const getResponse = await fetch(userUrl, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!getResponse.ok) {
+    throw new Error(`Failed to get user for setup token: ${getResponse.status}`);
+  }
+  const user = await getResponse.json();
+  if (user.attributes?.userType?.[0] !== 'guest') return;
+
+  const updateResponse = await fetch(userUrl, {
+    method: 'PUT',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      ...user,
+      attributes: {
+        ...user.attributes,
+        beginSetupToken: [generateBeginSetupToken(userId)],
+        setupUserId: [userId],
+      },
+    }),
+  });
+  if (!updateResponse.ok) {
+    throw new Error(`Failed to store setup token: ${updateResponse.status}`);
+  }
+}
+
+/**
  * Send Keycloak execute-actions-email for a user (verify email + register passkey).
  * Used when a provisioned guest clicks a share invite link and still needs to set up.
  */
 async function sendExecuteActionsEmail(userId, redirectUri) {
   validateUserId(userId);
   const token = await getServiceToken();
+  await storeBeginSetupToken(userId, token);
   const baseUrl = process.env.BASE_URL;
   const finalRedirect = redirectUri || baseUrl;
   const clientId = process.env.KEYCLOAK_CLIENT_ID || 'account-portal';
