@@ -37,7 +37,7 @@ spec:
       restartPolicy: OnFailure
       initContainers:
         - name: pull
-          image: ollama/ollama:0.35.0
+          image: ollama/ollama:0.40.0
           command:
             - /bin/sh
             - -c
@@ -64,7 +64,7 @@ spec:
               mountPath: /root/.ollama
       containers:
         - name: upload
-          image: amazon/aws-cli:2.37.8
+          image: amazon/aws-cli:2.37.10
           command:
             - /bin/sh
             - -c

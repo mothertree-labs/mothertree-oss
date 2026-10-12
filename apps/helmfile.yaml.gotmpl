@@ -91,7 +91,7 @@ releases:
   - name: kube-prometheus-stack
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: prometheus-community/kube-prometheus-stack
-    version: 91.8.2
+    version: 91.9.0
     disableValidation: true
     needs:
       - {{ requiredEnv "NS_INGRESS" }}/ingress-nginx
@@ -112,7 +112,7 @@ releases:
   - name: vector
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: vector/vector
-    version: 0.58.0
+    version: 0.59.0
     needs:
       - {{ requiredEnv "NS_MONITORING" }}/kube-prometheus-stack
     labels:
@@ -125,7 +125,7 @@ releases:
   - name: prometheus-blackbox-exporter
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: prometheus-community/prometheus-blackbox-exporter
-    version: 11.19.1
+    version: 11.20.0
     labels:
       tier: system
     needs:
