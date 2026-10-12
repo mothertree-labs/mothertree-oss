@@ -2,6 +2,7 @@ import { execSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { TEST_USERS } from './helpers/test-users';
+import { isImapConfigured, sweepInboxOlderThan } from './helpers/imap';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'dev-test-users.sh');
@@ -26,6 +27,36 @@ function run(cmd: string): string {
   });
 }
 
+/** Mail older than this in the fixed mail users' inboxes is from earlier runs. */
+const MAIL_SWEEP_MAX_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * Purge old mail from the fixed mail users (see sweepInboxOlderThan).
+ * Only one shard sweeps (shard 1, or an unsharded local run) so ten shards
+ * don't race to expunge the same messages. The pool lease guarantees one
+ * pipeline per tenant, and its own mail is younger than the cutoff.
+ */
+async function sweepFixedMailUsers(): Promise<void> {
+  const shard = process.env.E2E_SHARD;
+  if (shard && !shard.startsWith('1/')) return;
+
+  if (!isImapConfigured()) {
+    if (IS_CI) {
+      throw new Error('E2E_STALWART_ADMIN_PASSWORD is not set — cannot sweep fixed mail users');
+    }
+    console.log('  [setup] IMAP not configured — skipping mail sweep');
+    return;
+  }
+
+  for (const user of [TEST_USERS.emailTest, TEST_USERS.emailRecv]) {
+    const { deleted, remaining } = await sweepInboxOlderThan({
+      userEmail: user.email,
+      maxAgeMs: MAIL_SWEEP_MAX_AGE_MS,
+    });
+    console.log(`  [setup] Mail sweep ${user.username}: deleted ${deleted}, ${remaining} remaining`);
+  }
+}
+
 export default async function globalSetup(): Promise<void> {
   console.log('\n[E2E Global Setup]\n');
 
@@ -36,6 +67,8 @@ export default async function globalSetup(): Promise<void> {
     fs.rmSync(authDir, { recursive: true });
   }
   fs.mkdirSync(authDir, { recursive: true });
+
+  await sweepFixedMailUsers();
 
   // In CI, pipeline-scoped test users are created by ci-lease-tenant.sh via the
   // Keycloak API — no further user management needed here.
