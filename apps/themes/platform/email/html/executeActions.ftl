@@ -29,6 +29,17 @@
 <#-- Check if user has tenantEmail attribute AND is in swapped state (needs email swap before Keycloak action) -->
 <#if user.attributes?? && user.attributes.tenantEmail?? && attrVal(user.attributes.tenantEmail) != "" && user.email != attrVal(user.attributes.tenantEmail)>
     <#assign needsEmailSwap = true>
+</#if>
+<#-- Guests setting up a passkey also go through /beginSetup: it sets the mt-setup-info
+     cookie that lets webauthn-register.ftl offer email sign-in when the passkey can't be
+     created. The account portal stores beginSetupToken + setupUserId before sending. -->
+<#assign isGuestSetup = false>
+<#if isPasskeySetup && user.attributes?? && user.attributes.userType?? && attrVal(user.attributes.userType) == "guest"
+     && user.attributes.beginSetupToken?? && attrVal(user.attributes.beginSetupToken) != ""
+     && user.attributes.setupUserId?? && attrVal(user.attributes.setupUserId) != "">
+    <#assign isGuestSetup = true>
+</#if>
+<#if needsEmailSwap || isGuestSetup>
     <#-- Route through account portal to swap email before Keycloak processes the action -->
     <#-- Transform auth.X.org to account.X.org to find the account portal -->
     <#assign linkDomain = link?keep_after("://")?keep_before("/")>

@@ -594,7 +594,11 @@ describe('keycloak.js', () => {
         .mockResolvedValueOnce(mockResponse(200, { id: 'r2', name: 'docs-user' }))
         // 8. removeRealmRole DELETE mapping
         .mockResolvedValueOnce(mockResponse(204, ''))
-        // 9. PUT execute-actions-email
+        // 9. GET user (store beginSetup token)
+        .mockResolvedValueOnce(mockResponse(200, { ...createdUser, attributes: { userType: ['guest'] } }))
+        // 10. PUT user (beginSetupToken + setupUserId)
+        .mockResolvedValueOnce(mockResponse(204, ''))
+        // 11. PUT execute-actions-email
         .mockResolvedValueOnce(mockResponse(200, ''));
 
       const result = await keycloak.createGuestUser(guestParams);
@@ -650,11 +654,89 @@ describe('keycloak.js', () => {
         // 8-9. removeRealmRole
         .mockResolvedValueOnce(mockResponse(200, { id: 'r2', name: 'docs-user' }))
         .mockResolvedValueOnce(mockResponse(204, ''))
-        // 10. execute-actions-email
+        // 10-11. store beginSetup token (GET + PUT user)
+        .mockResolvedValueOnce(mockResponse(200, createdUser))
+        .mockResolvedValueOnce(mockResponse(204, ''))
+        // 12. execute-actions-email
         .mockResolvedValueOnce(mockResponse(200, ''));
 
       const result = await keycloak.createGuestUser(guestParams);
       expect(result.userId).toBe(VALID_UUID);
+    });
+  });
+
+  // ---- sendExecuteActionsEmail ----
+
+  describe('sendExecuteActionsEmail', () => {
+    const redirectUri = 'https://account.test.example.com/guest-complete?share=s1';
+    const guestUser = {
+      id: VALID_UUID,
+      email: 'guest@external.example.org',
+      attributes: { userType: ['guest'] },
+    };
+
+    it('stores a beginSetup token on the user before sending the email', async () => {
+      global.fetch
+        .mockResolvedValueOnce(mockResponse(200, TOKEN_RESPONSE))
+        .mockResolvedValueOnce(mockResponse(200, guestUser))
+        .mockResolvedValueOnce(mockResponse(204, ''))
+        .mockResolvedValueOnce(mockResponse(200, ''));
+
+      await keycloak.sendExecuteActionsEmail(VALID_UUID, redirectUri);
+
+      expect(global.fetch).toHaveBeenCalledTimes(4);
+      const [putUrl, putInit] = global.fetch.mock.calls[2];
+      expect(putUrl).toBe(`http://keycloak.test/admin/realms/test-realm/users/${VALID_UUID}`);
+      expect(putInit.method).toBe('PUT');
+      const body = JSON.parse(putInit.body);
+      expect(body.attributes.userType).toEqual(['guest']);
+      expect(body.attributes.setupUserId).toEqual([VALID_UUID]);
+
+      // The stored token must be one /beginSetup accepts for this user.
+      const [timestamp, hmac] = body.attributes.beginSetupToken[0].split(':');
+      const crypto = require('crypto');
+      const expected = crypto.createHmac('sha256', process.env.BEGINSETUP_SECRET)
+        .update(`${VALID_UUID}:${timestamp}`)
+        .digest('hex');
+      expect(hmac).toBe(expected);
+
+      const [emailUrl, emailInit] = global.fetch.mock.calls[3];
+      expect(emailUrl).toContain(`/users/${VALID_UUID}/execute-actions-email`);
+      expect(emailUrl).toContain(`redirect_uri=${encodeURIComponent(redirectUri)}`);
+      expect(JSON.parse(emailInit.body)).toEqual(['VERIFY_EMAIL', 'webauthn-register-passwordless']);
+    });
+
+    it('does not send the email when the token cannot be stored', async () => {
+      global.fetch
+        .mockResolvedValueOnce(mockResponse(200, TOKEN_RESPONSE))
+        .mockResolvedValueOnce(mockResponse(200, guestUser))
+        .mockResolvedValueOnce(mockResponse(500, 'boom'));
+
+      await expect(keycloak.sendExecuteActionsEmail(VALID_UUID, redirectUri))
+        .rejects.toThrow('Failed to store setup token: 500');
+      expect(global.fetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('leaves a non-guest user untouched and still sends the email', async () => {
+      global.fetch
+        .mockResolvedValueOnce(mockResponse(200, TOKEN_RESPONSE))
+        .mockResolvedValueOnce(mockResponse(200, {
+          id: VALID_UUID,
+          email: 'member@example.com',
+          attributes: { tenantEmail: ['member@example.com'], isRecoveryFlow: ['true'] },
+        }))
+        .mockResolvedValueOnce(mockResponse(200, ''));
+
+      await keycloak.sendExecuteActionsEmail(VALID_UUID, redirectUri);
+
+      // token, GET user, execute-actions-email — no PUT of the user itself
+      expect(global.fetch).toHaveBeenCalledTimes(3);
+      expect(global.fetch.mock.calls[2][0]).toContain('/execute-actions-email');
+    });
+
+    it('rejects an invalid user id without calling Keycloak', async () => {
+      await expect(keycloak.sendExecuteActionsEmail('../users', redirectUri)).rejects.toThrow();
+      expect(global.fetch).not.toHaveBeenCalled();
     });
   });
 

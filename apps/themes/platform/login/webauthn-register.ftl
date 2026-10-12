@@ -63,8 +63,8 @@
             </form>
 
             <div id="no-platform-auth-banner" style="display:none; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; text-align: left;">
-                <div style="font-weight: 600; color: #9a3412; margin-bottom: 0.25rem; font-size: 0.95rem;">Passkey not available on this device</div>
-                <div style="color: #9a3412; font-size: 0.9rem; line-height: 1.5;">
+                <div id="no-platform-auth-title" style="font-weight: 600; color: #9a3412; margin-bottom: 0.25rem; font-size: 0.95rem;">Passkey not available on this device</div>
+                <div id="no-platform-auth-text" style="color: #9a3412; font-size: 0.9rem; line-height: 1.5;">
                     Your device doesn't support passkeys (fingerprint or face recognition).
                     You can sign in using a secure link sent to your email instead.
                 </div>
@@ -81,7 +81,7 @@
             </a>
 
             <div id="register-btn-secondary" style="display:none; text-align: center; margin-top: 0.75rem;">
-                <a href="javascript:void(0)" onclick="registerWebAuthn()"
+                <a id="register-btn-secondary-link" href="javascript:void(0)" onclick="registerWebAuthn()"
                    style="color: #6b6b6b; text-decoration: none; font-size: 0.9rem; font-family: 'Figtree', sans-serif;">
                     I have a security key &mdash; register passkey anyway
                 </a>
@@ -161,6 +161,7 @@
                 var attestationConveyancePreference = "${attestationConveyancePreference}";
                 var authenticatorAttachment = "${authenticatorAttachment}";
                 var requireResidentKey = "${requireResidentKey}";
+                var residentKey = "${residentKey!'not specified'}";
                 var userVerificationRequirement = "${userVerificationRequirement}";
                 var createTimeout = ${createTimeout};
                 var excludeCredentialIds = "${excludeCredentialIds}";
@@ -190,17 +191,49 @@
                         name: username,
                         displayName: username
                     },
-                    pubKeyCredParams: pubKeyCredParams,
-                    authenticatorSelection: {
-                        authenticatorAttachment: authenticatorAttachment === "not specified" ? undefined : authenticatorAttachment,
-                        requireResidentKey: requireResidentKey === "Yes",
-                        residentKey: requireResidentKey === "Yes" ? "required" : "discouraged",
-                        userVerification: userVerificationRequirement
-                    },
-                    timeout: createTimeout === 0 ? undefined : createTimeout * 1000,
-                    attestation: attestationConveyancePreference,
-                    excludeCredentials: excludeCredentials
+                    pubKeyCredParams: pubKeyCredParams
                 };
+
+                // Keycloak renders every unset policy value as the literal
+                // "not specified". Leave those members out, as Keycloak's own
+                // webauthnRegister.js does: Safari before late 2025 treats
+                // attestation / userVerification / authenticatorAttachment as
+                // strict IDL enums and rejects the whole call with a bare
+                // "TypeError: Type error" before any prompt appears (a prod
+                // guest on Safari 15.3 could not register, 2026-10).
+                if (attestationConveyancePreference !== "not specified") {
+                    publicKey.attestation = attestationConveyancePreference;
+                }
+
+                var authenticatorSelection = {};
+                var isAuthenticatorSelectionSpecified = false;
+                if (authenticatorAttachment !== "not specified") {
+                    authenticatorSelection.authenticatorAttachment = authenticatorAttachment;
+                    isAuthenticatorSelectionSpecified = true;
+                }
+                if (residentKey !== "not specified") {
+                    authenticatorSelection.residentKey = residentKey;
+                    authenticatorSelection.requireResidentKey = residentKey === "required";
+                    isAuthenticatorSelectionSpecified = true;
+                } else if (requireResidentKey !== "not specified") {
+                    authenticatorSelection.residentKey = requireResidentKey === "Yes" ? "required" : "discouraged";
+                    authenticatorSelection.requireResidentKey = requireResidentKey === "Yes";
+                    isAuthenticatorSelectionSpecified = true;
+                }
+                if (userVerificationRequirement !== "not specified") {
+                    authenticatorSelection.userVerification = userVerificationRequirement;
+                    isAuthenticatorSelectionSpecified = true;
+                }
+                if (isAuthenticatorSelectionSpecified) {
+                    publicKey.authenticatorSelection = authenticatorSelection;
+                }
+
+                if (createTimeout !== 0) {
+                    publicKey.timeout = createTimeout * 1000;
+                }
+                if (excludeCredentials.length > 0) {
+                    publicKey.excludeCredentials = excludeCredentials;
+                }
 
                 navigator.credentials.create({publicKey: publicKey})
                     .then(function(result) {
@@ -219,6 +252,10 @@
                         document.getElementById('register').submit();
                     })
                     .catch(function(err) {
+                        // With an email sign-in route available, stay on this page
+                        // and offer it: posting the error lands on Keycloak's
+                        // generic error page, where the only way out is "try again".
+                        if (showRegistrationFailedFallback(err && err.name)) return;
                         document.getElementById('error').value = err.name + ": " + err.message;
                         document.getElementById('register').submit();
                     });
@@ -227,7 +264,7 @@
         <script type="text/javascript">
             // Build the /switch-to-magic-link URL from the mt-setup-info cookie (set by /beginSetup).
             // Returns the URL string, or null if the cookie is missing/invalid.
-            function buildSwitchToMagicLinkUrl() {
+            function buildSwitchToMagicLinkUrl(reason) {
                 try {
                     var cookies = document.cookie.split(';');
                     for (var i = 0; i < cookies.length; i++) {
@@ -239,7 +276,8 @@
                             return 'https://' + accountHost + '/switch-to-magic-link'
                                 + '?userId=' + encodeURIComponent(payload.userId)
                                 + '&token=' + encodeURIComponent(payload.token)
-                                + '&next=' + encodeURIComponent(currentUrl);
+                                + '&next=' + encodeURIComponent(currentUrl)
+                                + (reason ? '&reason=' + encodeURIComponent(reason) : '');
                         }
                     }
                 } catch(e) {
@@ -298,6 +336,33 @@
                     document.getElementById('registerBtn').style.display = 'block';
                     document.getElementById('register-btn-secondary').style.display = 'none';
                 }
+            }
+
+            // Registration failed in the browser (unsupported options, no usable
+            // authenticator, user dismissed the prompt). Offer email sign-in and a
+            // retry. Returns false when no setup cookie is present, so the caller
+            // falls back to reporting the error to Keycloak.
+            function showRegistrationFailedFallback(reason) {
+                var switchUrl = buildSwitchToMagicLinkUrl(reason || 'Error');
+                if (!switchUrl) return false;
+
+                document.getElementById('no-platform-auth-title').textContent = "Passkey setup didn't work";
+                document.getElementById('no-platform-auth-text').textContent =
+                    "This browser or device couldn't create a passkey. " +
+                    "You can sign in using a secure link sent to your email instead, or try again.";
+                document.getElementById('no-platform-auth-banner').style.display = 'block';
+                document.getElementById('registerBtn').style.display = 'none';
+
+                var magicBtn = document.getElementById('magic-link-btn');
+                magicBtn.href = switchUrl;
+                magicBtn.style.display = 'block';
+
+                document.getElementById('register-btn-secondary-link').textContent = 'Try passkey again';
+                document.getElementById('register-btn-secondary').style.display = 'block';
+
+                var subtleDiv = document.getElementById('magic-link-subtle');
+                if (subtleDiv) subtleDiv.style.display = 'none';
+                return true;
             }
         </script>
     </#if>

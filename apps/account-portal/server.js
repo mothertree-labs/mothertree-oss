@@ -684,10 +684,13 @@ app.get('/beginSetup', async (req, res) => {
   res.redirect(302, next);
 });
 
+const { guestCompleteRedirectFrom } = require('./api/guest-redirect');
+
 // Switch to Magic Link - swaps WebAuthn required action for magic-link
-// Called from the WebAuthn registration page when device lacks platform authenticator
+// Called from the WebAuthn registration page when the device lacks a platform
+// authenticator, or after passkey registration failed in the browser (`reason`).
 app.get('/switch-to-magic-link', async (req, res) => {
-  const { userId, token, next } = req.query;
+  const { userId, token, next, reason } = req.query;
 
   if (!userId || !next) {
     console.error('switch-to-magic-link: missing userId or next parameter');
@@ -731,7 +734,9 @@ app.get('/switch-to-magic-link', async (req, res) => {
     // Remove webauthn required action and mark user as magic-link auth
     await keycloakApi.removeRequiredAction(userId, 'webauthn-register-passwordless');
     await keycloakApi.setUserAuthMethod(userId, 'magic-link');
-    console.log(`switch-to-magic-link: removed webauthn action, set authMethod=magic-link for user ${userId}`);
+    const failureReason = typeof reason === 'string' && /^[A-Za-z]{1,40}$/.test(reason) ? reason : null;
+    console.log(`switch-to-magic-link: removed webauthn action, set authMethod=magic-link for user ${userId}` +
+      (failureReason ? ` (passkey registration failed in browser: ${failureReason})` : ''));
 
     // Send a magic-link email instead of redirecting directly.
     // The invitation link is long-lived (7 days) and doesn't verify email
@@ -742,7 +747,11 @@ app.get('/switch-to-magic-link', async (req, res) => {
     const accountPortalBase = process.env.BASE_URL; // e.g. https://account.dev.mother-tree.org
     // Get the user's current Keycloak email (recovery email during onboarding)
     const userEmail = await keycloakApi.getUserEmail(userId);
-    await keycloakApi.sendMagicLinkUrlToEmail(userId, `${accountPortalBase}/magic-link-landing`, userEmail, 'Complete your MotherTree account setup');
+    // A guest goes straight back to the shared file or doc. /magic-link-landing
+    // ends in /complete-registration, which only matters for invited members
+    // (tenant email swap) and would leave a guest on the account portal home.
+    const magicLinkRedirect = guestCompleteRedirectFrom(validatedNext, accountPortalBase) || `${accountPortalBase}/magic-link-landing`;
+    await keycloakApi.sendMagicLinkUrlToEmail(userId, magicLinkRedirect, userEmail, 'Complete your MotherTree account setup');
     console.log(`switch-to-magic-link: sent magic-link email to ${userEmail} for user ${userId}`);
     const emailHint = await keycloakApi.getUserEmailHint(userId);
 
