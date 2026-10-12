@@ -91,10 +91,11 @@ grep -q "file://" "$tmp/out" && { echo "FAIL: overrides honoured outside test mo
 echo "ok - env overrides are ignored outside test mode"
 
 # A signature by an expired key: gpg reports VALIDSIG *and* EXPKEYSIG.
+# Sign while the key is still valid, then expire it: setting a 1s expiry before
+# signing raced on a slow CI box (gpg refused to sign, no .asc was published).
 EXP_FPR=$(genkey "expiring <exp@example.com>")
-gpg --batch --quiet --quick-set-expire "$EXP_FPR" seconds=1 2>/dev/null \
-  || gpg --batch --quiet --passphrase '' --quick-set-expire "$EXP_FPR" 1d 2>/dev/null
 SHA_5=$(publish 5.0 "jar five" "$EXP_FPR")
+gpg --batch --quiet --passphrase '' --quick-set-expire "$EXP_FPR" seconds=1
 gpg --batch --armor --export "$EXP_FPR" > "$tmp/exp.asc"
 sleep 2
 rc=0; MAGIC_LINK_PIN_TEST=1 MAVEN_BASE_OVERRIDE="file://$tmp/maven" \
