@@ -96,6 +96,7 @@ test.describe('Email — DKIM Signature on Outbound Mail', () => {
 
       await senderPage.waitForFunction(
         () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
+        undefined,
         { timeout: 30_000 },
       );
       await senderPage.getByRole('button', { name: 'Compose' }).click();

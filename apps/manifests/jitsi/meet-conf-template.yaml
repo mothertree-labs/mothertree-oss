@@ -1,5 +1,7 @@
 # Custom meet.conf template for Jitsi Keycloak Adapter
-# This overrides the default template to add OIDC redirect logic
+# This overrides the default template to add OIDC redirect logic.
+# Paths follow the rootless web image (stable-11146+): rendered config lives
+# under /run/web/config, and colibri websockets are gone upstream.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,11 +13,7 @@ metadata:
 data:
   # Custom meet.conf template with OIDC adapter support
   meet.conf: |
-    {{ $ENABLE_COLIBRI_WEBSOCKET := .Env.ENABLE_COLIBRI_WEBSOCKET | default "0" | toBool }}
-    {{ $COLIBRI_WEBSOCKET_PORT := .Env.COLIBRI_WEBSOCKET_PORT | default "9090" }}
-    {{ $COLIBRI_WEBSOCKET_REGEX := .Env.COLIBRI_WEBSOCKET_REGEX | default "jvb" }}
     {{ $ENABLE_JAAS_COMPONENTS := .Env.ENABLE_JAAS_COMPONENTS | default "0" | toBool }}
-    {{ $ENABLE_OCTO := .Env.ENABLE_OCTO | default "0" | toBool -}}
     {{ $ENABLE_XMPP_WEBSOCKET := .Env.ENABLE_XMPP_WEBSOCKET | default "1" | toBool }}
     {{ $ENABLE_SUBDOMAINS := .Env.ENABLE_SUBDOMAINS | default "true" | toBool -}}
     {{ $XMPP_DOMAIN := .Env.XMPP_DOMAIN | default "meet.jitsi" -}}
@@ -55,7 +53,7 @@ data:
     add_header Permissions-Policy "interest-cohort=()";
 
     # Include custom configs
-    include /config/nginx-custom/*.conf;
+    include /run/web/config/nginx-custom/*.conf;
 
     {{ if .Env.ADAPTER_INTERNAL_URL }}
     # /oidc/redirect - OIDC adapter redirect
@@ -87,11 +85,11 @@ data:
     {{- end }}
 
     location = /config.js {
-        alias /config/config.js;
+        alias /run/web/config/config.js;
     }
 
     location = /interface_config.js {
-        alias /config/interface_config.js;
+        alias /run/web/config/interface_config.js;
     }
 
     location = /external_api.js {
@@ -118,30 +116,6 @@ data:
             expires 1y;
         }
     }
-
-    {{ if $ENABLE_COLIBRI_WEBSOCKET }}
-    # colibri (JVB) websockets
-    location ~ ^/colibri-ws/({{ $COLIBRI_WEBSOCKET_REGEX }})/(.*) {
-        tcp_nodelay on;
-
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_pass http://$1:{{ $COLIBRI_WEBSOCKET_PORT }}/colibri-ws/$1/$2$is_args$args;
-    }
-
-    {{ if $ENABLE_OCTO }}
-    # colibri (JVB) Relay to Relay websockets
-    location ~ ^/colibri-relay-ws/([a-zA-Z0-9-\._]+)/(.*) {
-        tcp_nodelay on;
-
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_pass http://$1:{{ $COLIBRI_WEBSOCKET_PORT }}/colibri-relay-ws/$1/$2$is_args$args;
-    }
-    {{ end }}
-    {{ end }}
 
     # BOSH
     location = /http-bind {
@@ -225,7 +199,7 @@ data:
         set $subdomain "$1.";
         set $subdir "$1/";
 
-        alias /config/config.js;
+        alias /run/web/config/config.js;
     }
 
 

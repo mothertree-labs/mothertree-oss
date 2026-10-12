@@ -80,6 +80,7 @@ test.describe('Email — Inbound Delivery to New User (#189)', () => {
       // after IMAP inbox load completes — large inboxes delay this)
       await senderPage.waitForFunction(
         () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
+        undefined,
         { timeout: 30_000 },
       );
       await senderPage.getByRole('button', { name: 'Compose' }).click();

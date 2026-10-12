@@ -51,6 +51,7 @@ async function getMatrixAccessToken(
   // Element persists the access token in localStorage once the SPA initialises.
   await page.waitForFunction(
     () => !!window.localStorage.getItem('mx_access_token'),
+    undefined,
     { timeout: 60_000 },
   );
   const token = await page.evaluate(() => window.localStorage.getItem('mx_access_token'));
