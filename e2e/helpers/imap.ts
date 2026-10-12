@@ -37,6 +37,67 @@ export function isImapConfigured(): boolean {
 }
 
 /**
+ * Render an imapflow error with the server's reply. imapflow throws a bare
+ * "Command failed" for any tagged NO/BAD; the reason Stalwart gave lives on
+ * responseStatus/responseText and is otherwise lost.
+ */
+function describeImapError(err: unknown): string {
+  const e = err as { message?: string; responseStatus?: string; responseText?: string };
+  const detail = [e.responseStatus, e.responseText].filter(Boolean).join(' ');
+  return detail ? `${e.message} (${detail})` : String(e.message ?? err);
+}
+
+/**
+ * Stalwart rejects any single IMAP argument over 4096 bytes ("BAD Argument
+ * exceeds maximum length of 4096 bytes."). imapflow does NOT compact an array
+ * range — it sends "1,2,3,…,N" verbatim — so passing a SEARCH result array to
+ * fetch/store breaks once a mailbox passes ~1040 messages. Never pass arrays
+ * as ranges: use '1:*' to walk a mailbox, and this to split UID sets.
+ */
+const MAX_RANGE_BYTES = 2048;
+
+function packUidRanges(uids: number[]): string[] {
+  const sorted = [...new Set(uids)].sort((a, b) => a - b);
+  const parts: string[] = [];
+  for (let i = 0; i < sorted.length; ) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+    parts.push(i === j ? `${sorted[i]}` : `${sorted[i]}:${sorted[j]}`);
+    i = j + 1;
+  }
+
+  const chunks: string[] = [];
+  let current = '';
+  for (const part of parts) {
+    if (current && current.length + 1 + part.length > MAX_RANGE_BYTES) {
+      chunks.push(current);
+      current = '';
+    }
+    current = current ? `${current},${part}` : part;
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+/**
+ * Flag + expunge the given UIDs in the currently open mailbox. imapflow's
+ * messageFlagsAdd/messageDelete swallow server errors and return false, so
+ * both results are checked — a failed delete throws instead of passing
+ * silently.
+ */
+async function expungeUids(client: typeof ImapFlow, uids: number[]): Promise<void> {
+  for (const range of packUidRanges(uids)) {
+    // Stalwart requires explicit \Deleted flag before expunge
+    if (!(await client.messageFlagsAdd(range, ['\\Deleted'], { uid: true }))) {
+      throw new Error(`STORE +FLAGS \\Deleted failed for UIDs ${range.slice(0, 80)}`);
+    }
+    if (!(await client.messageDelete(range, { uid: true }))) {
+      throw new Error(`EXPUNGE failed for UIDs ${range.slice(0, 80)}`);
+    }
+  }
+}
+
+/**
  * Create an ImapFlow client for the given auth user string.
  */
 function createClient(authUser: string, config: ImapConfig): typeof ImapFlow {
@@ -185,15 +246,13 @@ export async function deleteEmailsBySubject(opts: {
   let client: typeof ImapFlow | null = null;
   try {
     client = await connectAsMaster(opts.userEmail, config);
-    await client.mailboxOpen('INBOX');
-
-    const uids = await client.search({ all: true });
-    if (!uids || uids.length === 0) return 0;
+    const mailbox = await client.mailboxOpen('INBOX');
+    if (!mailbox.exists) return 0;
 
     const needle = opts.subjectContains.toLowerCase();
     const toDelete: number[] = [];
 
-    for await (const msg of client.fetch(uids, { uid: true, envelope: true })) {
+    for await (const msg of client.fetch('1:*', { uid: true, envelope: true })) {
       const subject = (msg.envelope?.subject || '').toLowerCase();
       if (subject.includes(needle)) {
         toDelete.push(msg.uid);
@@ -201,19 +260,70 @@ export async function deleteEmailsBySubject(opts: {
     }
 
     if (toDelete.length > 0) {
-      // Stalwart requires explicit \Deleted flag before expunge
-      await client.messageFlagsAdd(toDelete, ['\\Deleted'], { uid: true });
-      await client.messageDelete(toDelete, { uid: true });
+      await expungeUids(client, toDelete);
     }
 
     return toDelete.length;
   } catch (err) {
-    console.warn(`Cleanup: failed to delete emails for ${opts.userEmail}: ${(err as Error).message}`);
+    console.warn(`Cleanup: failed to delete emails for ${opts.userEmail}: ${describeImapError(err)}`);
     return 0;
   } finally {
     if (client) {
       await client.logout().catch(() => {});
     }
+  }
+}
+
+/**
+ * Delete every INBOX message older than `maxAgeMs` (by IMAP INTERNALDATE).
+ *
+ * The fixed mail users (e2e-mailrt, e2e-mailrcv) persist across pipelines and
+ * receive mail from many specs that never clean up (magic-link recovery mail
+ * to e2e-mailrt+tag@, iTIP plants, share notifications). This age-based sweep
+ * is the backstop. It is safe while other shards are running because mail
+ * from the current run is newer than the cutoff. Date filtering is done
+ * client-side because IMAP SEARCH BEFORE only has day granularity.
+ *
+ * Throws on any failure: a sweep that cannot run would otherwise let the
+ * inbox grow unnoticed again.
+ */
+export async function sweepInboxOlderThan(opts: {
+  userEmail: string;
+  maxAgeMs: number;
+}): Promise<{ deleted: number; remaining: number }> {
+  const config = getImapConfig();
+  if (!config) {
+    throw new Error(
+      'IMAP not configured: E2E_STALWART_ADMIN_PASSWORD is not set',
+    );
+  }
+
+  const client = await connectAsMaster(opts.userEmail, config);
+  try {
+    const mailbox = await client.mailboxOpen('INBOX');
+    const total = mailbox.exists ?? 0;
+    if (total === 0) return { deleted: 0, remaining: 0 };
+
+    const cutoff = Date.now() - opts.maxAgeMs;
+    const stale: number[] = [];
+    for await (const msg of client.fetch('1:*', { uid: true, internalDate: true })) {
+      const received = msg.internalDate ? new Date(msg.internalDate).getTime() : NaN;
+      if (!Number.isNaN(received) && received < cutoff) {
+        stale.push(msg.uid);
+      }
+    }
+
+    if (stale.length > 0) {
+      await expungeUids(client, stale);
+    }
+
+    return { deleted: stale.length, remaining: total - stale.length };
+  } catch (err) {
+    throw new Error(
+      `Inbox sweep failed for ${opts.userEmail}: ${describeImapError(err)}`,
+    );
+  } finally {
+    await client.logout().catch(() => {});
   }
 }
 
@@ -242,12 +352,9 @@ export async function countInboxBySubject(opts: {
 
     // Fetch all message envelopes and filter client-side (Stalwart SEARCH
     // by header is unreliable for substring matching)
-    const uids = await client.search({ all: true });
-    if (!uids || uids.length === 0) return 0;
-
     let count = 0;
     const needle = opts.subjectContains.toLowerCase();
-    for await (const msg of client.fetch(uids, { uid: true, envelope: true })) {
+    for await (const msg of client.fetch('1:*', { uid: true, envelope: true })) {
       const subject = (msg.envelope?.subject || '').toLowerCase();
       if (subject.includes(needle)) {
         count++;
