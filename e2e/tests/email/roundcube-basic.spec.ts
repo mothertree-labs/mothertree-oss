@@ -58,6 +58,7 @@ test.describe('Email — Roundcube Basic', () => {
     // during this window silently do nothing.
     await page.waitForFunction(
       () => window.rcmail && window.rcmail.task === 'mail' && !window.rcmail.busy,
+      undefined,
       { timeout: 30_000 },
     );
 
