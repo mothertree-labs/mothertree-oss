@@ -58,7 +58,7 @@ spec:
         - name: tailscale
           # tailscale/tailscale — stable release, multi-arch (version pinned on the image: line below)
           # https://hub.docker.com/r/tailscale/tailscale
-          image: tailscale/tailscale:v1.102.5
+          image: tailscale/tailscale:v1.104.1
           restartPolicy: Always
           env:
             - name: TS_AUTHKEY
