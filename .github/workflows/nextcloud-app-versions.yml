@@ -41,7 +41,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
 
       # One invocation, so one fetch of the app store and one selection. When
       # the check and the writeback each fetched independently, the PR body
