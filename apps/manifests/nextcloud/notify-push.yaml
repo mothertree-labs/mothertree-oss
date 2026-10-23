@@ -41,7 +41,7 @@ spec:
     spec:
       containers:
         - name: notify-push
-          image: icewind1991/notify_push:1.4.1
+          image: icewind1991/notify_push:1.4.2
           env:
             - name: PORT
               value: "7867"
