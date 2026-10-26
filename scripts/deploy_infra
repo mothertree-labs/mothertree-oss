@@ -650,8 +650,13 @@ if [ "$MT_ENV" = "dev" ]; then
     kubectl delete pvc -n "$NS_MONITORING" -l app=loki --wait=true --ignore-not-found
   fi
 fi
-sed "s/storageClassName: linode-block-storage-retain/storageClassName: ${LOKI_STORAGE_CLASS}/" \
-  "$REPO_ROOT/apps/loki-manual.yaml" | kubectl apply -f -
+# Loki reads its config only at startup, so a loki-config change must restart
+# the StatefulSet. Reset the tracker so earlier applies in this script don't
+# count as a Loki change.
+mt_reset_change_tracker
+mt_apply kubectl apply -f <(sed "s/storageClassName: linode-block-storage-retain/storageClassName: ${LOKI_STORAGE_CLASS}/" \
+  "$REPO_ROOT/apps/loki-manual.yaml")
+mt_restart_if_changed statefulset/loki -n "$NS_MONITORING"
 kubectl apply -f "$REPO_ROOT/apps/manifests/loki/loki-servicemonitor.yaml"
 kubectl apply -f "$REPO_ROOT/apps/manifests/loki/vector-servicemonitor.yaml"
 

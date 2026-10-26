@@ -56,6 +56,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   builtins, so it does not depend on `require(esm)`.
 
 ### Fixed
+- **Loki now actually enforces its 7-day log retention.** `apps/loki-manual.yaml`
+  set retention only under `table_manager`, which on a boltdb-shipper store
+  deletes nothing. The compactor ran with `retention_enabled: false` and an
+  unlimited `retention_period`, so every chunk ever written stayed on disk: the
+  prod Loki PVC grew ~25 MiB/day since it was created and reached the
+  `LokiStorageHigh` 80% threshold. Retention now runs in the compactor
+  (`retention_enabled: true`, `delete_request_store: filesystem`,
+  `limits_config.retention_period: 168h`). The first run removes all chunks older
+  than 7 days. `deletion_mode: disabled` keeps the compactor's delete API off,
+  because Loki runs with `auth_enabled: false`. `deploy_infra` now applies the Loki manifest through `mt_apply`
+  and restarts the StatefulSet when it changes, because Loki reads its config
+  only at startup and the old plain `kubectl apply` would have left the running
+  pod on the old config.
 - **Passkey registration works on older Safari, and guests get an email fallback
   when it fails.** `webauthn-register.ftl` passed Keycloak's `"not specified"`
   policy placeholder straight into `navigator.credentials.create()` as
@@ -145,6 +158,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `apps/calendar-automation/.dockerignore` goes with it — nothing else read it.
 
 ### Changed
+- **`KubeCPUOvercommit` relaxed** (`apps/values/prometheus.yaml`). The chart rule
+  fires after 10m whenever CPU requests exceed what is left after losing the
+  largest node. On 3×4-CPU autoscaled clusters that tripped on 0.3–0.85 cores of
+  requests at ~10% real CPU use, after a node recycle left the autoscaler at 3
+  nodes. That case doesn't need an alert, because the cluster autoscaler adds a
+  node when a node loss leaves pods Pending. The replacement fires the N-1 check
+  only when the shortfall exceeds 25% of the largest node's allocatable CPU. It
+  also keeps a no-margin check for requests exceeding total allocatable, and
+  waits `for: 1h`.
 - **Jitsi stable-11031 → stable-11248, with in-place ICE restart enabled**
   (`apps/manifests/jitsi/`). When a participant's media connection fails, for
   example on a Wi-Fi ↔ cellular switch, the client now asks the bridge for
