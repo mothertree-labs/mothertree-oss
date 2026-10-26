@@ -158,6 +158,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `apps/calendar-automation/.dockerignore` goes with it — nothing else read it.
 
 ### Changed
+- **`KubeCPUOvercommit` relaxed** (`apps/values/prometheus.yaml`). The chart rule
+  fires after 10m whenever CPU requests exceed what is left after losing the
+  largest node. On 3×4-CPU autoscaled clusters that tripped on 0.3–0.85 cores of
+  requests at ~10% real CPU use, after a node recycle left the autoscaler at 3
+  nodes. That case doesn't need an alert, because the cluster autoscaler adds a
+  node when a node loss leaves pods Pending. The replacement fires the N-1 check
+  only when the shortfall exceeds 25% of the largest node's allocatable CPU. It
+  also keeps a no-margin check for requests exceeding total allocatable, and
+  waits `for: 1h`.
 - **Jitsi stable-11031 → stable-11248, with in-place ICE restart enabled**
   (`apps/manifests/jitsi/`). When a participant's media connection fails, for
   example on a Wi-Fi ↔ cellular switch, the client now asks the bridge for
