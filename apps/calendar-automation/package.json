@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "ical.js": "2.2.1",
-    "imapflow": "2.5.1",
+    "imapflow": "2.9.1",
     "node-fetch": "3.3.2"
   },
   "engines": {
