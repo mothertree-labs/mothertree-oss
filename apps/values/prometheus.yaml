@@ -220,6 +220,7 @@ defaultRules:
     TargetDown: true
     KubePodNotReady: true
     KubeContainerWaiting: true
+    KubeCPUOvercommit: true
 
 # CPU limits removed from all workloads — no CFS throttling possible, so no custom alert needed
 additionalPrometheusRulesMap:
@@ -249,6 +250,47 @@ additionalPrometheusRulesMap:
                 )
               ) > 0
             for: 5m
+            labels:
+              severity: warning
+          # Relaxed replacement for the chart's KubeCPUOvercommit. Upstream fires after 10m whenever
+          # CPU requests exceed (total allocatable - largest node), i.e. the cluster could not
+          # re-schedule everything after losing one node. On a small autoscaled cluster that N-1
+          # check trips on fractions of a core (e.g. 8.3 requested vs 8 left on 3x4-CPU nodes after
+          # a node recycle) while real usage is ~10%, and a node loss that leaves pods Pending makes
+          # the cluster autoscaler add a node anyway. So the N-1 branch only fires once the shortfall
+          # exceeds 25% of the largest node's allocatable CPU (~1 core on 4-CPU nodes), for 1h.
+          # The second branch (requests > total allocatable, no margin) means pods cannot schedule
+          # right now, so it keeps no margin. The N-1 branch comes first so $value is the N-1
+          # shortfall whenever it fires; the second branch alone only matters on single-node
+          # clusters, which the N-1 branch skips (as upstream does).
+          # Below the margin (incl. autoscaler already at max), pods left Pending by a node loss
+          # still raise KubePodNotReady above.
+          - alert: KubeCPUOvercommit
+            annotations:
+              summary: 'Cluster has overcommitted CPU resource requests.'
+              description: 'Cluster {{ $labels.cluster }} CPU requests exceed the capacity left after losing its largest node (or, on a single node, its total allocatable CPU) by {{ printf "%.2f" $value }} cores. Small N-1 overcommits are tolerated because the cluster autoscaler adds a node when pods go Pending; this fires only when the shortfall exceeds 25% of the largest node or pods cannot schedule at all.'
+            expr: |-
+              (
+                sum by (cluster) (namespace_cpu:kube_pod_container_resource_requests:sum{})
+                -
+                (
+                  # Skip clusters with only one allocatable node.
+                  (
+                    sum by (cluster) (kube_node_status_allocatable{job="kube-state-metrics",resource="cpu"})
+                    -
+                    max by (cluster) (kube_node_status_allocatable{job="kube-state-metrics",resource="cpu"})
+                  ) > 0
+                )
+                > 0.25 * max by (cluster) (kube_node_status_allocatable{job="kube-state-metrics",resource="cpu"})
+              )
+              or
+              (
+                sum by (cluster) (namespace_cpu:kube_pod_container_resource_requests:sum{})
+                -
+                sum by (cluster) (kube_node_status_allocatable{job="kube-state-metrics",resource="cpu"})
+                > 0
+              )
+            for: 1h
             labels:
               severity: warning
           - alert: KubeContainerWaiting
