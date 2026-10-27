@@ -56,6 +56,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   builtins, so it does not depend on `require(esm)`.
 
 ### Fixed
+- **Headscale and PostgreSQL VMs now come back after a reboot.** The first
+  Linode security-patch reboots (2026-10-27) exposed two latent bugs. The
+  Headscale unit listed `/var/run/headscale` in `ReadWritePaths` under
+  `ProtectSystem=strict`, but that directory was created once by Ansible and
+  `/run` is tmpfs — after reboot the unit failed `226/NAMESPACE` forever, taking
+  down the tailnet control plane and embedded DERP relay. The unit now uses
+  `RuntimeDirectory=headscale`. The PostgreSQL cloud-init mounted whatever disk
+  was `/dev/sdc` and wrote a `/dev/sdc … defaults` fstab line; a failed mount
+  dropped the VM into emergency mode (no sshd, no tailscaled). Cloud-init now
+  waits for the instance's own volume by its `/dev/disk/by-id/` path and writes
+  the fstab entry by UUID with `nofail`. Ansible enforces the same line on
+  existing hosts and refuses to proceed unless `/mnt/pgdata` is a mounted
+  filesystem, so the data directory can no longer silently land on the root
+  disk; a `RequiresMountsFor=/mnt/pgdata` drop-in on `postgresql@.service`
+  keeps PostgreSQL from starting if the volume is missing. Also fixes the `headscale-cleanup` CronJob's `bad number` error on runs
+  with nothing to delete (`grep -c` prints `0` *and* exits 1).
 - **Loki now actually enforces its 7-day log retention.** `apps/loki-manual.yaml`
   set retention only under `table_manager`, which on a boltdb-shipper store
   deletes nothing. The compactor ran with `retention_enabled: false` and an
