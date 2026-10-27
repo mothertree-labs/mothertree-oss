@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **prod's Headscale moved from nl-ams to us-lax** (`headscale-prod`, prod Terraform
+  workspace), keeping the `hs-prod-eu` hostname so no tailnet client had to log in
+  again. `manage-dns.sh` now names the Headscale record after `headscale.domain`
+  (it would otherwise have created an unused `hs-prod` record), and
+  `deploy-tailscale-router.sh` no longer falls back to the prod-eu terraform
+  outputs for the Headscale address.
+- `manage_infra -e prod-eu` now refuses a phase1 apply or destroy unless
+  `MT_ALLOW_PRODEU_PHASE1=1` is set: it would recreate the decommissioned
+  cluster and rewrite the prod-eu outputs with the retired Headscale box's IP.
+
+### Fixed
+- **New Headscale VMs survive a reboot.** The cloud-init unit now sets
+  `RuntimeDirectory=headscale` (`/run` is tmpfs, so the `ReadWritePaths` entry
+  failed with 226/NAMESPACE after a reboot) and mounts the data volume by its
+  `/dev/disk/by-id/` path with a UUID + `nofail` fstab entry instead of `/dev/sdc`.
+- Headscale log shipping on prod pointed at `loki..<domain>` (the prod env DNS
+  label is empty); it now uses the `prod` internal prefix.
+
 ### Removed
 - **The `prod-eu` environment (nl-ams) is decommissioned.** Its only tenant did
   not join, so its cluster, PostgreSQL and TURN VMs, buckets and DNS records

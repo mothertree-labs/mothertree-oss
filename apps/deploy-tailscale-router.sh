@@ -170,16 +170,7 @@ mt_wait_for_tailscale_sidecar "$NS_INGRESS_INTERNAL" app=tailscale-router tag:ro
 # =============================================================================
 
 # Approve the /32 route in Headscale so the subnet router can forward traffic.
-# Prod and prod-eu share a Headscale server (provisioned in prod-eu). If the
-# local env doesn't have HEADSCALE_SERVER_IP, try loading it from prod-eu outputs.
 HS_IP="${HEADSCALE_SERVER_IP:-}"
-if [[ -z "$HS_IP" ]]; then
-  # Shared Headscale: check prod-eu terraform outputs
-  PRODEU_OUTPUTS="${REPO_ROOT}/config/platform/infra/terraform-outputs.prod-eu.env"
-  if [[ -f "$PRODEU_OUTPUTS" ]]; then
-    HS_IP=$(grep "^HEADSCALE_SERVER_IP=" "$PRODEU_OUTPUTS" 2>/dev/null | cut -d'"' -f2)
-  fi
-fi
 
 # Public :22 on the Headscale box is firewalled to admin_ssh_cidrs, so an operator
 # who isn't on an allowlisted IP (e.g. travelling) can't reach it that way. The box
@@ -191,7 +182,7 @@ SSH_OPTS=(-n -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o BatchMo
 
 if [[ -z "$HS_SSH_HOST" ]]; then
   print_error "No Headscale SSH host available."
-  print_error "Set HEADSCALE_SERVER_IP, provide prod-eu terraform outputs, or set HEADSCALE_SSH_HOST=<headscale mesh IP>."
+  print_error "Set HEADSCALE_SERVER_IP (terraform outputs) or HEADSCALE_SSH_HOST=<headscale mesh IP>."
   exit 1
 fi
 

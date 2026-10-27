@@ -8,7 +8,7 @@
 #   - lb2.prod.<domain> A     → Ingress LB IP (US prod, proxied)
 #   - lb1.{dev|prod-eu}.<domain> A  → Ingress LB IP (dev/prod-eu, not proxied)
 #   - turn[.dev].<domain> A              → TURN server IP
-#   - hs-{prod|dev|prod-eu}.<domain> A   → Headscale server IP
+#   - <headscale.domain> A (hs-<label>.<domain> if unset) → Headscale server IP
 #   - @ CNAME → www.<domain>             (prod only)
 #   - _matrix._tcp SRV                   → synapse[.dev].<domain>:443
 #   - _matrix-fed._tcp SRV               → synapse[.dev].<domain>:8448
@@ -131,14 +131,23 @@ else
 fi
 
 # 3. Headscale server A record
+# The record name comes from the configured headscale.domain, not the env label:
+# prod's Headscale keeps the hs-prod-eu name it was created under (every tailnet
+# client has that ControlURL persisted), so deriving "hs-prod" would create a
+# record nobody uses while leaving the real one untouched.
 if [ -n "${HEADSCALE_SERVER_IP:-}" ]; then
-  local_hs_label=""
-  if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
-    local_hs_label="hs-prod"
+  if [ -n "${HEADSCALE_DOMAIN:-}" ]; then
+    case "$HEADSCALE_DOMAIN" in
+      *".${DOMAIN}") ;;
+      *) print_error "headscale.domain '$HEADSCALE_DOMAIN' is not in the infra zone ${DOMAIN}"; exit 1 ;;
+    esac
+    local_hs_fqdn="$HEADSCALE_DOMAIN"
+  elif [ -z "$INFRA_ENV_DNS_LABEL" ]; then
+    local_hs_fqdn="hs-prod.${DOMAIN}"
   else
-    local_hs_label="hs-${INFRA_ENV_DNS_LABEL}"
+    local_hs_fqdn="hs-${INFRA_ENV_DNS_LABEL}.${DOMAIN}"
   fi
-  create_dns_record "${local_hs_label}.${DOMAIN}" "A" "$HEADSCALE_SERVER_IP"
+  create_dns_record "$local_hs_fqdn" "A" "$HEADSCALE_SERVER_IP"
 fi
 
 # 4. Base domain CNAME → www (prod only)

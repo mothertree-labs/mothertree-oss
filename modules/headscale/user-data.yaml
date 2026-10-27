@@ -30,6 +30,10 @@ write_files:
       ProtectSystem=strict
       ProtectHome=true
       ReadWritePaths=/var/lib/headscale /var/run/headscale /etc/headscale
+      # /run is tmpfs: recreate /run/headscale on every start, or the namespace
+      # setup for ReadWritePaths fails after a reboot (226/NAMESPACE).
+      RuntimeDirectory=headscale
+      RuntimeDirectoryMode=0750
       PrivateTmp=true
       NoNewPrivileges=true
 
@@ -66,36 +70,44 @@ runcmd:
   # 3. Mount persistent volume for Headscale data (SQLite DB, keys)
   # -------------------------------------------------------------------
   - |
-    echo "[cloud-init] Waiting for data volume..."
+    # Wait for THIS instance's volume by its stable by-id path. /dev/sdc is
+    # whatever disk enumerates third, so it is not a stable name.
+    VOLUME_DEV="/dev/disk/by-id/scsi-0Linode_Volume_${volume_label}"
+    echo "[cloud-init] Waiting for data volume $VOLUME_DEV..."
     timeout=300
     elapsed=0
     while [ $elapsed -lt $timeout ]; do
-      # Linode attaches volumes as /dev/sdc (first additional volume)
-      if [ -b /dev/sdc ]; then
-        echo "[cloud-init] Volume device /dev/sdc found."
+      if [ -b "$VOLUME_DEV" ]; then
+        echo "[cloud-init] Volume device $VOLUME_DEV found."
         break
       fi
       sleep 5
       elapsed=$((elapsed + 5))
     done
-    if [ ! -b /dev/sdc ]; then
-      echo "[cloud-init] ERROR: Volume device /dev/sdc not found after $${timeout}s"
+    if [ ! -b "$VOLUME_DEV" ]; then
+      echo "[cloud-init] ERROR: Volume device $VOLUME_DEV not found after $${timeout}s"
       exit 1
     fi
 
     # Format if new (no filesystem)
-    if ! blkid /dev/sdc >/dev/null 2>&1; then
+    if ! blkid "$VOLUME_DEV" >/dev/null 2>&1; then
       echo "[cloud-init] Formatting volume..."
-      mkfs.ext4 /dev/sdc
+      mkfs.ext4 "$VOLUME_DEV"
     fi
 
     # Mount volume
     mkdir -p /mnt/headscale-data
-    mount /dev/sdc /mnt/headscale-data
+    mount "$VOLUME_DEV" /mnt/headscale-data
 
-    # Add to fstab for persistence across reboots
+    # Persist by UUID with nofail: a missing volume must not drop the VM into
+    # emergency mode (no sshd/tailscaled, and the whole tailnet's control plane).
+    VOLUME_UUID=$(blkid -s UUID -o value "$VOLUME_DEV")
+    if [ -z "$VOLUME_UUID" ]; then
+      echo "[cloud-init] ERROR: no filesystem UUID on $VOLUME_DEV"
+      exit 1
+    fi
     if ! grep -q '/mnt/headscale-data' /etc/fstab; then
-      echo '/dev/sdc /mnt/headscale-data ext4 defaults 0 2' >> /etc/fstab
+      echo "UUID=$VOLUME_UUID /mnt/headscale-data ext4 defaults,nofail 0 2" >> /etc/fstab
     fi
 
     # Create data subdirectory on volume

@@ -122,6 +122,7 @@ resource "linode_instance" "headscale_server" {
       headscale_version = var.headscale_version
       domain            = var.domain
       base_domain       = var.base_domain
+      volume_label      = "${var.headscale_label}-data"
     }))
   }
 
