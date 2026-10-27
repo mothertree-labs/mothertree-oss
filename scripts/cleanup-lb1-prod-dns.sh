@@ -3,9 +3,11 @@
 # One-shot cleanup: delete orphaned `lb1.prod.<domain>` A records after
 # migrating prod to `lb2.prod`. Idempotent — safe to re-run.
 #
-# NOTE: lb1.prod.<domain> is now an intentional CNAME → lb1.prod-eu.<domain>
-# (managed by manage-dns.sh). This script only deletes type=A records, so
-# it will not touch the CNAME. Migration is complete; this script is a no-op.
+# NOTE: lb1.prod.<domain> was later reused as a CNAME → lb1.prod-eu.<domain>
+# for external-DNS tenants; that alias is no longer managed by code (prod-eu
+# was decommissioned) and is deleted by hand. Never recreate the name: foreign
+# tenant CNAMEs may still point at it. This script only deletes type=A
+# records. Migration is complete; this script is a no-op.
 #
 # Originally deleted:
 #   - lb1.prod.<INFRA_DOMAIN>            (the old shared infra A record)
