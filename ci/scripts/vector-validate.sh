@@ -26,7 +26,7 @@ source "${REPO_ROOT}/ci/scripts/lib/helmfile-lint-env.sh"
 
 # Every helmfile environment that deploys the vector release. Override with a
 # space-separated list if an environment needs to be skipped temporarily.
-VECTOR_VALIDATE_ENVS="${VECTOR_VALIDATE_ENVS:-dev prod prod-eu}"
+VECTOR_VALIDATE_ENVS="${VECTOR_VALIDATE_ENVS:-dev prod}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

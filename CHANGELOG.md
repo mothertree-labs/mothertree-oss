@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **The `prod-eu` environment (nl-ams) is decommissioned.** Its only tenant did
+  not join, so its cluster, PostgreSQL and TURN VMs, buckets and DNS records
+  were torn down. The `prod-eu` helmfile environment, its value overrides
+  (`apps/environments/prod-eu/`) and the CI env lists (vault build, Vector
+  validation) go with it. The Headscale VM that prod's tailnet runs on
+  (`hs-prod-eu`) still lives in nl-ams and keeps its Terraform workspace until
+  it is moved to us-lax; `deploy-tailscale-router.sh` still reads its address
+  from the prod-eu terraform outputs until then.
+
 ### Security
 - **Keycloak 26.7.3 → 26.7.4** (`apps/values/keycloak-codecentric.yaml`), a security
   release closing six CVEs. Two are **unauthenticated DoS against public

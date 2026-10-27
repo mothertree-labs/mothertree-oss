@@ -95,10 +95,10 @@ deploy-prod → deploy_infra -e prod + create_env -e prod -t <all tenants>
 ```
 
 **Secrets architecture**:
-- Kubeconfigs, terraform outputs, and tenant secrets are stored as **Ansible Vault-encrypted archives committed in the `config/platform` submodule** (`config/platform/ci/deploy-vault-{dev,prod,prod-eu}.vault`). The deploy scripts decrypt **from the cloned committed copy** — so a merged vault change deploys on the next pipeline run with no operator reprovision (GitHub issue #463). There is no fallback to the old host-provisioned copy under `/home/woodpecker/deploy-vaults`; a missing committed vault is a hard error.
+- Kubeconfigs, terraform outputs, and tenant secrets are stored as **Ansible Vault-encrypted archives committed in the `config/platform` submodule** (`config/platform/ci/deploy-vault-{dev,prod}.vault`). The deploy scripts decrypt **from the cloned committed copy** — so a merged vault change deploys on the next pipeline run with no operator reprovision (GitHub issue #463). There is no fallback to the old host-provisioned copy under `/home/woodpecker/deploy-vaults`; a missing committed vault is a hard error.
 - Decrypted into temp dirs at build time, cleaned up on exit
 - Private config submodules cloned via GitHub PAT (fine-grained, read-only) **before** vault decryption (the committed vault lives inside `config/platform`)
-- Vault password stored as Woodpecker secret `deploy_vault_password` (prod/prod-eu); dev uses its own password provisioned to the host as `dev-vault-pass` (see `DEV_VAULT_ACCESS.md`)
+- Vault password stored as Woodpecker secret `deploy_vault_password` (prod); dev uses its own password provisioned to the host as `dev-vault-pass` (see `DEV_VAULT_ACCESS.md`)
 - Build vaults with `scripts/build-deploy-vaults.sh` (uses `lpass` for vault password)
 
 **Key files**: `ci/scripts/ci-deploy.sh` (deploy wrapper), `.woodpecker/deploy-dev.yaml`, `.woodpecker/deploy-prod.yaml`, `ci/ansible/playbook.yml` (CI box provisioning), `scripts/build-deploy-vaults.sh` (vault assembly)
@@ -114,7 +114,7 @@ deploy-prod → deploy_infra -e prod + create_env -e prod -t <all tenants>
 - **Dev**: `matrix.dev.example.com`, `mail.dev.example.com`, `lb1.dev.example.com`
 - **Prod internal**: `grafana.prod.example.com`, `prometheus.prod.example.com` (prefix is `prod`, NOT `internal`)
 - **Dev internal**: `grafana.internal.dev.example.com`, `prometheus.internal.dev.example.com` (prefix is `internal.dev`)
-- Tenant subdomains CNAME to `lb2.prod.example.com` (prod) or `lb1.{env_label}.example.com` (dev/prod-eu)
+- Tenant subdomains CNAME to `lb2.prod.example.com` (prod) or `lb1.{env_label}.example.com` (dev)
 - `env_dns_label`: empty string for prod, `"dev"` for dev
 
 ## Tenant Config Structure
@@ -277,6 +277,7 @@ The validator is **not** sufficient on its own. It logs `RE2 not usable, falling
 ## Important Notes
 
 - Kubeconfig files: `kubeconfig.prod.yaml`, `kubeconfig.dev.yaml` (at repo root)
+- **prod's Headscale lives in the decommissioned `prod-eu` Terraform workspace** (VM `headscale-prod-eu`, nl-ams, `hs-prod-eu.<infra-domain>`). Everything else in prod-eu is gone. On prod-eu run **only** targeted operations: never `manage_infra -e prod-eu` with no flags, `--phase1` or `--destroy` (a phase1 apply recreates the LKE cluster and LLM bucket — they are not toggleable for non-dev envs — and a destroy takes Headscale with it), and never delete the `hs-prod-eu` DNS record: prod's PgBouncer→PostgreSQL path, the key rotator and CI mesh access all depend on it. Until it is moved to us-lax, `config/platform/infra/prod-eu.config.yaml`, `terraform-outputs.prod-eu.env` and the `pgbackrest-prod-eu-*` bucket (Headscale backups) must stay.
 - Secrets files are gitignored — use `.example` files as templates
 - Postfix image: `boky/postfix:v5.1.0` (inbound MX dispatch only; OpenDKIM sidecar was removed in step 2 PR-4, outbound DKIM signing is delegated to AWS SES Easy DKIM)
 - Keycloak image: `quay.io/keycloak/keycloak:26.7.4`
