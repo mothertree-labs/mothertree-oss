@@ -145,6 +145,21 @@ if [ "$EXPLICIT_PHASES" = "false" ]; then
   RUN_ANSIBLE=true
 fi
 
+# prod-eu is decommissioned: only its retired Headscale VM (now a temporary relay)
+# is left in that workspace. A phase1 apply would recreate the LKE cluster and LLM
+# bucket (not toggleable for non-dev envs) and rewrite terraform-outputs.prod-eu.env
+# with the relay box's IP, after which --dns/--ansible would point prod's tailnet
+# at it. --plan alone is read-only and stays allowed (--plan --destroy does not);
+# the final targeted teardown sets MT_ALLOW_PRODEU_PHASE1=1 on purpose.
+if [ "$MT_ENV" = "prod-eu" ] && [ "$RUN_PHASE1" = "true" ] \
+   && { [ "$PLAN_ONLY" != "true" ] || [ "$DESTROY" = "true" ]; } \
+   && [ "${MT_ALLOW_PRODEU_PHASE1:-}" != "1" ]; then
+  print_error "prod-eu is decommissioned: refusing a phase1 apply/destroy (it would recreate the cluster"
+  print_error "and repoint prod's Headscale DNS at the relay box). Use --plan, or set MT_ALLOW_PRODEU_PHASE1=1"
+  print_error "for a deliberate targeted teardown."
+  exit 2
+fi
+
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "manage_infra"
 
@@ -645,7 +660,8 @@ EOF
       fi
       # Headscale log shipping — Vector to Loki via internal ingress
       if [ -n "${HEADSCALE_DOMAIN:-}" ]; then
-        _loki_host="loki.${INFRA_ENV_DNS_LABEL}.${INFRA_DOMAIN}"
+        # prod's internal prefix is "prod" while its env DNS label is empty.
+        _loki_host="loki.${INFRA_ENV_DNS_LABEL:-prod}.${INFRA_DOMAIN}"
         echo "loki_push_url: \"http://${_loki_host}\"" >> "$TEMP_EXTRA_VARS"
         # Internal ingress ClusterIP — resolved via subnet router route
         _internal_ingress_ip=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress-internal \

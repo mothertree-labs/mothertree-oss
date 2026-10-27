@@ -53,9 +53,7 @@ mt_load_infra_config
 mt_require_commands ssh python3
 
 # Resolve Headscale server IP — prefer Tailscale mesh IP (from config yaml),
-# fall back to public IP (from terraform outputs). Prod shares the prod-eu
-# Headscale server, so HEADSCALE_SERVER_IP is empty in prod terraform outputs
-# but HEADSCALE_TAILSCALE_IP is always set in the infra config yaml.
+# fall back to public IP (from terraform outputs).
 HEADSCALE_IP="${HEADSCALE_TAILSCALE_IP:-${HEADSCALE_SERVER_IP:-}}"
 if [[ -z "$HEADSCALE_IP" ]]; then
   print_error "Neither HEADSCALE_TAILSCALE_IP nor HEADSCALE_SERVER_IP set — check infra config"
