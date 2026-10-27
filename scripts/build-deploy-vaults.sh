@@ -273,7 +273,7 @@ fi
 # ═══════════════════════════════════════════════════════════════════
 #  Full build mode — rebuild the entire vault for each environment.
 # ═══════════════════════════════════════════════════════════════════
-ENVS=("dev" "prod" "prod-eu")
+ENVS=("dev" "prod")
 if [[ -n "$ENV_ARG" ]]; then
   ENVS=("$ENV_ARG")
 fi
