@@ -6,7 +6,6 @@
 #
 # Records managed:
 #   - lb2.prod.<domain> A     → Ingress LB IP (US prod, proxied)
-#   - lb1.prod.<domain> CNAME → lb1.prod-eu.<domain> (EU alias, DNS-only, prod only; CNAME target for external-DNS tenants)
 #   - lb1.{dev|prod-eu}.<domain> A  → Ingress LB IP (dev/prod-eu, not proxied)
 #   - turn[.dev].<domain> A              → TURN server IP
 #   - hs-{prod|dev|prod-eu}.<domain> A   → Headscale server IP
@@ -122,17 +121,6 @@ if [ -n "$INGRESS_LB_IP" ]; then
   create_dns_record "${LB1_SUBDOMAIN}.${DOMAIN}" "A" "$INGRESS_LB_IP" "$CF_PROXIED"
 else
   print_warning "Skipping LB A record — ingress LB IP not available (run deploy_infra first, then re-run with --dns)"
-fi
-
-# 1b. lb1.prod CNAME → lb1.prod-eu (prod only: EU alias pointing to prod-eu cluster).
-# DNS-only (NOT proxied): this record is the CNAME target for tenants whose DNS is
-# managed externally (dns_external) on their own domains. Cloudflare's edge will only
-# serve a hostname whose zone lives in our account, so proxying this record makes the
-# edge reject foreign-zone hostnames (TLS handshake failure on 443, HTTP 409 on 80,
-# and ACME HTTP-01 challenges never reach our ingress). Leaving it grey-cloud routes
-# external-domain traffic straight to the prod-eu ingress, where our cert terminates.
-if [ -z "$INFRA_ENV_DNS_LABEL" ]; then
-  create_dns_record "lb1.prod.${DOMAIN}" "CNAME" "lb1.prod-eu.${DOMAIN}" "false"
 fi
 
 # 2. TURN server A record
