@@ -24,6 +24,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cluster and rewrite the prod-eu outputs with the retired Headscale box's IP.
 
 ### Fixed
+- The internal ingress controller takes the client address from the TCP
+  connection rather than forwarded headers, since nothing proxies in front of
+  it. Dropped its `set-real-ip-from` setting, which is not an ingress-nginx key.
 - **Headscale log shipping never reached Loki.** The Loki internal ingress the
   VMs' Vector agents push to was never applied (Vector got 404s), and its host
   template rendered `loki..<domain>` on prod. `deploy_infra` now applies it as

@@ -166,7 +166,6 @@ print_status "Setting internal ingress whitelist CIDRs (stable)..."
 
 STABLE_CIDRS="100.64.0.0/10,10.8.0.0/24,10.9.0.0/24,192.168.0.0/16,10.2.0.0/16"
 export INGRESS_INTERNAL_WHITELIST="$STABLE_CIDRS"
-export INGRESS_INTERNAL_REAL_IP_FROM="$STABLE_CIDRS"
 print_status "Internal ingress whitelist: $STABLE_CIDRS"
 
 # =============================================================================
