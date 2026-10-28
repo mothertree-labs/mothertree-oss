@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `manage_infra --ansible --limit=<vm>[,<vm>]` (`headscale`, `postgres`, `turn`)
+  configures only the named VMs. It fails if a named VM has no IP in the
+  terraform outputs (an empty inventory would "succeed" without doing anything)
+  and is rejected alongside any other phase.
+
 ### Changed
 - **prod's Headscale moved from nl-ams to us-lax** (`headscale-prod`, prod Terraform
   workspace), keeping the `hs-prod-eu` hostname so no tailnet client had to log in
@@ -18,6 +24,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cluster and rewrite the prod-eu outputs with the retired Headscale box's IP.
 
 ### Fixed
+- The Ansible phase now fails when Headscale is targeted without the pgBackRest S3
+  credentials its backups reuse. The backup tasks used to be skipped silently,
+  so the run finished green with no Headscale backups configured.
 - **New Headscale VMs survive a reboot.** The cloud-init unit now sets
   `RuntimeDirectory=headscale` (`/run` is tmpfs, so the `ReadWritePaths` entry
   failed with 226/NAMESPACE after a reboot) and mounts the data volume by its

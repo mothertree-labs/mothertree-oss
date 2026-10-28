@@ -53,6 +53,7 @@ ci/              CI server (Woodpecker)
 3. **`./scripts/create_env -e <env> -t <tenant> [--create-alert-user]`** — Tenant apps (Synapse, Element, Docs, Files, Jitsi, Stalwart, Roundcube, Admin Portal) — CI-able
 
 `manage_infra` supports phase selectors: `--phase1`, `--dns`, `--firewall`, `--ansible` (default: all).
+`--ansible --limit=<vm>[,<vm>]` (`headscale`, `postgres`, `turn`) configures only those VMs; it is rejected with any other phase.
 `--plan` and `--destroy` are phase1-only modifiers.
 
 On initial setup of a new environment, DNS must run after deploy_infra creates the ingress:
