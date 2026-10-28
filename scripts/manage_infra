@@ -23,6 +23,7 @@
 #   ./scripts/manage_infra -e dev --destroy-cluster-only  # Ephemeral: nuke LKE only, keep VMs
 #   ./scripts/manage_infra -e dev --dns               # Only update DNS records
 #   ./scripts/manage_infra -e dev --firewall --ansible  # Firewall + Ansible only
+#   ./scripts/manage_infra -e prod --ansible --limit=headscale  # One VM only
 
 set -euo pipefail
 
@@ -54,6 +55,8 @@ mt_usage() {
   echo "                         Dev environment only. Delegates to scripts/destroy-dev-cluster.sh."
   echo "  --dry-run              With --destroy-cluster-only, print resolved targets without destroying"
   echo "  --lb-ip=X.X.X.X       Override ingress LB IP for DNS (auto-detected if omitted)"
+  echo "  --limit=<vm>[,<vm>]    With --ansible only: configure just these VMs"
+  echo "                         (headscale, postgres, turn)"
   echo "  -h, --help             Show this help"
   echo ""
   echo "Examples:"
@@ -64,6 +67,7 @@ mt_usage() {
   echo "  $0 -e dev --dns                     # Only update DNS records"
   echo "  $0 -e dev --dns --lb-ip=1.2.3.4    # DNS with explicit LB IP"
   echo "  $0 -e dev --firewall --ansible      # Firewall + Ansible only"
+  echo "  $0 -e prod --ansible --limit=headscale  # Ansible on the Headscale VM only"
 }
 
 mt_parse_args "$@"
@@ -144,6 +148,48 @@ if [ "$EXPLICIT_PHASES" = "false" ]; then
   RUN_FIREWALL=true
   RUN_ANSIBLE=true
 fi
+
+# --limit=<vm>[,<vm>] restricts the Ansible phase to some VMs. It must not ride
+# along with any other phase: without a phase flag it would otherwise default to
+# all phases and run a phase1 apply just to configure one VM.
+ANSIBLE_LIMIT=""
+if mt_has_flag "--limit"; then
+  print_error "--limit needs a value: --limit=<vm>[,<vm>] (headscale, postgres, turn)"
+  exit 2
+fi
+if ANSIBLE_LIMIT=$(mt_get_flag_value "--limit"); then
+  if [ -z "$ANSIBLE_LIMIT" ]; then
+    print_error "--limit needs a value: --limit=<vm>[,<vm>] (headscale, postgres, turn)"
+    exit 2
+  fi
+  if [ "$RUN_ANSIBLE" != "true" ] || [ "$RUN_PHASE1" = "true" ] \
+     || [ "$RUN_DNS" = "true" ] || [ "$RUN_FIREWALL" = "true" ]; then
+    print_error "--limit only applies to --ansible on its own (e.g. --ansible --limit=headscale)"
+    exit 2
+  fi
+  if [ "$(printf '%s\n' "${MT_EXTRA_ARGS[@]}" | grep -c '^--limit=')" -gt 1 ]; then
+    print_error "--limit given more than once — pass one comma-separated list"
+    exit 2
+  fi
+  IFS=, read -ra _limit_vms <<<"$ANSIBLE_LIMIT"
+  _limit_count=0
+  for _vm in "${_limit_vms[@]}"; do
+    [ -z "$_vm" ] && continue
+    case "$_vm" in
+      headscale|postgres|turn) _limit_count=$((_limit_count + 1)) ;;
+      *) print_error "--limit: unknown VM '$_vm' (expected headscale, postgres, turn)"; exit 2 ;;
+    esac
+  done
+  if [ "$_limit_count" -eq 0 ]; then
+    print_error "--limit names no VM (expected headscale, postgres, turn)"
+    exit 2
+  fi
+fi
+
+# True when the Ansible phase should configure <vm> (always, without --limit).
+_ansible_wants() {
+  [ -z "$ANSIBLE_LIMIT" ] || [[ ",${ANSIBLE_LIMIT}," == *",$1,"* ]]
+}
 
 # prod-eu is decommissioned: only its retired Headscale VM (now a temporary relay)
 # is left in that workspace. A phase1 apply would recreate the LKE cluster and LLM
@@ -526,13 +572,45 @@ if [ "$RUN_ANSIBLE" = "true" ] && [ "$PLAN_ONLY" != "true" ] && [ "$DESTROY" != 
     print_warning "No tenant configs found for environment $MT_ENV"
   fi
 
+  # A VM named in --limit must exist: an empty inventory would make
+  # ansible-playbook "succeed" without touching anything.
+  if [ -n "$ANSIBLE_LIMIT" ]; then
+    for _vm in "${_limit_vms[@]}"; do
+      case "$_vm" in
+        "") continue ;;
+        headscale) _vm_ip="${HEADSCALE_SERVER_IP:-}" ;;
+        postgres)  _vm_ip="${POSTGRES_SERVER_IP:-}" ;;
+        turn)      _vm_ip="${TURN_SERVER_IP:-}" ;;
+      esac
+      if [ -z "$_vm_ip" ] || [ "$_vm_ip" = "null" ]; then
+        print_error "--limit=$_vm: no ${_vm} server IP in terraform-outputs.${MT_ENV}.env"
+        exit 1
+      fi
+    done
+    print_status "Ansible limited to: ${ANSIBLE_LIMIT}"
+  fi
+
+  # Headscale backups reuse the pgBackRest S3 credentials. The backup tasks are
+  # skipped without them, so a run would finish green with no backups at all.
+  if [ -n "${HEADSCALE_SERVER_IP:-}" ] && [ "$HEADSCALE_SERVER_IP" != "null" ] && _ansible_wants headscale; then
+    for _v in PGBACKREST_S3_ENDPOINT PGBACKREST_S3_BUCKET PGBACKREST_S3_KEY PGBACKREST_S3_SECRET; do
+      if [ -z "${!_v:-}" ]; then
+        print_error "$_v is not set — Headscale backups to S3 would be skipped"
+        exit 1
+      fi
+    done
+  fi
+
   # Check if there are any servers to provision
   _has_targets=false
-  [ -n "${TURN_SERVER_IP:-}" ] && _has_targets=true
-  [ -n "${HEADSCALE_SERVER_IP:-}" ] && [ "${HEADSCALE_SERVER_IP}" != "null" ] && _has_targets=true
-  [ -n "${POSTGRES_SERVER_IP:-}" ] && [ "${POSTGRES_SERVER_IP}" != "null" ] && _has_targets=true
+  [ -n "${TURN_SERVER_IP:-}" ] && _ansible_wants turn && _has_targets=true
+  [ -n "${HEADSCALE_SERVER_IP:-}" ] && [ "${HEADSCALE_SERVER_IP}" != "null" ] && _ansible_wants headscale && _has_targets=true
+  [ -n "${POSTGRES_SERVER_IP:-}" ] && [ "${POSTGRES_SERVER_IP}" != "null" ] && _ansible_wants postgres && _has_targets=true
 
-  if [ "$_has_targets" = "false" ]; then
+  if [ "$_has_targets" = "false" ] && [ -n "$ANSIBLE_LIMIT" ]; then
+    print_error "--limit=${ANSIBLE_LIMIT} selected no VM to configure"
+    exit 1
+  elif [ "$_has_targets" = "false" ]; then
     print_status "No server IPs found in Terraform outputs — skipping Ansible"
   else
     pushd "$REPO_ROOT/ansible" >/dev/null
@@ -549,9 +627,10 @@ if [ "$RUN_ANSIBLE" = "true" ] && [ "$PLAN_ONLY" != "true" ] && [ "$DESTROY" != 
       # Build dynamic inventory
       TEMP_INVENTORY=$(mktemp)
       echo "# Auto-generated by manage_infra" > "$TEMP_INVENTORY"
+      _ansible_hosts=""
 
       # TURN server — prefer Tailscale IP (public SSH may be blocked at cloud firewall)
-      if [ -n "${TURN_SERVER_IP:-}" ]; then
+      if [ -n "${TURN_SERVER_IP:-}" ] && _ansible_wants turn; then
         _turn_ansible_host="${TURN_SERVER_IP}"
         if [ -n "${TURN_TAILSCALE_IP:-}" ] && [ "$TURN_TAILSCALE_IP" != "null" ]; then
           _turn_ansible_host="${TURN_TAILSCALE_IP}"
@@ -563,10 +642,11 @@ if [ "$RUN_ANSIBLE" = "true" ] && [ "$PLAN_ONLY" != "true" ] && [ "$DESTROY" != 
 turn-server ansible_host=${_turn_ansible_host} ansible_user=root
 EOF
         print_status "TURN server ${_turn_ansible_host} added to inventory"
+        _ansible_hosts="${_ansible_hosts} TURN (${TURN_SERVER_IP})"
       fi
 
       # Headscale server — prefer Tailscale IP (public SSH is blocked at cloud firewall)
-      if [ -n "${HEADSCALE_SERVER_IP:-}" ] && [ "$HEADSCALE_SERVER_IP" != "null" ]; then
+      if [ -n "${HEADSCALE_SERVER_IP:-}" ] && [ "$HEADSCALE_SERVER_IP" != "null" ] && _ansible_wants headscale; then
         _hs_ansible_host="${HEADSCALE_SERVER_IP}"
         if [ -n "${HEADSCALE_TAILSCALE_IP:-}" ] && [ "$HEADSCALE_TAILSCALE_IP" != "null" ]; then
           _hs_ansible_host="${HEADSCALE_TAILSCALE_IP}"
@@ -578,10 +658,11 @@ EOF
 headscale-server ansible_host=${_hs_ansible_host} ansible_user=root
 EOF
         print_status "Headscale server ${_hs_ansible_host} added to inventory"
+        _ansible_hosts="${_ansible_hosts} Headscale (${HEADSCALE_SERVER_IP})"
       fi
 
       # PostgreSQL server — prefer Tailscale IP (public SSH may be blocked at cloud firewall)
-      if [ -n "${POSTGRES_SERVER_IP:-}" ] && [ "$POSTGRES_SERVER_IP" != "null" ]; then
+      if [ -n "${POSTGRES_SERVER_IP:-}" ] && [ "$POSTGRES_SERVER_IP" != "null" ] && _ansible_wants postgres; then
         _pg_ansible_host="${POSTGRES_SERVER_IP}"
         if [ -n "${PG_VM_TAILSCALE_IP:-}" ] && [ "$PG_VM_TAILSCALE_IP" != "null" ]; then
           _pg_ansible_host="${PG_VM_TAILSCALE_IP}"
@@ -593,6 +674,7 @@ EOF
 postgres-server ansible_host=${_pg_ansible_host} ansible_user=root
 EOF
         print_status "PostgreSQL server ${_pg_ansible_host} added to inventory"
+        _ansible_hosts="${_ansible_hosts} PostgreSQL (${POSTGRES_SERVER_IP})"
       fi
 
       # Source env-specific secrets if available (for tls_email, etc.)
@@ -768,6 +850,7 @@ EOF
       print_status "TURN IP:            ${TURN_SERVER_IP:-<not deployed>}"
       print_status "Headscale IP:       ${HEADSCALE_SERVER_IP:-<not deployed>}"
       print_status "PostgreSQL IP:      ${POSTGRES_SERVER_IP:-<not deployed>}"
+      print_status "Limit:              ${ANSIBLE_LIMIT:-<all VMs>}"
       print_status "==============================="
 
       # Run playbook
@@ -781,7 +864,7 @@ EOF
       rm -f "$TEMP_INVENTORY" "$TEMP_EXTRA_VARS"
 
       if [ $ANSIBLE_EXIT -eq 0 ]; then
-        print_success "Ansible playbook completed —${TURN_SERVER_IP:+ TURN ($TURN_SERVER_IP)}${HEADSCALE_SERVER_IP:+ Headscale ($HEADSCALE_SERVER_IP)}${POSTGRES_SERVER_IP:+ PostgreSQL ($POSTGRES_SERVER_IP)}"
+        print_success "Ansible playbook completed —${_ansible_hosts}"
       else
         print_error "Ansible playbook failed with exit code $ANSIBLE_EXIT"
         exit 1
