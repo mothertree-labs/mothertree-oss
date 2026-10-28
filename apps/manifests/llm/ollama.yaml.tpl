@@ -36,7 +36,7 @@ spec:
           # no --delete). No-op when the bucket is empty (first-ever deploy);
           # the main container then pulls the model directly (see below) while
           # the seed Job populates the bucket in the background.
-          image: amazon/aws-cli:2.38.5
+          image: amazon/aws-cli:2.39.1
           command:
             - /bin/sh
             - -c
@@ -50,7 +50,7 @@ spec:
               mountPath: /root/.ollama
       containers:
         - name: ollama
-          image: ollama/ollama:0.40.11
+          image: ollama/ollama:0.40.12
           command:
             - /bin/sh
             - -c

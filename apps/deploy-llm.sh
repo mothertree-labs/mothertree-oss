@@ -159,7 +159,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: check
-      image: amazon/aws-cli:2.38.5
+      image: amazon/aws-cli:2.39.1
       args: ["s3", "ls", "${_mt_model_manifest}"]
       envFrom:
         - secretRef:
