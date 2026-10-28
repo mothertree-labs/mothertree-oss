@@ -66,7 +66,8 @@ data:
       [.nodes[] | select(.online == true) | select(.givenName // .name | test($pods))] | length
     ')
 
-    STALE_COUNT=$(echo "$STALE_IDS" | grep -c . 2>/dev/null || echo 0)
+    # grep -c prints "0" AND exits 1 on no match, so `|| echo 0` would yield "0\n0"
+    STALE_COUNT=$(printf '%s\n' "$STALE_IDS" | grep -c . || true)
     log "Online pod nodes: $ONLINE_PODS"
     log "Stale pod nodes to delete: $STALE_COUNT"
 

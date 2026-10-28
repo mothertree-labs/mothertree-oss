@@ -628,7 +628,9 @@
       loop:
         - /etc/headscale
         - /var/lib/headscale
-        - /var/run/headscale
+      # /var/run/headscale is NOT created here: /run is tmpfs and a directory
+      # made once at provision time is gone after the first reboot. The unit's
+      # RuntimeDirectory= recreates it on every start.
 
     # -------------------------------------------------------------------
     # TLS certificate for DERP relay (port 443)
@@ -771,9 +773,15 @@
           RestartSec=5
           LimitNOFILE=65536
 
+          # Creates /run/headscale (unix socket dir) on every start. Listing it
+          # in ReadWritePaths without this made the unit fail 226/NAMESPACE
+          # forever after a reboot wiped the tmpfs (2026-10-27 outage).
+          RuntimeDirectory=headscale
+          RuntimeDirectoryMode=0750
+
           ProtectSystem=strict
           ProtectHome=true
-          ReadWritePaths=/var/lib/headscale /var/run/headscale /etc/headscale
+          ReadWritePaths=/var/lib/headscale /etc/headscale
           PrivateTmp=true
           NoNewPrivileges=true
 
@@ -1146,6 +1154,34 @@
     # -------------------------------------------------------------------
     # Ensure data directory is on persistent volume
     # -------------------------------------------------------------------
+    # /mnt/pgdata must be the mounted data volume. If it is a plain directory
+    # the move below puts the cluster on the root disk without any error
+    # (an environment once ran that way unnoticed until its first reboot).
+    - name: Read /mnt/pgdata mount
+      command: findmnt -n -o UUID,FSTYPE --mountpoint /mnt/pgdata
+      register: pgdata_mount
+      changed_when: false
+      failed_when: false
+
+    - name: Require /mnt/pgdata to be a mounted volume
+      fail:
+        msg: >-
+          /mnt/pgdata is not a mounted filesystem with a UUID (findmnt rc={{ pgdata_mount.rc }},
+          output='{{ pgdata_mount.stdout }}'). Attach and mount the data volume first —
+          refusing to place PostgreSQL data on the root disk.
+      when: pgdata_mount.rc != 0 or (pgdata_mount.stdout.split() | length) != 2
+
+    # By UUID, not /dev/sdX: device letters are not stable across boots.
+    # nofail: a missing volume must not drop the VM into emergency mode
+    # (no sshd, no tailscaled). PostgreSQL still fails loudly because the
+    # symlinked data directory is absent.
+    - name: Persist /mnt/pgdata mount in fstab by UUID
+      lineinfile:
+        path: /etc/fstab
+        regexp: '^[^#\s]+\s+/mnt/pgdata\s'
+        line: "UUID={{ pgdata_mount.stdout.split()[0] }} /mnt/pgdata {{ pgdata_mount.stdout.split()[1] }} defaults,nofail 0 2"
+      notify: reload systemd
+
     - name: Check if data directory exists on volume
       stat:
         path: "/mnt/pgdata/{{ pg_version }}/main/PG_VERSION"
@@ -1215,6 +1251,26 @@
       notify:
         - reload systemd
         - restart postgresql
+
+    # The cluster unit (postgresql@<ver>-main) must never start without the
+    # data volume: with the fstab `nofail`, a missing volume leaves /mnt/pgdata
+    # an empty root-disk directory. The unit's built-in RequiresMountsFor names
+    # the symlinked data path, which systemd does not resolve, so it only
+    # depends on /. No restart: the dependency applies from the next start.
+    - name: Create PostgreSQL cluster unit override directory
+      file:
+        path: /etc/systemd/system/postgresql@.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Require the data volume mount for the PostgreSQL cluster unit
+      copy:
+        content: |
+          [Unit]
+          RequiresMountsFor=/mnt/pgdata
+        dest: /etc/systemd/system/postgresql@.service.d/require-pgdata-mount.conf
+        mode: '0644'
+      notify: reload systemd
 
     # -------------------------------------------------------------------
     # PostgreSQL configuration

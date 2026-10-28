@@ -91,6 +91,7 @@ resource "linode_instance" "postgres_server" {
       headscale_url      = var.headscale_url
       tailscale_auth_key = var.tailscale_auth_key
       env                = var.env
+      volume_label       = linode_volume.postgres_data.label
     }))
   }
 
