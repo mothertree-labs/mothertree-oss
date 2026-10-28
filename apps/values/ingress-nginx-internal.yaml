@@ -22,12 +22,14 @@ controller:
     annotations-risk-level: "Critical"
     # Basic nginx configuration for internal services
     use-proxy-protocol: "false"
-    compute-full-forwarded-for: "true"
-    use-forwarded-headers: "true"
-    enable-real-ip: "true"
-    real-ip-header: "X-Forwarded-For"
-    set-real-ip-from: "10.8.0.0/24"  # VPN network CIDR (will be updated by phase2/infra with VPN server VPC subnet)
-    # Restrict access to VPN network (will be updated by phase2/infra with VPN server VPC subnet for NAT'd traffic)
+    # No proxy sits in front of this controller (clients reach the NodePort
+    # directly or through the Tailscale subnet router), so the TCP peer is the
+    # client. Keep forwarded-header / real-ip handling off so the allowlist and
+    # per-IP rate limits see that address.
+    use-forwarded-headers: "false"
+    enable-real-ip: "false"
+    compute-full-forwarded-for: "false"
+    # Restrict access to the allowlisted networks (deploy_infra sets the CIDRs)
     whitelist-source-range: "10.8.0.0/24"
   ingressClassResource:
     name: nginx-internal
