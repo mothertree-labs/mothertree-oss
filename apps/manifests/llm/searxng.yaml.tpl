@@ -31,7 +31,7 @@ spec:
         - name: searxng
           # Date-stamped tag from Docker Hub (searxng/searxng); Renovate keeps it
           # current (see docs/plans/llm/web-search.md).
-          image: searxng/searxng:2026.10.24-ef0ec03da
+          image: searxng/searxng:2026.10.28-c360868e5
           ports:
             - name: http
               containerPort: 8080
