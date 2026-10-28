@@ -24,6 +24,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cluster and rewrite the prod-eu outputs with the retired Headscale box's IP.
 
 ### Fixed
+- **Headscale log shipping never reached Loki.** The Loki internal ingress the
+  VMs' Vector agents push to was never applied (Vector got 404s), and its host
+  template rendered `loki..<domain>` on prod. `deploy_infra` now applies it as
+  `loki.<env label, "prod" for prod>.<infra domain>`, the same host
+  `manage_infra` gives Vector.
 - The Ansible phase now fails when Headscale is targeted without the pgBackRest S3
   credentials its backups reuse. The backup tasks used to be skipped silently,
   so the run finished green with no Headscale backups configured.

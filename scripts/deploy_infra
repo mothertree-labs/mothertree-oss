@@ -659,6 +659,12 @@ mt_apply kubectl apply -f <(sed "s/storageClassName: linode-block-storage-retain
 mt_restart_if_changed statefulset/loki -n "$NS_MONITORING"
 kubectl apply -f "$REPO_ROOT/apps/manifests/loki/loki-servicemonitor.yaml"
 kubectl apply -f "$REPO_ROOT/apps/manifests/loki/vector-servicemonitor.yaml"
+# Internal ingress for the VMs' Vector agents (Headscale, ...), which push over
+# the mesh subnet router. prod's internal prefix is "prod" while its env DNS
+# label is empty; manage_infra builds the same host for loki_push_url.
+LOKI_INTERNAL_HOST="loki.${INFRA_ENV_DNS_LABEL:-prod}.${INFRA_DOMAIN:?INFRA_DOMAIN is required}"
+export LOKI_INTERNAL_HOST
+envsubst '${LOKI_INTERNAL_HOST}' < "$REPO_ROOT/apps/manifests/loki/loki-ingress-internal.yaml.tpl" | kubectl apply -f -
 
 LOKI_READY=$(kubectl get pods -n "$NS_MONITORING" -l app=loki -o jsonpath='{.items[?(@.status.conditions[?(@.type=="Ready")].status=="True")].metadata.name}' 2>/dev/null || true)
 if [ -n "$LOKI_READY" ]; then
