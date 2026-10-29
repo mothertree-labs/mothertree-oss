@@ -13,6 +13,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and is rejected alongside any other phase.
 
 ### Changed
+- **prod-eu is fully retired.** The old nl-ams Headscale box, which relayed
+  clients to the us-lax one after the move, is deleted along with its volume,
+  firewall, backup bucket and Terraform workspace. `manage_infra` now refuses
+  `-e prod-eu` outright (the `MT_ALLOW_PRODEU_PHASE1` override is gone), and the router script drops its
+  `prod-eu` split-DNS case.
 - **prod's Headscale moved from nl-ams to us-lax** (`headscale-prod`, prod Terraform
   workspace), keeping the `hs-prod-eu` hostname so no tailnet client had to log in
   again. `manage-dns.sh` now names the Headscale record after `headscale.domain`

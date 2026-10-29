@@ -239,7 +239,6 @@ ssh "${SSH_OPTS[@]}" "root@${HS_SSH_HOST}" \
 # Route internal domain queries to this router's Unbound DNS.
 case "$MT_ENV" in
   dev)     SPLIT_DOMAIN="internal.dev.${INFRA_DOMAIN}" ;;
-  prod-eu) SPLIT_DOMAIN="prod-eu.${INFRA_DOMAIN}" ;;
   *)       SPLIT_DOMAIN="${MT_ENV}.${INFRA_DOMAIN}" ;;
 esac
 
