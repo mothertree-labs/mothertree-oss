@@ -29,6 +29,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cluster and rewrite the prod-eu outputs with the retired Headscale box's IP.
 
 ### Fixed
+- The public ingress controller now uses the supported `proxy-real-ip-cidr`
+  key for its trusted-proxy list, drops the unused `real-ip-header`, and sends
+  upstreams `X-Forwarded-For` as the single resolved client address.
 - The internal ingress controller takes the client address from the TCP
   connection rather than forwarded headers, since nothing proxies in front of
   it. Dropped its `set-real-ip-from` setting, which is not an ingress-nginx key.
