@@ -6,8 +6,8 @@
       "url": "https://github.com/nextcloud-releases/user_oidc/releases/download/v8.11.0/user_oidc-v8.11.0.tar.gz"
     },
     "calendar": {
-      "version": "6.6.3",
-      "url": "https://github.com/nextcloud-releases/calendar/releases/download/v6.6.3/calendar-v6.6.3.tar.gz"
+      "version": "6.6.4",
+      "url": "https://github.com/nextcloud-releases/calendar/releases/download/v6.6.4/calendar-v6.6.4.tar.gz"
     },
     "richdocuments": {
       "version": "9.2.3",
