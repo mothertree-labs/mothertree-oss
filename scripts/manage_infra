@@ -191,18 +191,11 @@ _ansible_wants() {
   [ -z "$ANSIBLE_LIMIT" ] || [[ ",${ANSIBLE_LIMIT}," == *",$1,"* ]]
 }
 
-# prod-eu is decommissioned: only its retired Headscale VM (now a temporary relay)
-# is left in that workspace. A phase1 apply would recreate the LKE cluster and LLM
-# bucket (not toggleable for non-dev envs) and rewrite terraform-outputs.prod-eu.env
-# with the relay box's IP, after which --dns/--ansible would point prod's tailnet
-# at it. --plan alone is read-only and stays allowed (--plan --destroy does not);
-# the final targeted teardown sets MT_ALLOW_PRODEU_PHASE1=1 on purpose.
-if [ "$MT_ENV" = "prod-eu" ] && [ "$RUN_PHASE1" = "true" ] \
-   && { [ "$PLAN_ONLY" != "true" ] || [ "$DESTROY" = "true" ]; } \
-   && [ "${MT_ALLOW_PRODEU_PHASE1:-}" != "1" ]; then
-  print_error "prod-eu is decommissioned: refusing a phase1 apply/destroy (it would recreate the cluster"
-  print_error "and repoint prod's Headscale DNS at the relay box). Use --plan, or set MT_ALLOW_PRODEU_PHASE1=1"
-  print_error "for a deliberate targeted teardown."
+# prod-eu was retired on 2026-10-29 (every nl-ams resource deleted). Refuse it
+# outright: phase1 would otherwise create a fresh workspace and auto-approve a
+# whole new stack from any leftover local terraform.prod-eu.tfvars.
+if [ "$MT_ENV" = "prod-eu" ]; then
+  print_error "prod-eu is retired (2026-10-29); refusing to run against it."
   exit 2
 fi
 
