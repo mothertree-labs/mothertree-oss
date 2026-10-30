@@ -14,6 +14,11 @@ spec:
     spec:
       backoffLimit: 2
       activeDeadlineSeconds: 600
+      # Finished Jobs (and their KubeJobFailed signal) age out after 24h, so a
+      # one-off failure (e.g. Headscale down during a VM reboot) does not alert
+      # forever once later hourly runs succeed. A persistent failure re-alerts
+      # with every new failed run.
+      ttlSecondsAfterFinished: 86400
       template:
         metadata:
           labels:

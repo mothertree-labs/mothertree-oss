@@ -95,6 +95,6 @@ Pods (all namespaces)
       → Grafana (Explore / Dashboards)
 ```
 
-- **Retention**: 7 days (`reject_old_samples_max_age: 168h`)
-- **Storage**: Filesystem-backed with BoltDB index, 10Gi PVC
-- **Alerts**: LokiDown, LokiRequestErrors, LokiStorageHigh, VectorDown, VectorSinkErrors, VectorNoLogsIngested
+- **Retention**: 7 days (`retention_period: 168h`, applied by the compactor)
+- **Storage**: Filesystem-backed with TSDB (v13) index, 10Gi PVC
+- **Alerts**: LokiDown, LokiRequestErrors, LokiStorageHigh, LokiRetentionNotRunning, VectorDown, VectorSinkErrors, VectorNoLogsIngested
