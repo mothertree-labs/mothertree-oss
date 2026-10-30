@@ -648,6 +648,22 @@ additionalPrometheusRulesMap:
             for: 15m
             labels:
               severity: warning
+          # The compactor applies retention every 10 minutes and stamps this
+          # gauge only when a whole run completes (it stays 0 until then). A
+          # run that errors on any table deletes nothing, which is how Loki
+          # silently kept every chunk for months (grafana/loki#23358). A missing
+          # series (compactor not started, metric renamed upstream) fires too.
+          - alert: LokiRetentionNotRunning
+            annotations:
+              summary: 'Loki retention has not completed in 6h'
+              description: 'The Loki compactor has not finished a retention run for over 6 hours (or does not report one at all), so expired logs are not being deleted and the PVC will keep growing. Check the loki-0 logs for "failed to apply retention".'
+            expr: |-
+              (time() - loki_compactor_apply_retention_last_successful_run_timestamp_seconds{namespace="infra-monitoring"} > 6 * 3600)
+              or
+              absent(loki_compactor_apply_retention_last_successful_run_timestamp_seconds{namespace="infra-monitoring"})
+            for: 1h
+            labels:
+              severity: warning
   vector-alerts:
     groups:
       - name: vector.rules

@@ -49,6 +49,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `/dev/disk/by-id/` path with a UUID + `nofail` fstab entry instead of `/dev/sdc`.
 - Headscale log shipping on prod pointed at `loki..<domain>` (the prod env DNS
   label is empty); it now uses the `prod` internal prefix.
+- **Loki retention deleted nothing.** Since Loki 3.6 the compactor fails on any
+  boltdb-shipper chunk that spans midnight (grafana/loki#23358), and one failed
+  table aborts the whole run, so prod kept every log chunk since February. Loki
+  now uses a TSDB (v13) index, which is not affected. Existing boltdb data is
+  ignored (different table prefix) and has to be wiped by hand to reclaim the
+  space. New `LokiRetentionNotRunning` alert fires when no retention run has
+  completed for 6h.
+- Failed `headscale-cleanup` Jobs now expire after 24h, so a one-off failure
+  (e.g. Headscale down during a VM reboot) no longer keeps `KubeJobFailed`
+  firing after later hourly runs succeed.
 
 ### Removed
 - **The `prod-eu` environment (nl-ams) is decommissioned.** Its only tenant did

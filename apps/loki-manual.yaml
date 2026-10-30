@@ -20,20 +20,28 @@ data:
         kvstore:
           store: inmemory
     
+    # TSDB, not boltdb-shipper: since Loki 3.6 compactor retention on a
+    # boltdb-shipper table fails on every chunk that spans midnight ("could not
+    # find entry of chunk ... to remove it", grafana/loki#23358), and one failed
+    # table aborts the whole run, so nothing was ever deleted. TSDB tables are
+    # not affected. The distinct prefix keeps the compactor away from any old
+    # boltdb index_<day> tables still on a volume: a table whose name does not
+    # match its period's prefix is skipped. `from` predates any sample Loki
+    # still accepts (reject_old_samples_max_age).
     schema_config:
       configs:
-        - from: 2020-10-24
-          store: boltdb-shipper
+        - from: 2024-01-01
+          store: tsdb
           object_store: filesystem
-          schema: v11
+          schema: v13
           index:
-            prefix: index_
+            prefix: tsdb_index_
             period: 24h
-    
+
     storage_config:
-      boltdb_shipper:
-        active_index_directory: /loki/boltdb-shipper-active
-        cache_location: /loki/boltdb-shipper-cache
+      tsdb_shipper:
+        active_index_directory: /loki/tsdb-index
+        cache_location: /loki/tsdb-cache
       filesystem:
         directory: /loki/chunks
     
