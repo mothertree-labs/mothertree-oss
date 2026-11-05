@@ -41,6 +41,34 @@ data:
     # from the app store by the OIDC config job during deploy. They live on emptyDir and
     # are lost on pod restart. The deploy script stores their download URLs in a ConfigMap
     # (nextcloud-appstore-urls). We download and extract them here on every boot.
+    #
+    # A failed download is FATAL. These apps are enabled in the database, so a pod
+    # that starts without one still passes its probes but serves 404s for that
+    # app's assets. Requests are spread across all pods, so one such pod breaks
+    # the feature for everyone. On 2026-11-05 a GitHub 504 left one pod without
+    # richdocuments, and Collabora stopped opening for that tenant. Retry with
+    # backoff, then fail the init container: the pod restarts and retries, and a
+    # deploy's rollout wait fails loudly instead of shipping a pod with the app
+    # missing.
+    download_app() {
+        _app="$1"; _url="$2"; _attempt=1; _delay=5
+        while :; do
+            _tmp=$(mktemp -d)
+            if curl -sSfL --connect-timeout 15 --max-time 300 -o "$_tmp/app.tar.gz" "$_url" \
+                && tar xzf "$_tmp/app.tar.gz" -C "$_tmp" \
+                && [ -f "$_tmp/$_app/appinfo/info.xml" ]; then
+                rm -rf "/mnt/custom_apps/$_app"
+                mv "$_tmp/$_app" /mnt/custom_apps/
+                rm -rf "$_tmp"
+                return 0
+            fi
+            rm -rf "$_tmp"
+            [ "$_attempt" -ge 6 ] && return 1
+            echo "  $_app: attempt $_attempt failed, retrying in ${_delay}s"
+            sleep "$_delay"
+            _attempt=$((_attempt + 1)); _delay=$((_delay * 2)); [ "$_delay" -gt 60 ] && _delay=60
+        done
+    }
     if [ -f /appstore-urls/app-urls ]; then
         echo "Downloading app store apps..."
         while IFS='|' read -r APP_ID APP_URL || [ -n "$APP_ID" ]; do
@@ -50,10 +78,11 @@ data:
                 continue
             fi
             echo "  $APP_ID: downloading from $APP_URL"
-            if curl -sfL "$APP_URL" | tar xzf - -C /mnt/custom_apps/ 2>/dev/null; then
+            if download_app "$APP_ID" "$APP_URL"; then
                 echo "  $APP_ID: OK"
             else
-                echo "  $APP_ID: FAILED (non-critical, app may be installed later by OIDC job)"
+                echo "  $APP_ID: FAILED after 6 attempts: refusing to start a pod without an enabled app" >&2
+                exit 1
             fi
         done < /appstore-urls/app-urls
         echo "App store downloads complete"

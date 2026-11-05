@@ -91,12 +91,17 @@ spec:
             # Relay control is handled by smtpd_relay_restrictions, not sender restrictions
             - name: POSTFIX_smtpd_sender_restrictions
               value: permit
+          # boky/postfix >= 5.2 runs rspamd as its DKIM backend, and it is
+          # always started (DKIM_AUTOGENERATE=false does not stop it). With the
+          # dev config it settles at ~395-425Mi and peaks ~410Mi at startup,
+          # against ~40Mi on v5.1.0; 256Mi OOM-killed it in a crash loop
+          # (Renovate #786, 2026-11-05).
           resources:
             requests:
               cpu: 10m
-              memory: 64Mi
+              memory: 448Mi
             limits:
-              memory: 256Mi
+              memory: 640Mi
           # Graceful shutdown: let K8s endpoint removal propagate before SIGTERM
           # so in-flight mail delivery completes without new connections arriving.
           lifecycle:
