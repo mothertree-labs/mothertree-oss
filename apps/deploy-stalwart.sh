@@ -185,7 +185,7 @@ fi
 # full info-level delivery stream so ci-e2e-diagnostics.sh can name which leg of
 # the email round-trip (shard-5) broke. Prod keeps the quieter legacy block to
 # bound log volume — flip an env here if prod delivery debugging is ever needed.
-if [[ "$MT_ENV" == "dev" ]]; then
+if mt_is_dev_class; then
     export STALWART_TRACING_TOML="    [tracer.\"stdout\"]
     type = \"stdout\"
     level = \"info\"

@@ -85,7 +85,7 @@ fi
 echo "Leased tenant: ${E2E_TENANT}"
 
 # ── Fetch a live dev kubeconfig (cluster is still up right after e2e) ─────────
-if [[ -z "${LINODE_CLI_TOKEN:-}" ]]; then
+if [[ -z "${LINODE_CLI_TOKEN:-}" && -z "${MT_CI_DEV_KUBECONFIG_FILE:-}" ]]; then
   echo "WARNING: LINODE_CLI_TOKEN not set in this step's env — cannot fetch a"
   echo "         kubeconfig; no pod logs available. Wire linode_token into the step."
   exit 0

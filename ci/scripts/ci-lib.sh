@@ -152,8 +152,22 @@ _ci_linode_reason() {
 # retry), 1 on any other failure. Every failure is explained on stderr and in
 # CI_KCFG_FETCH_LAST_ERROR. Pipeline #2089 lost 3 of 9 parallel app steps to
 # the old single-shot, stderr-swallowing version of this function.
+#
+# A CI host whose dev cluster is permanent (devhome: k3s on the same box) sets
+# MT_CI_DEV_KUBECONFIG_FILE (a Woodpecker global env var) to the kubeconfig it
+# was provisioned with; that file is copied instead and the Linode API is never
+# contacted. A set-but-unreadable path is an error, never a fall-through.
 ci_fetch_dev_kubeconfig() {
   local target="${1:?ci_fetch_dev_kubeconfig: target path required}"
+  if [ -n "${MT_CI_DEV_KUBECONFIG_FILE:-}" ]; then
+    if [ ! -s "$MT_CI_DEV_KUBECONFIG_FILE" ]; then
+      CI_KCFG_FETCH_LAST_ERROR="MT_CI_DEV_KUBECONFIG_FILE=$MT_CI_DEV_KUBECONFIG_FILE is missing or empty"
+      echo "ci_fetch_dev_kubeconfig: $CI_KCFG_FETCH_LAST_ERROR" >&2
+      return 1
+    fi
+    ( umask 077; cp "$MT_CI_DEV_KUBECONFIG_FILE" "$target" )
+    return 0
+  fi
   : "${LINODE_CLI_TOKEN:?LINODE_CLI_TOKEN required for kubeconfig fetch}"
   # The bearer token goes wherever CI_LINODE_API points: refuse anything but
   # https so a stray override cannot ship it in clear text.
@@ -266,7 +280,8 @@ ci_decrypt_vault() {
   local out_tar="${3:?ci_decrypt_vault: out_tar required}"
   : "${DEPLOY_VAULT_PASSWORD:?DEPLOY_VAULT_PASSWORD is required}"
 
-  if [[ "$env" == "dev" && -s "$CI_DEV_VAULT_PASS_FILE" ]]; then
+  # Every dev-class env (dev, devhome, ...) is keyed to the dev password.
+  if [[ "$env" =~ ^dev[a-z0-9]*$ && -s "$CI_DEV_VAULT_PASS_FILE" ]]; then
     # Stage the shared password in a 0600 temp file so both passwords can be
     # offered as labelled vault-ids. ansible-vault tries each until one opens.
     # Write it inside the caller's output dir (its WORK_DIR), which the caller's
@@ -286,6 +301,25 @@ ci_decrypt_vault() {
   ansible-vault decrypt "$vault_file" \
     --vault-password-file <(echo "$DEPLOY_VAULT_PASSWORD") \
     --output "$out_tar"
+}
+
+# ── Pool slots ───────────────────────────────────────────────────
+# The tenant-pool slots this CI host leases from. Default: the two Linode dev
+# pools. A single-pipeline host (devhome) sets CI_POOL_SLOTS="pool1" as a
+# Woodpecker global env var. Prints one slot per line; fails on a malformed
+# list rather than leasing from a slot name nobody provisioned.
+ci_pool_slots() {
+  local slots="${CI_POOL_SLOTS:-pool1 pool2}" slot
+  [ -n "${slots// /}" ] || { echo "ci_pool_slots: CI_POOL_SLOTS is empty" >&2; return 1; }
+  # Validate the whole list before printing any of it: callers read this
+  # through process substitution, where a failure after partial output would
+  # silently leave them with a truncated pool list.
+  for slot in $slots; do
+    [[ "$slot" =~ ^pool[0-9]+$ ]] || { echo "ci_pool_slots: invalid slot '$slot' in CI_POOL_SLOTS (expected poolN)" >&2; return 1; }
+  done
+  for slot in $slots; do
+    printf '%s\n' "$slot"
+  done
 }
 
 # ── Config submodule clone ──────────────────────────────────────

@@ -1176,15 +1176,28 @@ mt_http01_san_lines() {
     done
 }
 
+# Returns 0 when MT_ENV is a dev-class (non-production) environment: `dev` or
+# any `dev<suffix>` (e.g. `devhome`). Use this — not a literal `= "dev"` — for
+# "relaxed, non-production" behaviour (rate limits, test-user tooling, optional
+# alerting). Keep the literal `dev` only for things that exist solely for the
+# on-demand Linode dev cluster (bring-up, reaper, heartbeat, LKE kubeconfig
+# fetch). Usage: if mt_is_dev_class; then ...; fi
+mt_is_dev_class() {
+    case "${MT_ENV:-}" in
+        dev|dev[a-z0-9]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Returns 0 when MT_ENV is a production-like environment — every environment
-# except dev (prod, prod-eu, any future prod-*). Use this instead of a literal
-# `[ "$MT_ENV" = "prod" ]` for behaviour that must also hold on prod-eu: that
-# literal silently excluded prod-eu more than once (blackbox probe modules,
-# alert delivery). An unset MT_ENV counts as prod-like — the safe direction,
-# since prod-like is always the stricter mode.
+# that is not dev-class (prod, prod-eu, any future prod-*). Use this instead of
+# a literal `[ "$MT_ENV" = "prod" ]` for behaviour that must also hold on
+# prod-eu: that literal silently excluded prod-eu more than once (blackbox
+# probe modules, alert delivery). An unset MT_ENV counts as prod-like — the
+# safe direction, since prod-like is always the stricter mode.
 # Usage: if mt_is_prod_like; then ...; fi
 mt_is_prod_like() {
-    [ "${MT_ENV:-}" != "dev" ]
+    ! mt_is_dev_class
 }
 
 # Wait for Nextcloud's occ status to report installed=true.

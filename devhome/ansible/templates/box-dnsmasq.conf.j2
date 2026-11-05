@@ -1,0 +1,14 @@
+# Managed by devhome/ansible/box.yml — resolver for the devhome docker network.
+# The env's public hostnames resolve to the box itself so local callers (e2e in
+# the CI container) reach the ingress without a round trip through the
+# periscope. Everything else goes upstream.
+listen-address={{ devhome_net_gateway }}
+bind-interfaces
+no-resolv
+{% for s in devhome_upstream_dns %}
+server={{ s }}
+{% endfor %}
+address=/{{ devhome_env_domain }}/{{ devhome_net_gateway }}
+{% for h in devhome_dns_passthrough %}
+server=/{{ h }}/{{ devhome_upstream_dns[0] }}
+{% endfor %}

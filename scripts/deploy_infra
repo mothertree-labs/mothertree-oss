@@ -54,6 +54,11 @@ mt_require_env
 # Load all infrastructure configuration
 source "${REPO_ROOT}/scripts/lib/infra-config.sh"
 mt_load_infra_config
+# Cluster platform (lke | k3s) — exported for helmfile, which leaves the
+# Linode-only releases out on k3s.
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+mt_load_cluster_platform
+print_status "Cluster platform: $MT_CLUSTER_PLATFORM${MT_PUBLIC_INGRESS_IP:+ (public ingress IP $MT_PUBLIC_INGRESS_IP)}"
 
 # Alert delivery is mandatory outside dev (Fail Fast — never silently skip).
 # The loader only [WARN]s when these keys are absent, and the Alertmanager
@@ -240,6 +245,9 @@ fi
 # =============================================================================
 # Cloud Firewall Controller - create API token secret
 # =============================================================================
+if [ "$MT_CLUSTER_PLATFORM" = "k3s" ]; then
+  print_status "k3s: no Linode Cloud Firewall Controller (the box has no public ingress; the periscope is the only public face)"
+else
 print_status "Setting up Cloud Firewall Controller API token..."
 if [ -f "$REPO_ROOT/secrets.$MT_ENV.tfvars.env" ]; then
   source "$REPO_ROOT/secrets.$MT_ENV.tfvars.env"
@@ -252,6 +260,7 @@ if [ -n "${TF_VAR_linode_token:-}" ]; then
 else
   print_warning "TF_VAR_linode_token not set - Cloud Firewall Controller will not have API access"
 fi
+fi  # lke only
 
 # Migrate metrics-server from kubectl-managed to Helm-managed (one-time migration;
 # on subsequent runs Helm already owns the resources and this block is skipped)
@@ -272,8 +281,17 @@ fi
 
 # Apply persistent RBAC for cloud-firewall-controller (workaround for chart v0.2.0
 # bug where RBAC resources are Helm hooks that get garbage-collected between upgrades)
-print_status "Applying persistent cloud-firewall-controller RBAC..."
-kubectl apply -f "$REPO_ROOT/apps/manifests/cloud-firewall-controller-rbac.yaml"
+if [ "$MT_CLUSTER_PLATFORM" != "k3s" ]; then
+  print_status "Applying persistent cloud-firewall-controller RBAC..."
+  kubectl apply -f "$REPO_ROOT/apps/manifests/cloud-firewall-controller-rbac.yaml"
+fi
+
+# k3s: serve the LKE StorageClass names from local-path so every manifest and
+# chart value deploys unchanged (apps/manifests/k3s/storageclasses.yaml).
+if [ "$MT_CLUSTER_PLATFORM" = "k3s" ]; then
+  print_status "k3s: applying local-path aliases for the LKE StorageClasses..."
+  kubectl apply -f "$REPO_ROOT/apps/manifests/k3s/storageclasses.yaml"
+fi
 
 # =============================================================================
 # Pre-sync: Migrate existing tcp-services entries to PROXY protocol format

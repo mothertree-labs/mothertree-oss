@@ -1,0 +1,35 @@
+---
+# What cloud-init (ci/terraform/user-data.yaml) does for the Linode CI VM, for
+# the devhome-ci VM-like container: Docker CE + buildx and the woodpecker user.
+# Run before ci/ansible/playbook.yml:
+#   ansible-playbook -i config/platform/devhome/ci-inventory.yml devhome/ansible/ci-bootstrap.yml
+# Docker runs INSIDE the container (its /var/lib/docker is a host bind mount,
+# so overlayfs works), keeping CI builds out of the host daemon that runs k3d.
+- name: Bootstrap the devhome CI container
+  hosts: ci_servers
+  become: true
+  tasks:
+    - name: Install Docker CE (official repo) and base tools
+      ansible.builtin.shell: |
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+        apt-get update
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin git jq unzip ufw
+      args:
+        creates: /usr/bin/docker
+
+    - name: woodpecker user in the docker group
+      ansible.builtin.user:
+        name: woodpecker
+        shell: /bin/bash
+        groups: docker
+        append: true
+
+    - name: Docker running
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started

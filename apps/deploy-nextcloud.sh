@@ -257,7 +257,7 @@ if [ -n "$IDENTITY_SECRET_EXISTS_PRE_SB" ]; then
         esac
         if [ "$_nc_state" = "schema_absent" ]; then
             print_warning "SPLIT-BRAIN: nextcloud-identity Secret exists but ${NEXTCLOUD_DB_NAME} has no Nextcloud schema (${MT_PROBE_DETAIL})"
-            if [ "$MT_ENV" = "dev" ]; then
+            if mt_is_dev_class; then
                 print_warning "dev pool tenant: auto-recovering via clean cold-start reinstall (dev data loss acceptable)"
                 kubectl delete secret nextcloud-identity -n "$NS_FILES" --ignore-not-found
                 NC_SPLIT_BRAIN_RECOVERY=true

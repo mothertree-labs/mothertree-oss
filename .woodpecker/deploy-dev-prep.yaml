@@ -39,7 +39,7 @@ steps:
       E2E_POOL2_BASE_DOMAIN:
         from_secret: e2e_pool2_base_domain
     commands:
-      - ci/scripts/ci-deploy.sh dev --prep-only
+      - ci/scripts/ci-deploy.sh "$${MT_CI_DEV_ENV:-dev}" --prep-only
 
 # Test-user creation lives in deploy-dev-finalize, not here. The previous
 # placement (in this workflow, after prep) hit pipeline #1258: the

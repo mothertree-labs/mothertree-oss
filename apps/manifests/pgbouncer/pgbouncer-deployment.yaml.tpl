@@ -6,7 +6,9 @@ metadata:
   labels:
     app: pgbouncer
 spec:
-  replicas: 2
+  # infra config pgbouncer.replicas (default 2). The pod anti-affinity below is
+  # hard, so this must not exceed the node count (1 on a single-node k3s env).
+  replicas: ${PGBOUNCER_REPLICAS}
   selector:
     matchLabels:
       app: pgbouncer

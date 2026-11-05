@@ -36,4 +36,4 @@ steps:
       E2E_POOL2_BASE_DOMAIN:
         from_secret: e2e_pool2_base_domain
     commands:
-      - ci/scripts/ci-deploy-app.sh dev email-probe
+      - ci/scripts/ci-deploy-app.sh "$${MT_CI_DEV_ENV:-dev}" email-probe

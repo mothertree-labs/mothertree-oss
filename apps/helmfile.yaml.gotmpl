@@ -1,5 +1,8 @@
 environments:
   dev: {}
+  # devhome: single-node k3s on one box (see devhome/). Its values directory
+  # environments/devhome is a symlink to environments/dev — same dev sizing.
+  devhome: {}
   prod: {}
 
 ---
@@ -152,6 +155,8 @@ releases:
   - name: cloud-firewall-crd
     namespace: kube-system
     chart: linode-cfw/cloud-firewall-crd
+    # Linode-only: k3s (devhome) has no Cloud Firewall to manage.
+    installed: {{ ne (env "MT_CLUSTER_PLATFORM" | default "lke") "k3s" }}
     version: 0.2.0
     wait: true
     timeout: 120
@@ -165,6 +170,7 @@ releases:
   - name: cloud-firewall-controller
     namespace: kube-system
     chart: linode-cfw/cloud-firewall-controller
+    installed: {{ ne (env "MT_CLUSTER_PLATFORM" | default "lke") "k3s" }}
     version: 0.2.1
     needs:
       - kube-system/cloud-firewall-crd

@@ -189,12 +189,12 @@ mt_nc_cold_start_guard() {
             print_success "$db has no Nextcloud schema (${MT_PROBE_DETAIL:-}); clean cold start"
             return 0 ;;
         0)
-            if [ "$env" = "dev" ] && [ "$db" != "nextcloud_${tenant}" ]; then
+            if MT_ENV="$env" mt_is_dev_class && [ "$db" != "nextcloud_${tenant}" ]; then
                 MT_NC_COLD_START_ACTION="refused"
                 print_error "$db is fully installed but is not this tenant's database by convention (expected nextcloud_${tenant}); refusing to drop a DB that may belong to another tenant. Fix database.nextcloud_db in the tenant config or reset the DB by hand. Aborting WITHOUT touching it."
                 return 1
             fi
-            if [ "$env" = "dev" ]; then
+            if MT_ENV="$env" mt_is_dev_class; then
                 print_warning "ORPHAN: $db is fully installed (${MT_PROBE_DETAIL:-}) but this cluster has no nextcloud-identity Secret — a previous dev cluster left it behind"
                 print_warning "dev pool tenant: dropping $db so the install Job can start from a fresh database (dev data loss acceptable)"
                 if mt_nc_drop_db_verified "$db"; then

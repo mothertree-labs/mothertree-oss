@@ -237,10 +237,11 @@ ssh "${SSH_OPTS[@]}" "root@${HS_SSH_HOST}" \
 
 # ── Configure split DNS (REQUIRED — never silently skip) ─────────────────────
 # Route internal domain queries to this router's Unbound DNS.
-case "$MT_ENV" in
-  dev)     SPLIT_DOMAIN="internal.dev.${INFRA_DOMAIN}" ;;
-  *)       SPLIT_DOMAIN="${MT_ENV}.${INFRA_DOMAIN}" ;;
-esac
+if mt_is_dev_class; then
+  SPLIT_DOMAIN="internal.${MT_ENV}.${INFRA_DOMAIN}"
+else
+  SPLIT_DOMAIN="${MT_ENV}.${INFRA_DOMAIN}"
+fi
 
 print_status "Configuring split DNS: ${SPLIT_DOMAIN} → ${ROUTER_TS_IP}"
 if ! ssh "${SSH_OPTS[@]}" "root@${HS_SSH_HOST}" \
