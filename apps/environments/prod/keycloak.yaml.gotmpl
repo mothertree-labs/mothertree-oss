@@ -22,6 +22,13 @@ extraEnv: |
     value: keycloak
   - name: KC_DB_PASSWORD
     value: '{{ env "KEYCLOAK_DB_PASSWORD" }}'
+  # Set by deploy_infra to PgBouncer's default_pool_size. PgBouncer runs in
+  # session mode, so each Keycloak connection holds a server connection for its
+  # whole life. With the Quarkus default (100), Keycloak opens more than the pool
+  # under load, and the extra connections wait in PgBouncer's queue while Keycloak
+  # has idle connections of its own, until query_wait_timeout (#2587).
+  - name: KC_DB_POOL_MAX_SIZE
+    value: '{{ requiredEnv "KC_DB_POOL_MAX_SIZE" }}'
   - name: KC_LOG_LEVEL
     value: INFO
 

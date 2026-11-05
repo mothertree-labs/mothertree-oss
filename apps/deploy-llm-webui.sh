@@ -226,7 +226,11 @@ _coredns_body="rewrite name ${AUTH_HOST} ${_coredns_target}"$'\n'
 
 _coredns_existing=$(kubectl -n kube-system get configmap coredns-custom \
     -o "jsonpath={.data.${_coredns_key}}" 2>/dev/null || true)
-if [ "$_coredns_existing" = "$_coredns_body" ]; then
+# $(...) strips the trailing newline from the stored value, but
+# _coredns_body ends with one. Compare without it, or the two never match and
+# every deploy restarts CoreDNS (twice per pipeline: here and in the other
+# rewrite script), which is a DNS blip for any pipeline testing at the time.
+if [ "$_coredns_existing" = "${_coredns_body%$'\n'}" ]; then
     print_status "CoreDNS rewrite already in place — skipping patch + rollout"
     _coredns_changed=false
 else

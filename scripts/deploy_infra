@@ -844,6 +844,10 @@ fi
 # tar.gz on pod start) — and only then: unnecessary restarts are an auth outage
 # on single-replica environments and drop Infinispan-cached state.
 : "${KEYCLOAK_THEME_HASH:?theme hash must be computed before the Keycloak sync}"
+# Keycloak's DB pool is capped at PgBouncer's per-database pool (see
+# KC_DB_POOL_MAX_SIZE in apps/environments/<env>/keycloak.yaml.gotmpl).
+[[ "${PGBOUNCER_DEFAULT_POOL_SIZE:-}" =~ ^[1-9][0-9]*$ ]] || { print_error "PGBOUNCER_DEFAULT_POOL_SIZE ('${PGBOUNCER_DEFAULT_POOL_SIZE:-}') must be a positive integer (pgbouncer.default_pool_size in the infra config)"; exit 1; }
+export KC_DB_POOL_MAX_SIZE="$PGBOUNCER_DEFAULT_POOL_SIZE"
 print_status "Deploying Keycloak to $NS_AUTH namespace (replicas: $KEYCLOAK_REPLICAS, theme ${KEYCLOAK_THEME_HASH:0:12})..."
 pushd "$REPO_ROOT/apps" >/dev/null
   helmfile -e "$MT_ENV" -l name=keycloak sync --skip-deps
