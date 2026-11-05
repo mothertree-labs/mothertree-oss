@@ -164,6 +164,21 @@
 
     # The install script starts tailscaled on a VM but not inside a systemd
     # container (devhome-ci); make it explicit either way.
+    # A second CI host for a non-default dev-class env (devhome) must never
+    # fall back to prod's mesh or post under the live CI's status context.
+    - name: Refuse a partial second-CI-host configuration
+      ansible.builtin.assert:
+        that:
+          - ci_headscale_url | default('') | length > 0
+          - ci_tailscale_auth_key | default('') | length > 0
+          - woodpecker_status_context | default('') | length > 0
+          - woodpecker_status_context != 'ci/woodpecker'
+        fail_msg: >-
+          ci_dev_env={{ ci_dev_env }}: ci_headscale_url, ci_tailscale_auth_key and a
+          woodpecker_status_context other than ci/woodpecker are required
+        quiet: true
+      when: ci_dev_env | default('dev') != 'dev'
+
     - name: Ensure tailscaled is running
       ansible.builtin.systemd:
         name: tailscaled

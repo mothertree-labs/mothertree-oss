@@ -1183,10 +1183,9 @@ mt_http01_san_lines() {
 # on-demand Linode dev cluster (bring-up, reaper, heartbeat, LKE kubeconfig
 # fetch). Usage: if mt_is_dev_class; then ...; fi
 mt_is_dev_class() {
-    case "${MT_ENV:-}" in
-        dev|dev[a-z0-9]*) return 0 ;;
-        *) return 1 ;;
-    esac
+    # Anchored: "dev" plus lowercase letters/digits only. A glob like
+    # dev[a-z0-9]* would also accept devx-prod (its * matches anything).
+    [[ "${MT_ENV:-}" =~ ^dev[a-z0-9]*$ ]]
 }
 
 # Returns 0 when MT_ENV is a production-like environment — every environment

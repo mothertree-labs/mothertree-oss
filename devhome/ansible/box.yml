@@ -122,6 +122,11 @@
         that: (_ts_ip_now.stdout | trim) == box_tailscale_ip
         fail_msg: "box_tailscale_ip={{ box_tailscale_ip }} but the box's tailnet IP is {{ _ts_ip_now.stdout | trim }}"
 
+    - name: Require the periscope's tailnet address (HAProxy only accepts PROXY headers from it)
+      ansible.builtin.assert:
+        that: periscope_tailscale_ip | default('') is match('^100\\.')
+        fail_msg: "periscope_tailscale_ip (the periscope's 100.x tailnet address) is required"
+
     - name: Install k3d
       ansible.builtin.get_url:
         url: "https://github.com/k3d-io/k3d/releases/download/{{ k3d_version }}/k3d-linux-amd64"

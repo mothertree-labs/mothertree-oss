@@ -37,9 +37,12 @@ sql_lit() { printf "'%s'" "${1//\'/\'\'}"; }
   echo "SELECT 'CREATE ROLE pgbouncer LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname='pgbouncer') \\gexec"
   echo "ALTER ROLE pgbouncer WITH LOGIN PASSWORD $(sql_lit "$BOUNCER_PW");"
   echo "GRANT SELECT ON pg_catalog.pg_shadow TO pgbouncer;"
-  echo "GRANT pg_read_all_data TO pgbouncer;"
   echo "SELECT 'CREATE ROLE keycloak LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname='keycloak') \\gexec"
   echo "ALTER ROLE keycloak WITH LOGIN PASSWORD $(sql_lit "$KC_PW");"
   echo "SELECT 'CREATE DATABASE keycloak OWNER keycloak' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='keycloak') \\gexec"
+  echo "REVOKE CONNECT ON DATABASE keycloak FROM PUBLIC;"
+  echo "GRANT CONNECT ON DATABASE keycloak TO keycloak;"
+  # pgbouncer needs nothing beyond pg_shadow: auth_query runs in auth_dbname=postgres.
+  echo "REVOKE pg_read_all_data FROM pgbouncer;"
 } | ssh "$@" "$TARGET" 'sudo -u postgres psql -q -d postgres'
 echo "PostgreSQL bootstrap complete for env=$ENV ($TARGET)"

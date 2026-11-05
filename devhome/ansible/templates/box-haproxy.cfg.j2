@@ -22,6 +22,10 @@ defaults
 frontend in_{{ p.port }}
     bind {{ box_tailscale_ip }}:{{ p.port }}{{ ' accept-proxy' if p.proxy else '' }}
     bind {{ devhome_net_gateway }}:{{ p.port }}
+    # On the tailnet address only the periscope may connect: any other peer
+    # could send its own PROXY header and pick the client IP ingress sees.
+    # (tcp-request connection sees the real peer, not the PROXY address.)
+    tcp-request connection reject if { dst {{ box_tailscale_ip }} } !{ src {{ periscope_tailscale_ip }} }
     default_backend k3d_{{ p.port }}
 
 backend k3d_{{ p.port }}

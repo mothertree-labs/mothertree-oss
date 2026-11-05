@@ -31,7 +31,7 @@ check_not() { local desc="$1"; shift; if "$@"; then fail "$desc"; else ok; fi; }
   done
   # prod-like: prod, prod-eu, an unset env (the safe direction), and names that
   # merely contain "dev" somewhere other than as the prefix.
-  for e in prod prod-eu "" staging mydev dev-eu DEV; do
+  for e in prod prod-eu "" staging mydev dev-eu DEV devx-prod devhome-eu; do
     MT_ENV="$e"; mt_is_dev_class && { echo "FAIL: '$e' should not be dev-class" >&2; exit 1; }
     mt_is_prod_like || { echo "FAIL: '$e' should be prod-like" >&2; exit 1; }
   done

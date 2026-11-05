@@ -51,20 +51,22 @@ pre-auth keys and the forwarded ports.
 1. **Machines:**
    `cd devhome/terraform && terraform apply -var-file=../../config/platform/devhome/terraform.tfvars`.
    This creates the periscope plus, while `box_enabled`, the Linode stand-in box.
-2. **Box:**
+2. **Box, first pass:**
    `ansible-playbook -i …/inventory.yml -e @…/ansible-vars.yml devhome/ansible/box.yml`.
-   * The first pass joins the tailnet and prints the box's tailnet IP.
-   * Set `box_tailscale_ip`, then run it again. The second pass creates the k3d
-     cluster, HAProxy, dnsmasq and the VM-like containers.
-3. **Periscope:** `ansible-playbook … devhome/ansible/periscope.yml`.
-4. **PostgreSQL:**
+   It joins the tailnet and prints the box's tailnet IP. Set `box_tailscale_ip`.
+3. **Periscope:** `ansible-playbook … devhome/ansible/periscope.yml`. Set
+   `periscope_tailscale_ip` to its tailnet IP.
+4. **Box, second pass:** run `box.yml` again. It creates the k3d cluster, HAProxy,
+   dnsmasq and the VM-like containers. HAProxy accepts PROXY headers on the
+   tailnet address only from `periscope_tailscale_ip`.
+5. **PostgreSQL:**
    * Join `devhome-pg` to the tailnet.
    * Put its address in `pgbouncer.pg_vm_tailscale_ip` and `POSTGRES_SERVER_IP`
      (`config/platform/infra/terraform-outputs.devhome.env`).
    * Run `devhome/ansible/pg-prepare.yml` (the VM's cloud-init steps: C-locale
      initdb, `postgres_exporter`), then `manage_infra -e devhome --ansible --limit=postgres`, then
      `devhome/scripts/pg-bootstrap.sh -e devhome -t <infra-tenant> root@172.30.0.10 -o ProxyJump=root@<box>`.
-5. **Cluster:** `deploy_infra -e devhome`, `manage_infra -e devhome --dns`, then
+6. **Cluster:** `deploy_infra -e devhome`, `manage_infra -e devhome --dns`, then
    `create_env -e devhome -t <tenant>`.
 
 ## Ports
