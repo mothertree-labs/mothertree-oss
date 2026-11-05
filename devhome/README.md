@@ -39,7 +39,7 @@ internet ──► periscope (nanode, public IP; DNS for *.devhome.<domain> poin
   * CI: `ci/ansible/playbook.yml`.
 * **One pipeline at a time.** The CI host leases a single pool slot
   (`CI_POOL_SLOTS=pool1`). It deploys with `MT_CI_DEV_ENV=devhome` and reads
-  the cluster kubeconfig from `MT_CI_DEV_KUBECONFIG_FILE`. These are Woodpecker
+  the cluster kubeconfig from `MT_CI_DEV_KUBECONFIG_FILE` (`/home/woodpecker/.kube/devhome.yaml`, placed by `devhome/ansible/ci-bootstrap.yml`). These are Woodpecker
   global env vars.
 
 ## Bring-up (from an operator machine)
