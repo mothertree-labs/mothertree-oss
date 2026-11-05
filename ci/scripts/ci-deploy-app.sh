@@ -191,8 +191,10 @@ case "$MODE" in
       pushd "$REPO_ROOT/apps" >/dev/null
         helmfile -e "$MT_ENV" -l name=collabora-online sync
       popd >/dev/null
-      kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=collabora-online \
-        -n "$NS_OFFICE" --timeout=300s
+      # rollout status, not `kubectl wait -l`: on a first install the pods do not
+      # exist yet when helmfile returns, and `kubectl wait` on an empty selector
+      # fails at once ("no matching resources found").
+      kubectl rollout status deployment/collabora-online -n "$NS_OFFICE" --timeout=300s
       echo "  Collabora deployed"
     fi
 

@@ -814,8 +814,9 @@ if [ "$OFFICE_ENABLED" = "true" ]; then
     helmfile -e "$MT_ENV" -l name=collabora-online --skip-deps sync
   popd >/dev/null
   print_status "Collabora: waiting for pod readiness..."
-  kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=collabora-online \
-    -n "$NS_OFFICE" --timeout=300s
+  # rollout status, not `kubectl wait -l`: on a first install the pods may not
+  # exist yet, and `kubectl wait` on an empty selector fails at once.
+  kubectl rollout status deployment/collabora-online -n "$NS_OFFICE" --timeout=300s
   print_success "Collabora deployed"
 else
   print_status "Collabora: skipping (features.office_enabled is not true)"
