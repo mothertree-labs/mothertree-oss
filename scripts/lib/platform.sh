@@ -95,3 +95,16 @@ mt_ingress_public_ip() {
   [ -n "$ip" ] || return 1
   printf '%s\n' "$ip"
 }
+
+# mt_coredns_custom_suffix — key suffix for entries in kube-system/coredns-custom
+# that must be imported INSIDE the cluster's main server block (e.g. `rewrite`
+# rules). LKE's Corefile imports `custom/*.include` there; k3s's imports
+# `custom/*.override` there (its `*.server` keys are separate server blocks).
+mt_coredns_custom_suffix() {
+  mt_load_cluster_platform
+  if [ "$MT_CLUSTER_PLATFORM" = "k3s" ]; then
+    printf 'override\n'
+  else
+    printf 'include\n'
+  fi
+}

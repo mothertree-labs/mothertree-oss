@@ -92,6 +92,15 @@ check "k3s ingress IP never reads the Service" test ! -s "$KUBECTL_LOG"
 check "lke ingress IP is the Service LB IP" test "$(ingress_ip_of plain 198.51.100.4)" = "198.51.100.4"
 check_not "lke without an LB IP returns non-zero" ingress_ip_of plain ""
 
+suffix_of() {
+  ( REPO_ROOT="$TEST_TMP/repo" MT_ENV="$1"
+    unset MT_CLUSTER_PLATFORM MT_PUBLIC_INGRESS_IP MT_INFRA_CONFIG _MT_PLATFORM_LOADED _MT_PLATFORM_ENV
+    source "$PLATFORM_SH"
+    mt_coredns_custom_suffix ) 2>/dev/null
+}
+check "CoreDNS custom key suffix on LKE is include" test "$(suffix_of plain)" = "include"
+check "CoreDNS custom key suffix on k3s is override" test "$(suffix_of box)" = "override"
+
 # ── ci-lib.sh ─────────────────────────────────────────────────────────────
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/bin/redis-cli"
 chmod +x "$TEST_TMP/bin/redis-cli"

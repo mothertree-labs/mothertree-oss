@@ -443,7 +443,9 @@ print_status "Ensuring CoreDNS rewrite for $MAIL_HOST → stalwart.$NS_MAIL.svc.
 if ! kubectl -n kube-system get configmap coredns-custom >/dev/null 2>&1; then
     kubectl -n kube-system create configmap coredns-custom
 fi
-_coredns_key="mail-${TENANT}.include"
+# shellcheck source=../scripts/lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+_coredns_key="mail-${TENANT}.$(mt_coredns_custom_suffix)"   # .include on LKE, .override on k3s
 _coredns_body="rewrite name ${MAIL_HOST} stalwart.${NS_MAIL}.svc.cluster.local"$'\n'
 
 # Detect whether the desired rewrite is already in place. If so, the patch is
