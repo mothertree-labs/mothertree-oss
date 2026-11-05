@@ -37,6 +37,10 @@ internet ──► periscope (nanode, public IP; DNS for *.devhome.<domain> poin
   * PostgreSQL: the postgres play in `ansible/playbook.yml`, via
     `manage_infra -e devhome --ansible`.
   * CI: `ci/ansible/playbook.yml`.
+* **One PgBouncer replica.** Its pod anti-affinity is hard and there is one node,
+  so set `pgbouncer.replicas: 1` and double `default_pool_size` (20 instead of
+  dev's 10 × 2 pods). PgBouncer runs in session mode: during a Stalwart rolling
+  update the old pod keeps its whole pool, and at 10 the new pod never becomes Ready.
 * **One pipeline at a time.** The CI host leases a single pool slot
   (`CI_POOL_SLOTS=pool1`). It deploys with `MT_CI_DEV_ENV=devhome` and reads
   the cluster kubeconfig from `MT_CI_DEV_KUBECONFIG_FILE` (`/home/woodpecker/.kube/devhome.yaml`, placed by `devhome/ansible/ci-bootstrap.yml`). These are Woodpecker
