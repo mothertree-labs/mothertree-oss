@@ -138,6 +138,11 @@ check "no .woodpecker deploy command hard-codes env=dev${bad:+: $bad}" test -z "
 param=$(grep -cE 'ci/scripts/ci-deploy(-app)?\.sh "\$\$\{MT_CI_DEV_ENV:-dev\}"' "$REPO_ROOT"/.woodpecker/*.yaml | awk -F: '{s+=$2} END {print s}')
 check ".woodpecker dev deploys use MT_CI_DEV_ENV (found $param)" test "$param" -ge 15
 
+# ── realm import: dev-class login behaviour is not tied to the literal "dev"
+# (devhome's e2e logs in with a password; a literal check gave it prod's flow).
+lit=$(grep -nE '"\$\{?MT_ENV\}?" *!?= *"dev"' "$REPO_ROOT/docs/import-keycloak-realm.sh" || true)
+check "import-keycloak-realm.sh uses _is_dev_class, not MT_ENV = dev${lit:+: $lit}" test -z "$lit"
+
 # ── helmfile: devhome env + Linode-only releases gated ────────────────────
 hf="$REPO_ROOT/apps/helmfile.yaml.gotmpl"
 check "helmfile declares the devhome environment" grep -qE '^  devhome: \{\}' "$hf"
