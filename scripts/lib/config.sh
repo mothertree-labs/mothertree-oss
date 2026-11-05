@@ -631,7 +631,7 @@ _mt_export_all() {
   export KEYCLOAK_INTERNAL_URL="http://keycloak-keycloakx-http.infra-auth.svc.cluster.local"
 
   # Rate limiting: 1-minute sliding window for both envs, higher limit for dev
-  if [ "$MT_ENV" = "dev" ]; then
+  if mt_is_dev_class; then
     export RATE_LIMIT_MAX="${RATE_LIMIT_MAX:-2000}"       # ~33 QPS
     export RATE_LIMIT_BEGINSETUP_MAX="${RATE_LIMIT_BEGINSETUP_MAX:-20000}"
   else

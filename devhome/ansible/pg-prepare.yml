@@ -1,0 +1,65 @@
+---
+# What cloud-init (modules/postgres-server/user-data.yaml) does for the Linode
+# PostgreSQL VM before Ansible, for the devhome-pg VM-like container:
+#   - PostgreSQL from PGDG, cluster initialised with --locale=C (Synapse needs
+#     LC_COLLATE=C; the apt package would initdb with the system locale)
+#   - postgres_exporter binary + system user (the postgres play only deploys
+#     its systemd unit)
+# Run BEFORE `manage_infra -e devhome --ansible --limit=postgres`, which then
+# moves the data dir onto /mnt/pgdata and does everything else.
+- name: Prepare the devhome PostgreSQL container
+  hosts: postgres
+  become: true
+  vars:
+    pg_version: "17"
+    pge_version: "0.16.0"   # keep in step with modules/postgres-server/user-data.yaml
+  tasks:
+    - name: PGDG apt repository
+      ansible.builtin.shell: |
+        set -e
+        curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+        apt-get update
+      args:
+        creates: /etc/apt/sources.list.d/pgdg.list
+
+    - name: Install PostgreSQL
+      ansible.builtin.apt:
+        name: "postgresql-{{ pg_version }}"
+
+    - name: Is the cluster already on the data volume?
+      ansible.builtin.stat:
+        path: "/mnt/pgdata/{{ pg_version }}/main/PG_VERSION"
+      register: _on_volume
+
+    - name: Re-initialise the fresh cluster with the C locale (as cloud-init does)
+      ansible.builtin.shell: |
+        set -e
+        cur=$(sudo -u postgres psql -Atc "select datcollate from pg_database where datname='template1'")
+        [ "$cur" = "C" ] && { echo already-C; exit 0; }
+        systemctl stop postgresql
+        sudo -u postgres rm -rf "/var/lib/postgresql/{{ pg_version }}/main"
+        sudo -u postgres /usr/lib/postgresql/{{ pg_version }}/bin/initdb \
+          -D "/var/lib/postgresql/{{ pg_version }}/main" --locale=C --encoding=UTF8
+        systemctl start postgresql
+        echo reinitialised
+      register: _reinit
+      changed_when: "'reinitialised' in _reinit.stdout"
+      when: not _on_volume.stat.exists
+
+    - name: Install postgres_exporter
+      ansible.builtin.shell: |
+        set -e
+        curl -fsSL -o /tmp/pge.tgz "https://github.com/prometheus-community/postgres_exporter/releases/download/v{{ pge_version }}/postgres_exporter-{{ pge_version }}.linux-amd64.tar.gz"
+        tar -xzf /tmp/pge.tgz -C /tmp
+        install -m 0755 "/tmp/postgres_exporter-{{ pge_version }}.linux-amd64/postgres_exporter" /usr/local/bin/postgres_exporter
+        rm -rf /tmp/pge.tgz /tmp/postgres_exporter-*
+      args:
+        creates: /usr/local/bin/postgres_exporter
+
+    - name: postgres_exporter system user
+      ansible.builtin.user:
+        name: postgres_exporter
+        system: true
+        create_home: false
+        shell: /usr/sbin/nologin

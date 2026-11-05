@@ -128,7 +128,9 @@ DNS_RECORD_EXISTS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$
 if [ "$DNS_RECORD_EXISTS" -gt 0 ]; then
   print_status "DNS record for $ADMIN_HOST already exists"
 else
-  INGRESS_IP=$(kubectl get svc -n "$NS_INGRESS" ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+  # shellcheck source=../scripts/lib/platform.sh
+  source "${REPO_ROOT}/scripts/lib/platform.sh"
+  INGRESS_IP=$(mt_ingress_public_ip || echo "")
   if [ -n "$INGRESS_IP" ]; then
     curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records" \
       -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \

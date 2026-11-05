@@ -1,0 +1,12 @@
+# devhome Terraform variables — copy to config/platform/devhome/terraform.tfvars
+# and pass with: terraform apply -var-file=../../config/platform/devhome/terraform.tfvars
+# The Linode token comes from TF_VAR_linode_token.
+
+ssh_public_key = "ssh-ed25519 AAAA..."
+operator_ips   = ["203.0.113.10"]
+
+# Ports of the tenant(s) deployed on devhome (resources.stalwart.* / jitsi jvb_port)
+mail_tcp_ports  = [46500, 58700, 9930, 9940, 5880]
+media_udp_ports = [31000]
+
+# box_enabled = false   # once the real box runs at home

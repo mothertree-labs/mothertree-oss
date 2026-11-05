@@ -1,0 +1,34 @@
+# Managed by devhome/ansible/box.yml — fronts the k3d cluster's published ports
+# (on {{ k3d_publish_ip }}) for two kinds of clients:
+#   * the periscope, over the tailnet ({{ box_tailscale_ip }}): connections
+#     already carry a PROXY v2 header with the real client address;
+#   * local callers on the devhome docker network ({{ devhome_net_gateway }}),
+#     e.g. e2e in the CI container: plain TCP, so a PROXY header is added here.
+# Either way ingress-nginx receives exactly what the NodeBalancer sends it in
+# LKE: PROXY v2 on every port except 25.
+global
+    log /dev/log local0
+    maxconn 20000
+
+defaults
+    mode tcp
+    log global
+    option tcplog
+    timeout connect 5s
+    timeout client 1h
+    timeout server 1h
+
+{% for p in devhome_forward_tcp %}
+frontend in_{{ p.port }}
+    bind {{ box_tailscale_ip }}:{{ p.port }}{{ ' accept-proxy' if p.proxy else '' }}
+    bind {{ devhome_net_gateway }}:{{ p.port }}
+    # On the tailnet address only the periscope may connect: any other peer
+    # could send its own PROXY header and pick the client IP ingress sees.
+    # (tcp-request connection sees the real peer, not the PROXY address.)
+    tcp-request connection reject if { dst {{ box_tailscale_ip }} } !{ src {{ periscope_tailscale_ip }} }
+    default_backend k3d_{{ p.port }}
+
+backend k3d_{{ p.port }}
+    server k3d {{ k3d_publish_ip }}:{{ p.port }}{{ ' send-proxy-v2' if p.proxy else '' }}
+
+{% endfor %}

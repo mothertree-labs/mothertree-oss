@@ -417,7 +417,7 @@ else
         # The wipe is gated on POSITIVE evidence: a definite MISSING verdict
         # whose detail line proves the explicit query ran and answered. A lost
         # answer never reaches this branch (it aborted above).
-        if [ "$MT_ENV" = "dev" ] && [ -n "$MT_PROBE_DETAIL" ]; then
+        if mt_is_dev_class && [ -n "$MT_PROBE_DETAIL" ]; then
             print_warning "dev pool tenant: initdb --update did not converge (schema state: ${MT_PROBE_DETAIL}) — resetting public schema of ${ROUNDCUBE_DB_NAME} and re-running initdb"
             # Recreate the schema with the same grants roundcube-db-init sets
             # (REVOKE PUBLIC for cross-tenant isolation, ALL to the tenant user).

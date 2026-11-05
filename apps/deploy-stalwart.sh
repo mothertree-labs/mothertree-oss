@@ -185,7 +185,7 @@ fi
 # full info-level delivery stream so ci-e2e-diagnostics.sh can name which leg of
 # the email round-trip (shard-5) broke. Prod keeps the quieter legacy block to
 # bound log volume — flip an env here if prod delivery debugging is ever needed.
-if [[ "$MT_ENV" == "dev" ]]; then
+if mt_is_dev_class; then
     export STALWART_TRACING_TOML="    [tracer.\"stdout\"]
     type = \"stdout\"
     level = \"info\"
@@ -443,7 +443,9 @@ print_status "Ensuring CoreDNS rewrite for $MAIL_HOST → stalwart.$NS_MAIL.svc.
 if ! kubectl -n kube-system get configmap coredns-custom >/dev/null 2>&1; then
     kubectl -n kube-system create configmap coredns-custom
 fi
-_coredns_key="mail-${TENANT}.include"
+# shellcheck source=../scripts/lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+_coredns_key="mail-${TENANT}.$(mt_coredns_custom_suffix)"   # .include on LKE, .override on k3s
 _coredns_body="rewrite name ${MAIL_HOST} stalwart.${NS_MAIL}.svc.cluster.local"$'\n'
 
 # Detect whether the desired rewrite is already in place. If so, the patch is

@@ -150,7 +150,8 @@ mt_apply kubectl apply -f <(kubectl create secret generic postgres-credentials -
 # =============================================================================
 
 print_status "Applying PgBouncer Deployment..."
-mt_apply kubectl apply -f <(envsubst '${NS_DB} ${PG_VM_TAILSCALE_IP} ${HEADSCALE_URL} ${CHECKSUM_PGBOUNCER_CONFIG} ${CHECKSUM_PGBOUNCER_USERLIST}' \
+[[ "${PGBOUNCER_REPLICAS:-}" =~ ^[1-9][0-9]*$ ]] || { print_error "PGBOUNCER_REPLICAS ('${PGBOUNCER_REPLICAS:-}') must be a positive integer (pgbouncer.replicas in the infra config)"; exit 1; }
+mt_apply kubectl apply -f <(envsubst '${NS_DB} ${PG_VM_TAILSCALE_IP} ${HEADSCALE_URL} ${CHECKSUM_PGBOUNCER_CONFIG} ${CHECKSUM_PGBOUNCER_USERLIST} ${PGBOUNCER_REPLICAS}' \
   < "$MANIFESTS_DIR/pgbouncer-deployment.yaml.tpl")
 
 # =============================================================================

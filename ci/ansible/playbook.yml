@@ -36,8 +36,8 @@
           echo "["
           first=true
           for dir in "{{ _tenants_dir }}"/*/; do
-            config="$dir/dev.config.yaml"
-            secrets="$dir/dev.secrets.yaml"
+            config="$dir/{{ ci_dev_env | default('dev') }}.config.yaml"
+            secrets="$dir/{{ ci_dev_env | default('dev') }}.secrets.yaml"
             [[ -f "$config" && -f "$secrets" ]] || continue
             domain=$(yq '.dns.domain' "$config")
             env_label=$(yq '.dns.env_dns_label // ""' "$config")
@@ -162,18 +162,63 @@
       args:
         creates: /usr/bin/tailscale
 
-    - name: Join prod Tailscale mesh
+    # The install script starts tailscaled on a VM but not inside a systemd
+    # container (devhome-ci); make it explicit either way.
+    # A second CI host for a non-default dev-class env (devhome) must never
+    # fall back to prod's mesh or post under the live CI's status context.
+    - name: Refuse a partial second-CI-host configuration
+      ansible.builtin.assert:
+        that:
+          - ci_headscale_url | default('') | length > 0
+          - ci_tailscale_auth_key | default('') | length > 0
+          - woodpecker_status_context | default('') | length > 0
+          - woodpecker_status_context != 'ci/woodpecker'
+        fail_msg: >-
+          ci_dev_env={{ ci_dev_env }}: ci_headscale_url, ci_tailscale_auth_key and a
+          woodpecker_status_context other than ci/woodpecker are required
+        quiet: true
+      when: ci_dev_env | default('dev') != 'dev'
+
+    - name: Ensure tailscaled is running
+      ansible.builtin.systemd:
+        name: tailscaled
+        enabled: true
+        state: started
+
+    - name: Check tailnet membership
+      ansible.builtin.command: tailscale status --json
+      register: _ci_ts_status
+      changed_when: false
+      failed_when: false
+
+    # The Linode CI host joins prod's tailnet. A devhome CI host overrides
+    # ci_headscale_url / ci_tailscale_auth_key to join the dev tailnet instead —
+    # it must never hold a key for prod's mesh.
+    - name: Join the CI Tailscale mesh (prod's unless overridden)
       ansible.builtin.shell: |
         tailscale up \
-          --login-server={{ headscale_url_prod }} \
-          --authkey={{ tailscale_auth_key_prod }} \
+          --login-server={{ ci_headscale_url | default(headscale_url_prod) }} \
+          --authkey={{ ci_tailscale_auth_key | default(tailscale_auth_key_prod) }} \
+          --accept-dns={{ ci_tailscale_accept_dns | default(true) | lower }} \
           --accept-routes=false \
           --ssh \
           --timeout=30s
       register: tailscale_up
+      # Already logged in: re-running `up` with a spent single-use key fails, so
+      # only join when the node is not connected (same rule as the VM plays).
+      when: >-
+        _ci_ts_status.rc != 0 or
+        (_ci_ts_status.stdout | from_json).BackendState != "Running"
       changed_when: "'already' not in (tailscale_up.stdout | default(''))"
       failed_when: tailscale_up.rc != 0 and 'already' not in (tailscale_up.stderr | default(''))
       no_log: true
+
+    # devhome's CI container must resolve the env's own hostnames through the
+    # box's dnsmasq (straight to the local ingress), not MagicDNS. `tailscale
+    # up` is skipped once joined, so apply the preference on every run.
+    - name: Apply the MagicDNS preference
+      ansible.builtin.command: tailscale set --accept-dns={{ ci_tailscale_accept_dns | default(true) | lower }}
+      changed_when: false
 
     - name: Get Tailscale IP
       ansible.builtin.command: tailscale ip -4
@@ -505,6 +550,11 @@
           # awscli was removed from the default repos starting in Ubuntu 24.04
           # / Debian 13, so we install both via pip instead.
           - python3-pip
+          # redis-cli: the lease / lock / e2e-flag scripts (ci/scripts/ci-lib.sh)
+          # and the Valkey readiness check below talk to Valkey with it. The
+          # Linode CI VM only has it from a hand install; declared so a fresh
+          # host (devhome) gets it too.
+          - redis-tools
         state: present
 
     - name: Install awscli + linode-cli via pip (on-demand-dev bring-up + reaper)

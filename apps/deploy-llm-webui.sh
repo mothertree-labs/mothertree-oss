@@ -218,7 +218,9 @@ print_status "Ensuring CoreDNS rewrite for $AUTH_HOST → internal ingress"
 if ! kubectl -n kube-system get configmap coredns-custom >/dev/null 2>&1; then
     kubectl -n kube-system create configmap coredns-custom
 fi
-_coredns_key="auth-${MT_TENANT}.include"
+# shellcheck source=../scripts/lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+_coredns_key="auth-${MT_TENANT}.$(mt_coredns_custom_suffix)"   # .include on LKE, .override on k3s
 _coredns_target="ingress-nginx-internal-controller.infra-ingress-internal.svc.cluster.local"
 _coredns_body="rewrite name ${AUTH_HOST} ${_coredns_target}"$'\n'
 

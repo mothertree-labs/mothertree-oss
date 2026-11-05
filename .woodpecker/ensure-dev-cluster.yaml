@@ -45,4 +45,4 @@ steps:
       E2E_POOL2_BASE_DOMAIN:
         from_secret: e2e_pool2_base_domain
     commands:
-      - ci/scripts/ci-deploy.sh dev --bringup-only
+      - ci/scripts/ci-deploy.sh "$${MT_CI_DEV_ENV:-dev}" --bringup-only

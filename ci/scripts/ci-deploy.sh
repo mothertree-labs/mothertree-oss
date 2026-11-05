@@ -202,8 +202,20 @@ fi
 # call `ci-deploy.sh dev --prep-only`. The heartbeat-on-cleanup trap will fire
 # on exit (success or failure), keeping the reaper at bay during this step.
 if [[ "$BRINGUP_ONLY" == "true" ]]; then
+  # A k3s env (devhome) is always up — there is nothing to bring up. Prove the
+  # API answers with the vaulted kubeconfig so a dead box fails HERE, with a
+  # clear message, rather than in the first app deploy.
+  source "$REPO_ROOT/scripts/lib/platform.sh"
+  if mt_is_k3s; then
+    echo "=== Bring-up only: $MT_ENV is a permanent k3s cluster — checking it is reachable ==="
+    if ! kubectl get nodes -o wide; then
+      echo "ERROR: the $MT_ENV k3s API is unreachable with the vaulted kubeconfig — is the devhome box up?" >&2
+      exit 1
+    fi
+    exit 0
+  fi
   if [[ "$MT_ENV" != "dev" ]]; then
-    echo "ERROR: --bringup-only only supported for env=dev (got $MT_ENV)"
+    echo "ERROR: --bringup-only only supported for env=dev or a k3s env (got $MT_ENV)"
     exit 1
   fi
   echo "=== Bring-up only: ensuring dev cluster exists ==="

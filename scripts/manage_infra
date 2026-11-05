@@ -199,6 +199,21 @@ if [ "$MT_ENV" = "prod-eu" ]; then
   exit 2
 fi
 
+# k3s environments (devhome) have no LKE cluster and no phase1 workspace: their
+# machines are managed by devhome/terraform + devhome/ansible. Running phase1
+# here would create a fresh workspace and auto-approve an LKE cluster + VMs for
+# the env; the LKE firewall phase has nothing to attach to. Only --dns and
+# --ansible apply.
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+mt_load_cluster_platform
+if [ "$MT_CLUSTER_PLATFORM" = "k3s" ]; then
+  if [ "$RUN_PHASE1" = "true" ] || [ "$RUN_FIREWALL" = "true" ] || [ "$DESTROY" = "true" ]; then
+    print_error "env '$MT_ENV' runs on k3s (cluster.platform in its infra config): phase1 / --firewall / --destroy do not apply."
+    print_error "Its machines are managed by devhome/terraform and devhome/ansible. Use: manage_infra -e $MT_ENV --dns | --ansible"
+    exit 2
+  fi
+fi
+
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "manage_infra"
 

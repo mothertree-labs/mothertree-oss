@@ -54,6 +54,8 @@ _mt_resolve_project_conf
 
 # Load all tenant configuration and secrets
 source "${REPO_ROOT}/scripts/lib/config.sh"
+# shellcheck source=lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
 mt_load_tenant_config
 
 # Check flags
@@ -233,8 +235,7 @@ if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
   # no operator step, no config change.
   print_status "Deploying HTTP-01 multi-SAN TLS certificate for $TENANT_NAME (dns_external=true)..."
 
-  INGRESS_LB_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  INGRESS_LB_IP=$(mt_ingress_public_ip || true)
   if [ -z "$INGRESS_LB_IP" ]; then
     print_error "Cluster ingress LB IP not available — cannot tell which ${TENANT_DOMAIN} hosts point at us"
     print_error "Check: kubectl get svc ingress-nginx-controller -n ${NS_INGRESS}"
@@ -469,7 +470,8 @@ else
 print_status "Creating tenant DNS records..."
 
 # Get the ingress IP from the cluster
-INGRESS_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+# (k3s: cluster.public_ip — the Service reports a node-local address there)
+INGRESS_IP=$(mt_ingress_public_ip || echo "")
 if [ -z "$INGRESS_IP" ]; then
   print_warning "Could not get ingress IP - DNS records will not be created"
   print_warning "You may need to create DNS records manually for $TENANT_DOMAIN"
@@ -527,8 +529,7 @@ else
     # Create/update the mail A record pointing to the cluster ingress LB IP.
     # Inbound MX traffic: internet → NodeBalancer:25 → infra-mail/postfix:25 → tenant Stalwart.
     # Fail hard on missing LB IP: a stale/missing A record would silently bounce inbound mail.
-    INGRESS_LB_IP=$(kubectl get service -n "${NS_INGRESS:-infra-ingress}" ingress-nginx-controller \
-      -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+    INGRESS_LB_IP=$(mt_ingress_public_ip || echo "")
     if [ -z "$INGRESS_LB_IP" ]; then
       print_error "Cluster ingress LB IP not available — cannot set mail A record for $MX_HOST"
       print_error "Check: kubectl get svc ingress-nginx-controller -n ${NS_INGRESS:-infra-ingress}"
@@ -1118,8 +1119,7 @@ if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
   # than reusing the cert step's result because under --finalize-only this
   # phase runs as its own process. Hosts join the probes on the first deploy
   # after their CNAME resolves to us.
-  INGRESS_LB_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  INGRESS_LB_IP=$(mt_ingress_public_ip || true)
   if [ -z "$INGRESS_LB_IP" ]; then
     print_error "Cluster ingress LB IP not available — cannot tell which ${TENANT_DOMAIN} probe targets point at us"
     exit 1

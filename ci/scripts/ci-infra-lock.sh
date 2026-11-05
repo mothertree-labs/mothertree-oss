@@ -34,7 +34,8 @@ MAX_WAIT=2700     # 45 min — worst case: wait for e2e suite + deploy
 POLL_INTERVAL=15  # seconds between checks
 
 # Known pool slots — used to check for active e2e tests
-POOL_SLOTS=(pool1 pool2)
+mapfile -t POOL_SLOTS < <(ci_pool_slots)
+[[ ${#POOL_SLOTS[@]} -gt 0 ]] || { echo "ERROR: no pool slots configured"; exit 1; }
 
 _e2e_tests_running() {
   for pool in "${POOL_SLOTS[@]}"; do

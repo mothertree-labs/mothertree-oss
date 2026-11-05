@@ -1,0 +1,15 @@
+# devhome inventory — copy to config/platform/devhome/inventory.yml.
+# periscope / box are reached over public SSH from the operator IP (firewall
+# allow-list); the VM-like containers are reached through the box.
+all:
+  vars:
+    ansible_user: root
+  children:
+    periscope:
+      hosts:
+        periscope:
+          ansible_host: <periscope public ip>
+    box:
+      hosts:
+        box:
+          ansible_host: <box public ip>

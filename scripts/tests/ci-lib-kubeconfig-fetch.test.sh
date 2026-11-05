@@ -12,6 +12,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# These tests exercise the Linode API path. A CI host that sets the file
+# override globally (devhome: Woodpecker WOODPECKER_ENVIRONMENT) would turn
+# every case into a plain copy, so clear it here.
+unset MT_CI_DEV_KUBECONFIG_FILE
 TEST_TMP=$(mktemp -d)
 trap 'rm -rf "$TEST_TMP"' EXIT
 

@@ -1,0 +1,265 @@
+---
+# devhome box: Docker host for the whole dev environment + CI.
+#
+#   k3d cluster "devhome" (single k3s node)         — the dev Kubernetes cluster
+#   devhome-pg  (VM-like container, tag:postgres)   — configured by ansible/playbook.yml
+#   devhome-ci  (VM-like container, tag:ci)         — configured by ci/ansible/playbook.yml
+#
+# The host itself joins the dev tailnet (tag:k8s-node for the API server,
+# tag:operator so it can reach the containers' tailnet addresses), runs HAProxy
+# in front of the cluster's published ports and dnsmasq for the docker network.
+#
+# NOTE: no --node-external-ip. k3s would advertise that address as the
+# `kubernetes` Service endpoint, and the periscope IP is unreachable from pods.
+# The public address reaches the scripts via cluster.public_ip instead
+# (scripts/lib/platform.sh; JVB gets it as JVB_PUBLIC_IP).
+#
+# Run in two passes: first with box_tailscale_ip unset (joins the tailnet and
+# prints the address), then with it set (the address is baked into HAProxy,
+# the k3d TLS SAN and the kubeconfig).
+- name: Configure devhome box
+  hosts: box
+  become: true
+  vars:
+    devhome_net_gateway: "172.30.0.1"
+    devhome_net_subnet: "172.30.0.0/24"
+    k3d_publish_ip: "127.0.0.2"
+    k3d_subnet: "172.28.0.0/16"
+    k3d_version: "v5.9.0"
+    k3s_image: "rancher/k3s:v1.36.6-k3s1"
+    devhome_upstream_dns: ["1.1.1.1", "8.8.8.8"]
+    devhome_dns_passthrough: []
+    vm_containers:
+      # Every path a nested daemon writes layers to must be a host bind mount
+      # (overlay on the container's own overlay root fails): Docker 29 keeps
+      # image snapshots in /var/lib/containerd, not only /var/lib/docker.
+      # /var/lib/tailscale keeps the node identity across container rebuilds.
+      - { name: devhome-pg, hostname: postgres-devhome, ip: "172.30.0.10",
+          volumes: ["/srv/devhome/pgdata:/mnt/pgdata",
+                    "/srv/devhome/pg-tailscale:/var/lib/tailscale"] }
+      - { name: devhome-ci, hostname: ci-devhome, ip: "172.30.0.20",
+          volumes: ["/srv/devhome/ci-docker:/var/lib/docker",
+                    "/srv/devhome/ci-containerd:/var/lib/containerd",
+                    "/srv/devhome/ci-woodpecker:/var/lib/woodpecker",
+                    "/srv/devhome/ci-tailscale:/var/lib/tailscale",
+                    "/srv/devhome/ci-home:/home"] }
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - headscale_url | default('') | length > 0
+          - devhome_env_domain | default('') | length > 0
+          - operator_ssh_public_key | default('') | length > 0
+        fail_msg: "headscale_url, devhome_env_domain and operator_ssh_public_key are required"
+
+    - name: Base packages
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, gnupg, haproxy, dnsmasq, jq, git]
+        update_cache: true
+
+    - name: Stop distro dnsmasq from grabbing port 53 on every interface before it is configured
+      ansible.builtin.systemd:
+        name: dnsmasq
+        state: stopped
+        enabled: false
+      when: box_tailscale_ip | default('') | length == 0
+
+    - name: Kernel settings (k3s inotify, HAProxy binding to the tailnet address before it exists)
+      ansible.posix.sysctl:
+        name: "{{ item.k }}"
+        value: "{{ item.v }}"
+        sysctl_file: /etc/sysctl.d/90-devhome.conf
+      loop:
+        - { k: fs.inotify.max_user_instances, v: "8192" }
+        - { k: fs.inotify.max_user_watches, v: "1048576" }
+        - { k: net.ipv4.ip_nonlocal_bind, v: "1" }
+        - { k: net.ipv4.ip_forward, v: "1" }
+
+    - name: Install Docker (official repo)
+      ansible.builtin.shell: |
+        set -e
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+        apt-get update
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+      args:
+        creates: /usr/bin/docker
+
+    - name: Install Tailscale
+      ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
+      args:
+        creates: /usr/bin/tailscale
+
+    - name: Check tailnet membership
+      ansible.builtin.command: tailscale ip -4
+      register: _ts_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Join the dev tailnet
+      ansible.builtin.command: >-
+        tailscale up --login-server={{ headscale_url }}
+        --authkey={{ ts_authkey_box }} --hostname=devhome-box --accept-dns=false
+      when: _ts_ip.rc != 0 or (_ts_ip.stdout | trim) == ''
+      no_log: true
+
+    - name: Read tailnet address
+      ansible.builtin.command: tailscale ip -4
+      register: _ts_ip_now
+      changed_when: false
+
+    - name: Report tailnet address (set box_tailscale_ip to this for the second pass)
+      ansible.builtin.debug:
+        msg: "devhome box tailnet IP: {{ _ts_ip_now.stdout | trim }}"
+
+    - name: Stop after the first pass
+      ansible.builtin.meta: end_play
+      when: box_tailscale_ip | default('') | length == 0
+
+    - name: Refuse a stale box_tailscale_ip
+      ansible.builtin.assert:
+        that: (_ts_ip_now.stdout | trim) == box_tailscale_ip
+        fail_msg: "box_tailscale_ip={{ box_tailscale_ip }} but the box's tailnet IP is {{ _ts_ip_now.stdout | trim }}"
+
+    - name: Require the periscope's tailnet address (HAProxy only accepts PROXY headers from it)
+      ansible.builtin.assert:
+        that: periscope_tailscale_ip | default('') is match('^100\\.')
+        fail_msg: "periscope_tailscale_ip (the periscope's 100.x tailnet address) is required"
+
+    - name: Install k3d
+      ansible.builtin.get_url:
+        url: "https://github.com/k3d-io/k3d/releases/download/{{ k3d_version }}/k3d-linux-amd64"
+        dest: /usr/local/bin/k3d
+        mode: "0755"
+
+    - name: Install kubectl
+      ansible.builtin.shell: |
+        set -e
+        v=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+        curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${v}/bin/linux/amd64/kubectl"
+        chmod 0755 /usr/local/bin/kubectl
+      args:
+        creates: /usr/local/bin/kubectl
+
+    - name: Data directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /srv/devhome/pgdata
+        - /srv/devhome/ci-docker
+        - /srv/devhome/ci-woodpecker
+        - /srv/devhome/ci-home
+        - /srv/devhome/ci-containerd
+        - /srv/devhome/ci-tailscale
+        - /srv/devhome/pg-tailscale
+        - /srv/devhome/k3s-storage
+        - /srv/devhome/vm-image
+
+    - name: devhome docker network
+      ansible.builtin.shell: |
+        docker network inspect devhome >/dev/null 2>&1 && exit 0
+        docker network create --subnet {{ devhome_net_subnet }} --gateway {{ devhome_net_gateway }} devhome
+        echo created
+      register: _net
+      changed_when: "'created' in _net.stdout"
+
+    - name: dnsmasq for the devhome network
+      ansible.builtin.template:
+        src: box-dnsmasq.conf.j2
+        dest: /etc/dnsmasq.d/devhome.conf
+      register: _dnsmasq_conf
+
+    - name: Enable dnsmasq
+      ansible.builtin.systemd:
+        name: dnsmasq
+        enabled: true
+        state: "{{ 'restarted' if _dnsmasq_conf.changed else 'started' }}"
+
+    - name: Create the k3d cluster
+      ansible.builtin.shell: |
+        set -e
+        k3d cluster list devhome >/dev/null 2>&1 && { echo exists; exit 0; }
+        k3d cluster create devhome \
+          --image {{ k3s_image }} \
+          --servers 1 --agents 0 --no-lb \
+          --api-port 0.0.0.0:6443 \
+          --subnet {{ k3d_subnet }} \
+          --volume /srv/devhome/k3s-storage:/var/lib/rancher/k3s/storage@server:0 \
+          {% for p in devhome_forward_tcp %}--port {{ k3d_publish_ip }}:{{ p.port }}:{{ p.port }}@server:0:direct {% endfor %} \
+          {% for p in devhome_forward_udp %}--port 0.0.0.0:{{ p }}:{{ p }}/udp@server:0:direct {% endfor %} \
+          --k3s-arg "--disable=traefik@server:0" \
+          --k3s-arg "--disable=metrics-server@server:0" \
+          --k3s-arg "--cluster-cidr=10.2.0.0/16@server:0" \
+          --k3s-arg "--service-cidr=10.128.0.0/16@server:0" \
+          --k3s-arg "--cluster-dns=10.128.0.10@server:0" \
+          --k3s-arg "--tls-san={{ box_tailscale_ip }}@server:0" \
+          --kubeconfig-update-default=false --wait --timeout 300s
+        echo created
+      register: _k3d
+      changed_when: "'created' in _k3d.stdout"
+
+    - name: Write the cluster kubeconfig (server = box tailnet address)
+      ansible.builtin.shell: |
+        set -e
+        umask 077
+        k3d kubeconfig get devhome \
+          | sed -E 's#server: https://[^ ]+#server: https://{{ box_tailscale_ip }}:6443#' > /root/devhome-kubeconfig.yaml
+      changed_when: false
+
+    - name: Box HAProxy (periscope + local callers -> k3d published ports)
+      ansible.builtin.template:
+        src: box-haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        validate: haproxy -c -f %s
+      register: _haproxy
+
+    - name: Enable HAProxy
+      ansible.builtin.systemd:
+        name: haproxy
+        enabled: true
+        state: "{{ 'restarted' if _haproxy.changed else 'started' }}"
+
+    - name: VM-like container image
+      ansible.builtin.copy:
+        src: vm.Dockerfile
+        dest: /srv/devhome/vm-image/Dockerfile
+      register: _vm_df
+
+    - name: Build VM-like container image
+      ansible.builtin.command: docker build -t devhome-vm:latest /srv/devhome/vm-image
+      when: _vm_df.changed
+
+    - name: Operator key for the VM-like containers
+      ansible.builtin.copy:
+        dest: /srv/devhome/vm-image/authorized_keys
+        content: "{{ operator_ssh_public_key }}\n"
+        mode: "0600"
+
+    - name: Run VM-like containers
+      ansible.builtin.shell: |
+        set -e
+        docker inspect {{ item.name }} >/dev/null 2>&1 && { echo exists; exit 0; }
+        docker run -d --name {{ item.name }} --hostname {{ item.hostname }} \
+          --network devhome --ip {{ item.ip }} --dns {{ devhome_net_gateway }} \
+          --privileged --cgroupns=private --restart unless-stopped \
+          --tmpfs /run --tmpfs /run/lock \
+          -v /srv/devhome/vm-image/authorized_keys:/root/.ssh/authorized_keys:ro \
+          {% for v in item.volumes %}-v {{ v }} {% endfor %} \
+          devhome-vm:latest
+        echo created
+      loop: "{{ vm_containers }}"
+      register: _vm_run
+      changed_when: "'created' in _vm_run.stdout"
+
+    # The CI host reads the cluster kubeconfig from MT_CI_DEV_KUBECONFIG_FILE
+    # (a Woodpecker global env var) instead of fetching it from the Linode API.
+    - name: Install the cluster kubeconfig in the CI container
+      ansible.builtin.shell: |
+        set -e
+        docker exec devhome-ci install -d -m 0755 /etc/mothertree
+        docker cp /root/devhome-kubeconfig.yaml devhome-ci:/etc/mothertree/devhome-kubeconfig.yaml
+        docker exec devhome-ci sh -c 'id woodpecker >/dev/null 2>&1 && chown woodpecker /etc/mothertree/devhome-kubeconfig.yaml; chmod 0600 /etc/mothertree/devhome-kubeconfig.yaml'
+      changed_when: false

@@ -59,8 +59,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate environment
-if [[ "$MT_ENV" != "dev" && "$MT_ENV" != "prod" ]]; then
-  echo "[ERROR] Environment must be 'dev' or 'prod'" >&2
+if [[ ! "$MT_ENV" =~ ^dev[a-z0-9]*$ && "$MT_ENV" != "prod" ]]; then
+  echo "[ERROR] Environment must be dev-class (dev, devhome, ...) or 'prod'" >&2
   exit 1
 fi
 
