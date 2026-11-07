@@ -212,6 +212,9 @@ print_status "Admin Portal deployed to https://$ADMIN_HOST"
 # Setup Keycloak OIDC clients (idempotent)
 # =============================================================================
 print_status "Setting up portal OIDC clients in Keycloak..."
+# Fail the deploy if this fails: without these clients (and, on Keycloak
+# 26.8.2+, their kc-admin-api scope) both portals' admin-API calls return 401.
 "$REPO_ROOT/scripts/setup-admin-portal-client" -e "$MT_ENV" -t "$MT_TENANT" || {
-  print_warning "Failed to setup portal clients - may need manual configuration"
+  print_error "Failed to set up portal OIDC clients in Keycloak"
+  exit 1
 }

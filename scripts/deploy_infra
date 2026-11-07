@@ -905,6 +905,44 @@ else
   fi
 fi
 
+# Keycloak 26.8.2+ admin-API audience check (CVE-2026-19688): service-account
+# tokens are rejected (HTTP 401) by the Admin REST API unless their client has
+# the built-in kc-admin-api client scope. The 26.8.2 migration creates that
+# scope in every realm but attaches it to no client, so the admin and account
+# portals (invites, recovery, guest registration) and the CI user scripts break
+# the moment Keycloak rolls. Attach it here, right after the rollout and for
+# every realm on the server, so the outage window is this deploy step, not the
+# time until create_env reaches each tenant. setup-admin-portal-client attaches
+# it again (strictly) when it creates the clients for a new tenant.
+source "${REPO_ROOT}/scripts/lib/keycloak-admin-scope.sh"
+_kcadm() {
+  kubectl exec keycloak-keycloakx-0 -n "$NS_AUTH" -c keycloak \
+    --kubeconfig="$KUBECONFIG" -- /opt/keycloak/bin/kcadm.sh "$@"
+}
+mt_kc_get() { _kcadm get "$2" -r "$1"; }
+mt_kc_put() { _kcadm update "$2" -r "$1"; }
+mt_kc_version() {
+  local v
+  v=$(_kcadm get serverinfo -r master | jq -r '.systemInfo.version // ""') || return 1
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
+}
+print_status "Ensuring ${MT_KC_ADMIN_API_SCOPE} scope on portal service-account clients..."
+_kcadm config credentials --server http://localhost:8080 --realm master \
+  --user admin --password "$KEYCLOAK_ADMIN_PASSWORD" 2>/dev/null || {
+  print_error "kcadm login failed; cannot configure the admin-API audience scope"
+  exit 1
+}
+_kc_realms=$(_kcadm get realms --fields realm | jq -r '.[].realm') || {
+  print_error "Could not list Keycloak realms"
+  exit 1
+}
+[ -n "$_kc_realms" ] || { print_error "Keycloak returned no realms"; exit 1; }
+while IFS= read -r _kc_realm; do
+  [ "$_kc_realm" = "master" ] && continue
+  mt_kc_ensure_admin_api_scope --if-present "$_kc_realm" admin-portal account-portal || exit 1
+done <<< "$_kc_realms"
+
 # NOTE: DNS records are now managed by manage_infra --dns (via scripts/manage-dns.sh)
 # NOTE: LKE firewall rules are now managed by manage_infra --firewall. See issue #244.
 

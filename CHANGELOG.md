@@ -27,6 +27,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `manage_infra -e prod-eu` now refuses a phase1 apply or destroy unless
   `MT_ALLOW_PRODEU_PHASE1=1` is set: it would recreate the decommissioned
   cluster and rewrite the prod-eu outputs with the retired Headscale box's IP.
+- **Ready for Keycloak 26.8.2's admin-API audience check (CVE-2026-19688).**
+  From 26.8.2 the Admin REST API returns 401 for any service-account token
+  whose client lacks the built-in `kc-admin-api` client scope. The upgrade
+  creates that scope in every realm but attaches it to no client, which would
+  break both portals (invites, recovery, guest registration) and the CI
+  test-user scripts. `deploy_infra` now attaches it to `admin-portal` and
+  `account-portal` in every realm right after the Keycloak rollout.
+  `setup-admin-portal-client` attaches it for new tenants. Both read the
+  scope back and fail if it is missing; on Keycloak older than 26.8.2 the step
+  does nothing (`scripts/lib/keycloak-admin-scope.sh`).
+- `deploy-admin-portal.sh` now fails the deploy when
+  `setup-admin-portal-client` fails, instead of printing a warning and
+  carrying on with broken portal clients.
 
 ### Fixed
 - The public ingress controller now uses the supported `proxy-real-ip-cidr`
