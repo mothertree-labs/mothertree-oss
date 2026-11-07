@@ -30,7 +30,7 @@ spec:
             runAsUser: 1000
           containers:
             - name: cleanup
-              image: alpine/k8s:1.37.1
+              image: alpine/k8s:1.37.2
               command: ["sh", "/config/cleanup.sh"]
               env:
                 - name: HEADSCALE_API_KEY

@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: prosody
-        image: ghcr.io/jitsi/prosody:stable-11248-2
+        image: ghcr.io/jitsi/prosody:stable-11248-3
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

@@ -83,7 +83,7 @@ spec:
       # Init container to discover node's external IP (cloud K8s returns internal IP for status.hostIP)
       initContainers:
       - name: discover-external-ip
-        image: alpine/kubectl:1.37.1
+        image: alpine/kubectl:1.37.2
         imagePullPolicy: IfNotPresent
         env:
         - name: POD_NAME
@@ -144,7 +144,7 @@ spec:
           mountPath: /shared
       containers:
       - name: jvb
-        image: ghcr.io/jitsi/jvb:stable-11248-2
+        image: ghcr.io/jitsi/jvb:stable-11248-3
         # Rootless since stable-11146: the image runs as user s6 (uid/gid 1000).
         # Numeric ids are required, runAsNonRoot cannot verify a named USER.
         securityContext:
