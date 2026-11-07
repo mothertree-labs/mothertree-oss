@@ -28,7 +28,7 @@ spec:
           # boky/postfix:v5.1.0 - SMTP relay image
           # Source: https://github.com/bokysan/docker-postfix
           # v5.1.0 released Jan 2025, supports /docker-init.d/ scripts
-          image: boky/postfix:v5.1.0
+          image: boky/postfix:5.2.1
           ports:
             - containerPort: 25
               name: smtp
@@ -126,7 +126,7 @@ spec:
       # files Postfix reads at runtime.
       initContainers:
         - name: prepare-routing
-          image: boky/postfix:v5.1.0
+          image: boky/postfix:5.2.1
           command:
             - /bin/sh
             - -c
