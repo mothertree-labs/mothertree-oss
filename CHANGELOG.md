@@ -52,6 +52,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the app, and pins its sha256. Any failure leaves the manifest untouched.
   The legacy bare-version pin format and the app-store fallback for a
   missing manifest are gone: both produced unpinned downloads.
+- **Infra Postfix no longer generates DKIM keys or runs rspamd.** The pod set
+  `DKIM_AUTOGENERATE="false"`, but boky/postfix tests that variable with
+  `[[ -n ... ]]`, so any value turns key generation **on**. With keys present,
+  boky/postfix >= 5.2 starts rspamd (~290-425Mi). That is what OOM-killed
+  Postfix 5.2.1 on Renovate #786 and forced the 448/640Mi bump in #790. The
+  variable is gone. The pod is inbound-only and never signs: outbound DKIM is
+  SES Easy DKIM. It runs at ~30-45Mi on both v5.1.0 and v5.2.1, so its memory
+  goes to a 128Mi request (headroom so the only MX pod is not the first
+  eviction target) and a 256Mi limit.
+  `scripts/tests/postfix-dkim-autogenerate.test.sh` fails CI if the variable
+  comes back.
 - The public ingress controller now uses the supported `proxy-real-ip-cidr`
   key for its trusted-proxy list, drops the unused `real-ip-header`, and sends
   upstreams `X-Forwarded-For` as the single resolved client address.
