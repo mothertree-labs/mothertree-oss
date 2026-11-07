@@ -50,17 +50,41 @@ data:
     # backoff, then fail the init container: the pod restarts and retries, and a
     # deploy's rollout wait fails loudly instead of shipping a pod with the app
     # missing.
+    #
+    # Integrity (#654): every tarball is pinned by sha256 in app-versions.json.
+    # It is downloaded to a file over https only (redirects included: GitHub
+    # hands release assets to another host), checked against the pin, and only
+    # then extracted. A mismatch is not retried: the same URL serving
+    # different bytes is not a transient fault, and the pod must not start.
     download_app() {
-        _app="$1"; _url="$2"; _attempt=1; _delay=5
+        _app="$1"; _url="$2"; _sha="$3"; _attempt=1; _delay=5
+        case "$_sha" in
+            *[!0-9a-f]*|"") echo "  $_app: no valid sha256 pin" >&2; return 1 ;;
+        esac
+        [ "${#_sha}" -eq 64 ] || { echo "  $_app: no valid sha256 pin" >&2; return 1; }
         while :; do
             _tmp=$(mktemp -d)
-            if curl -sSfL --connect-timeout 15 --max-time 300 -o "$_tmp/app.tar.gz" "$_url" \
-                && tar xzf "$_tmp/app.tar.gz" -C "$_tmp" \
-                && [ -f "$_tmp/$_app/appinfo/info.xml" ]; then
-                rm -rf "/mnt/custom_apps/$_app"
-                mv "$_tmp/$_app" /mnt/custom_apps/
-                rm -rf "$_tmp"
-                return 0
+            if curl -sSfL --proto '=https' --proto-redir '=https' \
+                --connect-timeout 15 --max-time 300 -o "$_tmp/app.tar.gz" "$_url"; then
+                if ! echo "$_sha  $_tmp/app.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+                    echo "  $_app: sha256 mismatch: got $(sha256sum "$_tmp/app.tar.gz" | cut -d' ' -f1), pinned $_sha" >&2
+                    rm -rf "$_tmp"
+                    return 1
+                fi
+                # Extract into a staging dir on the SAME filesystem as the
+                # target (the emptyDir), so the final mv is an atomic rename: an
+                # init container killed mid-install leaves only staging behind,
+                # never a half-copied app dir that the skip check would accept.
+                _stage="/mnt/custom_apps/.staging-$_app"
+                rm -rf "$_stage"; mkdir -p "$_stage"
+                if tar xzf "$_tmp/app.tar.gz" -C "$_stage" --no-same-owner --no-same-permissions \
+                    && [ -f "$_stage/$_app/appinfo/info.xml" ]; then
+                    rm -rf "/mnt/custom_apps/$_app"
+                    mv "$_stage/$_app" "/mnt/custom_apps/$_app"
+                    rm -rf "$_stage" "$_tmp"
+                    return 0
+                fi
+                rm -rf "$_stage"
             fi
             rm -rf "$_tmp"
             [ "$_attempt" -ge 6 ] && return 1
@@ -71,17 +95,17 @@ data:
     }
     if [ -f /appstore-urls/app-urls ]; then
         echo "Downloading app store apps..."
-        while IFS='|' read -r APP_ID APP_URL || [ -n "$APP_ID" ]; do
+        while IFS='|' read -r APP_ID APP_URL APP_SHA256 || [ -n "$APP_ID" ]; do
             [ -z "$APP_ID" ] && continue
-            if [ -d "/mnt/custom_apps/$APP_ID" ]; then
+            if [ -f "/mnt/custom_apps/$APP_ID/appinfo/info.xml" ]; then
                 echo "  $APP_ID: already extracted from ConfigMap, skipping"
                 continue
             fi
             echo "  $APP_ID: downloading from $APP_URL"
-            if download_app "$APP_ID" "$APP_URL"; then
-                echo "  $APP_ID: OK"
+            if download_app "$APP_ID" "$APP_URL" "${APP_SHA256:-}"; then
+                echo "  $APP_ID: OK (sha256 verified)"
             else
-                echo "  $APP_ID: FAILED after 6 attempts: refusing to start a pod without an enabled app" >&2
+                echo "  $APP_ID: FAILED (download or sha256 verification): refusing to start a pod without an enabled app" >&2
                 exit 1
             fi
         done < /appstore-urls/app-urls

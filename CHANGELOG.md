@@ -42,6 +42,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   carrying on with broken portal clients.
 
 ### Fixed
+- **Nextcloud app tarballs are now integrity-checked (#654).** Every app in
+  `apps/manifests/nextcloud/app-versions.json` carries a `sha256`. The
+  Nextcloud init container downloads over https only (redirects included),
+  verifies the digest and only then extracts. A mismatch fails the pod
+  immediately, without retries. `deploy-nextcloud.sh` refuses a manifest
+  with a missing or malformed pin, and the weekly version check
+  (`--update`) now downloads each newly selected release, checks it contains
+  the app, and pins its sha256. Any failure leaves the manifest untouched.
+  The legacy bare-version pin format and the app-store fallback for a
+  missing manifest are gone: both produced unpinned downloads.
 - The public ingress controller now uses the supported `proxy-real-ip-cidr`
   key for its trusted-proxy list, drops the unused `real-ip-header`, and sends
   upstreams `X-Forwarded-For` as the single resolved client address.
