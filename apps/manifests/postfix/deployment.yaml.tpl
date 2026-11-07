@@ -45,8 +45,11 @@ spec:
               value: "${SMTP_ALLOWED_SENDER_DOMAINS}"
             - name: HOSTNAME
               value: "${SMTP_HOSTNAME}"
-            - name: DKIM_AUTOGENERATE
-              value: "false"
+            # NO DKIM_AUTOGENERATE here, not even "false": the image tests it with
+            # [[ -n "$DKIM_AUTOGENERATE" ]], so ANY value turns key generation ON.
+            # Generated keys make boky/postfix >= 5.2 start rspamd (~290Mi). This
+            # pod is inbound-only and never signs; outbound DKIM is SES Easy DKIM.
+            # Guarded by scripts/tests/postfix-dkim-autogenerate.test.sh.
             - name: POSTFIX_myhostname
               value: "${SMTP_HOSTNAME}"
             - name: POSTFIX_mydomain
@@ -91,17 +94,18 @@ spec:
             # Relay control is handled by smtpd_relay_restrictions, not sender restrictions
             - name: POSTFIX_smtpd_sender_restrictions
               value: permit
-          # boky/postfix >= 5.2 runs rspamd as its DKIM backend, and it is
-          # always started (DKIM_AUTOGENERATE=false does not stop it). With the
-          # dev config it settles at ~395-425Mi and peaks ~410Mi at startup,
-          # against ~40Mi on v5.1.0; 256Mi OOM-killed it in a crash loop
-          # (Renovate #786, 2026-11-05).
+          # ~30-45Mi with no DKIM keys (v5.1.0 and v5.2.1 alike). The 448/640Mi
+          # bump in #790 only existed because DKIM_AUTOGENERATE="false" was
+          # generating keys and v5.2.1 then ran rspamd (~395-425Mi; 256Mi
+          # OOM-killed it on Renovate #786, 2026-11-05).
+          # Request 128Mi (not the ~45Mi it uses) so the only MX pod is not
+          # the first eviction target under node memory pressure.
           resources:
             requests:
               cpu: 10m
-              memory: 448Mi
+              memory: 128Mi
             limits:
-              memory: 640Mi
+              memory: 256Mi
           # Graceful shutdown: let K8s endpoint removal propagate before SIGTERM
           # so in-flight mail delivery completes without new connections arriving.
           lifecycle:
