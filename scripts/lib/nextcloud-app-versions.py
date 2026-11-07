@@ -31,10 +31,15 @@ lines of output nobody reads:
 
 Exit codes:  0 up to date · 1 error · 2 updates available
 """
+import hashlib
+import io
 import json
 import os
 import re
 import sys
+import tarfile
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse
 
 _STABLE, _PRERELEASE = 1, 0
@@ -183,6 +188,52 @@ def check_download_url(url, hosts):
     return None
 
 
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to https URLs (GitHub hands release assets to
+    another host, so redirects must work, but never a downgrade)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlparse(newurl).scheme != "https":
+            raise urllib.error.URLError(f"refusing non-https redirect to {newurl!r}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch_tarball(url):
+    """Return the bytes of the release tarball at `url` (https only).
+
+    MT_NC_TARBALL_FIXTURES=<dir> is a test hook: read <dir>/<basename of url>
+    instead of touching the network.
+    """
+    fixtures = os.environ.get("MT_NC_TARBALL_FIXTURES")
+    if fixtures:
+        with open(os.path.join(fixtures, os.path.basename(urlparse(url).path)), "rb") as f:
+            return f.read()
+    if urlparse(url).scheme != "https":
+        raise ValueError(f"not https: {url!r}")
+    opener = urllib.request.build_opener(_HttpsOnlyRedirect)
+    req = urllib.request.Request(url, headers={"User-Agent": "mothertree-nc-app-versions"})
+    with opener.open(req, timeout=300) as resp:
+        return resp.read()
+
+
+def tarball_sha256(app_id, url):
+    """sha256 of the release tarball, after checking it really is `app_id`.
+
+    The init container extracts <app_id>/ from the tarball and requires
+    <app_id>/appinfo/info.xml, so pinning a digest for anything else would
+    only move the failure to pod boot.
+    """
+    data = fetch_tarball(url)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        names = set(tar.getnames())
+    if f"{app_id}/appinfo/info.xml" not in names:
+        raise ValueError(f"tarball has no {app_id}/appinfo/info.xml")
+    return hashlib.sha256(data).hexdigest()
+
+
 def main(argv):
     args = [a for a in argv[1:] if not a.startswith("--")]
     flags = {a for a in argv[1:] if a.startswith("--")}
@@ -221,11 +272,20 @@ def main(argv):
         # proposed URLs leaves a manifest whose pin is equal to or ahead of the
         # store permanently unexamined — it would report "up to date" or "ahead
         # of the store" and exit clean no matter what URL it carried.
-        if isinstance(info, dict):
-            problem = check_download_url(info.get("url"), hosts)
-            if problem:
-                errors.append(f"{app_id}: the pinned download URL {problem}")
-                continue
+        if not isinstance(info, dict):
+            errors.append(f"{app_id}: pin must be an object with version, url "
+                          f"and sha256 (#654)")
+            continue
+        problem = check_download_url(info.get("url"), hosts)
+        if problem:
+            errors.append(f"{app_id}: the pinned download URL {problem}")
+            continue
+        # The init container refuses a tarball that does not match this pin
+        # (#654); a pin without one would fail every Nextcloud pod boot.
+        if not _SHA256_RE.fullmatch(str(info.get("sha256", ""))):
+            errors.append(f"{app_id}: the pinned sha256 is missing or malformed "
+                          f"(got {info.get('sha256')!r})")
+            continue
 
         if pinned_is_pre and not allow_prerelease:
             # Left alone, this reports "up to date" forever: an RC's core version
@@ -291,8 +351,24 @@ def main(argv):
     print(f"\n{len(updates)} update(s) available")
 
     if update_mode:
+        # Fetch and hash every selected release BEFORE touching the manifest:
+        # one bad tarball must not leave a half-written file behind.
+        digests, fetch_errors = {}, []
         for app_id, chosen in updates:
-            fields = {"version": chosen["version"], "url": chosen["download"]}
+            try:
+                digests[app_id] = tarball_sha256(app_id, chosen["download"])
+            except Exception as exc:  # network, tar, missing info.xml
+                fetch_errors.append(f"{app_id}: could not verify the {chosen['version']} "
+                                    f"tarball: {exc}")
+        if fetch_errors:
+            print("", file=sys.stderr)
+            for err in fetch_errors:
+                print(f"ERROR: {err}", file=sys.stderr)
+            print("\nManifest NOT updated.", file=sys.stderr)
+            return 1
+        for app_id, chosen in updates:
+            fields = {"version": chosen["version"], "url": chosen["download"],
+                      "sha256": digests[app_id]}
             existing = manifest["apps"][app_id]
             if isinstance(existing, dict):
                 # Merge unrelated fields, but DROP anything bound to the bytes of
@@ -302,11 +378,9 @@ def main(argv):
                 # for a different file while the diff shows an UNCHANGED sha256
                 # line — no signal at all for the reviewer.
                 #
-                # When #654 lands, the right shape is for this writeback to
-                # recompute the digest from the release it just selected (the
-                # store returns signatureDigest on every release), not to
-                # preserve whatever was there. The key list below is a tripwire
-                # for a stale value, not the mechanism.
+                # The sha256 is recomputed above from the release just
+                # selected (#654) and set by `fields`; the key list below is a
+                # tripwire for any other stale content-bound value.
                 for content_bound in ("sha256", "sha512", "checksum", "integrity",
                                       "digest", "signature", "signatureDigest"):
                     existing.pop(content_bound, None)
