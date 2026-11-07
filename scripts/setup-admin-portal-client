@@ -712,6 +712,45 @@ else
 fi
 
 #############################################
+# 9. Admin-API audience scope (Keycloak 26.8.2+, CVE-2026-19688)
+#############################################
+# Both portals call the Admin REST API with client_credentials tokens, which
+# Keycloak 26.8.2+ rejects (HTTP 401) unless the client has the kc-admin-api
+# default scope. deploy_infra already sweeps existing realms right after the
+# Keycloak rollout; this covers clients created here for a new tenant, and is
+# strict: both clients were just created, so a missing one is an error.
+source "${REPO_ROOT}/scripts/lib/keycloak-admin-scope.sh"
+_kc_admin_api() {  # _kc_admin_api <method> <url>: body on stdout, non-zero unless 2xx
+    local method="$1" url="$2" out code
+    out=$(curl -s --connect-timeout 10 --max-time 30 -w '\n%{http_code}' -X "$method" "$url" \
+        -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json") || return 1
+    code="${out##*$'\n'}"
+    [[ "$code" =~ ^2[0-9][0-9]$ ]] || { print_error "Keycloak ${method} ${url} returned HTTP ${code}" >&2; return 1; }
+    printf '%s\n' "${out%$'\n'*}"
+}
+mt_kc_get() { _kc_admin_api GET "https://$AUTH_HOST/admin/realms/$1/$2"; }
+mt_kc_put() { _kc_admin_api PUT "https://$AUTH_HOST/admin/realms/$1/$2" > /dev/null; }
+mt_kc_version() {
+    local v
+    v=$(_kc_admin_api GET "https://$AUTH_HOST/admin/serverinfo" | jq -r '.systemInfo.version // ""') || return 1
+    [ -n "$v" ] || return 1
+    printf '%s\n' "$v"
+}
+print_status "Ensuring ${MT_KC_ADMIN_API_SCOPE} scope on portal clients..."
+# The master admin-cli token fetched at the top lives 60s by default; the steps
+# above can outlast it, so fetch a fresh one rather than 401 here.
+TOKEN=$(curl -s --connect-timeout 10 --max-time 30 -X POST "https://$AUTH_HOST/realms/master/protocol/openid-connect/token" \
+    --data-urlencode "username=admin" \
+    --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
+    --data-urlencode "grant_type=password" \
+    --data-urlencode "client_id=admin-cli" | jq -r '.access_token // ""')
+if [ -z "$TOKEN" ]; then
+    print_error "Could not refresh the Keycloak admin token for the ${MT_KC_ADMIN_API_SCOPE} step"
+    exit 1
+fi
+mt_kc_ensure_admin_api_scope "$KEYCLOAK_REALM" admin-portal account-portal || exit 1
+
+#############################################
 # Summary
 #############################################
 echo ""
