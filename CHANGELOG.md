@@ -42,6 +42,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   carrying on with broken portal clients.
 
 ### Fixed
+- **Real client IPs through the public ingress.** The ingress-nginx
+  LoadBalancer Service used `externalTrafficPolicy: Cluster`, so kube-proxy
+  SNATed some connections to the node's public IP. That address is not in
+  `proxy-real-ip-cidr`, so nginx ignored the PROXY / `X-Forwarded-For` client
+  address and used the node IP. It was measured on dev as 11/40 sessions,
+  every one arriving from a node public IP, and in prod roughly half of real
+  browser requests were logged with a node IP. The Service is now
+  `externalTrafficPolicy: Local`: the NodeBalancer only sends to nodes running
+  a controller and nothing is SNATed, so the TCP peer is always the
+  NodeBalancer's private address. On dev, 40/40 sessions kept the real IP and
+  HTTPS was unchanged. Cloudflare enforcement keys on the PROXY header address
+  and is unaffected.
+- Infra Postfix gained a PROXY-protocol listener on 10025 with port 25's
+  restrictions. NetworkPolicy lets only ingress-nginx reach it, since it trusts
+  the header's client address. It receives no traffic yet: a follow-up points
+  the inbound MX path at it. The Postfix Deployment's leftover pre-PR-4
+  OpenDKIM milter env (`POSTFIX_*milter*` → 127.0.0.1:8891) and its
+  `postfix-ses-env` envFrom are removed. They logged a refused milter connect
+  on every SMTP session.
 - **Nextcloud app tarballs are now integrity-checked (#654).** Every app in
   `apps/manifests/nextcloud/app-versions.json` carries a `sha256`. The
   Nextcloud init container downloads over https only (redirects included),

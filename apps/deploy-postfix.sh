@@ -191,6 +191,35 @@ if [ -n "$dep_live" ]; then
   fi
 fi
 
+# Same class of orphan, from the same era: pre-PR-4 also set the OpenDKIM
+# milter env (POSTFIX_*milter*, pointing at the removed sidecar on
+# 127.0.0.1:8891) and an envFrom on the SES-relay ConfigMap postfix-ses-env,
+# both outside last-applied-configuration, so apply never prunes them. Postfix
+# then logs "connect to Milter service inet:127.0.0.1:8891: Connection refused"
+# on every connection (harmless only because milter_default_action=accept).
+# Delete exactly those env names and that envFrom; no-op where absent.
+if [ -n "$dep_live" ]; then
+  milter_patch=$(printf '%s' "$dep_live" | jq -c '
+    ["POSTFIX_smtpd_milters","POSTFIX_non_smtpd_milters",
+     "POSTFIX_milter_default_action","POSTFIX_milter_protocol"] as $stale
+    | (.spec.template.spec.containers[]? | select(.name == "postfix")) as $c
+    | ([ $c.env[]?.name | select(. as $n | $stale | index($n)) ]) as $env_del
+    | ([ $c.envFrom[]? | select(.configMapRef.name? == "postfix-ses-env") ] | length) as $ef
+    | if ($env_del | length) == 0 and $ef == 0 then null
+      else {spec: {template: {spec: {containers: [
+        {name: "postfix"}
+        + (if ($env_del | length) > 0 then {env: ($env_del | map({name: ., "$patch": "delete"}))} else {} end)
+        # envFrom: null drops the WHOLE list; safe because deployment.yaml.tpl
+        # declares no envFrom (re-check this if the template ever gains one).
+        + (if $ef > 0 then {envFrom: null} else {} end)
+      ]}}}} end
+  ')
+  if [ "$milter_patch" != "null" ]; then
+    print_status "Cleaning up pre-PR-4 Postfix env orphans (OpenDKIM milter settings, postfix-ses-env envFrom)..."
+    kubectl patch deployment postfix -n "$NS_MAIL" --type=strategic -p "$milter_patch" >/dev/null
+  fi
+fi
+
 # After the Deployment spec is clean, delete the per-tenant dkim-key Secrets.
 # Order matters: deleting Secrets while the Deployment still referenced them
 # would leave the pod FailedMount until the next apply.
@@ -234,7 +263,8 @@ envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/service-nodeport.yaml.tpl" | kubectl app
 # Apply NetworkPolicy
 # =============================================================================
 print_status "Applying Postfix NetworkPolicy..."
-envsubst '${NS_MAIL}' < "$MANIFESTS_DIR/networkpolicy.yaml.tpl" | kubectl apply -f -
+: "${NS_INGRESS:?NS_INGRESS must be set (10025 is restricted to the ingress namespace)}"
+envsubst '${NS_MAIL} ${NS_INGRESS}' < "$MANIFESTS_DIR/networkpolicy.yaml.tpl" | kubectl apply -f -
 
 # =============================================================================
 # Conditional restart (only if config/secrets changed)
