@@ -32,6 +32,8 @@ spec:
           ports:
             - containerPort: 25
               name: smtp
+            - containerPort: 10025
+              name: smtp-proxy
           # Mount init script for port-specific master.cf configuration
           # Scripts in /docker-init.d/ run after config generation but before Postfix starts
           volumeMounts:
