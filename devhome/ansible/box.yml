@@ -142,21 +142,26 @@
       args:
         creates: /usr/local/bin/kubectl
 
+    # Modes match what the daemon inside each container sets on its own state
+    # dir (docker 0710, containerd/tailscale 0700). A blanket 0755 reset them
+    # on every run, leaving the tailscale node keys world-readable.
     - name: Data directories
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "/srv/devhome/{{ item.d }}"
         state: directory
-        mode: "0755"
+        mode: "{{ item.m }}"
       loop:
-        - /srv/devhome/pgdata
-        - /srv/devhome/ci-docker
-        - /srv/devhome/ci-woodpecker
-        - /srv/devhome/ci-home
-        - /srv/devhome/ci-containerd
-        - /srv/devhome/ci-tailscale
-        - /srv/devhome/pg-tailscale
-        - /srv/devhome/k3s-storage
-        - /srv/devhome/vm-image
+        - { d: pgdata, m: "0755" }
+        - { d: ci-docker, m: "0710" }
+        - { d: ci-woodpecker, m: "0755" }
+        - { d: ci-home, m: "0755" }
+        - { d: ci-containerd, m: "0700" }
+        - { d: ci-tailscale, m: "0700" }
+        - { d: pg-tailscale, m: "0700" }
+        - { d: k3s-storage, m: "0755" }
+        - { d: vm-image, m: "0755" }
+      loop_control:
+        label: "{{ item.d }}"
 
     - name: devhome docker network
       ansible.builtin.shell: |
@@ -165,6 +170,59 @@
         echo created
       register: _net
       changed_when: "'created' in _net.stdout"
+
+    # Let the k3d network and the devhome network reach each other directly.
+    # Docker 28+ isolates bridges twice: a raw-table DROP for every container
+    # address not arriving on its own bridge, and the DOCKER chain's
+    # inter-bridge drop. Without this, tailnet peers on the two networks
+    # (PgBouncer's sidecar in k3d <-> devhome-pg, the CI container <-> pods)
+    # cannot find a local path, and tailscale relays them through DERP over the
+    # home uplink: every DB query left the box (1.7 s pings; Keycloak's realm
+    # import died on JDBC read timeouts). On the Linode stand-in the box had a
+    # public IP, so the peers met there and this never showed. Scoped to the
+    # two subnets; re-applied whenever docker (re)starts, since docker
+    # rebuilds its chains then.
+    - name: Bridge routing between the k3d and devhome networks (script)
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/devhome-bridge-routing
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # Managed by devhome/ansible/box.yml
+          set -eu
+          A="{{ k3d_subnet }}" B="{{ devhome_net_subnet }}"
+          for pair in "$A $B" "$B $A"; do
+            set -- $pair
+            iptables -t raw -C PREROUTING -s "$1" -d "$2" -j ACCEPT 2>/dev/null \
+              || iptables -t raw -I PREROUTING -s "$1" -d "$2" -j ACCEPT
+            iptables -C DOCKER-USER -s "$1" -d "$2" -j ACCEPT 2>/dev/null \
+              || iptables -I DOCKER-USER -s "$1" -d "$2" -j ACCEPT
+          done
+      register: _bridge_script
+
+    - name: Bridge routing between the k3d and devhome networks (unit)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/devhome-bridge-routing.service
+        content: |
+          [Unit]
+          Description=devhome: direct routing between the k3d and devhome docker networks
+          After=docker.service
+          PartOf=docker.service
+          [Service]
+          Type=oneshot
+          RemainAfterExit=true
+          ExecStart=/usr/local/sbin/devhome-bridge-routing
+          [Install]
+          WantedBy=docker.service
+        mode: "0644"
+      register: _bridge_unit
+
+    - name: Enable bridge routing
+      ansible.builtin.systemd:
+        name: devhome-bridge-routing
+        enabled: true
+        daemon_reload: "{{ _bridge_unit.changed }}"
+        state: "{{ 'restarted' if (_bridge_script.changed or _bridge_unit.changed) else 'started' }}"
 
     - name: dnsmasq for the devhome network
       ansible.builtin.template:
