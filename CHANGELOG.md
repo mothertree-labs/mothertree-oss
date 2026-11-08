@@ -63,6 +63,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   eviction target) and a 256Mi limit.
   `scripts/tests/postfix-dkim-autogenerate.test.sh` fails CI if the variable
   comes back.
+- **The dev reaper no longer leaks a Cloud Firewall per recycle.** The
+  cloud-firewall-controller creates a Linode firewall labelled
+  `lke-<cluster_id>` for every cluster, and `destroy-dev-cluster.sh` never
+  deleted it: 41 had piled up by 2026-11-04 and hit the account's firewall
+  limit. A new Step 6 deletes any `lke-<id>` firewall whose cluster is not a
+  live LKE cluster **and** that has no attached entities. It fails closed if
+  the live-cluster or firewall list can't be read, the way the NodeBalancer
+  sweep does. `--dry-run` lists the candidates. The selection rule lives in
+  `scripts/lib/dev-orphans.sh` with unit tests.
 - The public ingress controller now uses the supported `proxy-real-ip-cidr`
   key for its trusted-proxy list, drops the unused `real-ip-header`, and sends
   upstreams `X-Forwarded-For` as the single resolved client address.
