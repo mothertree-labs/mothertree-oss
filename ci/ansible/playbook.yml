@@ -555,6 +555,10 @@
           # Linode CI VM only has it from a hand install; declared so a fresh
           # host (devhome) gets it too.
           - redis-tools
+          # apps/deploy-nextcloud.sh stages the custom Nextcloud apps with
+          # rsync. Linode's Ubuntu image ships it, a minimal container host
+          # (devhome-ci) does not.
+          - rsync
         state: present
 
     - name: Install awscli + linode-cli via pip (on-demand-dev bring-up + reaper)
