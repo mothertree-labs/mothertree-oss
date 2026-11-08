@@ -191,6 +191,8 @@ elif [ -n "${SMTP_RELAY_HOST:-}" ]; then
     protocol = \"smtp\"
 
     # The hop is WireGuard-encrypted; the relay's STARTTLS uses a self-signed cert.
+    # Safe ONLY because mt_require_mesh_ip pins the host to 100.64.0.0/10: never
+    # relax that check (e.g. to allow hostnames) without turning this back on.
     [queue.route.\"relay\".tls]
     implicit = false
     allow-invalid-certs = true"

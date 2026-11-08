@@ -34,6 +34,22 @@ smtpd_client_restrictions = permit_mynetworks, reject
 smtpd_relay_restrictions = permit_mynetworks, reject
 smtpd_recipient_restrictions = permit_mynetworks, reject
 
+# Everything on the box (every tenant pod, CI steps running PR code) shares the
+# box's tailnet address, so the address alone admits more than Stalwart. Limit
+# what it can do: envelope senders only from devhome's own mail domains (and
+# the null sender, for bounces), and rate limits so a misbehaving workload
+# cannot get the periscope's IP, which is also devhome's MX and ingress IP,
+# blocklisted.
+smtpd_null_access_lookup_key = <>
+smtpd_sender_restrictions = check_sender_access inline:{ {<> = OK}{% for d in devhome_relay_sender_domains | default([devhome_env_domain]) %}, {{ '{' }}{{ d }} = OK{{ '}' }}, {{ '{' }}.{{ d }} = OK{{ '}' }}{% endfor %} }, reject
+# Rate limits apply to mynetworks too (the default exempts it); only loopback
+# is exempt.
+smtpd_client_event_limit_exceptions = 127.0.0.0/8
+anvil_rate_time_unit = 60s
+smtpd_client_message_rate_limit = {{ devhome_relay_messages_per_minute | default(200) }}
+smtpd_client_recipient_rate_limit = {{ devhome_relay_recipients_per_minute | default(600) }}
+smtpd_client_connection_rate_limit = {{ devhome_relay_connections_per_minute | default(200) }}
+
 # The tailnet hop is already WireGuard-encrypted; STARTTLS is offered with the
 # snakeoil cert only so clients that insist on it can proceed.
 smtpd_tls_cert_file = /etc/ssl/certs/ssl-cert-snakeoil.pem
