@@ -175,6 +175,9 @@ check_not "out-of-range relay port must fail" relay_of 'mail:\n  smtp_relay:\n  
 st="$REPO_ROOT/apps/deploy-stalwart.sh"
 check "deploy-stalwart refuses SES + smtp_relay together" grep -q 'Both SES (ses.\* in infra secrets) and mail.smtp_relay' "$st"
 check "deploy-stalwart has an smtp_relay route" grep -q 'elif \[ -n "${SMTP_RELAY_HOST:-}" \]; then' "$st"
+# Stalwart resolves the relay address through DNS; a bare IP bounces every message.
+check "deploy-stalwart relay route uses the smtp-relay Service name" grep -q 'address = \\"${SMTP_RELAY_SVC_HOST}\\"' "$st"
+check_not "deploy-stalwart relay route never inlines the raw mesh IP" grep -q 'address = \\"${SMTP_RELAY_HOST}\\"' "$st"
 
 echo "devhome-env: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

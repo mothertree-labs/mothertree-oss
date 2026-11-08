@@ -182,17 +182,28 @@ elif [ -n "${SMTP_RELAY_HOST:-}" ]; then
     # Host/port were validated by mt_load_infra_config (mesh IP, numeric port),
     # so inlining them cannot inject TOML.
     STALWART_SES_ENABLED=false
+    # Stalwart always resolves a relay route's address through DNS (v0.15
+    # ip_lookup has no IP-literal path), so a bare mesh IP fails every delivery
+    # with "record not found" and bounces it. Give it a cluster-local name: a
+    # selector-less Service whose only endpoint is the validated mesh IP
+    # (applied below). The trailing dot makes the name absolute, so the pod's
+    # DNS search list (ndots:5, node-inherited domains) can never resolve it
+    # upstream; only cluster DNS answers, so the name maps to that IP alone.
+    SMTP_RELAY_SVC_HOST="smtp-relay.${NS_MAIL}.svc.cluster.local."
     export STALWART_OUTBOUND_ROUTE_NAME="relay"
     export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - unauthenticated smart host on the tailnet (mail.smtp_relay).
+    # ${SMTP_RELAY_SVC_HOST} -> ${SMTP_RELAY_HOST} (Service + EndpointSlice).
     [queue.route.\"relay\"]
     type = \"relay\"
-    address = \"${SMTP_RELAY_HOST}\"
+    address = \"${SMTP_RELAY_SVC_HOST}\"
     port = ${SMTP_RELAY_PORT}
     protocol = \"smtp\"
 
     # The hop is WireGuard-encrypted; the relay's STARTTLS uses a self-signed cert.
-    # Safe ONLY because mt_require_mesh_ip pins the host to 100.64.0.0/10: never
-    # relax that check (e.g. to allow hostnames) without turning this back on.
+    # Safe ONLY because mt_require_mesh_ip pins the host to 100.64.0.0/10 and the
+    # route name is an absolute cluster-local name whose only endpoint is that
+    # IP: never relax either (hostnames, a relative name) without turning this
+    # back on.
     [queue.route.\"relay\".tls]
     implicit = false
     allow-invalid-certs = true"
@@ -241,6 +252,69 @@ print_status "Config checksum: $CONFIG_CHECKSUM"
 print_status "Ensuring $NS_MAIL namespace exists..."
 kubectl create namespace "$NS_MAIL" --dry-run=client -o yaml | kubectl apply -f -
 print_success "Namespace ready: $NS_MAIL"
+
+# =============================================================================
+# Tailnet smart host Service (mail.smtp_relay only)
+# =============================================================================
+# The DNS name Stalwart's relay route points at (see the route block above).
+if [ -n "${SMTP_RELAY_HOST:-}" ]; then
+    print_status "Applying smtp-relay Service -> ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}..."
+    kubectl apply -f - <<EOF_RELAY
+apiVersion: v1
+kind: Service
+metadata:
+  name: smtp-relay
+  namespace: ${NS_MAIL}
+spec:
+  type: ClusterIP
+  ports:
+    - name: smtp
+      port: ${SMTP_RELAY_PORT}
+      targetPort: ${SMTP_RELAY_PORT}
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: smtp-relay-tailnet
+  namespace: ${NS_MAIL}
+  labels:
+    kubernetes.io/service-name: smtp-relay
+    endpointslice.kubernetes.io/managed-by: mothertree-deploy-stalwart
+addressType: IPv4
+ports:
+  - name: smtp
+    port: ${SMTP_RELAY_PORT}
+    protocol: TCP
+endpoints:
+  - addresses: ["${SMTP_RELAY_HOST}"]
+---
+# allow-mail-smtp-egress only opens 25/465/587. Open exactly the relay's
+# address and port, for Stalwart only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-smtp-relay-egress
+  namespace: ${NS_MAIL}
+spec:
+  podSelector:
+    matchLabels:
+      app: stalwart
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: ${SMTP_RELAY_HOST}/32
+      ports:
+        - port: ${SMTP_RELAY_PORT}
+          protocol: TCP
+EOF_RELAY
+    print_success "smtp-relay Service ready"
+else
+    kubectl delete service smtp-relay -n "$NS_MAIL" --ignore-not-found=true >/dev/null
+    kubectl delete endpointslice smtp-relay-tailnet -n "$NS_MAIL" --ignore-not-found=true >/dev/null
+    kubectl delete networkpolicy allow-smtp-relay-egress -n "$NS_MAIL" --ignore-not-found=true >/dev/null
+fi
 
 # =============================================================================
 # Clean up stale dkim-key Secret
