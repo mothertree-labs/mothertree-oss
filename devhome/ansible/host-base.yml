@@ -1,0 +1,201 @@
+---
+# devhome box: base OS setup of the physical home machine, run before box.yml.
+#
+# Everything here was first done by hand on a fresh Ubuntu 24.04 install. It
+# lives in a playbook so that a reinstall can be reproduced and nothing exists
+# only on the box:
+#   * passwordless sudo for the operator account (Ansible connects as it)
+#   * SSH: keys only, no password or keyboard-interactive login
+#   * networking: wired NIC first, optional WiFi as fallback. cloud-init's
+#     network handling is off, so it never rewrites netplan
+#   * the installer's LVM root grown to the whole disk
+#   * unattended security upgrades, with a reboot at a fixed hour
+#
+# First run on a fresh install (sudo still needs a password):
+#   ansible-playbook -i <inventory> -e @<vars> --ask-become-pass devhome/ansible/host-base.yml
+# Later runs need no prompt.
+#
+# Netplan changes are applied in a detached systemd unit. SSH may drop for a few
+# seconds while networkd reconfigures, but the apply is not killed with it.
+- name: devhome box base OS
+  hosts: box
+  become: true
+  vars:
+    devhome_wired_iface: ""        # e.g. eno1 (required)
+    devhome_wifi_iface: ""         # optional fallback; empty = no WiFi config
+    devhome_wifi_ssid: ""
+    devhome_wifi_password: ""
+    devhome_reboot_time: "04:30"   # local time for unattended-upgrades reboots
+  handlers:
+    - name: reload ssh
+      ansible.builtin.systemd:
+        name: ssh
+        state: reloaded
+
+    - name: apply netplan
+      # Detached, so an SSH drop during the apply can't kill it halfway.
+      ansible.builtin.command: >
+        systemd-run --unit=devhome-netplan-apply-{{ ansible_facts['date_time']['epoch'] }}
+        --collect /usr/sbin/netplan apply
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - ansible_user is defined and ansible_user != 'root'
+          - devhome_wired_iface | length > 0
+          - devhome_wired_iface in ansible_facts['interfaces']
+          - devhome_wifi_iface | length == 0 or (devhome_wifi_ssid | length > 0 and devhome_wifi_password | length > 0)
+        fail_msg: >-
+          Need ansible_user (the non-root operator account), devhome_wired_iface
+          naming an existing NIC ({{ ansible_facts['interfaces'] | join(', ') }}), and,
+          when devhome_wifi_iface is set, devhome_wifi_ssid + devhome_wifi_password.
+
+    # ── sudo ──────────────────────────────────────────────────────────────
+    - name: Passwordless sudo for the operator account
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/90-{{ ansible_user }}"
+        content: "{{ ansible_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
+    # ── SSH ───────────────────────────────────────────────────────────────
+    - name: Operator account has an authorized key (refuse to lock ourselves out)
+      ansible.builtin.stat:
+        path: "/home/{{ ansible_user }}/.ssh/authorized_keys"
+      register: _authkeys
+
+    - name: Refuse to disable password login without an authorized key
+      ansible.builtin.assert:
+        that: _authkeys.stat.exists and _authkeys.stat.size > 0
+        fail_msg: "/home/{{ ansible_user }}/.ssh/authorized_keys is missing or empty"
+
+    # 00- so it sorts before 50-cloud-init.conf: sshd keeps the FIRST value it
+    # reads, and cloud-init ships PasswordAuthentication yes.
+    - name: SSH keys-only
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-hardening.conf
+        content: |
+          # Managed by devhome/ansible/host-base.yml
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PermitRootLogin prohibit-password
+          PubkeyAuthentication yes
+        mode: "0644"
+        validate: /usr/sbin/sshd -t -f %s
+      notify: reload ssh
+
+    # ── networking ────────────────────────────────────────────────────────
+    - name: Keep cloud-init away from the network config
+      ansible.builtin.copy:
+        dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+        content: "network: {config: disabled}\n"
+        mode: "0644"
+
+    # The installer's copy holds the WiFi password in clear text and is unused
+    # once cloud-init's network handling is off.
+    - name: Remove the installer's network config
+      ansible.builtin.file:
+        path: /etc/cloud/cloud.cfg.d/90-installer-network.cfg
+        state: absent
+
+    - name: Wired netplan (primary route)
+      ansible.builtin.copy:
+        dest: /etc/netplan/10-wired.yaml
+        content: |
+          # Managed by devhome/ansible/host-base.yml
+          network:
+            version: 2
+            ethernets:
+              {{ devhome_wired_iface }}:
+                dhcp4: true
+                dhcp4-overrides:
+                  route-metric: 100
+                optional: true
+        mode: "0600"
+      notify: apply netplan
+
+    - name: WiFi netplan (fallback route)
+      ansible.builtin.copy:
+        dest: /etc/netplan/20-wifi.yaml
+        content: |
+          # Managed by devhome/ansible/host-base.yml
+          network:
+            version: 2
+            wifis:
+              {{ devhome_wifi_iface }}:
+                dhcp4: true
+                dhcp4-overrides:
+                  route-metric: 600
+                optional: true
+                access-points:
+                  {{ devhome_wifi_ssid | to_json }}:
+                    auth:
+                      key-management: psk
+                      password: {{ devhome_wifi_password | to_json }}
+        mode: "0600"
+      no_log: true
+      when: devhome_wifi_iface | length > 0
+      notify: apply netplan
+
+    - name: No WiFi netplan when WiFi is not configured
+      ansible.builtin.file:
+        path: /etc/netplan/20-wifi.yaml
+        state: absent
+      when: devhome_wifi_iface | length == 0
+      notify: apply netplan
+
+    # The installer's file; its content now lives in 20-wifi.yaml.
+    - name: Remove the installer's netplan
+      ansible.builtin.file:
+        path: /etc/netplan/50-cloud-init.yaml
+        state: absent
+      notify: apply netplan
+
+    - name: Validate the netplan config before any apply
+      ansible.builtin.command: netplan generate
+      changed_when: false
+
+    # ── disk ──────────────────────────────────────────────────────────────
+    # Ubuntu's installer gives the root LV only part of the volume group.
+    - name: Free space in the root volume group
+      ansible.builtin.shell: |
+        set -euo pipefail
+        lv=$(findmnt -no SOURCE /)
+        vg=$(lvs --noheadings -o vg_name "$lv" | tr -d ' ')
+        echo "$lv $(vgs --noheadings --units b --nosuffix -o vg_free "$vg" | tr -d ' ')"
+      args:
+        executable: /bin/bash
+      register: _vgfree
+      changed_when: false
+      check_mode: false   # read-only probe; must run in --check too
+
+    - name: Grow the root LV and filesystem to the whole volume group
+      ansible.builtin.command: "lvextend -r -l +100%FREE {{ _vgfree.stdout.split()[0] }}"
+      when: (_vgfree.stdout.split()[1] | int) > 1073741824   # > 1 GiB free
+
+    # ── updates ───────────────────────────────────────────────────────────
+    - name: unattended-upgrades installed
+      ansible.builtin.apt:
+        name: unattended-upgrades
+        state: present
+
+    - name: Daily unattended security upgrades
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+        mode: "0644"
+
+    # The distro default is security-only origins. This file only adds the
+    # reboot, so a patched kernel or libc is actually used, at a fixed quiet hour.
+    - name: Reboot after upgrades that need it
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/52devhome-reboot
+        content: |
+          // Managed by devhome/ansible/host-base.yml
+          Unattended-Upgrade::Automatic-Reboot "true";
+          Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+          Unattended-Upgrade::Automatic-Reboot-Time "{{ devhome_reboot_time }}";
+        mode: "0644"

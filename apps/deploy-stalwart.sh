@@ -136,13 +136,23 @@ print_status "Master-user secret hash generated"
 #   - SES configured (prod): relay via AWS SES on 587 with SASL auth. The
 #     ses-credentials Secret carries endpoint/username/password, mounted as
 #     env vars referenced by %{env:...}% in the relay route block.
-#   - SES unset (dev): direct MX delivery from the cluster's egress IP. No
+#   - mail.smtp_relay in the infra config (devhome): relay via an
+#     unauthenticated smart host on the tailnet (the periscope's Postfix,
+#     which authorizes the box by source address). Residential ISPs block
+#     outbound 25, so direct MX cannot work from a home box. Setting this AND
+#     SES is a config error: the route would be ambiguous.
+#   - Neither (dev): direct MX delivery from the cluster's egress IP. No
 #     smart host. Cluster egress IP has no PTR/SPF so receivers may tempfail,
 #     but that matches the existing dev behavior (see project_mail_paths_per_env).
 #
 # `.dkim.private_key` in tenant secrets is now unused by any cluster component
 # (the OpenDKIM sidecar and infra-mail dkim-key-<tenant> Secrets were removed
 # in step 2 PR-4). The field is kept in the secrets YAML for rollback safety.
+
+if [ -n "${SMTP_RELAY_HOST:-}" ] && [ -n "${SES_SMTP_ENDPOINT:-}" ]; then
+    print_error "Both SES (ses.* in infra secrets) and mail.smtp_relay (infra config) are set for $MT_ENV; pick one outbound route"
+    exit 1
+fi
 
 if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
     # Reject endpoints containing characters that could inject TOML directives
@@ -168,6 +178,23 @@ if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "$
     username = \"%{env:SES_SMTP_USER}%\"
     secret = \"%{env:SES_SMTP_PASSWORD}%\""
     print_status "Outbound relay: AWS SES ($SES_SMTP_ENDPOINT)"
+elif [ -n "${SMTP_RELAY_HOST:-}" ]; then
+    # Host/port were validated by mt_load_infra_config (mesh IP, numeric port),
+    # so inlining them cannot inject TOML.
+    STALWART_SES_ENABLED=false
+    export STALWART_OUTBOUND_ROUTE_NAME="relay"
+    export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - unauthenticated smart host on the tailnet (mail.smtp_relay).
+    [queue.route.\"relay\"]
+    type = \"relay\"
+    address = \"${SMTP_RELAY_HOST}\"
+    port = ${SMTP_RELAY_PORT}
+    protocol = \"smtp\"
+
+    # The hop is WireGuard-encrypted; the relay's STARTTLS uses a self-signed cert.
+    [queue.route.\"relay\".tls]
+    implicit = false
+    allow-invalid-certs = true"
+    print_status "Outbound relay: tailnet smart host ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}"
 else
     STALWART_SES_ENABLED=false
     export STALWART_OUTBOUND_ROUTE_NAME="mx"

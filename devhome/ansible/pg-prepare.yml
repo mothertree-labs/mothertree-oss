@@ -5,8 +5,13 @@
 #     LC_COLLATE=C; the apt package would initdb with the system locale)
 #   - postgres_exporter binary + system user (the postgres play only deploys
 #     its systemd unit)
+#   - joins the dev tailnet (tag:postgres key ts_authkey_pg) and prints the
+#     address: manage_infra reaches the postgres host by that address, so the
+#     join has to come first. The postgres play then sees a running node and
+#     skips its own `tailscale up`.
 # Run BEFORE `manage_infra -e devhome --ansible --limit=postgres`, which then
 # moves the data dir onto /mnt/pgdata and does everything else.
+# Put the printed address in pgbouncer.pg_vm_tailscale_ip and POSTGRES_SERVER_IP.
 - name: Prepare the devhome PostgreSQL container
   hosts: postgres
   become: true
@@ -35,6 +40,10 @@
     - name: Re-initialise the fresh cluster with the C locale (as cloud-init does)
       ansible.builtin.shell: |
         set -e
+        # The cluster from the package may still be starting right after the install.
+        systemctl start postgresql
+        for _ in $(seq 1 30); do pg_isready -q && break; sleep 1; done
+        pg_isready
         cur=$(sudo -u postgres psql -Atc "select datcollate from pg_database where datname='template1'")
         [ "$cur" = "C" ] && { echo already-C; exit 0; }
         systemctl stop postgresql
@@ -63,3 +72,47 @@
         system: true
         create_home: false
         shell: /usr/sbin/nologin
+
+    - name: Install Tailscale
+      ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
+      args:
+        creates: /usr/bin/tailscale
+
+    - name: tailscaled running
+      ansible.builtin.systemd:
+        name: tailscaled
+        enabled: true
+        state: started
+
+    - name: Check tailnet membership
+      ansible.builtin.command: tailscale ip -4
+      register: _ts_ip
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Require the pre-auth key when not yet on the tailnet
+      ansible.builtin.assert:
+        that:
+          - headscale_url | default('') | length > 0
+          - ts_authkey_pg | default('') | length > 0
+        fail_msg: "devhome-pg is not on the tailnet: headscale_url and ts_authkey_pg (tag:postgres) are required"
+      when: _ts_ip.rc != 0 or (_ts_ip.stdout | trim) == ''
+
+    - name: Join the dev tailnet
+      ansible.builtin.command: >-
+        tailscale up --login-server={{ headscale_url }}
+        --authkey={{ ts_authkey_pg }} --hostname=postgres-devhome
+        --accept-dns=false
+      when: _ts_ip.rc != 0 or (_ts_ip.stdout | trim) == ''
+      no_log: true
+
+    - name: Read tailnet address
+      ansible.builtin.command: tailscale ip -4
+      register: _ts_ip_now
+      changed_when: false
+      check_mode: false
+
+    - name: Report tailnet address (pgbouncer.pg_vm_tailscale_ip / POSTGRES_SERVER_IP)
+      ansible.builtin.debug:
+        msg: "devhome-pg tailnet IP: {{ _ts_ip_now.stdout | trim }}"
