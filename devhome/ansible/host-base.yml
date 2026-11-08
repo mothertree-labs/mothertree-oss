@@ -156,6 +156,39 @@
       ansible.builtin.command: netplan generate
       changed_when: false
 
+    # Both NICs sit on the same LAN subnet. By default Linux answers ARP for
+    # any of its addresses on any interface, so the router intermittently
+    # learned the WiFi MAC for the wired address and sent the wired traffic over
+    # the ~0.5 Mbit/s USB WiFi (downloads stalled, pings dropped, the box
+    # looked like it was behind a bufferbloated link). Answer and announce each
+    # address only on its own interface.
+    - name: Per-interface ARP (no ARP flux between wired and WiFi)
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/60-devhome-arp.conf
+        content: |
+          # Managed by devhome/ansible/host-base.yml
+          net.ipv4.conf.all.arp_ignore = 1
+          net.ipv4.conf.all.arp_announce = 2
+          net.ipv4.conf.default.arp_ignore = 1
+          net.ipv4.conf.default.arp_announce = 2
+        mode: "0644"
+      register: devhome_arp_sysctl
+
+    - name: Load the ARP sysctls
+      ansible.builtin.command: sysctl --system
+      when: devhome_arp_sysctl is changed
+
+    - name: Re-announce the wired address so the router relearns its MAC
+      ansible.builtin.shell: |
+        set -euo pipefail
+        addr=$(ip -4 -o addr show dev {{ devhome_wired_iface | quote }} | awk '{split($4,a,"/"); print a[1]; exit}')
+        [ -n "$addr" ] || exit 0
+        command -v arping >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iputils-arping >/dev/null
+        arping -c 3 -U -I {{ devhome_wired_iface | quote }} "$addr" >/dev/null
+      args:
+        executable: /bin/bash
+      when: devhome_arp_sysctl is changed
+
     # ── disk ──────────────────────────────────────────────────────────────
     # Ubuntu's installer gives the root LV only part of the volume group.
     - name: Free space in the root volume group
