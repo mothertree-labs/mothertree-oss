@@ -23,8 +23,8 @@ clone:
 steps:
   - name: deploy-dev-finalize
     image: bash
-    # Runs on both pull_request and push:main so main-push can re-deploy the
-    # tenant when the idle reaper destroyed dev between PR and merge (#422).
+    # Runs on both pull_request and push:main: the merge pipeline re-deploys
+    # the merged code to devhome and re-runs e2e before deploy-prod (#422).
     environment:
       CI: "true"
       CI_VALKEY_PASSWORD:
@@ -95,9 +95,8 @@ steps:
   # tenant auth ingress is up (created in apps/deploy-matrix.sh, which
   # this workflow depends on). The step itself runs on both PR and push
   # so users are provisioned for every pipeline. Since #422, the
-  # deploy-dev-finalize step above also runs on push:main (re-deploying
-  # tenant resources if the idle reaper destroyed the cluster); on a
-  # warm cluster it is a fast no-op via mt_apply / mt_restart_if_changed.
+  # deploy-dev-finalize step above also runs on push:main; when nothing
+  # changed it is a fast no-op via mt_apply / mt_restart_if_changed.
   - name: create-test-users
     image: bash
     environment:
@@ -200,8 +199,7 @@ steps:
   # `pull_request | push:main` so it runs for EVERY pipeline. Historic
   # gap-#18 lesson: e2e shards run on main-push too and gate deploy-prod,
   # so any pre-e2e gate must also run on main-push. Since #422 the deploy
-  # steps themselves also run on push:main (warm-cluster fast-no-op or
-  # cold-cluster full redeploy after the idle reaper destroys the cluster).
+  # steps themselves also run on push:main.
   - name: imaps-readiness
     image: bash
     environment:

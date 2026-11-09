@@ -22,20 +22,19 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/build-deploy-vaults.sh                 # Full build, all envs
-#   ./scripts/build-deploy-vaults.sh dev             # Full build, dev only
+#   ./scripts/build-deploy-vaults.sh devhome         # Full build, devhome only
 #   ./scripts/build-deploy-vaults.sh prod            # Full build, prod only
 #
 #   # Patch mode — update ONLY the named tenant secret(s) inside an existing
-#   # vault, preserving kubeconfig / terraform-outputs / tf-state untouched.
+#   # vault, preserving kubeconfig / terraform-outputs untouched.
 #   # No LastPass needed; supply the dev password via MT_VAULT_PASSWORD.
 #   MT_VAULT_PASSWORD=<dev-pw> \
-#     ./scripts/build-deploy-vaults.sh dev --update-secrets --tenant acme
+#     ./scripts/build-deploy-vaults.sh devhome --update-secrets --tenant acme
 #   ... --tenant acme --tenant beta   # repeatable; at least one required
 #
 # Prerequisites:
 #   - ansible-vault, tar installed
-#   - Full build: kubeconfig.<env>.yaml at repo root (prod / prod-eu only;
-#                 dev fetches its kubeconfig live from the Linode LKE API),
+#   - Full build: kubeconfig.<env>.yaml at repo root,
 #                 config/platform/infra/terraform-outputs.<env>.env,
 #                 config/tenants/<tenant>/<env>.secrets.yaml,
 #                 and a password source (LastPass login or MT_VAULT_PASSWORD*)
@@ -62,13 +61,6 @@ LPASS_VAULT_ENTRY="7375668101991863677"
 # access. Create this LastPass note with a fresh random password before the
 # first dev re-key (see DEV_VAULT_ACCESS.md).
 LPASS_DEV_VAULT_ENTRY="mothertree-dev-vault-password"
-
-# ── LastPass entry for the phase1-dev Terraform-state bucket creds ─
-# Created during the phase1-dev migration (see phase1-dev/MIGRATION.md).
-# The entry stores the access key in the Username field and the secret key
-# in the Password field (standard lpass credential format).
-# Dev only — CI doesn't run terraform for prod or prod-eu.
-LPASS_TF_STATE_ENTRY="mothertree-tf-state-dev-s3-credentials"
 
 # ── Parse args ────────────────────────────────────────────────────
 ENV_ARG=""
@@ -192,9 +184,9 @@ _resolve_vault_password() {
 # ═══════════════════════════════════════════════════════════════════
 #  Patch mode — update only the named tenant secret(s) in an existing
 #  vault, leaving infra artifacts (kubeconfig, terraform-outputs,
-#  tf-state-creds) exactly as they are. Lets a contributor add/update
+#  and the rest) exactly as they are. Lets a contributor add/update
 #  tenant secrets with ONLY the dev vault password — no LastPass, no
-#  kubeconfig, no terraform outputs, no tf-state credentials.
+#  kubeconfig, no terraform outputs.
 # ═══════════════════════════════════════════════════════════════════
 if [[ "$UPDATE_SECRETS" == "true" ]]; then
   : "${ENV_ARG:?--update-secrets requires an explicit env (e.g. dev)}"
@@ -280,7 +272,7 @@ fi
 # ═══════════════════════════════════════════════════════════════════
 #  Full build mode — rebuild the entire vault for each environment.
 # ═══════════════════════════════════════════════════════════════════
-ENVS=("dev" "prod")
+ENVS=("devhome" "prod")
 if [[ -n "$ENV_ARG" ]]; then
   ENVS=("$ENV_ARG")
 fi
@@ -318,22 +310,13 @@ for env in "${ENVS[@]}"; do
 
   ERRORS=()
 
-  # 1. Kubeconfig (prod / prod-eu only)
-  # Dev does NOT ship a kubeconfig in the vault: CI refetches it live from the
-  # Linode LKE API on every dev step (ci_fetch_dev_kubeconfig in ci-lib.sh), and
-  # the ephemeral on-demand dev cluster makes any baked-in copy stale within a
-  # reaper cycle. Staging one here would silently re-add it on the next full
-  # rebuild. Prod / prod-eu have stable clusters and still rely on the vault copy.
-  if [[ "$env" == "dev" ]]; then
-    print_status "  Skipping kubeconfig (dev fetches it live from the Linode LKE API)"
+  # 1. Kubeconfig
+  KUBECONFIG_SRC="$REPO_ROOT/kubeconfig.${env}.yaml"
+  if [[ -f "$KUBECONFIG_SRC" ]]; then
+    cp "$KUBECONFIG_SRC" "$STAGING/kubeconfig.yaml"
+    print_status "  Added kubeconfig.yaml"
   else
-    KUBECONFIG_SRC="$REPO_ROOT/kubeconfig.${env}.yaml"
-    if [[ -f "$KUBECONFIG_SRC" ]]; then
-      cp "$KUBECONFIG_SRC" "$STAGING/kubeconfig.yaml"
-      print_status "  Added kubeconfig.yaml"
-    else
-      ERRORS+=("Kubeconfig not found: $KUBECONFIG_SRC")
-    fi
+    ERRORS+=("Kubeconfig not found: $KUBECONFIG_SRC")
   fi
 
   # 2. Terraform outputs
@@ -345,33 +328,7 @@ for env in "${ENVS[@]}"; do
     ERRORS+=("Terraform outputs not found: $TF_OUTPUTS_SRC")
   fi
 
-  # 3. Phase1-dev Terraform-state bucket creds (dev only).
-  # CI's bring-up step runs `terraform apply` against phase1-dev's S3 backend
-  # (bucket `mothertree-tf-state-dev`). The scoped access key for that bucket
-  # is stored in LastPass and pulled into the vault on every rebuild.
-  if [[ "$env" == "dev" ]]; then
-    _require_lpass
-    print_status "  Fetching phase1-dev tf-state creds from LastPass ($LPASS_TF_STATE_ENTRY)..."
-    TF_STATE_AK=$(lpass show --username "$LPASS_TF_STATE_ENTRY" 2>/dev/null || true)
-    TF_STATE_SK=$(lpass show --password "$LPASS_TF_STATE_ENTRY" 2>/dev/null || true)
-    if [[ -z "$TF_STATE_AK" || -z "$TF_STATE_SK" ]]; then
-      ERRORS+=("LastPass entry '$LPASS_TF_STATE_ENTRY' is missing Username or Password (access/secret key). See phase1-dev/MIGRATION.md for setup.")
-    else
-      # printf with %s avoids any shell interpolation on the secret values —
-      # an unquoted heredoc would expand `$`/backticks/backslashes if the
-      # keys ever contained those characters (Linode keys are alphanumeric
-      # in practice, but defending against the future change is cheap).
-      umask 077
-      {
-          printf 'AWS_ACCESS_KEY_ID=%s\n' "$TF_STATE_AK"
-          printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$TF_STATE_SK"
-      } > "$STAGING/tf-state-creds.env"
-      umask 022
-      print_status "  Added tf-state-creds.env (phase1-dev backend)"
-    fi
-  fi
-
-  # 4. Tenant secrets (config files come from git submodules, not the vault)
+  # 3. Tenant secrets (config files come from git submodules, not the vault)
   TENANT_COUNT=0
   for tenant_dir in "$TENANTS_DIR"/*/; do
     [[ -d "$tenant_dir" ]] || continue
@@ -431,7 +388,7 @@ print_success "Deploy vaults built successfully."
 echo ""
 echo "Next steps:"
 echo "  1. Commit the vault files in config/platform/ci/"
-echo "  2. Re-provision the CI box: ./ci/scripts/provision-ci.sh --ansible-only"
-echo "  3. dev uses its own vault password (LastPass: $LPASS_DEV_VAULT_ENTRY) —"
-echo "     set the 'deploy_vault_password_dev' Ansible var so CI can decrypt it."
-echo "     prod/prod-eu use the shared 'deploy_vault_password' Woodpecker secret."
+echo "  2. Bump the config/platform submodule pointer in this repo (CI decrypts"
+echo "     the committed copy)"
+echo "  3. dev-class envs (devhome) use the dev vault password (LastPass:"
+echo "     $LPASS_DEV_VAULT_ENTRY); prod uses the shared prod password."

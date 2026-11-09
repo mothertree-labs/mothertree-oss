@@ -288,8 +288,8 @@ fi
 # run the full dev deploy, this also blocked prod deploys).
 #
 # The guard lives HERE, per tenant, so it is scoped to exactly the tenant this
-# pipeline leased — the earlier cluster-wide sweeps (dev-bringup.sh /
-# destroy-dev-cluster.sh) both misread a lost `kubectl run -i` listing as "no
+# pipeline leased — the earlier cluster-wide sweeps (at the since-retired dev
+# cluster's bring-up and teardown) both misread a lost `kubectl run -i` listing as "no
 # databases" and could touch tenants outside the lease. Same explicit-verdict
 # probe as 4d; a drop counts only after a fresh probe proves the DB is gone.
 # dev: drop + fresh install. Any other env: refuse and abort untouched.

@@ -288,7 +288,7 @@ fi
 # ── Live DB + PgBouncer introspection ─────────────────────────────────────────
 # Both sections need the PG admin password and reach the DB through PgBouncer the
 # same way real pods do. We fetch the password ONCE and guard both sections on it.
-# Read-only throughout (no DROP) — so unlike dev-bringup's reset block, a bad
+# Read-only throughout (no DROP) — so unlike a destructive reset, a bad
 # tenant name or missing secret just SKIPS (best-effort: never exit non-zero).
 # Sanitize the slash in E2E_SHARD ("5/10") so pod names stay valid DNS-1123 labels.
 _diag_suffix="${CI_PIPELINE_NUMBER:-x}-${E2E_SHARD//\//-}"
@@ -302,7 +302,7 @@ if [[ -z "$_pg_pwd" ]]; then
   echo "    (postgres-credentials secret in infra-db unavailable — skipping DB introspection)"
 elif [[ ! "$E2E_TENANT" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
   # Allowlist-validate BEFORE interpolating the tenant into the DB name / SQL
-  # (defends against SQL/identifier injection — mirrors dev-bringup's guard).
+  # (defends against SQL/identifier injection).
   echo "    (suspicious tenant name '$E2E_TENANT' — skipping DB introspection)"
 else
   echo ">>> Introspecting roundcube_${E2E_TENANT} via PgBouncer (throwaway psql pod):"

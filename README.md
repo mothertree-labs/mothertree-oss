@@ -2,7 +2,7 @@
 
 _Build status:_
 
-[![status-badge](https://ci.mother-tree.org/api/badges/1/status.svg)](https://ci.mother-tree.org/repos/1)
+[![status-badge](https://ci-devhome.mother-tree.org/api/badges/1/status.svg)](https://ci-devhome.mother-tree.org/repos/1)
 
 Multi-tenant collaboration platform on Kubernetes. Provides Matrix (chat), Element (web client), Docs (collaborative editing), Nextcloud (files), Jitsi (video conferencing), and email (Stalwart + Roundcube) per tenant — with shared infrastructure for auth (Keycloak), database (PostgreSQL), monitoring (Prometheus/Grafana), and ingress (NGINX).
 
@@ -134,7 +134,8 @@ scripts/         Orchestration scripts (manage_infra, deploy_infra, create_env)
   lib/             Shared libraries (common.sh, config.sh, paths.sh, etc.)
 tenants/         Tenant config template (.example/) or local configs
 ansible/         VM configuration (Headscale, PostgreSQL, TURN/CoTURN)
-ci/              CI server (Woodpecker) — Terraform, Ansible, pipeline scripts
+ci/              CI server (Woodpecker) — Ansible, pipeline scripts
+devhome/         One-machine dev cluster + CI host (k3s, periscope, Ansible)
 .woodpecker/     CI pipeline definitions
 ```
 
@@ -161,7 +162,8 @@ See [tenants/README.md](tenants/README.md) for tenant configuration details.
 ### CI/CD (automatic)
 
 Woodpecker CI deploys automatically:
-- **Pull requests** deploy to dev (leased tenant slot), then run E2E tests
+- **Pull requests** deploy to the dev-class `devhome` cluster (leased tenant
+  slot), then run E2E tests. See [devhome/README.md](devhome/README.md)
 - **Merges to main** deploy to prod (all tenants) after the gate passes
 
 Pipeline: validate → build-images → deploy-dev → E2E → gate → deploy-prod

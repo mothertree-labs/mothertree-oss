@@ -6,7 +6,7 @@
 # the SAME dead holder both issue the DEL, and the second erases the lock the
 # first has just won — so both print "Acquired ...". On 2026-09-09 pipelines
 # #2131 and #2132 did exactly that and ran concurrent `terraform apply` against
-# phase1-dev/terraform.tfstate.
+# the (since retired) dev cluster state.
 #
 # Two layers:
 #   * argument contract — always runs, so CI has a real assertion even where no

@@ -12,7 +12,7 @@
 # run the full dev deploy, a poisoned dev also blocks prod deploys.
 #
 # Two earlier guards swept ALL nextcloud_* DBs from outside the tenant deploy
-# (dev-bringup.sh at cluster bring-up, destroy-dev-cluster.sh at teardown) by
+# (at the since-retired dev cluster's bring-up and teardown) by
 # listing the catalog through a `kubectl run -i` pod. Both read a LOST attach
 # result (exit 0, empty stdout) as "no databases", so they silently did nothing
 # and the poison stayed. A cluster-wide sweep also cannot know which tenant the

@@ -1,7 +1,9 @@
 # devhome — dev + CI on one box
 
-`devhome` is a dev-class environment (like `dev`) whose whole footprint
-(the dev Kubernetes cluster, the CI host, and PostgreSQL) runs on **one machine**.
+`devhome` is the dev-class environment CI tests against. Its whole footprint
+(the dev Kubernetes cluster, the CI host, and PostgreSQL) runs on **one machine**,
+and the same CI host also runs the prod deploys. It replaced the on-demand dev
+LKE cluster and the Linode CI VM.
 That machine is a small server at home (it was rehearsed on a Linode first;
 `box_enabled` in the Terraform still creates that stand-in). The only public
 part is a 1 GB "periscope" node:
@@ -43,7 +45,7 @@ internet ──► periscope (nanode, public IP; DNS for *.devhome.<domain> poin
   dev's 10 × 2 pods). PgBouncer runs in session mode: during a Stalwart rolling
   update the old pod keeps its whole pool, and at 10 the new pod never becomes Ready.
 * **Outbound mail goes through the periscope.** Residential ISPs block
-  outbound TCP 25, so Stalwart cannot deliver to MX directly as it does on dev.
+  outbound TCP 25, so Stalwart cannot deliver to MX directly.
   The periscope runs a relay-only Postfix on its tailnet address
   (`devhome_mail_relay_port`, default 2525) that accepts only the box's tailnet
   address, and `mail.smtp_relay` in `config/platform/infra/devhome.config.yaml`
@@ -73,7 +75,7 @@ periscope on its tailnet address (the periscope's public SSH is limited to
    `cd devhome/terraform && terraform apply -var-file=../../config/platform/devhome/terraform.tfvars`.
 2. **Box base OS:** install Ubuntu 24.04 with the operator account and its SSH
    key, then `ansible-playbook -i … --ask-become-pass devhome/ansible/host-base.yml`
-   (passwordless sudo, keys-only SSH, wired-first netplan with WiFi fallback,
+   (passwordless sudo, keys-only SSH, wired netplan, optionally on a VLAN,
    root LV grown to the disk, unattended upgrades with a 04:30 reboot). The
    netplan apply drops the LAN for up to ~90 s while DHCP/ARP settle.
 3. **Box, first pass:** `ansible-playbook -i … devhome/ansible/box.yml`. It

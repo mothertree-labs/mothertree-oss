@@ -13,6 +13,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and is rejected alongside any other phase.
 
 ### Changed
+- **devhome replaces the on-demand dev cluster and the Linode CI VM.** CI
+  (Woodpecker) and the dev-class test cluster now run on one machine
+  (`devhome/`, a k3s cluster behind a small public "periscope" node), and that
+  CI also runs the prod deploys. The PR pipeline deploys to `devhome`
+  (`MT_CI_DEV_ENV`), and `ensure-dev-cluster` only checks that its API answers.
+  `build-deploy-vaults.sh` builds `devhome` + `prod` by default and ships a
+  kubeconfig for every env.
 - **prod-eu is fully retired.** The old nl-ams Headscale box, which relayed
   clients to the us-lax one after the move, is deleted along with its volume,
   firewall, backup bucket and Terraform workspace. `manage_infra` now refuses
@@ -123,6 +130,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   firing after later hourly runs succeed.
 
 ### Removed
+- **The on-demand dev LKE cluster and the Linode CI VM.** Gone with them:
+  `phase1-dev/` (cluster, VPC, heartbeat bucket), the idle reaper
+  (`scripts/dev-reaper.sh`, its cron and env template), `dev-bringup.sh`,
+  `dev-heartbeat.sh`, `destroy-dev-cluster.sh` and its orphan-sweep library,
+  `dev-cert-cache.sh` (cached the dev wildcard cert across reaps),
+  `dev-status.sh`, `ci/terraform/` and `ci/scripts/provision-ci.sh`. In
+  `manage_infra`, `--phase1-dev-only` and `--destroy-cluster-only` now fail
+  with an explanation. The CI playbook no longer installs awscli/linode-cli.
+  The dev-class behaviour that devhome relies on (`mt_is_dev_class`, the dev
+  vault password, `apps/environments/dev`) is unchanged.
 - **The `prod-eu` environment (nl-ams) is decommissioned.** Its only tenant did
   not join, so its cluster, PostgreSQL and TURN VMs, buckets and DNS records
   were torn down. The `prod-eu` helmfile environment, its value overrides
