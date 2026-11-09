@@ -3,6 +3,17 @@ when:
   - event: push
     branch: main
 
+# Not for ordering: the shards need only this step's browser cache. A
+# workflow that ends in the pipeline's first ~minute leaves its GitHub status
+# stuck at "pending". Woodpecker's start-up loop posts "pending" for every
+# workflow one at a time (server/pipeline/helper.go updatePipelineStatus),
+# several of those loops overlap, and one landing after this step's "success"
+# overwrites it. On devhome this step takes ~10s, so every PR and main commit
+# kept a yellow e2e-setup check. validate takes ~3 min and deploy-dev-prep
+# waits for it too, so this costs no time on the critical path.
+depends_on:
+  - validate
+
 clone:
   - name: clone
     image: woodpeckerci/plugin-git
