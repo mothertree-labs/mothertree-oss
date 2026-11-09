@@ -37,6 +37,14 @@
     # The cluster kubeconfig the pipelines read through MT_CI_DEV_KUBECONFIG_FILE
     # (set in woodpecker_environment). In the woodpecker user's home: steps
     # run as woodpecker, and /etc/mothertree is root-only (ci/ansible/playbook.yml).
+    - name: woodpecker kube directory (copy does not create parents on a fresh /home)
+      ansible.builtin.file:
+        path: /home/woodpecker/.kube
+        state: directory
+        owner: woodpecker
+        group: woodpecker
+        mode: "0700"
+
     - name: devhome cluster kubeconfig for pipeline steps
       ansible.builtin.copy:
         src: "{{ devhome_kubeconfig_src | default(playbook_dir + '/../../kubeconfig.devhome.yaml') }}"

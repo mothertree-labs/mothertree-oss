@@ -1,0 +1,64 @@
+# Managed by devhome/ansible/periscope.yml — outbound-only relay for devhome.
+#
+# The devhome box sits on a residential line whose ISP blocks outbound TCP 25,
+# so its Stalwart relays through here instead of delivering to MX directly
+# (dev's LKE cluster delivers direct). It accepts mail ONLY from the box's
+# tailnet address, on the periscope's tailnet address (master.cf); the public
+# :25 stays HAProxy's inbound forward to the box.
+#
+# Postfix delivers nothing locally. Mail for devhome's own domains goes to their
+# MX, which is this periscope's public :25 (HAProxy) and so back to the box.
+# inet_interfaces is loopback-only on purpose: Postfix treats the addresses
+# in inet_interfaces as "itself", so with `all` it would bounce exactly those
+# messages as "mail for <domain> loops back to myself". The tailnet listener is
+# bound explicitly in master.cf instead.
+compatibility_level = 3.6
+myhostname = mail.{{ devhome_env_domain }}
+myorigin = $myhostname
+smtpd_banner = $myhostname ESMTP
+biff = no
+append_dot_mydomain = no
+
+inet_interfaces = loopback-only
+inet_protocols = ipv4
+
+mydestination =
+local_recipient_maps =
+local_transport = error:local delivery is disabled
+alias_maps =
+alias_database =
+relayhost =
+
+mynetworks = 127.0.0.0/8 {{ box_tailscale_ip }}/32
+smtpd_client_restrictions = permit_mynetworks, reject
+smtpd_relay_restrictions = permit_mynetworks, reject
+smtpd_recipient_restrictions = permit_mynetworks, reject
+
+# Everything on the box (every tenant pod, CI steps running PR code) shares the
+# box's tailnet address, so the address alone admits more than Stalwart. Limit
+# what it can do: envelope senders only from devhome's own mail domains (and
+# the null sender, for bounces), and rate limits so a misbehaving workload
+# cannot get the periscope's IP, which is also devhome's MX and ingress IP,
+# blocklisted.
+smtpd_null_access_lookup_key = <>
+smtpd_sender_restrictions = check_sender_access inline:{ {<> = OK}{% for d in devhome_relay_sender_domains | default([devhome_env_domain]) %}, {{ '{' }}{{ d }} = OK{{ '}' }}, {{ '{' }}.{{ d }} = OK{{ '}' }}{% endfor %} }, reject
+# Rate limits apply to mynetworks too (the default exempts it); only loopback
+# is exempt.
+smtpd_client_event_limit_exceptions = 127.0.0.0/8
+anvil_rate_time_unit = 60s
+smtpd_client_message_rate_limit = {{ devhome_relay_messages_per_minute | default(200) }}
+smtpd_client_recipient_rate_limit = {{ devhome_relay_recipients_per_minute | default(600) }}
+smtpd_client_connection_rate_limit = {{ devhome_relay_connections_per_minute | default(200) }}
+
+# The tailnet hop is already WireGuard-encrypted; STARTTLS is offered with the
+# snakeoil cert only so clients that insist on it can proceed.
+smtpd_tls_cert_file = /etc/ssl/certs/ssl-cert-snakeoil.pem
+smtpd_tls_key_file = /etc/ssl/private/ssl-cert-snakeoil.key
+smtpd_tls_security_level = may
+smtp_tls_security_level = may
+smtp_tls_CApath = /etc/ssl/certs
+
+message_size_limit = 52428800
+# dev mail: don't retry undeliverable test mail for days.
+maximal_queue_lifetime = 1d
+bounce_queue_lifetime = 1d

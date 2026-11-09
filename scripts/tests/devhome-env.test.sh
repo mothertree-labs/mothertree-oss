@@ -150,5 +150,34 @@ gated=$(grep -c 'installed: {{ ne (env "MT_CLUSTER_PLATFORM" | default "lke") "k
 check "both cloud-firewall releases are skipped on k3s (found $gated)" test "$gated" -eq 2
 check "environments/devhome resolves to the dev values" test -f "$REPO_ROOT/apps/environments/devhome/ingress-nginx.yaml.gotmpl"
 
+# ── mail.smtp_relay (devhome's outbound smart host on the tailnet) ─────────
+relay_of() {  # <yaml> -> prints "<host>:<port>" or fails
+  printf '%b' "$1" > "$TEST_TMP/relay.config.yaml"
+  ( MT_INFRA_CONFIG="$TEST_TMP/relay.config.yaml"
+    unset SMTP_RELAY_HOST SMTP_RELAY_PORT
+    # shellcheck source=../lib/infra-config.sh
+    source "$REPO_ROOT/scripts/lib/infra-config.sh"
+    _mt_infra_load_env_config >/dev/null
+    # :- so a loader that never sets them prints ":" instead of tripping set -u,
+    # which would make the must-fail checks below pass vacuously.
+    echo "${SMTP_RELAY_HOST:-}:${SMTP_RELAY_PORT:-}" ) 2>/dev/null
+}
+check "no mail block means no relay" test "$(relay_of 'keycloak:\n  replicas: 1\n')" = ":"
+check "mesh relay host + port" test "$(relay_of 'mail:\n  smtp_relay:\n    host: "100.64.99.1"\n    port: 2525\n')" = "100.64.99.1:2525"
+check_not "public relay host must fail (relay is unauthenticated)" relay_of 'mail:\n  smtp_relay:\n    host: "203.0.113.9"\n    port: 2525\n'
+check_not "hostname relay host must fail" relay_of 'mail:\n  smtp_relay:\n    host: "relay.example.com"\n    port: 2525\n'
+check_not "relay host without port must fail" relay_of 'mail:\n  smtp_relay:\n    host: "100.64.99.1"\n'
+check_not "relay port without host must fail" relay_of 'mail:\n  smtp_relay:\n    port: 2525\n'
+check_not "non-numeric relay port must fail" relay_of 'mail:\n  smtp_relay:\n    host: "100.64.99.1"\n    port: "25; x"\n'
+check_not "out-of-range relay port must fail" relay_of 'mail:\n  smtp_relay:\n    host: "100.64.99.1"\n    port: 70000\n'
+
+# deploy-stalwart: the relay is a third route and never silently loses to SES.
+st="$REPO_ROOT/apps/deploy-stalwart.sh"
+check "deploy-stalwart refuses SES + smtp_relay together" grep -q 'Both SES (ses.\* in infra secrets) and mail.smtp_relay' "$st"
+check "deploy-stalwart has an smtp_relay route" grep -q 'elif \[ -n "${SMTP_RELAY_HOST:-}" \]; then' "$st"
+# Stalwart resolves the relay address through DNS; a bare IP bounces every message.
+check "deploy-stalwart relay route uses the smtp-relay Service name" grep -q 'address = \\"${SMTP_RELAY_SVC_HOST}\\"' "$st"
+check_not "deploy-stalwart relay route never inlines the raw mesh IP" grep -q 'address = \\"${SMTP_RELAY_HOST}\\"' "$st"
+
 echo "devhome-env: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
