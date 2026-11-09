@@ -147,8 +147,9 @@ _mt_infra_load_env_config() {
     PGBOUNCER_DEFAULT_POOL_SIZE=$(yq '.pgbouncer.default_pool_size // 15' "$infra_config")
     PGBOUNCER_MIN_POOL_SIZE=$(yq '.pgbouncer.min_pool_size // 2' "$infra_config")
     PGBOUNCER_RESERVE_POOL_SIZE=$(yq '.pgbouncer.reserve_pool_size // 2' "$infra_config")
+    PGBOUNCER_REPLICAS=$(yq '.pgbouncer.replicas // 2' "$infra_config")
     export PGBOUNCER_ENABLED PG_VM_TAILSCALE_IP
-    export PGBOUNCER_MAX_CLIENT_CONN PGBOUNCER_DEFAULT_POOL_SIZE PGBOUNCER_MIN_POOL_SIZE PGBOUNCER_RESERVE_POOL_SIZE
+    export PGBOUNCER_MAX_CLIENT_CONN PGBOUNCER_DEFAULT_POOL_SIZE PGBOUNCER_MIN_POOL_SIZE PGBOUNCER_RESERVE_POOL_SIZE PGBOUNCER_REPLICAS
 
     # Headscale coordination server
     HEADSCALE_URL=$(yq '.headscale.url // ""' "$infra_config")
@@ -160,6 +161,21 @@ _mt_infra_load_env_config() {
     # TURN server Tailscale IP (for Ansible inventory mesh fallback)
     TURN_TAILSCALE_IP=$(yq '.turn.tailscale_ip // ""' "$infra_config")
     export TURN_TAILSCALE_IP
+
+    # Outbound mail smart host WITHOUT auth (devhome: the periscope's Postfix,
+    # because the home ISP blocks outbound 25). It authorizes by source address,
+    # so it must be a mesh address: a public host would make this an
+    # unauthenticated hop over the internet. Both keys or neither.
+    SMTP_RELAY_HOST=$(yq '.mail.smtp_relay.host // ""' "$infra_config")
+    SMTP_RELAY_PORT=$(yq '.mail.smtp_relay.port // ""' "$infra_config")
+    if [ -n "$SMTP_RELAY_HOST" ] || [ -n "$SMTP_RELAY_PORT" ]; then
+      mt_require_mesh_ip SMTP_RELAY_HOST "${SMTP_RELAY_HOST:-<unset>}" "mail.smtp_relay.host"
+      if ! [[ "$SMTP_RELAY_PORT" =~ ^[0-9]{1,5}$ ]] || [ "$SMTP_RELAY_PORT" -lt 1 ] || [ "$SMTP_RELAY_PORT" -gt 65535 ]; then
+        echo "[ERROR] mail.smtp_relay.port ('$SMTP_RELAY_PORT') must be a TCP port when mail.smtp_relay.host is set" >&2
+        exit 1
+      fi
+    fi
+    export SMTP_RELAY_HOST SMTP_RELAY_PORT
 
     # LLM inference model (shared Ollama)
     LLM_MODEL=$(yq '.llm.model // "llama3.2:1b"' "$infra_config")

@@ -111,6 +111,8 @@ jobs:
 
           Automated weekly check found new compatible app versions.
           Prereleases and nightlies are excluded; see \`scripts/lib/nextcloud-app-versions.py\`.
+          Each new tarball was downloaded over https, checked to contain the app, and its
+          \`sha256\` pinned; Nextcloud pods refuse to install a tarball that does not match (#654).
 
           ### Changes
 

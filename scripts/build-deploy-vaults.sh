@@ -117,6 +117,13 @@ TENANTS_DIR="$REPO_ROOT/config/tenants"
 INFRA_DIR="$REPO_ROOT/config/platform/infra"
 
 # ── LastPass helpers (only required when LastPass is the password source) ──
+# dev-class envs (dev, devhome, ...) are all keyed to the dev vault password
+# (LastPass: $LPASS_DEV_VAULT_ENTRY); everything else to the shared operator one.
+# Mirrors mt_is_dev_class in scripts/lib/common.sh (not sourced here).
+_is_dev_class_env() {
+  [[ "${1:-}" =~ ^dev[a-z0-9]*$ ]]
+}
+
 _require_lpass() {
   if ! command -v lpass >/dev/null 2>&1; then
     print_error "lpass is required to source the vault password from LastPass."
@@ -144,13 +151,13 @@ _resolve_vault_password() {
   # than silently honour it. This stops a stray MT_VAULT_PASSWORD (e.g. a dev
   # password left exported in the shell) from re-encrypting prod/prod-eu under
   # the wrong key — which would let the dev password decrypt the prod vault.
-  if [[ "$env" != "dev" && "$override_set" == "true" ]]; then
+  if ! _is_dev_class_env "$env" && [[ "$override_set" == "true" ]]; then
     print_error "MT_VAULT_PASSWORD / MT_VAULT_PASSWORD_FILE is set, but env '$env' must use the shared operator vault password from LastPass."
-    print_error "The direct-password override applies to 'dev' only. Unset it, or build 'dev' explicitly."
+    print_error "The direct-password override applies to dev-class envs (dev, devhome, ...) only. Unset it, or build one of those explicitly."
     exit 1
   fi
 
-  if [[ "$env" == "dev" ]]; then
+  if _is_dev_class_env "$env"; then
     if [[ -n "${MT_VAULT_PASSWORD_FILE:-}" ]]; then
       [[ -f "$MT_VAULT_PASSWORD_FILE" ]] || {
         print_error "MT_VAULT_PASSWORD_FILE not found: $MT_VAULT_PASSWORD_FILE"; exit 1; }
@@ -165,7 +172,7 @@ _resolve_vault_password() {
   fi
   _require_lpass
   local entry
-  if [[ "$env" == "dev" ]]; then
+  if _is_dev_class_env "$env"; then
     entry="$LPASS_DEV_VAULT_ENTRY"
   else
     entry="$LPASS_VAULT_ENTRY"
@@ -174,7 +181,7 @@ _resolve_vault_password() {
   pw=$(lpass show --note "$entry" 2>/dev/null)
   if [[ -z "$pw" ]]; then
     print_error "Failed to fetch vault password from LastPass entry: $entry"
-    if [[ "$env" == "dev" ]]; then
+    if _is_dev_class_env "$env"; then
       print_error "Create the dev vault-password note (see DEV_VAULT_ACCESS.md), or pass MT_VAULT_PASSWORD."
     fi
     exit 1
@@ -284,9 +291,9 @@ fi
 # silently re-key prod/prod-eu.
 if [[ -n "${MT_VAULT_PASSWORD:-}${MT_VAULT_PASSWORD_FILE:-}" ]]; then
   for _e in "${ENVS[@]}"; do
-    if [[ "$_e" != "dev" ]]; then
+    if ! _is_dev_class_env "$_e"; then
       print_error "MT_VAULT_PASSWORD / MT_VAULT_PASSWORD_FILE is set, but this build includes non-dev env '$_e'."
-      print_error "The direct-password override applies to 'dev' only. Unset it, or build 'dev' explicitly."
+      print_error "The direct-password override applies to dev-class envs (dev, devhome, ...) only. Unset it, or build one of those explicitly."
       exit 1
     fi
   done

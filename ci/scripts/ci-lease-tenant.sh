@@ -35,8 +35,9 @@ fi
 RETRY_INTERVAL=60
 MAX_WAIT=3600  # 1 hour — prod deploys on other slots can take 20-30 min
 
-# ── Pool slots (add new slots here when onboarding tenants) ──────
-POOLS=(pool1 pool2)
+# ── Pool slots (CI_POOL_SLOTS, default "pool1 pool2" — see ci_pool_slots) ──
+mapfile -t POOLS < <(ci_pool_slots)
+[[ ${#POOLS[@]} -gt 0 ]] || { echo "ERROR: no pool slots configured"; exit 1; }
 
 echo "--- CI Tenant Lease (pipeline #${CI_PIPELINE_NUMBER})"
 echo "Pool slots: ${POOLS[*]} | TTL: ${LEASE_TTL}s | Event: ${CI_PIPELINE_EVENT:-push}"

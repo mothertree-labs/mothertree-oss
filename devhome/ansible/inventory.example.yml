@@ -1,0 +1,25 @@
+# devhome inventory — copy to config/platform/devhome/inventory.yml.
+# The operator machine reaches the box on the LAN as a non-root account (the
+# playbooks use become). Everything else is reached THROUGH the box: the
+# VM-like containers on its docker network, and the periscope on its tailnet
+# address, which works once box.yml's first pass has joined the box to the
+# tailnet. (The periscope's public SSH is limited to operator_ips.)
+all:
+  children:
+    box:
+      hosts:
+        box:
+          ansible_host: <box LAN hostname>
+          ansible_user: <operator account>
+    periscope:
+      hosts:
+        periscope:
+          ansible_host: <periscope tailnet ip>
+          ansible_user: root
+          ansible_ssh_common_args: "-o ProxyJump=<operator account>@<box LAN hostname> -o StrictHostKeyChecking=accept-new"
+    postgres:
+      hosts:
+        devhome-pg:
+          ansible_host: 172.30.0.10
+          ansible_user: root
+          ansible_ssh_common_args: "-o ProxyJump=<operator account>@<box LAN hostname> -o StrictHostKeyChecking=accept-new"

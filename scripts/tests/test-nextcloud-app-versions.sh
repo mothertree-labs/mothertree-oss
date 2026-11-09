@@ -22,6 +22,15 @@ contains() {  # contains <description> <needle> <haystack>
     case "$3" in *"$2"*) PASS=$((PASS + 1)); echo "  ok   - $1";; *) FAIL=$((FAIL + 1)); echo "  FAIL - $1 (no [$2] in: $3)";; esac
 }
 
+OLD_SHA=$(printf 'a%.0s' $(seq 64))
+# --update downloads the selected tarball to pin its sha256 (#654). Serve it
+# from fixtures instead of the network: <dir>/<basename of the download URL>.
+FIXTURES="$TMPDIR_TEST/tarballs"; mkdir -p "$FIXTURES/src/calendar/appinfo" "$FIXTURES/src/other"
+echo '<info/>' > "$FIXTURES/src/calendar/appinfo/info.xml"
+tar czf "$FIXTURES/calendar-6.5.4.tar.gz" -C "$FIXTURES/src" calendar
+export MT_NC_TARBALL_FIXTURES="$FIXTURES"
+CAL_SHA=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$FIXTURES/calendar-6.5.4.tar.gz")
+
 write_manifest() {  # write_manifest <path> <app>=<version>...
     local path="$1"; shift
     { echo '{"platform_version": "32.0.5", "apps": {'
@@ -31,8 +40,9 @@ write_manifest() {  # write_manifest <path> <app>=<version>...
           first=0
           # Must be an allow-listed https host: the selector re-validates every
           # pinned URL on each run, not only newly proposed ones.
-          printf '"%s": {"version": "%s", "url": "https://github.com/x/%s.tar.gz"}' \
-              "${pair%%=*}" "${pair#*=}" "${pair%%=*}"
+          # Every pin carries a sha256 (#654); the selector rejects one without.
+          printf '"%s": {"version": "%s", "url": "https://github.com/x/%s.tar.gz", "sha256": "%s"}' \
+              "${pair%%=*}" "${pair#*=}" "${pair%%=*}" "$OLD_SHA"
       done
       echo '}}'
     } > "$path"
@@ -283,7 +293,7 @@ check "shell metachars in build metadata rejected" unparseable "$(pv '''1.0.0+;r
 # --- --update must preserve unknown fields (#654 will add a checksum) ---------
 cat > "$TMPDIR_TEST/m23.json" <<'JSON'
 {"platform_version": "32.0.5", "apps": {
-  "calendar": {"version": "6.4.2", "url": "https://github.com/x/calendar-6.4.2.tar.gz", "sha256": "OLD-TARBALL-DIGEST", "note": "keepme"}
+  "calendar": {"version": "6.4.2", "url": "https://github.com/x/calendar-6.4.2.tar.gz", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "note": "keepme"}
 }}
 JSON
 python3 "$SELECTOR" "$TMPDIR_TEST/m23.json" "$API" --update >/dev/null 2>&1
@@ -292,9 +302,8 @@ check "  version still updates" "6.5.4" "$(field "$TMPDIR_TEST/m23.json" version
 # A checksum is bound to the BYTES of the old release. Carrying it across a
 # version bump would either break the install or leave the manifest asserting a
 # checksum for a different tarball while the diff shows an UNCHANGED sha256 line
-# — no signal for the reviewer. It must be dropped (and, once #654 lands,
-# recomputed from the selected release).
-check "  content-bound sha256 is dropped, not carried" "GONE" "$(field "$TMPDIR_TEST/m23.json" sha256)"
+# — no signal for the reviewer. It is recomputed from the selected release (#654).
+check "  sha256 is recomputed from the new tarball" "$CAL_SHA" "$(field "$TMPDIR_TEST/m23.json" sha256)"
 check "  unrelated fields survive the merge" "keepme" "$(field "$TMPDIR_TEST/m23.json" note)"
 
 # --- malformed URLs return a verdict, not a traceback -------------------------
@@ -325,6 +334,67 @@ JSON
 OUT=$(python3 "$SELECTOR" "$TMPDIR_TEST/m25.json" "$API" 2>&1)
 contains "a bad URL does not abort the loop (calendar reported)" "calendar" "$OUT"
 contains "  ...and the second app is still checked (offhost reported)" "offhost" "$OUT"
+
+# --- #654: every pin must carry a valid sha256 --------------------------------
+cat > "$TMPDIR_TEST/m26.json" <<'JSON'
+{"platform_version": "32.0.5", "apps": {
+  "calendar": {"version": "6.5.4", "url": "https://github.com/x/calendar-6.5.4.tar.gz"}
+}}
+JSON
+OUT=$(python3 "$SELECTOR" "$TMPDIR_TEST/m26.json" "$API" 2>&1); RC=$?
+check    "pin without sha256 -> exit 1" 1 "$RC"
+contains "says why" "sha256 is missing or malformed" "$OUT"
+
+cat > "$TMPDIR_TEST/m27.json" <<'JSON'
+{"platform_version": "32.0.5", "apps": {
+  "calendar": {"version": "6.5.4", "url": "https://github.com/x/calendar-6.5.4.tar.gz", "sha256": "ABCDEF"}
+}}
+JSON
+OUT=$(python3 "$SELECTOR" "$TMPDIR_TEST/m27.json" "$API" 2>&1); RC=$?
+check "malformed sha256 -> exit 1" 1 "$RC"
+
+echo '{"platform_version": "32.0.5", "apps": {"calendar": "6.5.4"}}' > "$TMPDIR_TEST/m28.json"
+OUT=$(python3 "$SELECTOR" "$TMPDIR_TEST/m28.json" "$API" 2>&1); RC=$?
+check    "legacy bare-version pin -> exit 1" 1 "$RC"
+contains "says why" "pin must be an object" "$OUT"
+
+write_manifest "$TMPDIR_TEST/m29.json" calendar=6.4.2
+python3 "$SELECTOR" "$TMPDIR_TEST/m29.json" "$API" --update >/dev/null 2>&1
+check "--update pins the sha256 of the new tarball" "$CAL_SHA" "$(field "$TMPDIR_TEST/m29.json" sha256)"
+
+# A tarball that is not the app (no <app>/appinfo/info.xml) is never pinned.
+tar czf "$TMPDIR_TEST/wrong.tar.gz" -C "$FIXTURES/src" other
+mkdir -p "$TMPDIR_TEST/wrongfix"; cp "$TMPDIR_TEST/wrong.tar.gz" "$TMPDIR_TEST/wrongfix/calendar-6.5.4.tar.gz"
+write_manifest "$TMPDIR_TEST/m30.json" calendar=6.4.2
+BEFORE=$(cat "$TMPDIR_TEST/m30.json")
+OUT=$(MT_NC_TARBALL_FIXTURES="$TMPDIR_TEST/wrongfix" python3 "$SELECTOR" "$TMPDIR_TEST/m30.json" "$API" --update 2>&1); RC=$?
+check    "--update with a tarball that is not the app -> exit 1" 1 "$RC"
+contains "says why" "appinfo/info.xml" "$OUT"
+check    "  and writes nothing" "$BEFORE" "$(cat "$TMPDIR_TEST/m30.json")"
+
+# A failed fetch writes nothing either (nothing half-updated).
+mkdir -p "$TMPDIR_TEST/emptyfix"
+write_manifest "$TMPDIR_TEST/m31.json" calendar=6.4.2
+BEFORE=$(cat "$TMPDIR_TEST/m31.json")
+OUT=$(MT_NC_TARBALL_FIXTURES="$TMPDIR_TEST/emptyfix" python3 "$SELECTOR" "$TMPDIR_TEST/m31.json" "$API" --update 2>&1); RC=$?
+check    "--update when the tarball cannot be fetched -> exit 1" 1 "$RC"
+check    "  and writes nothing" "$BEFORE" "$(cat "$TMPDIR_TEST/m31.json")"
+
+# Redirects are followed only to https.
+REDIR=$(python3 -c '
+import importlib.util, urllib.error, urllib.request
+spec = importlib.util.spec_from_file_location("nav", "'"${REPO_ROOT}"'/scripts/lib/nextcloud-app-versions.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+h = m._HttpsOnlyRedirect(); req = urllib.request.Request("https://github.com/x.tar.gz")
+try:
+    h.redirect_request(req, None, 302, "Found", {}, "http://objects.example/x.tar.gz"); print("followed")
+except urllib.error.URLError:
+    print("refused")
+r = h.redirect_request(req, None, 302, "Found", {}, "https://objects.example/x.tar.gz")
+print("https-ok" if r is not None and r.full_url.startswith("https://") else "https-broken")
+')
+contains "redirect to http:// is refused" "refused" "$REDIR"
+contains "redirect to https:// is followed" "https-ok" "$REDIR"
 
 echo ""
 echo "nextcloud-app-versions: $PASS passed, $FAIL failed"

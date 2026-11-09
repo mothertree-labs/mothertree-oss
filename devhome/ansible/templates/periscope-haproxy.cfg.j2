@@ -1,0 +1,25 @@
+# Managed by devhome/ansible/periscope.yml — L4 forward of the env's public
+# ports to the devhome box over the tailnet. TLS is NOT terminated here.
+# PROXY v2 mirrors what the Linode NodeBalancer sends to ingress-nginx today:
+# on for every port except 25 (apps/values/ingress-nginx.yaml).
+global
+    log /dev/log local0
+    maxconn 20000
+
+defaults
+    mode tcp
+    log global
+    option tcplog
+    timeout connect 5s
+    timeout client 1h
+    timeout server 1h
+
+{% for p in devhome_forward_tcp %}
+frontend pub_{{ p.port }}
+    bind :{{ p.port }}
+    default_backend box_{{ p.port }}
+
+backend box_{{ p.port }}
+    server box {{ box_tailscale_ip }}:{{ p.port }}{{ ' send-proxy-v2' if p.proxy else '' }}
+
+{% endfor %}

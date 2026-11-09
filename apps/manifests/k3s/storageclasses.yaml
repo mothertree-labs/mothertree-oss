@@ -1,0 +1,23 @@
+# k3s (devhome) only — applied by scripts/deploy_infra when cluster.platform=k3s.
+#
+# Every manifest and chart value in this repo names the LKE CSI classes
+# (linode-block-storage, linode-block-storage-retain). On a single-node k3s
+# box those are served by k3s's bundled local-path provisioner instead, so the
+# manifests deploy unchanged. Volumes live under the node's
+# /var/lib/rancher/k3s/storage, which devhome/ansible/box.yml bind-mounts from
+# the host (/srv/devhome/k3s-storage) so they survive a node container rebuild.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: linode-block-storage
+provisioner: rancher.io/local-path
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: linode-block-storage-retain
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer

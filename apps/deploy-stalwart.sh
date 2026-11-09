@@ -136,13 +136,23 @@ print_status "Master-user secret hash generated"
 #   - SES configured (prod): relay via AWS SES on 587 with SASL auth. The
 #     ses-credentials Secret carries endpoint/username/password, mounted as
 #     env vars referenced by %{env:...}% in the relay route block.
-#   - SES unset (dev): direct MX delivery from the cluster's egress IP. No
+#   - mail.smtp_relay in the infra config (devhome): relay via an
+#     unauthenticated smart host on the tailnet (the periscope's Postfix,
+#     which authorizes the box by source address). Residential ISPs block
+#     outbound 25, so direct MX cannot work from a home box. Setting this AND
+#     SES is a config error: the route would be ambiguous.
+#   - Neither (dev): direct MX delivery from the cluster's egress IP. No
 #     smart host. Cluster egress IP has no PTR/SPF so receivers may tempfail,
 #     but that matches the existing dev behavior (see project_mail_paths_per_env).
 #
 # `.dkim.private_key` in tenant secrets is now unused by any cluster component
 # (the OpenDKIM sidecar and infra-mail dkim-key-<tenant> Secrets were removed
 # in step 2 PR-4). The field is kept in the secrets YAML for rollback safety.
+
+if [ -n "${SMTP_RELAY_HOST:-}" ] && [ -n "${SES_SMTP_ENDPOINT:-}" ]; then
+    print_error "Both SES (ses.* in infra secrets) and mail.smtp_relay (infra config) are set for $MT_ENV; pick one outbound route"
+    exit 1
+fi
 
 if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
     # Reject endpoints containing characters that could inject TOML directives
@@ -168,6 +178,36 @@ if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "$
     username = \"%{env:SES_SMTP_USER}%\"
     secret = \"%{env:SES_SMTP_PASSWORD}%\""
     print_status "Outbound relay: AWS SES ($SES_SMTP_ENDPOINT)"
+elif [ -n "${SMTP_RELAY_HOST:-}" ]; then
+    # Host/port were validated by mt_load_infra_config (mesh IP, numeric port),
+    # so inlining them cannot inject TOML.
+    STALWART_SES_ENABLED=false
+    # Stalwart always resolves a relay route's address through DNS (v0.15
+    # ip_lookup has no IP-literal path), so a bare mesh IP fails every delivery
+    # with "record not found" and bounces it. Give it a cluster-local name: a
+    # selector-less Service whose only endpoint is the validated mesh IP
+    # (applied below). The trailing dot makes the name absolute, so the pod's
+    # DNS search list (ndots:5, node-inherited domains) can never resolve it
+    # upstream; only cluster DNS answers, so the name maps to that IP alone.
+    SMTP_RELAY_SVC_HOST="smtp-relay.${NS_MAIL}.svc.cluster.local."
+    export STALWART_OUTBOUND_ROUTE_NAME="relay"
+    export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - unauthenticated smart host on the tailnet (mail.smtp_relay).
+    # ${SMTP_RELAY_SVC_HOST} -> ${SMTP_RELAY_HOST} (Service + EndpointSlice).
+    [queue.route.\"relay\"]
+    type = \"relay\"
+    address = \"${SMTP_RELAY_SVC_HOST}\"
+    port = ${SMTP_RELAY_PORT}
+    protocol = \"smtp\"
+
+    # The hop is WireGuard-encrypted; the relay's STARTTLS uses a self-signed cert.
+    # Safe ONLY because mt_require_mesh_ip pins the host to 100.64.0.0/10 and the
+    # route name is an absolute cluster-local name whose only endpoint is that
+    # IP: never relax either (hostnames, a relative name) without turning this
+    # back on.
+    [queue.route.\"relay\".tls]
+    implicit = false
+    allow-invalid-certs = true"
+    print_status "Outbound relay: tailnet smart host ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}"
 else
     STALWART_SES_ENABLED=false
     export STALWART_OUTBOUND_ROUTE_NAME="mx"
@@ -185,7 +225,7 @@ fi
 # full info-level delivery stream so ci-e2e-diagnostics.sh can name which leg of
 # the email round-trip (shard-5) broke. Prod keeps the quieter legacy block to
 # bound log volume — flip an env here if prod delivery debugging is ever needed.
-if [[ "$MT_ENV" == "dev" ]]; then
+if mt_is_dev_class; then
     export STALWART_TRACING_TOML="    [tracer.\"stdout\"]
     type = \"stdout\"
     level = \"info\"
@@ -212,6 +252,69 @@ print_status "Config checksum: $CONFIG_CHECKSUM"
 print_status "Ensuring $NS_MAIL namespace exists..."
 kubectl create namespace "$NS_MAIL" --dry-run=client -o yaml | kubectl apply -f -
 print_success "Namespace ready: $NS_MAIL"
+
+# =============================================================================
+# Tailnet smart host Service (mail.smtp_relay only)
+# =============================================================================
+# The DNS name Stalwart's relay route points at (see the route block above).
+if [ -n "${SMTP_RELAY_HOST:-}" ]; then
+    print_status "Applying smtp-relay Service -> ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}..."
+    kubectl apply -f - <<EOF_RELAY
+apiVersion: v1
+kind: Service
+metadata:
+  name: smtp-relay
+  namespace: ${NS_MAIL}
+spec:
+  type: ClusterIP
+  ports:
+    - name: smtp
+      port: ${SMTP_RELAY_PORT}
+      targetPort: ${SMTP_RELAY_PORT}
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: smtp-relay-tailnet
+  namespace: ${NS_MAIL}
+  labels:
+    kubernetes.io/service-name: smtp-relay
+    endpointslice.kubernetes.io/managed-by: mothertree-deploy-stalwart
+addressType: IPv4
+ports:
+  - name: smtp
+    port: ${SMTP_RELAY_PORT}
+    protocol: TCP
+endpoints:
+  - addresses: ["${SMTP_RELAY_HOST}"]
+---
+# allow-mail-smtp-egress only opens 25/465/587. Open exactly the relay's
+# address and port, for Stalwart only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-smtp-relay-egress
+  namespace: ${NS_MAIL}
+spec:
+  podSelector:
+    matchLabels:
+      app: stalwart
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: ${SMTP_RELAY_HOST}/32
+      ports:
+        - port: ${SMTP_RELAY_PORT}
+          protocol: TCP
+EOF_RELAY
+    print_success "smtp-relay Service ready"
+else
+    kubectl delete service smtp-relay -n "$NS_MAIL" --ignore-not-found=true >/dev/null
+    kubectl delete endpointslice smtp-relay-tailnet -n "$NS_MAIL" --ignore-not-found=true >/dev/null
+    kubectl delete networkpolicy allow-smtp-relay-egress -n "$NS_MAIL" --ignore-not-found=true >/dev/null
+fi
 
 # =============================================================================
 # Clean up stale dkim-key Secret
@@ -443,7 +546,9 @@ print_status "Ensuring CoreDNS rewrite for $MAIL_HOST → stalwart.$NS_MAIL.svc.
 if ! kubectl -n kube-system get configmap coredns-custom >/dev/null 2>&1; then
     kubectl -n kube-system create configmap coredns-custom
 fi
-_coredns_key="mail-${TENANT}.include"
+# shellcheck source=../scripts/lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+_coredns_key="mail-${TENANT}.$(mt_coredns_custom_suffix)"   # .include on LKE, .override on k3s
 _coredns_body="rewrite name ${MAIL_HOST} stalwart.${NS_MAIL}.svc.cluster.local"$'\n'
 
 # Detect whether the desired rewrite is already in place. If so, the patch is
@@ -451,7 +556,11 @@ _coredns_body="rewrite name ${MAIL_HOST} stalwart.${NS_MAIL}.svc.cluster.local"$
 # rewrite has been live and converged for some time already.
 _coredns_existing=$(kubectl -n kube-system get configmap coredns-custom \
     -o "jsonpath={.data.${_coredns_key}}" 2>/dev/null || true)
-if [ "$_coredns_existing" = "$_coredns_body" ]; then
+# $(...) strips the trailing newline from the stored value, but
+# _coredns_body ends with one. Compare without it, or the two never match and
+# every deploy restarts CoreDNS (twice per pipeline: here and in the other
+# rewrite script), which is a DNS blip for any pipeline testing at the time.
+if [ "$_coredns_existing" = "${_coredns_body%$'\n'}" ]; then
     print_status "CoreDNS rewrite already in place — skipping patch + rollout"
     _coredns_changed=false
 else

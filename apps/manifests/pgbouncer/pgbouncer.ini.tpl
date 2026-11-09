@@ -26,6 +26,13 @@ auth_file = /etc/pgbouncer/userlist.txt
 ; Must exist in auth_file (for bootstrapping) and have SELECT on pg_shadow in PostgreSQL.
 auth_user = pgbouncer
 auth_query = SELECT usename, passwd FROM pg_shadow WHERE usename=$1
+; Run auth_query in the `postgres` database, not in the database the client
+; asked for. pg_shadow is cluster-wide, and every db-init Job REVOKEs CONNECT
+; FROM PUBLIC on the database it creates — so without this, auth_user needs a
+; per-database GRANT CONNECT that no deploy step creates (dev/prod only have
+; it from hand grants; a fresh PostgreSQL fails every login with "permission
+; denied for database"). PgBouncer >= 1.20.
+auth_dbname = postgres
 
 ; Admin/stats access (localhost only)
 admin_users = pgbouncer

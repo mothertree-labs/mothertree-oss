@@ -69,7 +69,20 @@ if [ -z "$JVB_PORT" ] || [ "$JVB_PORT" = "null" ]; then
     print_error "Add 'resources.jitsi.jvb_port: <port>' to the tenant config (e.g., 31000)"
     exit 1
 fi
-print_status "JVB port: $JVB_PORT (hostPort for UDP media, IP discovered dynamically via Downward API)"
+print_status "JVB port: $JVB_PORT (hostPort for UDP media)"
+
+# JVB's advertised media address: on LKE the init container discovers the
+# node's ExternalIP. On k3s (devhome) the node is not publicly reachable — the
+# periscope DNATs the media port to it — so advertise cluster.public_ip.
+# shellcheck source=../scripts/lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+if mt_is_k3s; then
+    export JVB_PUBLIC_IP="$MT_PUBLIC_INGRESS_IP"
+    print_status "JVB public IP: $JVB_PUBLIC_IP (k3s: cluster.public_ip)"
+else
+    export JVB_PUBLIC_IP=""
+    print_status "JVB public IP: discovered from the node ExternalIP"
+fi
 
 # Ensure namespace exists
 print_status "Ensuring $NS_JITSI namespace exists..."
@@ -164,7 +177,7 @@ _prosody_restarted="$_mt_deploy_changed"
 # Apply JVB — K8s handles rolling update (with graceful drain) if spec changed
 # JVB uses specific variable substitution to preserve shell variables in init container scripts
 # NS_JITSI is included for tenant-specific ClusterRole/ClusterRoleBinding names (avoids multi-tenant RBAC collision)
-envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI} ${JVB_PUBLIC_IP}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 # Clean up old non-namespaced RBAC resources (replaced by tenant-specific names)
 kubectl delete clusterrole jitsi-jvb-node-reader --ignore-not-found >/dev/null 2>&1
 kubectl delete clusterrolebinding jitsi-jvb-node-reader --ignore-not-found >/dev/null 2>&1

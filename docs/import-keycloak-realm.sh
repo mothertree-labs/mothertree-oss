@@ -30,6 +30,11 @@ print_error() {
 
 # Require MT_ENV and set kubeconfig statelessly
 REPO_ROOT="${REPO_ROOT:-/workspace}"
+
+# Dev-class envs (dev, devhome, ...) get the CI-friendly realm: password login
+# in the credential subflow and no brute-force lockout. Mirrors mt_is_dev_class
+# in scripts/lib/common.sh (not sourced here: this script defines its own helpers).
+_is_dev_class() { [[ "${MT_ENV:-}" =~ ^dev[a-z0-9]*$ ]]; }
 if [ -z "${MT_ENV:-}" ]; then
   print_error "MT_ENV is not set. Usage: MT_ENV=dev ./docs/import-keycloak-realm.sh"
   exit 1
@@ -387,7 +392,7 @@ print_success "Realm event logging verified (user+admin events on, retention=${L
 # Disable brute force protection in dev — CI runs 10 parallel E2E shards that
 # authenticate the same test user simultaneously, triggering Keycloak's quick
 # login check and temporarily disabling the account.
-if [ "$MT_ENV" = "dev" ]; then
+if _is_dev_class; then
     print_status "Disabling brute force protection (dev environment)..."
     BF_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /dev/null -X PUT \
       "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM" \
@@ -1507,7 +1512,7 @@ if [ -z "$PASSKEY_FLOW_EXISTS" ]; then
                 fi
 
                 # Step 5: Add Password Form only in dev (password login is dev-only)
-                if [ "$MT_ENV" = "dev" ]; then
+                if _is_dev_class; then
                     print_status "Adding Password Form to credential subflow (dev environment)..."
                     ADD_PASSWORD_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/add_password.json -X POST \
                       "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser%20credential/executions/execution" \
@@ -1547,7 +1552,7 @@ if [ -z "$PASSKEY_FLOW_EXISTS" ]; then
 
                 WEBAUTHN_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "webauthn-authenticator-passwordless") | .id // empty')
                 if [ -n "$WEBAUTHN_EXEC_ID" ]; then
-                    if [ "$MT_ENV" = "dev" ]; then
+                    if _is_dev_class; then
                         # Dev: ALTERNATIVE (user chooses between passkey, password, or magic link)
                         curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
                           "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser/executions" \
@@ -1566,7 +1571,7 @@ if [ -z "$PASSKEY_FLOW_EXISTS" ]; then
                     fi
                 fi
 
-                if [ "$MT_ENV" = "dev" ]; then
+                if _is_dev_class; then
                     PASSWORD_FORM_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "auth-password-form") | .id // empty')
                     if [ -n "$PASSWORD_FORM_EXEC_ID" ]; then
                         curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
@@ -1734,7 +1739,7 @@ else
         fi
 
         # Step 5: Add Password Form only in dev (password login is dev-only)
-        if [ "$MT_ENV" = "dev" ]; then
+        if _is_dev_class; then
             print_status "Adding Password Form to credential subflow (dev environment)..."
             ADD_PASSWORD_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/add_password.json -X POST \
               "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/authentication/flows/passkey%20browser%20credential/executions/execution" \
@@ -1782,7 +1787,7 @@ else
             print_success "Set WebAuthn Passwordless as ALTERNATIVE"
         fi
 
-        if [ "$MT_ENV" = "dev" ]; then
+        if _is_dev_class; then
             PASSWORD_FORM_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "auth-password-form") | .id // empty')
             if [ -n "$PASSWORD_FORM_EXEC_ID" ]; then
                 curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -X PUT \
@@ -1815,7 +1820,7 @@ else
             print_success "Username Form moved to top of forms subflow"
         fi
 
-        if [ "$MT_ENV" = "dev" ]; then
+        if _is_dev_class; then
             print_success "Flow restructured: Username Form → credential subflow (WebAuthn | Password | Magic Link)"
         else
             print_success "Flow restructured: Username Form → credential subflow (WebAuthn | Magic Link)"
@@ -1834,7 +1839,7 @@ else
         WEBAUTHN_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "webauthn-authenticator-passwordless") | .id // empty')
         MAGIC_LINK_EXEC_ID=$(echo "$UPDATED_EXECUTIONS" | jq -r '.[] | select(.providerId == "ext-magic-form") | .id // empty')
 
-        if [ "$MT_ENV" != "dev" ]; then
+        if ! _is_dev_class; then
             # Prod: remove Password Form if it exists (leftover from dev configuration)
             if [ -n "$PASSWORD_FORM_EXEC_ID" ]; then
                 print_status "Removing Password Form from prod flow (password login is dev-only)..."

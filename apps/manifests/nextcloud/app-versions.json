@@ -3,27 +3,33 @@
   "apps": {
     "user_oidc": {
       "version": "8.11.0",
-      "url": "https://github.com/nextcloud-releases/user_oidc/releases/download/v8.11.0/user_oidc-v8.11.0.tar.gz"
+      "url": "https://github.com/nextcloud-releases/user_oidc/releases/download/v8.11.0/user_oidc-v8.11.0.tar.gz",
+      "sha256": "887920504c2f0e0d055abd66225ee7b66d756f50fe5a3739779d6b2ce108633f"
     },
     "calendar": {
       "version": "6.6.4",
-      "url": "https://github.com/nextcloud-releases/calendar/releases/download/v6.6.4/calendar-v6.6.4.tar.gz"
+      "url": "https://github.com/nextcloud-releases/calendar/releases/download/v6.6.4/calendar-v6.6.4.tar.gz",
+      "sha256": "0557b6b5852a467cf3f746e59d56478d227f78bf7a66357b30dfc10cae4c7e3c"
     },
     "richdocuments": {
       "version": "9.2.3",
-      "url": "https://github.com/nextcloud-releases/richdocuments/releases/download/v9.2.3/richdocuments-v9.2.3.tar.gz"
+      "url": "https://github.com/nextcloud-releases/richdocuments/releases/download/v9.2.3/richdocuments-v9.2.3.tar.gz",
+      "sha256": "d62329cbe2e63c55e69edcb14e9fdecd743ad144446950c9496f3254c1eef7c8"
     },
     "external": {
       "version": "7.0.1",
-      "url": "https://github.com/nextcloud-releases/external/releases/download/v7.0.1/external-v7.0.1.tar.gz"
+      "url": "https://github.com/nextcloud-releases/external/releases/download/v7.0.1/external-v7.0.1.tar.gz",
+      "sha256": "6b99d44ae45cd77f03b052da9aad63dea8adf58f50be4f8d0b8765821ef5ef28"
     },
     "notify_push": {
       "version": "1.4.2",
-      "url": "https://github.com/nextcloud-releases/notify_push/releases/download/v1.4.2/notify_push-v1.4.2.tar.gz"
+      "url": "https://github.com/nextcloud-releases/notify_push/releases/download/v1.4.2/notify_push-v1.4.2.tar.gz",
+      "sha256": "4bd2d62de2de3814e399297bc2443ed127a3ca730e540976a959c0b5a89cc380"
     },
     "integration_google": {
       "version": "4.4.0",
-      "url": "https://github.com/nextcloud-releases/integration_google/releases/download/v4.4.0/integration_google-v4.4.0.tar.gz"
+      "url": "https://github.com/nextcloud-releases/integration_google/releases/download/v4.4.0/integration_google-v4.4.0.tar.gz",
+      "sha256": "4d4cffb1c237c6e31205362f23683b5fc8771405efdc871a742a4a3ebdbd5077"
     }
   }
 }

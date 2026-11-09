@@ -97,13 +97,14 @@ else
   CF_PROXIED="false"
 fi
 
-# Get ingress LB IP — from flag, K8s query, or skip
+# Get ingress LB IP — from flag, the platform (k3s: cluster.public_ip; LKE: the
+# ingress Service's LoadBalancer IP), or skip
+source "${REPO_ROOT}/scripts/lib/platform.sh"
 LB_IP_OVERRIDE=$(mt_get_flag_value "--lb-ip" || echo "")
 if [ -n "$LB_IP_OVERRIDE" ]; then
   INGRESS_LB_IP="$LB_IP_OVERRIDE"
 else
-  INGRESS_LB_IP=$(kubectl get service -n "$NS_INGRESS" ingress-nginx-controller \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+  INGRESS_LB_IP=$(mt_ingress_public_ip || echo "")
 fi
 
 print_status "Managing infrastructure DNS records (env: $MT_ENV)"

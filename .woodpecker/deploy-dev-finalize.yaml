@@ -44,7 +44,7 @@ steps:
       E2E_POOL2_BASE_DOMAIN:
         from_secret: e2e_pool2_base_domain
     commands:
-      - ci/scripts/ci-deploy-app.sh dev finalize
+      - ci/scripts/ci-deploy-app.sh "$${MT_CI_DEV_ENV:-dev}" finalize
 
   # Post-deploy infra health gate (#612). Everything above has deployed by
   # now; ask Prometheus whether shared infra (infra-* namespaces) actually
@@ -89,7 +89,7 @@ steps:
         from_secret: e2e_pool2_base_domain
       INFRA_GATE_IGNORE: "^pg-metrics-bridge(-|$$)"
     commands:
-      - ci/scripts/ci-deploy-app.sh dev infra-gate
+      - ci/scripts/ci-deploy-app.sh "$${MT_CI_DEV_ENV:-dev}" infra-gate
 
   # Pipeline-scoped test users for E2E. Lives here so it runs AFTER the
   # tenant auth ingress is up (created in apps/deploy-matrix.sh, which
@@ -176,7 +176,7 @@ steps:
       E2E_POOL2_BASE_DOMAIN:
         from_secret: e2e_pool2_base_domain
     commands:
-      - ci/scripts/ci-deploy-app.sh dev remint-caldav-tokens
+      - ci/scripts/ci-deploy-app.sh "$${MT_CI_DEV_ENV:-dev}" remint-caldav-tokens
 
   # Cold-start gap #20: FATAL gate for the EXTERNAL IMAPS path the e2e tests
   # use. Pinned root cause (controlled experiment): a cold Stalwart delivers
@@ -235,4 +235,4 @@ steps:
       E2E_POOL2_STALWART_IMAP_PORT:
         from_secret: e2e_pool2_stalwart_imap_port
     commands:
-      - ci/scripts/ci-deploy-app.sh dev imaps-readiness
+      - ci/scripts/ci-deploy-app.sh "$${MT_CI_DEV_ENV:-dev}" imaps-readiness

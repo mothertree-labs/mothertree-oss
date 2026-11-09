@@ -28,10 +28,12 @@ spec:
           # boky/postfix:v5.1.0 - SMTP relay image
           # Source: https://github.com/bokysan/docker-postfix
           # v5.1.0 released Jan 2025, supports /docker-init.d/ scripts
-          image: boky/postfix:v5.1.0
+          image: boky/postfix:5.2.1
           ports:
             - containerPort: 25
               name: smtp
+            - containerPort: 10025
+              name: smtp-proxy
           # Mount init script for port-specific master.cf configuration
           # Scripts in /docker-init.d/ run after config generation but before Postfix starts
           volumeMounts:
@@ -45,8 +47,11 @@ spec:
               value: "${SMTP_ALLOWED_SENDER_DOMAINS}"
             - name: HOSTNAME
               value: "${SMTP_HOSTNAME}"
-            - name: DKIM_AUTOGENERATE
-              value: "false"
+            # NO DKIM_AUTOGENERATE here, not even "false": the image tests it with
+            # [[ -n "$DKIM_AUTOGENERATE" ]], so ANY value turns key generation ON.
+            # Generated keys make boky/postfix >= 5.2 start rspamd (~290Mi). This
+            # pod is inbound-only and never signs; outbound DKIM is SES Easy DKIM.
+            # Guarded by scripts/tests/postfix-dkim-autogenerate.test.sh.
             - name: POSTFIX_myhostname
               value: "${SMTP_HOSTNAME}"
             - name: POSTFIX_mydomain
@@ -91,10 +96,16 @@ spec:
             # Relay control is handled by smtpd_relay_restrictions, not sender restrictions
             - name: POSTFIX_smtpd_sender_restrictions
               value: permit
+          # ~30-45Mi with no DKIM keys (v5.1.0 and v5.2.1 alike). The 448/640Mi
+          # bump in #790 only existed because DKIM_AUTOGENERATE="false" was
+          # generating keys and v5.2.1 then ran rspamd (~395-425Mi; 256Mi
+          # OOM-killed it on Renovate #786, 2026-11-05).
+          # Request 128Mi (not the ~45Mi it uses) so the only MX pod is not
+          # the first eviction target under node memory pressure.
           resources:
             requests:
               cpu: 10m
-              memory: 64Mi
+              memory: 128Mi
             limits:
               memory: 256Mi
           # Graceful shutdown: let K8s endpoint removal propagate before SIGTERM
@@ -121,7 +132,7 @@ spec:
       # files Postfix reads at runtime.
       initContainers:
         - name: prepare-routing
-          image: boky/postfix:v5.1.0
+          image: boky/postfix:5.2.1
           command:
             - /bin/sh
             - -c

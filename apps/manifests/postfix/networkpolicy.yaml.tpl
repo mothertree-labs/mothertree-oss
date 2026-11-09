@@ -18,3 +18,19 @@ spec:
     - ports:
         - port: 25
           protocol: TCP
+    # Port 10025: smtp-proxy - ONLY from the public ingress-nginx controller
+    # pods. This listener trusts the client address in the PROXY header, so
+    # anyone else reaching it could forge a sender IP. Namespace AND pod
+    # selector in one entry = both must match.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ${NS_INGRESS}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+              app.kubernetes.io/instance: ingress-nginx
+              app.kubernetes.io/component: controller
+      ports:
+        - port: 10025
+          protocol: TCP

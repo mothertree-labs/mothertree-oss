@@ -83,7 +83,7 @@ spec:
       # Init container to discover node's external IP (cloud K8s returns internal IP for status.hostIP)
       initContainers:
       - name: discover-external-ip
-        image: alpine/kubectl:1.37.1
+        image: alpine/kubectl:1.37.2
         imagePullPolicy: IfNotPresent
         env:
         - name: POD_NAME
@@ -94,11 +94,24 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        # Set only on platforms where the node's ExternalIP is NOT where
+        # clients reach the hostPort (k3s behind a periscope: the periscope's
+        # public IP, which DNATs the media port over the tailnet). Empty on LKE.
+        # (Rendered by envsubst from JVB_PUBLIC_IP; read at runtime under a
+        # different name so envsubst cannot touch the script below.)
+        - name: JVB_IP_OVERRIDE
+          value: "${JVB_PUBLIC_IP}"
         command:
         - /bin/sh
         - -c
         - |
           set -eu
+
+          if [ -n "${JVB_IP_OVERRIDE:-}" ]; then
+            echo "Using configured public IP for JVB (platform override): $JVB_IP_OVERRIDE"
+            echo -n "$JVB_IP_OVERRIDE" > /shared/external-ip
+            exit 0
+          fi
 
           NODE_NAME="$(kubectl get pod "$POD_NAME" -n "$POD_NAMESPACE" -o jsonpath='{.spec.nodeName}')"
           if [ -z "$NODE_NAME" ]; then
@@ -131,7 +144,7 @@ spec:
           mountPath: /shared
       containers:
       - name: jvb
-        image: ghcr.io/jitsi/jvb:stable-11248-2
+        image: ghcr.io/jitsi/jvb:stable-11248-3
         # Rootless since stable-11146: the image runs as user s6 (uid/gid 1000).
         # Numeric ids are required, runAsNonRoot cannot verify a named USER.
         securityContext:

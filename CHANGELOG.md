@@ -27,8 +27,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `manage_infra -e prod-eu` now refuses a phase1 apply or destroy unless
   `MT_ALLOW_PRODEU_PHASE1=1` is set: it would recreate the decommissioned
   cluster and rewrite the prod-eu outputs with the retired Headscale box's IP.
+- **Ready for Keycloak 26.8.2's admin-API audience check (CVE-2026-19688).**
+  From 26.8.2 the Admin REST API returns 401 for any service-account token
+  whose client lacks the built-in `kc-admin-api` client scope. The upgrade
+  creates that scope in every realm but attaches it to no client, which would
+  break both portals (invites, recovery, guest registration) and the CI
+  test-user scripts. `deploy_infra` now attaches it to `admin-portal` and
+  `account-portal` in every realm right after the Keycloak rollout.
+  `setup-admin-portal-client` attaches it for new tenants. Both read the
+  scope back and fail if it is missing; on Keycloak older than 26.8.2 the step
+  does nothing (`scripts/lib/keycloak-admin-scope.sh`).
+- `deploy-admin-portal.sh` now fails the deploy when
+  `setup-admin-portal-client` fails, instead of printing a warning and
+  carrying on with broken portal clients.
 
 ### Fixed
+- **Real client IPs through the public ingress.** The ingress-nginx
+  LoadBalancer Service used `externalTrafficPolicy: Cluster`, so kube-proxy
+  SNATed some connections to the node's public IP. That address is not in
+  `proxy-real-ip-cidr`, so nginx ignored the PROXY / `X-Forwarded-For` client
+  address and used the node IP. It was measured on dev as 11/40 sessions,
+  every one arriving from a node public IP, and in prod roughly half of real
+  browser requests were logged with a node IP. The Service is now
+  `externalTrafficPolicy: Local`: the NodeBalancer only sends to nodes running
+  a controller and nothing is SNATed, so the TCP peer is always the
+  NodeBalancer's private address. On dev, 40/40 sessions kept the real IP and
+  HTTPS was unchanged. Cloudflare enforcement keys on the PROXY header address
+  and is unaffected.
+- Infra Postfix gained a PROXY-protocol listener on 10025 with port 25's
+  restrictions. NetworkPolicy lets only ingress-nginx reach it, since it trusts
+  the header's client address. It receives no traffic yet: a follow-up points
+  the inbound MX path at it. The Postfix Deployment's leftover pre-PR-4
+  OpenDKIM milter env (`POSTFIX_*milter*` → 127.0.0.1:8891) and its
+  `postfix-ses-env` envFrom are removed. They logged a refused milter connect
+  on every SMTP session.
+- **Nextcloud app tarballs are now integrity-checked (#654).** Every app in
+  `apps/manifests/nextcloud/app-versions.json` carries a `sha256`. The
+  Nextcloud init container downloads over https only (redirects included),
+  verifies the digest and only then extracts. A mismatch fails the pod
+  immediately, without retries. `deploy-nextcloud.sh` refuses a manifest
+  with a missing or malformed pin, and the weekly version check
+  (`--update`) now downloads each newly selected release, checks it contains
+  the app, and pins its sha256. Any failure leaves the manifest untouched.
+  The legacy bare-version pin format and the app-store fallback for a
+  missing manifest are gone: both produced unpinned downloads.
+- **Infra Postfix no longer generates DKIM keys or runs rspamd.** The pod set
+  `DKIM_AUTOGENERATE="false"`, but boky/postfix tests that variable with
+  `[[ -n ... ]]`, so any value turns key generation **on**. With keys present,
+  boky/postfix >= 5.2 starts rspamd (~290-425Mi). That is what OOM-killed
+  Postfix 5.2.1 on Renovate #786 and forced the 448/640Mi bump in #790. The
+  variable is gone. The pod is inbound-only and never signs: outbound DKIM is
+  SES Easy DKIM. It runs at ~30-45Mi on both v5.1.0 and v5.2.1, so its memory
+  goes to a 128Mi request (headroom so the only MX pod is not the first
+  eviction target) and a 256Mi limit.
+  `scripts/tests/postfix-dkim-autogenerate.test.sh` fails CI if the variable
+  comes back.
+- **The dev reaper no longer leaks a Cloud Firewall per recycle.** The
+  cloud-firewall-controller creates a Linode firewall labelled
+  `lke-<cluster_id>` for every cluster, and `destroy-dev-cluster.sh` never
+  deleted it: 41 had piled up by 2026-11-04 and hit the account's firewall
+  limit. A new Step 6 deletes any `lke-<id>` firewall whose cluster is not a
+  live LKE cluster **and** that has no attached entities. It fails closed if
+  the live-cluster or firewall list can't be read, the way the NodeBalancer
+  sweep does. `--dry-run` lists the candidates. The selection rule lives in
+  `scripts/lib/dev-orphans.sh` with unit tests.
 - The public ingress controller now uses the supported `proxy-real-ip-cidr`
   key for its trusted-proxy list, drops the unused `real-ip-header`, and sends
   upstreams `X-Forwarded-For` as the single resolved client address.

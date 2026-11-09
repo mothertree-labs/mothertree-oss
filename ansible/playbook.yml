@@ -528,7 +528,7 @@
   hosts: headscale_servers
   become: yes
   vars:
-    headscale_version: "0.29.6"
+    headscale_version: "0.29.7"
     # headscale_base_domain: REQUIRED - e.g., ts.example.com (MagicDNS base domain)
     # headscale_domain: REQUIRED - e.g., hs-prod.example.com
     # tls_email: REQUIRED - for Let's Encrypt certificate
@@ -1163,13 +1163,26 @@
       changed_when: false
       failed_when: false
 
+    # devhome runs this play against a VM-like container whose /mnt/pgdata is a
+    # bind mount from the host. Inside a container findmnt shows no UUID when
+    # the host's source is LVM/device-mapper, and fstab is never read for it,
+    # so there the requirement is only "is a mount point" (not the container's
+    # own root). VMs report "none" and keep the full UUID check + fstab entry.
+    - name: Detect a container
+      command: systemd-detect-virt --container
+      register: pg_virt_container
+      changed_when: false
+      failed_when: false
+
     - name: Require /mnt/pgdata to be a mounted volume
       fail:
         msg: >-
           /mnt/pgdata is not a mounted filesystem with a UUID (findmnt rc={{ pgdata_mount.rc }},
           output='{{ pgdata_mount.stdout }}'). Attach and mount the data volume first —
           refusing to place PostgreSQL data on the root disk.
-      when: pgdata_mount.rc != 0 or (pgdata_mount.stdout.split() | length) != 2
+      when: >-
+        pgdata_mount.rc != 0 or (pgdata_mount.stdout | trim) == '' or
+        (pg_virt_container.rc != 0 and (pgdata_mount.stdout.split() | length) != 2)
 
     # By UUID, not /dev/sdX: device letters are not stable across boots.
     # nofail: a missing volume must not drop the VM into emergency mode
@@ -1181,6 +1194,7 @@
         regexp: '^[^#\s]+\s+/mnt/pgdata\s'
         line: "UUID={{ pgdata_mount.stdout.split()[0] }} /mnt/pgdata {{ pgdata_mount.stdout.split()[1] }} defaults,nofail 0 2"
       notify: reload systemd
+      when: pg_virt_container.rc != 0   # a container's bind mounts come from the host
 
     - name: Check if data directory exists on volume
       stat:

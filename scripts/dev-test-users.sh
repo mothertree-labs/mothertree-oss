@@ -109,7 +109,7 @@ mt_load_tenant_config
 # ============================================================================
 # HARD GATE: dev only
 # ============================================================================
-if [ "$MT_ENV" != "dev" ]; then
+if ! mt_is_dev_class; then
     print_error "FATAL: dev-test-users.sh can ONLY run in dev environment"
     print_error "Current MT_ENV=$MT_ENV — refusing to continue"
     exit 1

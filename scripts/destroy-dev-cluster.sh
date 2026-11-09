@@ -45,6 +45,7 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 source "${REPO_ROOT}/scripts/lib/common.sh"
 source "${REPO_ROOT}/scripts/lib/args.sh"
+source "${REPO_ROOT}/scripts/lib/dev-orphans.sh"
 
 mt_usage() {
   cat <<EOF
@@ -226,6 +227,16 @@ if [ "$DRY_RUN" = "true" ]; then
       | "  \(.id)\t\(.label)"' || true
   else
     echo "  (cluster id unknown — would skip NB sweep)"
+  fi
+
+  echo ""
+  echo "Cloud Firewall (lke-<id>) orphan-sweep candidates (dead cluster, no attached entities):"
+  if _dr_live=$(linode-cli lke clusters-list --all-rows --json 2>/dev/null | jq -r '.[].id // empty') \
+      && _dr_fw=$(linode-cli firewalls list --all-rows --json 2>/dev/null) \
+      && _dr_out=$(mt_cfw_orphan_firewalls "$_dr_fw" "$_dr_live"); then
+    if [ -n "$_dr_out" ]; then printf '%s\n' "$_dr_out" | sed 's/^/  /'; else echo "  (none)"; fi
+  else
+    echo "  (could not list clusters/firewalls — the real run would skip the sweep)"
   fi
 
   print_status "Dry run complete. No changes made."
@@ -581,7 +592,7 @@ print_status "Orphan sweep: NodeBalancers with no live LKE cluster..."
 # balancers. So: abort the sweep unless the live-cluster lookup succeeds AND
 # returns a non-empty, all-numeric id list. prod + prod-eu always exist, so an
 # empty result unambiguously means an API failure, not "no clusters."
-if ! LIVE_CLUSTERS_JSON=$(linode-cli lke clusters-list --json); then
+if ! LIVE_CLUSTERS_JSON=$(linode-cli lke clusters-list --all-rows --json); then
   print_error "linode-cli lke clusters-list failed — SKIPPING NodeBalancer sweep (fail closed; will retry next recycle)"
 else
   LIVE_LKE_IDS=$(echo "$LIVE_CLUSTERS_JSON" | jq -r '.[].id // empty' | grep -E '^[0-9]+$' || true)
@@ -597,6 +608,40 @@ else
           fi
           print_status "  Deleting orphaned NodeBalancer id=$nb_id ($nb_label — dead cluster $nb_cluster_id)"
           linode-cli nodebalancers delete "$nb_id" || print_warning "  Failed to delete NB $nb_id"
+        done
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 6: orphan sweep — Cloud Firewall Controller firewalls
+# ---------------------------------------------------------------------------
+# The cloud-firewall-controller (apps/values/cloud-firewall-controller.yaml.gotmpl)
+# creates one Linode Cloud Firewall per cluster, labelled `lke-<cluster_id>`, and
+# attaches every node to it. Nothing deletes it when the cluster goes: 41 had
+# piled up by 2026-11-04 and hit the account's firewall limit. Same rule as the
+# NodeBalancer sweep — a firewall whose cluster id is not a live LKE cluster can
+# only belong to a destroyed one — plus a second lock: it must have NO attached
+# entities, so a firewall still protecting anything is never touched. Fail
+# closed on the live-cluster lookup for the same reason as above.
+# --all-rows on both lists: a paged response missing a live cluster would make
+# its firewall look orphaned.
+print_status "Orphan sweep: lke-<id> Cloud Firewalls with no live LKE cluster..."
+# Firewalls FIRST, clusters second: any firewall seen then belongs to a cluster
+# that already existed when the live list was taken, so a cluster created
+# between the two calls can never look dead.
+if ! FIREWALLS_JSON=$(linode-cli firewalls list --all-rows --json); then
+  print_error "linode-cli firewalls list failed — SKIPPING firewall sweep (fail closed; will retry next recycle)"
+elif ! LIVE_CLUSTERS_JSON=$(linode-cli lke clusters-list --all-rows --json); then
+  print_error "linode-cli lke clusters-list failed — SKIPPING firewall sweep (fail closed; will retry next recycle)"
+else
+  LIVE_LKE_IDS=$(echo "$LIVE_CLUSTERS_JSON" | jq -r '.[].id // empty' | grep -E '^[0-9]+$' || true)
+  if [ -z "${LIVE_LKE_IDS//[[:space:]]/}" ]; then
+    print_error "Live LKE cluster list is empty/unparseable — SKIPPING firewall sweep (fail closed; prod must always be present)"
+  else
+    mt_cfw_orphan_firewalls "$FIREWALLS_JSON" "$LIVE_LKE_IDS" \
+      | while IFS=$'\t' read -r fw_id fw_label; do
+          print_status "  Deleting orphaned firewall id=$fw_id ($fw_label — dead cluster, no attached entities)"
+          linode-cli firewalls delete "$fw_id" || print_warning "  Failed to delete firewall $fw_id"
         done
   fi
 fi

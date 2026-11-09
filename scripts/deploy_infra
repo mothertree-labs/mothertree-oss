@@ -54,6 +54,11 @@ mt_require_env
 # Load all infrastructure configuration
 source "${REPO_ROOT}/scripts/lib/infra-config.sh"
 mt_load_infra_config
+# Cluster platform (lke | k3s) — exported for helmfile, which leaves the
+# Linode-only releases out on k3s.
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+mt_load_cluster_platform
+print_status "Cluster platform: $MT_CLUSTER_PLATFORM${MT_PUBLIC_INGRESS_IP:+ (public ingress IP $MT_PUBLIC_INGRESS_IP)}"
 
 # Alert delivery is mandatory outside dev (Fail Fast — never silently skip).
 # The loader only [WARN]s when these keys are absent, and the Alertmanager
@@ -240,6 +245,9 @@ fi
 # =============================================================================
 # Cloud Firewall Controller - create API token secret
 # =============================================================================
+if [ "$MT_CLUSTER_PLATFORM" = "k3s" ]; then
+  print_status "k3s: no Linode Cloud Firewall Controller (the box has no public ingress; the periscope is the only public face)"
+else
 print_status "Setting up Cloud Firewall Controller API token..."
 if [ -f "$REPO_ROOT/secrets.$MT_ENV.tfvars.env" ]; then
   source "$REPO_ROOT/secrets.$MT_ENV.tfvars.env"
@@ -252,6 +260,7 @@ if [ -n "${TF_VAR_linode_token:-}" ]; then
 else
   print_warning "TF_VAR_linode_token not set - Cloud Firewall Controller will not have API access"
 fi
+fi  # lke only
 
 # Migrate metrics-server from kubectl-managed to Helm-managed (one-time migration;
 # on subsequent runs Helm already owns the resources and this block is skipped)
@@ -272,8 +281,17 @@ fi
 
 # Apply persistent RBAC for cloud-firewall-controller (workaround for chart v0.2.0
 # bug where RBAC resources are Helm hooks that get garbage-collected between upgrades)
-print_status "Applying persistent cloud-firewall-controller RBAC..."
-kubectl apply -f "$REPO_ROOT/apps/manifests/cloud-firewall-controller-rbac.yaml"
+if [ "$MT_CLUSTER_PLATFORM" != "k3s" ]; then
+  print_status "Applying persistent cloud-firewall-controller RBAC..."
+  kubectl apply -f "$REPO_ROOT/apps/manifests/cloud-firewall-controller-rbac.yaml"
+fi
+
+# k3s: serve the LKE StorageClass names from local-path so every manifest and
+# chart value deploys unchanged (apps/manifests/k3s/storageclasses.yaml).
+if [ "$MT_CLUSTER_PLATFORM" = "k3s" ]; then
+  print_status "k3s: applying local-path aliases for the LKE StorageClasses..."
+  kubectl apply -f "$REPO_ROOT/apps/manifests/k3s/storageclasses.yaml"
+fi
 
 # =============================================================================
 # Pre-sync: Migrate existing tcp-services entries to PROXY protocol format
@@ -826,6 +844,10 @@ fi
 # tar.gz on pod start) — and only then: unnecessary restarts are an auth outage
 # on single-replica environments and drop Infinispan-cached state.
 : "${KEYCLOAK_THEME_HASH:?theme hash must be computed before the Keycloak sync}"
+# Keycloak's DB pool is capped at PgBouncer's per-database pool (see
+# KC_DB_POOL_MAX_SIZE in apps/environments/<env>/keycloak.yaml.gotmpl).
+[[ "${PGBOUNCER_DEFAULT_POOL_SIZE:-}" =~ ^[1-9][0-9]*$ ]] || { print_error "PGBOUNCER_DEFAULT_POOL_SIZE ('${PGBOUNCER_DEFAULT_POOL_SIZE:-}') must be a positive integer (pgbouncer.default_pool_size in the infra config)"; exit 1; }
+export KC_DB_POOL_MAX_SIZE="$PGBOUNCER_DEFAULT_POOL_SIZE"
 print_status "Deploying Keycloak to $NS_AUTH namespace (replicas: $KEYCLOAK_REPLICAS, theme ${KEYCLOAK_THEME_HASH:0:12})..."
 pushd "$REPO_ROOT/apps" >/dev/null
   helmfile -e "$MT_ENV" -l name=keycloak sync --skip-deps
@@ -882,6 +904,44 @@ else
     print_warning "Could not sync Keycloak admin password — manual reset may be needed"
   fi
 fi
+
+# Keycloak 26.8.2+ admin-API audience check (CVE-2026-19688): service-account
+# tokens are rejected (HTTP 401) by the Admin REST API unless their client has
+# the built-in kc-admin-api client scope. The 26.8.2 migration creates that
+# scope in every realm but attaches it to no client, so the admin and account
+# portals (invites, recovery, guest registration) and the CI user scripts break
+# the moment Keycloak rolls. Attach it here, right after the rollout and for
+# every realm on the server, so the outage window is this deploy step, not the
+# time until create_env reaches each tenant. setup-admin-portal-client attaches
+# it again (strictly) when it creates the clients for a new tenant.
+source "${REPO_ROOT}/scripts/lib/keycloak-admin-scope.sh"
+_kcadm() {
+  kubectl exec keycloak-keycloakx-0 -n "$NS_AUTH" -c keycloak \
+    --kubeconfig="$KUBECONFIG" -- /opt/keycloak/bin/kcadm.sh "$@"
+}
+mt_kc_get() { _kcadm get "$2" -r "$1"; }
+mt_kc_put() { _kcadm update "$2" -r "$1"; }
+mt_kc_version() {
+  local v
+  v=$(_kcadm get serverinfo -r master | jq -r '.systemInfo.version // ""') || return 1
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
+}
+print_status "Ensuring ${MT_KC_ADMIN_API_SCOPE} scope on portal service-account clients..."
+_kcadm config credentials --server http://localhost:8080 --realm master \
+  --user admin --password "$KEYCLOAK_ADMIN_PASSWORD" 2>/dev/null || {
+  print_error "kcadm login failed; cannot configure the admin-API audience scope"
+  exit 1
+}
+_kc_realms=$(_kcadm get realms --fields realm | jq -r '.[].realm') || {
+  print_error "Could not list Keycloak realms"
+  exit 1
+}
+[ -n "$_kc_realms" ] || { print_error "Keycloak returned no realms"; exit 1; }
+while IFS= read -r _kc_realm; do
+  [ "$_kc_realm" = "master" ] && continue
+  mt_kc_ensure_admin_api_scope --if-present "$_kc_realm" admin-portal account-portal || exit 1
+done <<< "$_kc_realms"
 
 # NOTE: DNS records are now managed by manage_infra --dns (via scripts/manage-dns.sh)
 # NOTE: LKE firewall rules are now managed by manage_infra --firewall. See issue #244.

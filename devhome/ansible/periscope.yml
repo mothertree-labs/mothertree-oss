@@ -1,0 +1,183 @@
+---
+# devhome periscope: the env's only public face. DNS (lb1.<label>.<domain>,
+# mail.<label>.<domain>) points here; TCP is forwarded by HAProxy (PROXY v2),
+# UDP media by iptables DNAT — both over the dev tailnet to the devhome box.
+#
+# It is also the box's outbound mail relay: Postfix on the periscope's tailnet
+# address, accepting only from the box (residential lines block outbound 25).
+#
+# Run: ansible-playbook -i <inventory> -e @<vars> periscope.yml
+# Needs: headscale_url, box_tailscale_ip, periscope_tailscale_ip,
+#        devhome_env_domain, devhome_mail_relay_port,
+#        devhome_forward_tcp ([{port, proxy}]), devhome_forward_udp ([port]);
+#        ts_authkey_periscope only while it is not yet on the tailnet
+- name: Configure devhome periscope
+  hosts: periscope
+  become: true
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - headscale_url | default('') | length > 0
+          - box_tailscale_ip | default('') | length > 0
+          - devhome_forward_tcp | default([]) | length > 0
+          - periscope_tailscale_ip | default('') is match('^100\\.')
+          - devhome_env_domain | default('') | length > 0
+          - (devhome_mail_relay_port | default(0) | int) > 0
+          - (devhome_mail_relay_port | int) not in (devhome_forward_tcp | map(attribute='port') | list)
+        fail_msg: >-
+          headscale_url, box_tailscale_ip, periscope_tailscale_ip (100.x),
+          devhome_env_domain, devhome_forward_tcp and devhome_mail_relay_port
+          (not one of the forwarded ports) are required"
+
+    - name: Install HAProxy
+      ansible.builtin.apt:
+        name: [haproxy, iptables]
+        update_cache: true
+
+    - name: Install Tailscale
+      ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
+      args:
+        creates: /usr/bin/tailscale
+
+    - name: Check tailnet membership
+      ansible.builtin.command: tailscale ip -4
+      register: _ts_ip
+      changed_when: false
+      failed_when: false
+      check_mode: false   # read-only probe; without it --check tries to re-join
+
+    - name: Join the dev tailnet
+      ansible.builtin.command: >-
+        tailscale up --login-server={{ headscale_url }}
+        --authkey={{ ts_authkey_periscope }} --hostname=devhome-periscope
+        --accept-dns=false
+      when: _ts_ip.rc != 0 or (_ts_ip.stdout | trim) == ''
+      no_log: true
+
+    - name: Enable IP forwarding (UDP DNAT)
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        sysctl_set: true
+
+    - name: Deploy HAProxy config
+      ansible.builtin.template:
+        src: periscope-haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        validate: haproxy -c -f %s
+      notify: reload haproxy
+
+    - name: Deploy UDP forward script
+      ansible.builtin.template:
+        src: periscope-udp-forward.sh.j2
+        dest: /usr/local/sbin/periscope-udp-forward
+        mode: "0755"
+      register: _udp_script
+
+    - name: Deploy UDP forward unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/periscope-udp-forward.service
+        content: |
+          [Unit]
+          Description=devhome periscope UDP media forward
+          After=network-online.target tailscaled.service
+          Wants=network-online.target
+          [Service]
+          Type=oneshot
+          RemainAfterExit=true
+          ExecStart=/usr/local/sbin/periscope-udp-forward
+          [Install]
+          WantedBy=multi-user.target
+      register: _udp_unit
+
+    - name: Enable UDP forward
+      ansible.builtin.systemd:
+        name: periscope-udp-forward
+        enabled: true
+        state: "{{ 'restarted' if (_udp_script.changed or _udp_unit.changed) else 'started' }}"
+        daemon_reload: true
+
+    - name: Enable HAProxy
+      ansible.builtin.systemd:
+        name: haproxy
+        enabled: true
+        state: started
+
+    # ── outbound mail relay ────────────────────────────────────────────────
+    - name: Install Postfix (relay only)
+      ansible.builtin.apt:
+        name: [postfix, ssl-cert]
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Postfix main.cf
+      ansible.builtin.template:
+        src: periscope-postfix-main.cf.j2
+        dest: /etc/postfix/main.cf
+        mode: "0644"
+      notify: restart postfix
+
+    # HAProxy owns *:25 for inbound MX, so the distro smtpd on :25 must not run.
+    - name: Disable the distro smtpd on port 25
+      ansible.builtin.replace:
+        path: /etc/postfix/master.cf
+        regexp: '^smtp(\s+inet\s.*smtpd.*)$'
+        replace: '#smtp\1  # disabled by periscope.yml (HAProxy owns :25)'
+      notify: restart postfix
+
+    - name: Relay listener on the tailnet address only
+      ansible.builtin.blockinfile:
+        path: /etc/postfix/master.cf
+        marker: "# {mark} devhome relay listener (periscope.yml)"
+        block: |
+          {{ periscope_tailscale_ip }}:{{ devhome_mail_relay_port }} inet n - y - - smtpd
+      notify: restart postfix
+
+    # The listener binds the tailnet address, which exists only once tailscaled
+    # is up (net.ipv4.ip_nonlocal_bind covers the race at boot).
+    - name: Allow binding the tailnet address before it exists
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_nonlocal_bind
+        value: "1"
+        sysctl_set: true
+
+    - name: Postfix unit drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/postfix@-.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Start Postfix after tailscaled
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/postfix@-.service.d/after-tailscale.conf
+        content: |
+          [Unit]
+          After=tailscaled.service
+          Wants=tailscaled.service
+        mode: "0644"
+      register: _pf_dropin
+
+    - name: Check the Postfix config
+      ansible.builtin.command: postfix check
+      changed_when: false
+
+    - name: Enable Postfix
+      ansible.builtin.systemd:
+        name: postfix
+        enabled: true
+        state: started
+        daemon_reload: "{{ _pf_dropin.changed }}"
+
+
+  handlers:
+    - name: restart postfix
+      ansible.builtin.systemd:
+        name: postfix
+        state: restarted
+        daemon_reload: true
+
+    - name: reload haproxy
+      ansible.builtin.systemd:
+        name: haproxy
+        state: reloaded

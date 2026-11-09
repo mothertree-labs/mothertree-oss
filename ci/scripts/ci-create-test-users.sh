@@ -230,6 +230,27 @@ FIXED_USERS=(
   "e2e-mailrcv:e2e-testpass-mailrcv:false"
 )
 
+# assign_realm_role <username> <user_id> <role> — both roles exist in the
+# realm template, so a failure here is a real problem (expired token, Keycloak
+# restarting) and fails the step rather than leaving a user without its role.
+assign_realm_role() {
+  local username="$1" user_id="$2" role="$3" role_json
+  role_json=$(curl -sf --connect-timeout 10 --max-time 10 \
+    "${KEYCLOAK_URL}/admin/realms/${REALM}/roles/${role}" \
+    -H "Authorization: Bearer $TOKEN") || {
+    echo "ERROR: could not read realm role ${role} (needed for ${username})" >&2
+    exit 1
+  }
+  curl -sf --connect-timeout 10 --max-time 10 -X POST \
+    "${KEYCLOAK_URL}/admin/realms/${REALM}/users/${user_id}/role-mappings/realm" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "[${role_json}]" > /dev/null || {
+    echo "ERROR: could not assign realm role ${role} to ${username}" >&2
+    exit 1
+  }
+}
+
 create_user() {
   local username="$1" password="$2" is_admin="$3"
   local email="${username}@${EMAIL_DOMAIN}"
@@ -273,7 +294,12 @@ print(json.dumps({
     echo "failed (HTTP ${http_code})"
     cat /tmp/ci-create-user.json 2>/dev/null || true
     echo ""
-    return 0  # Don't fail the build — tests may still pass
+    # Fatal: without this user every login in all 10 shards fails, and a soft
+    # failure here only shows up 20 minutes later as dozens of "Invalid username"
+    # errors (#2590: a concurrent deploy restarted Keycloak, the admin token went
+    # 401, and the step still printed "Test users created.").
+    echo "ERROR: could not create Keycloak user ${username} (HTTP ${http_code})" >&2
+    exit 1
   fi
 
   # Assign roles
@@ -284,37 +310,13 @@ print(json.dumps({
     | python3 -c "import json,sys; users=json.load(sys.stdin); print(users[0]['id'] if users else '')" 2>/dev/null || true)
 
   if [[ -z "$user_id" ]]; then
-    echo "    WARNING: Could not find user ID for role assignment"
-    return 0
+    echo "ERROR: could not look up the user ID of ${username} for role assignment" >&2
+    exit 1
   fi
 
-  # Assign docs-user role
-  local role_json
-  role_json=$(curl -sf --connect-timeout 10 --max-time 10 \
-    "${KEYCLOAK_URL}/admin/realms/${REALM}/roles/docs-user" \
-    -H "Authorization: Bearer $TOKEN" 2>/dev/null || true)
-
-  if [[ -n "$role_json" ]]; then
-    curl -sf --connect-timeout 10 --max-time 10 -X POST \
-      "${KEYCLOAK_URL}/admin/realms/${REALM}/users/${user_id}/role-mappings/realm" \
-      -H "Authorization: Bearer $TOKEN" \
-      -H "Content-Type: application/json" \
-      -d "[${role_json}]" > /dev/null 2>&1 || true
-  fi
-
-  # Assign tenant-admin role if needed
+  assign_realm_role "$username" "$user_id" docs-user
   if [[ "$is_admin" == "true" ]]; then
-    role_json=$(curl -sf --connect-timeout 10 --max-time 10 \
-      "${KEYCLOAK_URL}/admin/realms/${REALM}/roles/tenant-admin" \
-      -H "Authorization: Bearer $TOKEN" 2>/dev/null || true)
-
-    if [[ -n "$role_json" ]]; then
-      curl -sf --connect-timeout 10 --max-time 10 -X POST \
-        "${KEYCLOAK_URL}/admin/realms/${REALM}/users/${user_id}/role-mappings/realm" \
-        -H "Authorization: Bearer $TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "[${role_json}]" > /dev/null 2>&1 || true
-    fi
+    assign_realm_role "$username" "$user_id" tenant-admin
   fi
 }
 
