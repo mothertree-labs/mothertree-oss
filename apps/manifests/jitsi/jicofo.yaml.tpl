@@ -11,11 +11,14 @@ spec:
   selector:
     matchLabels:
       app: jitsi-jicofo
+  # Recreate, never RollingUpdate: every Jicofo logs in with the same full JID
+  # (focus@auth/focus). A surge pod overlapping the old one makes Prosody kick
+  # one session with <conflict/> "Replaced by new connection", and Jicofo does
+  # not reconnect after a conflict — it stays Running with zero bridges and
+  # every conference request gets service-unavailable (prod, 2026-11-09:
+  # 16h of no video calls after a deploy rolled Jicofo twice in one second).
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+    type: Recreate
   template:
     metadata:
       labels:

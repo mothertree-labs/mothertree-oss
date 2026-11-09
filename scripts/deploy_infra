@@ -70,6 +70,7 @@ if mt_is_prod_like; then
   : "${MATRIX_ALERTMANAGER_ACCESS_TOKEN:?alertbot.access_token missing in ${_alerting_secrets} (required for every environment except dev)}"
   : "${ALERTMANAGER_MATRIX_ROOM_ID:?alertbot.room_id missing in ${_alerting_secrets} (required for every environment except dev)}"
   : "${HEALTHCHECKS_DEADMAN_URL:?healthchecks.deadman_url missing in ${_alerting_secrets} (required for every environment except dev)}"
+  : "${HEALTHCHECKS_CRITICAL_URL:?healthchecks.critical_url missing in ${_alerting_secrets} (required for every environment except dev — critical alerts page through it)}"
   case "$ALERTMANAGER_MATRIX_ROOM_ID" in
     '!'*:*) ;;
     *)
@@ -87,6 +88,18 @@ if mt_is_prod_like; then
     https://*) ;;
     *)
       print_error "healthchecks.deadman_url in ${_alerting_secrets} is not an https:// URL"
+      exit 1 ;;
+  esac
+  case "$HEALTHCHECKS_CRITICAL_URL" in
+    *REPLACE_WITH*)
+      print_error "healthchecks.critical_url in ${_alerting_secrets} is still the template placeholder — create a check on healthchecks.io and paste its ping URL"
+      exit 1 ;;
+    "$HEALTHCHECKS_DEADMAN_URL")
+      print_error "healthchecks.critical_url in ${_alerting_secrets} must be a separate check from deadman_url"
+      exit 1 ;;
+    https://*) ;;
+    *)
+      print_error "healthchecks.critical_url in ${_alerting_secrets} is not an https:// URL"
       exit 1 ;;
   esac
   unset _alerting_secrets

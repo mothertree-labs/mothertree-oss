@@ -131,9 +131,23 @@ alertmanager:
           # refuses to run without them — no placeholder defaults here.
           - url: 'http://matrix-alertmanager.{{ env "NS_MONITORING" }}.svc.cluster.local:3000/alerts/{{ requiredEnv "ALERTMANAGER_MATRIX_ROOM_ID" }}'
             send_resolved: true
+          # Out of band: email and Matrix above are both hosted ON the platform
+          # being monitored (oncall@ is a Stalwart mailbox, the room is on our
+          # Synapse), so neither pages anyone. Flip the dedicated healthchecks
+          # "critical alert" check to failed; its integrations reach a phone.
+          # Fire-only — the deadman receiver below re-arms it to up within a
+          # minute, so each hourly repeat of a still-firing critical notifies
+          # again. Prod lost video for 16h on 2026-11-09 with this alert firing.
+          - url: '{{ requiredEnv "HEALTHCHECKS_CRITICAL_URL" | trimSuffix "/" }}/fail'
+            send_resolved: false
       - name: 'deadman'
         webhook_configs:
           - url: '{{ requiredEnv "HEALTHCHECKS_DEADMAN_URL" }}'
+            send_resolved: false
+          # Re-arm the critical-alert check (success ping). healthchecks only
+          # notifies on a state change, so without this it would stay down
+          # after the first critical and never notify again.
+          - url: '{{ requiredEnv "HEALTHCHECKS_CRITICAL_URL" }}'
             send_resolved: false
       - name: 'selftest'
         webhook_configs:
