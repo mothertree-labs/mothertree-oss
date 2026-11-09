@@ -9,16 +9,16 @@
     "test": "jest --forceExit --detectOpenHandles"
   },
   "devDependencies": {
-    "@tailwindcss/cli": "^4.3.3",
+    "@tailwindcss/cli": "^4.3.5",
     "jest": "^30.5.2",
-    "nock": "^15.0.5",
+    "nock": "^15.0.6",
     "supertest": "^7.3.1"
   },
   "dependencies": {
     "connect-redis": "10.0.0",
     "ejs": "7.0.2",
     "express": "5.3.0",
-    "express-rate-limit": "8.7.2",
+    "express-rate-limit": "8.7.3",
     "express-session": "1.19.0",
     "helmet": "8.3.0",
     "nodemailer": "10.3.1",
