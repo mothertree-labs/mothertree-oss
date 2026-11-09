@@ -296,19 +296,23 @@ fi
 # =============================================================================
 # Pre-sync: Migrate existing tcp-services entries to PROXY protocol format
 # =============================================================================
-# When PROXY protocol is enabled on the NodeBalancer, ALL TCP stream listeners
-# must decode the PROXY header. This migration adds :PROXY: suffix to existing
-# tcp-services entries BEFORE helmfile sync enables PROXY protocol on the NB,
-# ensuring mail ports work correctly during the transition.
+# The NodeBalancer (devhome: the periscope/box HAProxy) sends PROXY v2 on every
+# port, so every TCP stream listener must decode the header. Rewrite existing
+# entries BEFORE the helmfile sync changes what the NodeBalancer sends:
+#   * per-tenant Stalwart ports get the :PROXY: decode suffix;
+#   * port 25 moves to Postfix's PROXY listener (MT_SMTP_INBOUND_TCP_SERVICE).
+# Order matters for 25: until the sync drops the old port-25 PROXY opt-out, a
+# sender reaching a decoding listener without a header times out, which MTAs
+# retry. The reverse order would hand PROXY bytes to Postfix's plain :25 as an
+# SMTP command and could earn senders a permanent 5xx.
+MT_SMTP_INBOUND_TCP_SERVICE="infra-mail/postfix:10025:PROXY:PROXY"
 if kubectl get configmap tcp-services -n "$NS_INGRESS" >/dev/null 2>&1; then
   EXISTING_DATA=$(kubectl get configmap tcp-services -n "$NS_INGRESS" -o jsonpath='{.data}' 2>/dev/null || echo "{}")
   if [ -n "$EXISTING_DATA" ] && [ "$EXISTING_DATA" != "{}" ]; then
     print_status "Migrating tcp-services entries to PROXY protocol format..."
-    # Port 25 is excluded: Linode's PROXY v2 handshake to ingress-nginx hangs
-    # specifically on port 25, so inbound MX traffic runs without PROXY.
-    # See apps/values/ingress-nginx.yaml for the per-port proxy-protocol override.
     kubectl get configmap tcp-services -n "$NS_INGRESS" -o json \
-      | jq '.data |= with_entries(if .key == "25" then . else .value |= if test(":PROXY:$") then . else . + ":PROXY:" end end)' \
+      | jq --arg smtp "$MT_SMTP_INBOUND_TCP_SERVICE" \
+          '.data |= with_entries(if .key == "25" then .value = $smtp else .value |= if test(":PROXY:") then . else . + ":PROXY:" end end)' \
       | kubectl apply -f -
     print_status "tcp-services entries migrated to PROXY protocol format"
   else
@@ -984,12 +988,12 @@ if [ "$_mail_enabled_any" = "true" ]; then
   fi
 
   # =============================================================================
-  # Configure nginx TCP proxy for inbound SMTP (port 25 -> Postfix:25)
+  # Configure nginx TCP proxy for inbound SMTP (port 25 -> Postfix:10025, PROXY)
   # =============================================================================
-  # Inbound MX traffic: internet → NodeBalancer:25 → nginx:25 → infra-mail/postfix:25.
+  # Inbound MX traffic: internet → NodeBalancer:25 → nginx:25 → infra-mail/postfix:10025.
   # The Linode NodeBalancer adds PROXY protocol v2 headers (via the
-  # linode-loadbalancer-default-proxy-protocol annotation on the ingress service),
-  # so nginx sees real client IPs via PROXY.
+  # linode-loadbalancer-default-proxy-protocol annotation on the ingress service);
+  # nginx decodes them and passes the client address on to Postfix in PROXY v1.
   # Two things are needed:
   #   1. tcp-services ConfigMap entries (tells nginx where to proxy)
   #   2. LB service ports (tells the cloud LB to forward to nginx's NodePort)
@@ -1007,11 +1011,12 @@ if [ "$_mail_enabled_any" = "true" ]; then
       -p='[{"op": "remove", "path": "/data/30025"}]' || true
   fi
 
-  # NOTE: port 25 does NOT use PROXY protocol (see apps/values/ingress-nginx.yaml for
-  # the rationale). Linode's PROXY v2 to nginx hangs specifically on port 25; disabling
-  # it is the workaround. Postfix sees nginx pod IPs instead of real client IPs.
-  kubectl patch configmap tcp-services -n "$NS_INGRESS" --type merge -p '{"data": {"25": "infra-mail/postfix:25"}}'
-  print_status "tcp-services ConfigMap updated with 25 -> infra-mail/postfix:25 (no PROXY)"
+  # Port 25 carries PROXY v2 like every other port: nginx decodes it and
+  # re-sends it to Postfix's 10025 listener (smtpd_upstream_proxy_protocol),
+  # so Postfix logs, rate-limits and RBL-checks the real sender address.
+  kubectl patch configmap tcp-services -n "$NS_INGRESS" --type merge \
+    -p "$(jq -cn --arg v "$MT_SMTP_INBOUND_TCP_SERVICE" '{data: {"25": $v}}')"
+  print_status "tcp-services ConfigMap updated with 25 -> $MT_SMTP_INBOUND_TCP_SERVICE"
 
   EXISTING_PORTS=$(kubectl get svc ingress-nginx-controller -n "$NS_INGRESS" -o jsonpath='{.spec.ports[*].port}' 2>/dev/null || echo "")
   # Remove stale 30025 port from LB service (from the pre-relay-VM-removal era)

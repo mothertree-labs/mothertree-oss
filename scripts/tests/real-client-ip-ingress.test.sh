@@ -12,9 +12,28 @@ ok "public ingress Service is externalTrafficPolicy: Local" \
    '[ "$(yq ".controller.service.externalTrafficPolicy" "$V")" = Local ]'
 ok "NodeBalancer PROXY v2 is the default" \
    '[ "$(yq ".controller.service.annotations[\"service.beta.kubernetes.io/linode-loadbalancer-default-proxy-protocol\"]" "$V")" = v2 ]'
-# Port 25 PROXY end to end (no NodeBalancer opt-out; tcp-services 25 ->
-# infra-mail/postfix:10025:PROXY:PROXY) lands in the follow-up; until then the
-# 10025 listener exists but receives no traffic.
+ok "no per-port PROXY opt-out on the NodeBalancer (port 25 included)" \
+   '[ "$(yq ".controller.service.annotations | keys | map(select(test(\"linode-loadbalancer-port-\"))) | length" "$V")" = 0 ]'
+# Port 25: nginx decodes the NodeBalancer's PROXY header and re-sends it to
+# Postfix's 10025 listener. Both deploy_infra sites (pre-sync migration and the
+# late patch) must use the same entry, or a deploy flips 25 back to plain.
+D="$R/scripts/deploy_infra"
+ok "tcp-services 25 entry is postfix:10025, decode + re-send PROXY" \
+   'grep -qx "MT_SMTP_INBOUND_TCP_SERVICE=\"infra-mail/postfix:10025:PROXY:PROXY\"" "$D"'
+ok "pre-sync migration points 25 at MT_SMTP_INBOUND_TCP_SERVICE" \
+   'grep -q "jq --arg smtp \"\$MT_SMTP_INBOUND_TCP_SERVICE\"" "$D" && grep -q "if .key == \"25\" then .value = \$smtp" "$D"'
+ok "late patch writes MT_SMTP_INBOUND_TCP_SERVICE for 25" \
+   'grep -q "jq -cn --arg v \"\$MT_SMTP_INBOUND_TCP_SERVICE\" '"'"'{data: {\"25\": \$v}}'"'"'" "$D"'
+ok "no plain postfix:25 tcp-services entry left in deploy_infra" \
+   '! grep -q "infra-mail/postfix:25\"" "$D"'
+ok "pre-sync migration runs before the tier=system helmfile sync" \
+   '[ "$(grep -n "^MT_SMTP_INBOUND_TCP_SERVICE=" "$D" | cut -d: -f1)" -lt "$(grep -n "helmfile -e \"\$MT_ENV\" -l tier=system sync" "$D" | head -1 | cut -d: -f1)" ]'
+# Trust list: only peers that may assert the client address in a PROXY header.
+CIDR=$(yq '.controller.config["proxy-real-ip-cidr"]' "$V")
+ok "Cloudflare IPv4 reference ranges are all trusted" \
+   '! grep -v "^#" "$R/scripts/cloudflare-ips-v4.txt" | grep . | while read -r c; do printf "%s" "$CIDR" | tr , "\n" | grep -qx "$c" || echo "$c"; done | grep -q .'
+ok "devhome trusts only the k3d gateway" \
+   '[ "$(yq ".controller.config[\"proxy-real-ip-cidr\"]" "$R/apps/environments/dev/ingress-nginx.yaml.gotmpl")" = 172.28.0.1/32 ]'
 M="$R/apps/manifests/postfix/10-master-cf-overrides.sh"
 ok "Postfix 10025 listener exists" 'grep -q "^postconf -M \"10025/inet=10025 inet" "$M"'
 ok "10025 requires the PROXY header" 'grep -q "10025/inet/smtpd_upstream_proxy_protocol=haproxy" "$M"'

@@ -10,7 +10,7 @@ part is a 1 GB "periscope" node:
 
 ```
 internet ──► periscope (nanode, public IP; DNS for *.devhome.<domain> points here)
-               │  HAProxy L4 forward — PROXY v2 on every port except 25
+               │  HAProxy L4 forward — PROXY v2 on every port
                │  iptables DNAT for UDP media (Jitsi JVB)
                ▼  over the dev tailnet (Headscale)
              devhome box ─ HAProxy ─► k3d cluster "devhome" (single k3s node)

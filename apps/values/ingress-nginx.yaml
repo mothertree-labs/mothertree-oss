@@ -37,20 +37,16 @@ controller:
     externalTrafficPolicy: Local
     annotations:
       service.beta.kubernetes.io/linode-loadbalancer-default-proxy-protocol: "v2"
-      # Port 25 (inbound MX) still has PROXY off at the NodeBalancer, so Postfix
-      # sees the nginx pod IP. The old explanation ("PROXY v2 hangs on port
-      # 25") was nginx's 25 entry not decoding the header: verified on dev with
-      # 40/40 greetings and the real sender IP once it decodes. Postfix now has
-      # a PROXY listener on 10025; a follow-up switches the tcp-services 25
-      # entry to infra-mail/postfix:10025:PROXY:PROXY (before the helm sync)
-      # and drops this override. The two are split so the NodeBalancer never
-      # sends PROXY to a listener that does not expect it.
-      service.beta.kubernetes.io/linode-loadbalancer-port-25: '{"proxy-protocol":"none"}'
+      # Applies to every port, including 25 (inbound MX): the tcp-services 25
+      # entry decodes the header and hands the sender address on to Postfix's
+      # PROXY listener on 10025 (scripts/deploy_infra). Never add a per-port
+      # opt-out (linode-loadbalancer-port-25) back without also pointing 25 at
+      # a listener that does not expect PROXY.
   extraArgs:
     # TCP proxy for mail ports: nginx watches this ConfigMap and dynamically proxies
     # TCP connections to per-tenant Stalwart ClusterIP services.
     # The ConfigMap is managed by deploy-stalwart.sh (adds ports per tenant).
-    # Port 25 is inbound MX (internet → NodeBalancer → nginx → Postfix).
+    # Port 25 is inbound MX (internet → NodeBalancer → nginx → Postfix:10025, PROXY).
     # Per-tenant Stalwart mail ports are added by deploy-stalwart.sh.
     tcp-services-configmap: "infra-ingress/tcp-services"
   resources:
