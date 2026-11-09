@@ -32,7 +32,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: jicofo
-        image: ghcr.io/jitsi/jicofo:stable-11248-2
+        image: ghcr.io/jitsi/jicofo:stable-11248-3
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
