@@ -53,13 +53,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   NodeBalancer now sends PROXY v2 on port 25 like every other port (the
   `linode-loadbalancer-port-25` opt-out is gone), and the tcp-services `25`
   entry is `infra-mail/postfix:10025:PROXY:PROXY`: nginx decodes the header
-  and passes the client address to Postfix's PROXY listener. Per-client
-  limits and RBL checks now apply to the actual sender instead of one nginx
-  address. `deploy_infra` rewrites the entry before the Helm sync changes the
-  NodeBalancer, so a sender caught in between gets a timeout that MTAs retry,
-  never PROXY bytes parsed as an SMTP command. The old "PROXY hangs on port
-  25" note was nginx's 25 entry not decoding the header. devhome's HAProxy
-  hops (`devhome_forward_tcp`) must send PROXY on 25 too.
+  and passes the client address to Postfix's PROXY listener. Postfix logs, and
+  any per-client limit or client check added later applies to, the actual
+  sender instead of one nginx address. `deploy_infra` rewrites the entry
+  before the Helm sync changes the NodeBalancer, so a sender caught in between
+  gets a timeout that MTAs retry, never PROXY bytes parsed as an SMTP command.
+  The old "PROXY hangs on port 25" note was nginx's 25 entry not decoding the
+  header. devhome's HAProxy hops (`devhome_forward_tcp`) must send PROXY on 25
+  too.
 - **devhome now passes real client IPs.** The controller's only TCP peer there
   is the k3d gateway `172.28.0.1`, which was not in `proxy-real-ip-cidr`, so
   every request and mail session was logged as that address. The dev-class

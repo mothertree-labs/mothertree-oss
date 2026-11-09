@@ -26,6 +26,8 @@ ok "late patch writes MT_SMTP_INBOUND_TCP_SERVICE for 25" \
    'grep -q "jq -cn --arg v \"\$MT_SMTP_INBOUND_TCP_SERVICE\" '"'"'{data: {\"25\": \$v}}'"'"'" "$D"'
 ok "no plain postfix:25 tcp-services entry left in deploy_infra" \
    '! grep -q "infra-mail/postfix:25\"" "$D"'
+ok "pre-sync migration runs after the CRD gate (a failed gate leaves 25 alone)" \
+   '[ "$(grep -n "^MT_SMTP_INBOUND_TCP_SERVICE=" "$D" | cut -d: -f1)" -gt "$(grep -n "if ! mt_apply_prometheus_crds" "$D" | head -1 | cut -d: -f1)" ]'
 ok "pre-sync migration runs before the tier=system helmfile sync" \
    '[ "$(grep -n "^MT_SMTP_INBOUND_TCP_SERVICE=" "$D" | cut -d: -f1)" -lt "$(grep -n "helmfile -e \"\$MT_ENV\" -l tier=system sync" "$D" | head -1 | cut -d: -f1)" ]'
 # Trust list: only peers that may assert the client address in a PROXY header.
@@ -36,6 +38,8 @@ ok "prod trust list has no pod/node/RFC1918 catch-alls" \
    '! printf "%s" "$CIDR" | tr , "\n" | grep -qE "^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.0\.0/16)"'
 ok "Cloudflare IPv4 reference ranges are all trusted" \
    '! grep -v "^#" "$R/scripts/cloudflare-ips-v4.txt" | grep . | while read -r c; do printf "%s" "$CIDR" | tr , "\n" | grep -qx "$c" || echo "$c"; done | grep -q .'
+ok "devhome's trusted gateway matches k3d_subnet in devhome/ansible/box.yml" \
+   '[ "$(yq ".[0].vars.k3d_subnet" "$R/devhome/ansible/box.yml")" = 172.28.0.0/16 ]'
 ok "devhome trusts only the k3d gateway" \
    '[ "$(yq ".controller.config[\"proxy-real-ip-cidr\"]" "$R/apps/environments/dev/ingress-nginx.yaml.gotmpl")" = 172.28.0.1/32 ]'
 M="$R/apps/manifests/postfix/10-master-cf-overrides.sh"

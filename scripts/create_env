@@ -514,7 +514,7 @@ else
     MX_HOST="${MAIL_HOST}"
 
     # Create/update the mail A record pointing to the cluster ingress LB IP.
-    # Inbound MX traffic: internet → NodeBalancer:25 → infra-mail/postfix:25 → tenant Stalwart.
+    # Inbound MX traffic: internet → NodeBalancer:25 → nginx → infra-mail/postfix:10025 (PROXY) → tenant Stalwart.
     # Fail hard on missing LB IP: a stale/missing A record would silently bounce inbound mail.
     INGRESS_LB_IP=$(mt_ingress_public_ip || echo "")
     if [ -z "$INGRESS_LB_IP" ]; then
