@@ -1,11 +1,13 @@
+# Checks that the dev-class CI cluster (devhome, a permanent k3s cluster) is
+# reachable before the app deploys start. The name is from the retired
+# on-demand LKE cluster, which this step used to create.
+#
 # Workflow-level `when` MUST match `deploy-dev-prep.yaml` — that workflow lists
 # ensure-dev-cluster in its depends_on, and Woodpecker blocks a workflow if any
 # dependency is filtered out for the current event. The workflow must exist in
 # the DAG on both events so deploy-dev-prep can resolve — without this, the
 # merge-to-main pipeline short-circuits BEFORE deploy-prod (pipelines #1216 /
-# #1219). Per issue #422, the deploy step itself also runs on both events so
-# main-push can re-provision the cluster when the idle reaper has destroyed it
-# in the gap between PR pipeline completion and the merge.
+# #1219).
 when:
   - event: pull_request
   - event: push
@@ -25,7 +27,6 @@ clone:
 steps:
   - name: ensure-dev-cluster
     image: bash
-    # Runs on both pull_request and push:main — see workflow header (issue #422).
     environment:
       CI: "true"
       CI_VALKEY_PASSWORD:

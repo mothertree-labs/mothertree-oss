@@ -46,13 +46,6 @@ chmod 0700 "$WORK_DIR"
 _cleanup() {
   # Stop lease renewal background process
   [[ -n "${_LEASE_RENEWAL_PID:-}" ]] && kill "$_LEASE_RENEWAL_PID" 2>/dev/null || true
-  # On-demand-dev heartbeat — touch the bucket so the idle reaper sees this
-  # CI step as recent activity. Runs on every exit (success or failure) for
-  # dev only; never for prod. Tolerant of heartbeat failure: the alternative
-  # is killing the build over a no-op cosmetic action.
-  if [[ "$MT_ENV" == "dev" ]] && [[ -n "${DEV_STATE_BUCKET:-}" ]]; then
-    "$REPO_ROOT/scripts/dev-heartbeat.sh" || true
-  fi
   # Remove decrypted vault contents
   rm -rf "$WORK_DIR"
   # Remove secrets copied into worktree
@@ -64,10 +57,8 @@ trap _cleanup EXIT
 
 # ── Lease renewal ─────────────────────────────────────────────────
 # Start a background loop that renews the Valkey pool lease (and its
-# reverse-lookup key) every 120s. The PR lease TTL is 1000s (~17 min), but a
-# cold on-demand-dev bring-up (cluster create + system tier + LLM stack) can
-# exceed that — so the lease must be renewed during bring-up too, not only
-# during the tenant deploy. Sets the global _LEASE_RENEWAL_PID so the EXIT
+# reverse-lookup key) every 120s. The PR lease TTL is 1000s (~17 min), and a
+# tenant deploy can run longer than that. Sets the global _LEASE_RENEWAL_PID so the EXIT
 # trap (_cleanup) can stop it. Idempotent: a second call is a no-op.
 _start_lease_renewal() {
   [[ -n "${_LEASE_RENEWAL_PID:-}" ]] && return 0          # already running
@@ -113,37 +104,12 @@ rm -f "$WORK_DIR/secrets.tar.gz"
 echo "Vault decrypted successfully"
 
 # ── Set up environment ───────────────────────────────────────────
-# For dev, fetch the kubeconfig directly from the Linode API so each
-# workflow gets the live cluster's API endpoint — every Woodpecker
-# workflow has its own workspace, so the kubeconfig written by
-# ensure-dev-cluster's dev-bringup is NOT visible here, and the dev vault
-# carries no kubeconfig at all (any copy would lag the real cluster id by a
-# reaper cycle; pipelines #1262/#1263). The API is the only source, so a
-# failed fetch is fatal with its reason instead of the old silent "fall
-# back to the vault copy" that could never succeed on dev (pipeline #2089).
-# ci_fetch_dev_kubeconfig retries 429/5xx itself.
-#
-# --bringup-only is the one exception: the cluster may not exist yet, and
-# dev-bringup.sh fetches its own kubeconfig (with a longer wait for the
-# "kubeconfig not yet available" window after creation), so skip it here.
-if [[ "$MT_ENV" == "dev" ]]; then
-  : "${LINODE_CLI_TOKEN:?LINODE_CLI_TOKEN is required for env=dev (wire linode_token into the step secrets)}"
-  if [[ "$BRINGUP_ONLY" == "true" ]]; then
-    echo "Bring-up only: dev-bringup.sh fetches the kubeconfig once the cluster exists"
-  elif ci_fetch_dev_kubeconfig "$WORK_DIR/kubeconfig.yaml"; then
-    echo "Fetched fresh kubeconfig from Linode API for env=dev"
-  else
-    echo "ERROR: could not fetch the dev kubeconfig from the Linode API: ${CI_KCFG_FETCH_LAST_ERROR:-unknown error}" >&2
-    exit 1
-  fi
-fi
+# The kubeconfig comes from the vault: every env CI deploys to (devhome,
+# prod) is a permanent cluster.
 export KUBECONFIG="$WORK_DIR/kubeconfig.yaml"
 export MT_TERRAFORM_OUTPUTS_FILE="$WORK_DIR/terraform-outputs.env"
 
-# On --bringup-only, the kubeconfig in the vault might be from a long-destroyed
-# cluster (or absent on first-ever cold start). The bring-up step generates a
-# fresh kubeconfig itself, so don't fail here — skip the check.
-if [[ "$BRINGUP_ONLY" != "true" ]] && [[ ! -f "$KUBECONFIG" ]]; then
+if [[ ! -f "$KUBECONFIG" ]]; then
   echo "ERROR: kubeconfig.yaml not found in vault archive"
   ls -la "$WORK_DIR/"
   exit 1
@@ -155,30 +121,15 @@ if [[ ! -f "$MT_TERRAFORM_OUTPUTS_FILE" ]]; then
   exit 1
 fi
 
-# Source the terraform outputs so child scripts (dev-bringup.sh,
-# dev-heartbeat.sh, deploy_infra) see DEV_STATE_BUCKET / DEV_STATE_S3_*.
-# `set -a` exports every assignment in the file. For prod / prod-eu the
-# DEV_STATE_* keys are empty strings, harmless.
+# Source the terraform outputs (TURN / Headscale / PostgreSQL addresses) for
+# the child scripts. `set -a` exports every assignment in the file.
 set -a
 # shellcheck disable=SC1090
 source "$MT_TERRAFORM_OUTPUTS_FILE"
 set +a
 
-# Source the phase1-dev TF-state-bucket creds (dev only). Only present in the
-# dev vault — see scripts/build-deploy-vaults.sh.
-if [[ -f "$WORK_DIR/tf-state-creds.env" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$WORK_DIR/tf-state-creds.env"
-  set +a
-  echo "Loaded phase1-dev tf-state credentials"
-fi
-
 # ── Copy secrets from vault into workspace ────────────────────────
 # Config files come from submodules; secrets come from the encrypted vault.
-# Done BEFORE the --bringup-only shortcut so dev-bringup.sh can resolve the
-# infra-tenant secrets file (for Cloudflare creds used by manage_infra
-# --dns) via infra-config.sh. Pipeline #1255 surfaced this.
 if [[ -d "$WORK_DIR/tenants" ]]; then
   for tenant_secrets_dir in "$WORK_DIR/tenants"/*/; do
     [[ -d "$tenant_secrets_dir" ]] || continue
@@ -196,38 +147,21 @@ else
   exit 1
 fi
 
-# ── On-demand-dev bring-up shortcut ───────────────────────────────
-# dev-bringup.sh ensures the LKE cluster exists and runs deploy_infra. It does
-# NOT do tenant-level deploys — those happen in subsequent pipeline steps that
-# call `ci-deploy.sh dev --prep-only`. The heartbeat-on-cleanup trap will fire
-# on exit (success or failure), keeping the reaper at bay during this step.
+# ── Bring-up check (ensure-dev-cluster) ───────────────────────────
+# The dev-class CI env (devhome) is a permanent k3s cluster: there is nothing
+# to bring up. Prove the API answers with the vaulted kubeconfig so a dead box
+# fails HERE, with a clear message, rather than in the first app deploy.
 if [[ "$BRINGUP_ONLY" == "true" ]]; then
-  # A k3s env (devhome) is always up — there is nothing to bring up. Prove the
-  # API answers with the vaulted kubeconfig so a dead box fails HERE, with a
-  # clear message, rather than in the first app deploy.
   source "$REPO_ROOT/scripts/lib/platform.sh"
-  if mt_is_k3s; then
-    echo "=== Bring-up only: $MT_ENV is a permanent k3s cluster — checking it is reachable ==="
-    if ! kubectl get nodes -o wide; then
-      echo "ERROR: the $MT_ENV k3s API is unreachable with the vaulted kubeconfig — is the devhome box up?" >&2
-      exit 1
-    fi
-    exit 0
-  fi
-  if [[ "$MT_ENV" != "dev" ]]; then
-    echo "ERROR: --bringup-only only supported for env=dev or a k3s env (got $MT_ENV)"
+  if ! mt_is_k3s; then
+    echo "ERROR: --bringup-only is only supported for a k3s env (got $MT_ENV)" >&2
     exit 1
   fi
-  echo "=== Bring-up only: ensuring dev cluster exists ==="
-  # Keep the pool lease alive for the whole bring-up: a cold cluster create +
-  # system-tier + LLM stack can run well past the 1000s lease TTL, and without
-  # this the lease expires before the downstream deploy-dev-prep step resolves
-  # the leased tenant ("No pool lease found"). The EXIT trap stops it.
-  _start_lease_renewal
-  # Don't exec — let the cleanup trap fire on the way out so $WORK_DIR is
-  # scrubbed and the heartbeat is touched. dev-bringup.sh ALSO touches the
-  # heartbeat on success; the double-touch is harmless (last writer wins).
-  "$REPO_ROOT/scripts/dev-bringup.sh"
+  echo "=== Bring-up only: $MT_ENV is a permanent k3s cluster — checking it is reachable ==="
+  if ! kubectl get nodes -o wide; then
+    echo "ERROR: the $MT_ENV k3s API is unreachable with the vaulted kubeconfig — is the devhome box up?" >&2
+    exit 1
+  fi
   exit 0
 fi
 
