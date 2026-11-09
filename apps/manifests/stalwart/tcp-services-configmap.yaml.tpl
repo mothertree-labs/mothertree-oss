@@ -6,8 +6,8 @@
 # internal ports on its Stalwart ClusterIP service. deploy-stalwart.sh
 # patches this ConfigMap to add/update entries per tenant.
 #
-# Port 30025 (SMTP inbound) is also added to this ConfigMap by deploy_infra,
-# mapping to infra-mail/postfix:25 for VPN Postfix inbound mail routing.
+# Port 25 (SMTP inbound) is also added to this ConfigMap by deploy_infra,
+# mapping to infra-mail/postfix:10025:PROXY:PROXY (MT_SMTP_INBOUND_TCP_SERVICE).
 #
 # Required environment variables:
 #   NS_MAIL - Tenant mail namespace (e.g., tn-example-mail)

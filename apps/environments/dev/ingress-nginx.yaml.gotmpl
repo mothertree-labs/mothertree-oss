@@ -1,5 +1,12 @@
-# Dev: no geo enforcement — dev DNS is not Cloudflare-proxied (gray cloud),
-# so all external traffic would be blocked. Monitoring probes (Blackbox Exporter)
-# also go through external FQDNs and would be blocked.
+# Dev-class (devhome): no geo enforcement — DNS is not Cloudflare-proxied (gray
+# cloud), so all external traffic would be blocked. Monitoring probes (Blackbox
+# Exporter) also go through external FQDNs and would be blocked.
 # The $deny_non_cloudflare geo variable is still defined (base values) but not enforced.
-{}
+controller:
+  config:
+    # The only TCP peer the controller sees on devhome is the k3d network
+    # gateway (k3d_subnet in devhome/ansible/box.yml): the box HAProxy, which
+    # passes on the periscope's PROXY header or adds one for local callers.
+    # Measured on both paths 2026-11-09. Not Cloudflare-proxied, so no
+    # Cloudflare ranges: an X-Forwarded-For from a client is never trusted.
+    proxy-real-ip-cidr: "172.28.0.1/32"

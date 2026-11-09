@@ -5,7 +5,7 @@
 #   * local callers on the devhome docker network ({{ devhome_net_gateway }}),
 #     e.g. e2e in the CI container: plain TCP, so a PROXY header is added here.
 # Either way ingress-nginx receives exactly what the NodeBalancer sends it in
-# LKE: PROXY v2 on every port except 25.
+# LKE: PROXY v2 on every port, 25 included.
 global
     log /dev/log local0
     maxconn 20000

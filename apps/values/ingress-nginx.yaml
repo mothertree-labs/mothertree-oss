@@ -37,20 +37,16 @@ controller:
     externalTrafficPolicy: Local
     annotations:
       service.beta.kubernetes.io/linode-loadbalancer-default-proxy-protocol: "v2"
-      # Port 25 (inbound MX) still has PROXY off at the NodeBalancer, so Postfix
-      # sees the nginx pod IP. The old explanation ("PROXY v2 hangs on port
-      # 25") was nginx's 25 entry not decoding the header: verified on dev with
-      # 40/40 greetings and the real sender IP once it decodes. Postfix now has
-      # a PROXY listener on 10025; a follow-up switches the tcp-services 25
-      # entry to infra-mail/postfix:10025:PROXY:PROXY (before the helm sync)
-      # and drops this override. The two are split so the NodeBalancer never
-      # sends PROXY to a listener that does not expect it.
-      service.beta.kubernetes.io/linode-loadbalancer-port-25: '{"proxy-protocol":"none"}'
+      # Applies to every port, including 25 (inbound MX): the tcp-services 25
+      # entry decodes the header and hands the sender address on to Postfix's
+      # PROXY listener on 10025 (scripts/deploy_infra). Never add a per-port
+      # opt-out (linode-loadbalancer-port-25) back without also pointing 25 at
+      # a listener that does not expect PROXY.
   extraArgs:
     # TCP proxy for mail ports: nginx watches this ConfigMap and dynamically proxies
     # TCP connections to per-tenant Stalwart ClusterIP services.
     # The ConfigMap is managed by deploy-stalwart.sh (adds ports per tenant).
-    # Port 25 is inbound MX (internet → NodeBalancer → nginx → Postfix).
+    # Port 25 is inbound MX (internet → NodeBalancer → nginx → Postfix:10025, PROXY).
     # Per-tenant Stalwart mail ports are added by deploy-stalwart.sh.
     tcp-services-configmap: "infra-ingress/tcp-services"
   resources:
@@ -83,11 +79,15 @@ controller:
     # X-Original-Forwarded-For.
     compute-full-forwarded-for: "false"
     enable-real-ip: "true"
-    # Cloudflare ranges (https://www.cloudflare.com/ips/) plus the NodeBalancer /
-    # node private range and pod range the TCP peer comes from. The Cloudflare
-    # entries must match the geo block below (which also allows 172.16/12 and
-    # loopback; neither is a TCP peer here).
-    proxy-real-ip-cidr: "173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32,192.168.0.0/16,10.0.0.0/8"
+    # Cloudflare ranges (https://www.cloudflare.com/ips/) plus the one range the
+    # TCP peer comes from: the NodeBalancer's private backend range
+    # 192.168.255.0/24 (externalTrafficPolicy: Local, so never SNATed; a prod
+    # census of controller sockets found no other peer). A trusted peer's PROXY
+    # header decides the client address Postfix and the apps see, so keep this
+    # to the NodeBalancer: do not add pod or node ranges back. devhome
+    # overrides this (environments/dev). The Cloudflare entries must match the
+    # geo block below.
+    proxy-real-ip-cidr: "173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32,192.168.255.0/24"
     # Geo variable: map source IP to allow/deny flag for Cloudflare enforcement
     # $proxy_protocol_addr = source IP from PROXY protocol header (Cloudflare edge IP)
     # Note: $realip_remote_addr is the TCP peer (NodeBalancer/kube-proxy IP), NOT
