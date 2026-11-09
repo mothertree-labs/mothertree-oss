@@ -64,6 +64,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is the k3d gateway `172.28.0.1`, which was not in `proxy-real-ip-cidr`, so
   every request and mail session was logged as that address. The dev-class
   override trusts exactly that address.
+- **Narrower real-IP trust list.** `proxy-real-ip-cidr` now trusts only the
+  Cloudflare ranges and the NodeBalancer's backend range `192.168.255.0/24`
+  (previously all of `10.0.0.0/8` and `192.168.0.0/16`). Since
+  `externalTrafficPolicy: Local` the NodeBalancer is the only peer a census of
+  prod's controller sockets found.
 - **Real client IPs through the public ingress.** The ingress-nginx
   LoadBalancer Service used `externalTrafficPolicy: Cluster`, so kube-proxy
   SNATed some connections to the node's public IP. That address is not in

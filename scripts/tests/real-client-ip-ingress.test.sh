@@ -30,6 +30,10 @@ ok "pre-sync migration runs before the tier=system helmfile sync" \
    '[ "$(grep -n "^MT_SMTP_INBOUND_TCP_SERVICE=" "$D" | cut -d: -f1)" -lt "$(grep -n "helmfile -e \"\$MT_ENV\" -l tier=system sync" "$D" | head -1 | cut -d: -f1)" ]'
 # Trust list: only peers that may assert the client address in a PROXY header.
 CIDR=$(yq '.controller.config["proxy-real-ip-cidr"]' "$V")
+ok "prod trust list includes the NodeBalancer backend range" \
+   'printf "%s" "$CIDR" | tr , "\n" | grep -qx 192.168.255.0/24'
+ok "prod trust list has no pod/node/RFC1918 catch-alls" \
+   '! printf "%s" "$CIDR" | tr , "\n" | grep -qE "^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.0\.0/16)"'
 ok "Cloudflare IPv4 reference ranges are all trusted" \
    '! grep -v "^#" "$R/scripts/cloudflare-ips-v4.txt" | grep . | while read -r c; do printf "%s" "$CIDR" | tr , "\n" | grep -qx "$c" || echo "$c"; done | grep -q .'
 ok "devhome trusts only the k3d gateway" \
