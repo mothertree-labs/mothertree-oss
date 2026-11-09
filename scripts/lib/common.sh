@@ -502,7 +502,7 @@ mt_psql() {
 #
 # Why this exists (CI pipeline #1746): PgBouncer pools are keyed on
 # (database, user). While a database is dropped (dev drop/recreate windows:
-# destroy-side DB sweep, dev-bringup orphan guard, split-brain recovery), any
+# split-brain recovery, and formerly the retired dev cluster's sweeps), any
 # pool that attempts a server login records the failure and serves clients a
 # cached error — "server login has been failing, cached error: database ...
 # does not exist (server_login_retry)". The cache only clears on the next
@@ -1944,8 +1944,7 @@ mt_coredns_rewrite_require() {
 # at the head of every record so a value containing a newline cannot forge one.
 # Anything else is refused: a bare `{.metadata.annotations}` or `{.metadata.*}`
 # (they include kubectl.kubernetes.io/last-applied-configuration, which for a
-# client-side-applied Secret carries the WHOLE object including .data —
-# dev-cert-cache.sh restores wildcard-tls-<tenant> with `kubectl apply`),
+# client-side-applied Secret carries the WHOLE object including .data),
 # `{.metadata.labels.x}`, any other field, any `$`/`@`/`..`/`[` form, and any
 # text outside braces (a brace-less `resourceVersion` would be echoed as
 # literal text by kubectl and read as "equal everywhere"). An empty path is

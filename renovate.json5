@@ -2,7 +2,7 @@
 //
 // Division of labour (avoid duplicate PRs):
 //   Dependabot (.github/dependabot.yml) owns: npm (portals, calendar-automation),
-//     terraform (the roots phase1, phase1-dev, ci/terraform -- Dependabot
+//     terraform (the phase1 root -- Dependabot
 //     follows each root's ../modules sources itself), and the three Dockerfiles it
 //     already tracks (admin-portal, account-portal, docker/roundcube — these
 //     also feed .github/workflows/dependabot-version-bump.yml).
@@ -86,10 +86,9 @@
         "/^apps/deploy-[^/]+\\.sh$/",
         "/^scripts/lib/nextcloud-db\\.sh$/",
         // `kubectl run --image=postgres:<tag>` throwaway psql pods (#684). These
-        // three files were outside every pattern, so their pins drifted to 15
+        // files were outside every pattern, so their pins drifted to 15
         // and 16 while the dashboard showed a single "postgres 17 -> 18" item.
         "/^scripts/lib/common\\.sh$/",
-        "/^scripts/destroy-dev-cluster\\.sh$/",
         "/^ci/scripts/ci-e2e-diagnostics\\.sh$/",
         "/^apps/scripts/perf/build-k6-image\\.sh$/",
         "/^apps/loki-manual\\.yaml$/",
@@ -108,8 +107,8 @@
         // 0.59.0), so a Renovate bump there was a no-op.
         "\\nK6_IMAGE=\\$\\{K6_IMAGE:-(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)\\}",
         // `kubectl run ... --image=postgres:<major>[.<minor>]-alpine` pins in
-        // scripts/lib/common.sh (mt_psql, mt_pgbouncer_verify_db),
-        // scripts/destroy-dev-cluster.sh and ci/scripts/ci-e2e-diagnostics.sh
+        // scripts/lib/common.sh (mt_psql, mt_pgbouncer_verify_db) and
+        // ci/scripts/ci-e2e-diagnostics.sh
         // (#684). Deliberately narrow: depName is the literal `postgres` and the
         // tag must end in `-alpine`, so a Renovate bump can never swap the
         // client pod onto a non-alpine tag, and the `--image=` prefix cannot
@@ -386,10 +385,10 @@
       "groupName": "tailscale-mesh",
     },
     {
-      "description": "Woodpecker upgrade is applied by ci/provision-ci.sh --ansible-only, not by merge",
+      "description": "Woodpecker upgrade is applied by re-running ci/ansible/playbook.yml on the CI host, not by merge",
       "matchPackageNames": ["woodpecker-ci/woodpecker"],
       "prBodyNotes": [
-        "Merging does NOT upgrade the CI VM. Apply with `ci/provision-ci.sh --ansible-only` while no pipelines are running (Valkey leases are recreated — see issue #547).",
+        "Merging does NOT upgrade the CI host. Re-run `ci/ansible/playbook.yml` against the devhome CI container (see devhome/README.md) while no pipelines are running (Valkey leases are recreated — see issue #547).",
       ],
     },
 

@@ -83,7 +83,8 @@ Run once, from an operator machine with LastPass + the repo checked out.
    still comes from the host file written by Ansible, so reprovision whenever
    the dev password changes:
    ```bash
-   ./ci/scripts/provision-ci.sh --ansible-only
+   ansible-playbook -i config/platform/devhome/ci-inventory.yml \
+     -e @config/platform/devhome/ci-ansible-vars.yml ci/ansible/playbook.yml
    ```
 
 ### Why there's no flag-day

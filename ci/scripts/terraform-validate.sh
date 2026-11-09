@@ -18,8 +18,8 @@ FAIL=0
 # Every ROOT config an operator or CI runs. Modules are exercised through the
 # roots that call them: `init -backend=false` still installs modules and
 # intersects their provider constraints. A missing root is an error, not a
-# skip -- a silent skip is how phase1-dev went unvalidated for months.
-for dir in phase1 phase1-dev ci/terraform; do
+# skip -- a silent skip is how a root once went unvalidated for months.
+for dir in phase1 devhome/terraform; do
   if [ ! -d "$dir" ]; then
     echo "^^^ +++"
     echo "Terraform root $dir not found -- update the list in $0 if it moved"

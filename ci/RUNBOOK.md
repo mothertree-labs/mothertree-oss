@@ -1,16 +1,25 @@
 # CI Server Runbook
 
-Operational procedures for the Woodpecker CI VM (`ci/`). See `CLAUDE.md` for
-the pipeline structure and `ci/ansible/playbook.yml` for what is provisioned.
+Operational procedures for the Woodpecker CI host. It is `devhome-ci`, a
+VM-like container (systemd + sshd) on the devhome box; see `devhome/README.md`
+for the box and `CLAUDE.md` for the pipeline structure. `ci/ansible/playbook.yml`
+is what is provisioned on it.
 
-Access is Tailscale-only by design — `ssh root@100.64.0.19`. A timeout on the
-public `:22` is intentional, not a fault.
-
-Every API snippet below needs an **admin** token (`/api/queue/info` is
-admin-only and fails confusingly without one):
+The server is `https://ci-devhome.mother-tree.org` (through the periscope). For
+shell access, SSH to the box on the home LAN and enter the container:
 
 ```bash
-WP_TOKEN=$(security find-generic-password -a mothertree -s woodpecker-api-token -w)
+ssh <operator>@<devhome-box>
+sudo docker exec -it devhome-ci bash     # systemctl / sqlite3 steps below run in here
+```
+
+Every API snippet below needs an **admin** token (`/api/queue/info` is
+admin-only and fails confusingly without one). It is `woodpecker_api_token`
+in the private `config/platform/devhome/ci-ansible-vars.yml`:
+
+```bash
+WP=https://ci-devhome.mother-tree.org
+WP_TOKEN=$(yq -r .woodpecker_api_token config/platform/devhome/ci-ansible-vars.yml)
 ```
 
 ---
@@ -50,7 +59,7 @@ finished:
 ```bash
 # 1. What is occupying the workers right now?
 curl -s -H "Authorization: Bearer $WP_TOKEN" \
-  https://ci.mother-tree.org/api/queue/info | jq '.stats, (.running | map(.id))'
+  $WP/api/queue/info | jq '.stats, (.running | map(.id))'
 ```
 
 ```bash
@@ -89,7 +98,7 @@ sqlite3 "$DB" "SELECT count(*) FROM tasks t JOIN workflows w ON CAST(w.id AS TEX
 # 1. Global gate — must print 0. Repeat this immediately before step 2;
 #    a webhook can start a pipeline in the gap.
 curl -s -H "Authorization: Bearer $WP_TOKEN" \
-  "https://ci.mother-tree.org/api/queue/info" | jq '.stats.running_count'
+  "$WP/api/queue/info" | jq '.stats.running_count'
 
 # 2. Stop services
 systemctl stop woodpecker-agent woodpecker-server
@@ -117,7 +126,7 @@ systemctl start woodpecker-agent
 # 6. Verify BOTH units came back — the retired script had a self-heal for this
 systemctl is-active woodpecker-server woodpecker-agent
 curl -s -H "Authorization: Bearer $WP_TOKEN" \
-  "https://ci.mother-tree.org/api/agents" | jq -r '.[] | "\(.name) \(.version)"'
+  "$WP/api/agents" | jq -r '.[] | "\(.name) \(.version)"'
 ```
 
 A DB delete alone is not enough — the queue is held in memory, so the server
@@ -133,16 +142,19 @@ Note also that a NULL `w.state` is deleted rather than preserved, since
 
 **Delete your backup once CI is confirmed healthy.** `bak-jam-*` files are ~1 GB
 unencrypted copies of the secret store, so they outlive credential rotation.
-They *are* reaped by the next `provision-ci.sh` run (`ci/ansible/playbook.yml`
-prunes `bak-autounjam-*` and `bak-jam-*`), but do not rely on that — remove it
-when you are done.
+They *are* reaped by the next run of `ci/ansible/playbook.yml` (it prunes
+`bak-autounjam-*` and `bak-jam-*`), but do not rely on that — remove it when
+you are done.
 
 ---
 
-## Reprovisioning the CI box
+## Reprovisioning the CI host
+
+From an operator checkout (the box must be reachable over SSH):
 
 ```bash
-./ci/scripts/provision-ci.sh --ansible-only
+ansible-playbook -i config/platform/devhome/ci-inventory.yml \
+  -e @config/platform/devhome/ci-ansible-vars.yml ci/ansible/playbook.yml
 ```
 
 **Pre-flight, in order:**
@@ -152,9 +164,9 @@ when you are done.
    lease is destroyed**. See #547. Use the same global gate as above:
    ```bash
    curl -s -H "Authorization: Bearer $WP_TOKEN" \
-     "https://ci.mother-tree.org/api/queue/info" | jq '.stats'
+     "$WP/api/queue/info" | jq '.stats'
    ```
-2. **Sync the local checkout.** `provision-ci.sh` runs the playbook from your
+2. **Sync the local checkout.** This runs the playbook from your
    *local* working copy, not from `origin/main`. A stale checkout silently
    provisions the wrong thing and still reports success:
    ```bash
@@ -168,7 +180,8 @@ when you are done.
    GRPC parity. Correct behaviour — but it means a routine converge is also an
    upgrade:
    ```bash
-   ssh root@100.64.0.19 '/usr/local/bin/woodpecker-server --version'
+   # inside devhome-ci:
+   /usr/local/bin/woodpecker-server --version
    ```
 
 **Verify afterwards**: both services `active` and reporting the same version, and
@@ -180,7 +193,7 @@ merely that the field is populated, because `none` is also a populated value and
 it is the one that disables the gate entirely:
 
 ```bash
-curl -s -H "Authorization: Bearer $WP_TOKEN" https://ci.mother-tree.org/api/repos/1 \
+curl -s -H "Authorization: Bearer $WP_TOKEN" $WP/api/repos/1 \
   | jq '{require_approval, approval_allowed_users}'
 # expect: {"require_approval": "forks", "approval_allowed_users": []}
 ```
@@ -203,4 +216,4 @@ value is unexpected, restore it and see the security notes in the private
   pipelines can both "acquire" the same lock and run concurrent `terraform apply`.
 - **#650** — a lockfile-only change is treated as non-source, so the image
   rebuild is skipped and `:latest` is re-pointed at the old image.
-- **#547** — `provision-ci.sh` wipes Valkey leases.
+- **#547** — re-running the CI playbook wipes Valkey leases.

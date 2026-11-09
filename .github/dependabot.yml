@@ -137,8 +137,6 @@ updates:
   - package-ecosystem: "terraform"
     directories:
       - "/phase1"
-      - "/phase1-dev"
-      - "/ci/terraform"
     multi-ecosystem-group: "weekly-deps"
     # REQUIRED alongside multi-ecosystem-group -- see the header note.
     patterns: ["*"]

@@ -138,7 +138,7 @@ stored anywhere.
 3. **ACL**: `{"src":["tag:monitoring"],"dst":["tag:monitoring:9090"]}` in
    `ansible/templates/headscale-acl-policy.json.j2`. Redeploy it:
    ```bash
-   ./ci/scripts/provision-ci.sh --ansible-only   # or the headscale playbook tag that runs "Deploy ACL policy"
+   ./scripts/manage_infra -e prod --ansible --limit=headscale   # runs "Deploy ACL policy"
    ```
 
 4. **prod config**: set `metrics_federation.role: consumer` **and**

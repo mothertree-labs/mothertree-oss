@@ -55,7 +55,7 @@ vcli_renew_if() {  # vcli_renew_if <key> <expected-value> <ttl-seconds>
 #
 # That is not hypothetical: on 2026-09-09 pipelines #2131 and #2132 both printed
 # "Acquired infra lock" through exactly this path and then ran concurrent
-# `terraform apply` against phase1-dev/terraform.tfstate (issue #647).
+# `terraform apply` against the (since retired) dev cluster state (issue #647).
 #
 # Doing the compare and the delete in one Lua body makes it atomic: only the
 # holder value we actually observed can be removed.
@@ -136,13 +136,11 @@ _ci_linode_reason() {
   printf '%s' "$reason"
 }
 
-# Fetch a fresh kubeconfig for the live dev LKE cluster and write it to
-# $1 (path). Each Woodpecker workflow gets its own workspace, so the
-# fresh kubeconfig written by dev-bringup in ensure-dev-cluster doesn't
-# propagate to deploy-dev-prep, deploy-dev-matrix, etc. — and the dev vault
-# deliberately carries NO kubeconfig (on-demand clusters make any copy stale
-# by a reaper cycle). The Linode API is therefore the only source, so this
-# retries instead of giving up on the first hiccup:
+# Write the dev-class CI cluster's kubeconfig to $1 (path). On devhome the
+# host provides it (MT_CI_DEV_KUBECONFIG_FILE, a Woodpecker global env var).
+# Without that override it falls back to the Linode API (from the retired
+# on-demand LKE dev cluster), and retries instead of giving up on the first
+# hiccup:
 #   429            → wait Retry-After (capped), retry
 #   5xx / curl err → back off (exponential, capped), retry
 #   other 4xx      → not retryable: fail now with the reason (401/403 = token,

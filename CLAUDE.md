@@ -40,9 +40,9 @@ tenants/         Per-tenant config (or use config/tenants/ submodule)
   .example/      Template for new tenants
 ansible/         VM configuration (Headscale, PostgreSQL, TURN/CoTURN)
 ci/              CI server (Woodpecker)
-  terraform/     CI VM provisioning (Linode)
-  ansible/       CI VM configuration (tools, vaults, deploy keys)
+  ansible/       CI host configuration (tools, vaults, deploy keys)
   scripts/       CI pipeline scripts (ci-deploy.sh, build-image.sh, lease/release)
+devhome/         One-machine dev cluster + CI host: periscope Terraform, box/CI/PG Ansible
 .woodpecker/     Woodpecker pipeline definitions
 ```
 
@@ -72,15 +72,16 @@ Sub-scripts are fully self-contained and independently runnable:
 
 ## CI/CD (Woodpecker)
 
-Woodpecker CI runs on a dedicated Linode VM (`ci/`). All pipeline files are in `.woodpecker/`.
+Woodpecker CI runs on the **devhome** box: one machine that hosts the CI server (`devhome-ci`, a VM-like container configured by `ci/ansible/playbook.yml`), the dev-class k3s test cluster `devhome`, and its PostgreSQL. A small public "periscope" node forwards traffic to it over the tailnet. See `devhome/README.md` for the architecture and bring-up, and `ci/RUNBOOK.md` for operations. All pipeline files are in `.woodpecker/`. The required status check is `ci/woodpecker-devhome/pr/mothertree-build`.
 
-**PR pipeline** (dev):
+**PR pipeline** (devhome):
 ```
 validate ─────────────┐
 build-images ──────────┤  (starts immediately, parallel with validate)
 ci-lease ──────────────┤
+ensure-dev-cluster ────┤  → only checks the devhome k3s API answers (the cluster is permanent)
 e2e-setup ─────────────┤
-deploy-dev ────────────┤  → deploy_infra -e dev + create_env -e dev -t <leased-tenant>
+deploy-dev-* ──────────┤  → deploy the leased tenant to devhome (prep, then per-app steps in parallel)
                        │
            e2e-shard-1..10  → Playwright tests against freshly deployed code
                        │
@@ -89,20 +90,22 @@ deploy-dev ────────────┤  → deploy_infra -e dev + cr
            mothertree-build → gate (required status check)
 ```
 
-**Main merge pipeline** (prod):
-Same as above, but deploy-dev is a no-op (step-level `when: pull_request`). After the gate passes:
+The dev deploy steps take their env from `MT_CI_DEV_ENV` (`devhome`, a Woodpecker global env var set on the CI host). One pool slot only (`CI_POOL_SLOTS=pool1`), so PR pipelines run one at a time.
+
+**Main merge pipeline** (prod): the same DAG runs again (dev deploy + e2e on the merged code), then after the gate:
 ```
 deploy-prod → deploy_infra -e prod + create_env -e prod -t <all tenants>
 ```
+The devhome box therefore holds the prod deploy vault password. Pushing to main while deploy-prod runs cancels it.
 
 **Secrets architecture**:
-- Kubeconfigs, terraform outputs, and tenant secrets are stored as **Ansible Vault-encrypted archives committed in the `config/platform` submodule** (`config/platform/ci/deploy-vault-{dev,prod}.vault`). The deploy scripts decrypt **from the cloned committed copy** — so a merged vault change deploys on the next pipeline run with no operator reprovision (GitHub issue #463). There is no fallback to the old host-provisioned copy under `/home/woodpecker/deploy-vaults`; a missing committed vault is a hard error.
+- Kubeconfigs, terraform outputs, and tenant secrets are stored as **Ansible Vault-encrypted archives committed in the `config/platform` submodule** (`config/platform/ci/deploy-vault-{devhome,prod}.vault`). The deploy scripts decrypt **from the cloned committed copy** — so a merged vault change deploys on the next pipeline run with no operator reprovision (GitHub issue #463), as long as the `config/platform` pointer is bumped. A missing committed vault is a hard error.
 - Decrypted into temp dirs at build time, cleaned up on exit
 - Private config submodules cloned via GitHub PAT (fine-grained, read-only) **before** vault decryption (the committed vault lives inside `config/platform`)
-- Vault password stored as Woodpecker secret `deploy_vault_password` (prod); dev uses its own password provisioned to the host as `dev-vault-pass` (see `DEV_VAULT_ACCESS.md`)
+- Woodpecker secret `deploy_vault_password` holds the prod vault password; dev-class vaults (devhome) are opened with the dev password provisioned to the host as `dev-vault-pass` (see `DEV_VAULT_ACCESS.md`). `ci_decrypt_vault` tries both for dev-class envs.
 - Build vaults with `scripts/build-deploy-vaults.sh` (uses `lpass` for vault password)
 
-**Key files**: `ci/scripts/ci-deploy.sh` (deploy wrapper), `.woodpecker/deploy-dev.yaml`, `.woodpecker/deploy-prod.yaml`, `ci/ansible/playbook.yml` (CI box provisioning), `scripts/build-deploy-vaults.sh` (vault assembly)
+**Key files**: `ci/scripts/ci-deploy.sh` / `ci-deploy-app.sh` (deploy wrappers), `.woodpecker/deploy-dev-*.yaml`, `.woodpecker/deploy-prod.yaml`, `ci/ansible/playbook.yml` (CI host provisioning), `devhome/` (the box, periscope and cluster), `scripts/build-deploy-vaults.sh` (vault assembly)
 
 ## Namespace Conventions
 
@@ -243,10 +246,6 @@ Never skip this step, even if the changes seem trivial.
 - **Tailscale sidecar `authkey expired` / `machineAuthorized=false` / untagged node**: the sidecar's auth Secret holds a dead or untagged pre-auth key. Run `./scripts/check-tailscale-keys -e <env>` for a per-Secret verdict and `--rotate` to mint tagged keys through the Headscale API and restart the sidecars. Pod pre-auth keys are never stored in the vaults — the deploy scripts mint them (`tailscale.rotator_api_key` is the only Tailscale secret they need) and the `tailscale-key-rotator` CronJob re-verifies every Secret daily.
 - **PgBouncer SCRAM-SHA-256**: PgBouncer requires `auth_type = scram-sha-256` to match PostgreSQL's default. If auth fails, check that `userlist.txt` has the correct SCRAM hashes, not plaintext passwords.
 - **Stale SSH host keys**: If Ansible fails with SSH errors against a VM that was rebuilt, remove the old key: `ssh-keygen -R <ip>`, then re-run `manage_infra --ansible`.
-- **Stale kubeconfig after cluster rebuild**: CI redeploys the cluster with a new API endpoint. Refresh `kubeconfig.dev.yaml` from the Linode API. This command requires the dev vault password and is for **zsh on Linux**:
-  ```zsh
-  export LINODE_CLI_TOKEN="$(ansible-vault decrypt config/platform/ci/deploy-vault-dev.vault --vault-password-file /home/marekj/.mt-dev-vault-pass --output - | tar -xzOf - ./tenants/mothertree/dev.secrets.yaml | yq '.linode.token')" && ID=$(linode-cli lke clusters-list --json 2>/dev/null | jq -r '.[]|select(.label=="matrix-cluster-dev").id') && linode-cli lke kubeconfig-view --json "$ID" | jq -r '.[0].kubeconfig' | base64 -d > kubeconfig.dev.yaml
-  ```
 
 ## Release Versioning
 

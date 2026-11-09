@@ -34,11 +34,9 @@ provider "cloudflare" {
 
 # Create LKE Cluster.
 #
-# Dev's LKE cluster (and only the LKE cluster — the always-up dev VMs continue
-# to live here in the dev workspace) was moved to ../phase1-dev/ in order to
-# back its state with Linode Object Storage. CI needs durable shared state to
-# implement the on-demand-dev model. Prod and prod-eu continue to keep their
-# LKE clusters in this directory with local state.
+# The dev workspace has no LKE cluster: the on-demand dev cluster was retired
+# and devhome (a k3s cluster on one machine, devhome/) replaced it. Prod keeps
+# its LKE cluster in this directory with local state.
 module "lke_cluster" {
   count  = var.env == "dev" ? 0 : 1
   source = "../modules/lke-cluster"

@@ -24,10 +24,9 @@ LOCK_KEY="ci-infra-lock-dev"
 LOCK_VALUE="${CI_PIPELINE_NUMBER}#${CI_PIPELINE_EVENT:-unknown}"
 # Default 10 min — the prep-phase deploy_infra is a warm idempotent re-sync
 # (2-5 min). Overridable via INFRA_LOCK_TTL for callers whose critical section
-# runs longer: dev-bringup.sh's cold/degraded repair does a NEAR-COLD
-# deploy_infra of the whole system tier (~15 min) and must not let the lock
-# expire mid-repair — that would re-open the concurrent-repair race the lock
-# exists to prevent. A dead holder is still force-acquired promptly via the
+# runs longer (a near-cold deploy_infra of the whole system tier is ~15 min)
+# and must not let the lock expire mid-run — that would re-open the
+# concurrent-repair race the lock exists to prevent. A dead holder is still force-acquired promptly via the
 # _pipeline_is_alive check below regardless of TTL, so a longer TTL is safe.
 LOCK_TTL="${INFRA_LOCK_TTL:-600}"
 MAX_WAIT=2700     # 45 min — worst case: wait for e2e suite + deploy

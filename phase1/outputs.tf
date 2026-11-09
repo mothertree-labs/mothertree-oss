@@ -1,7 +1,6 @@
 # LKE outputs are guarded with `length(module.lke_cluster) > 0` so the dev
 # workspace (where the module count is 0 — see phase1/main.tf) can `terraform
-# apply` cleanly. Dev's LKE cluster lives in ../phase1-dev/ and exposes the
-# same outputs from there.
+# apply` cleanly.
 
 output "cluster_id" {
   description = "The ID of the LKE cluster"
@@ -85,7 +84,7 @@ output "next_steps" {
 
 output "deployment_summary" {
   description = "Summary of the deployment"
-  value = length(module.lke_cluster) == 0 ? "LKE cluster managed in ../phase1-dev/ — see that directory's outputs." : format(
+  value = length(module.lke_cluster) == 0 ? "No LKE cluster in this workspace." : format(
     "Matrix infrastructure deployed successfully!\n\nCluster Details:\n- Cluster ID: %s\n- Region: %s\n- Status: %s\n- Kubeconfig: %s/../kubeconfig.%s.yaml\n\nMatrix Domain: %s.%s\n%s\n\nNext Steps:\n1. Run 'terraform apply' in phase2/ to deploy Matrix services\n2. Wait for DNS propagation (5-10 minutes)\n3. Access Matrix at https://%s.%s\n",
     module.lke_cluster[0].cluster_id,
     module.lke_cluster[0].cluster_region,
