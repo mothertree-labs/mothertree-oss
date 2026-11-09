@@ -303,6 +303,15 @@ _mt_infra_load_alerting() {
       echo "[WARN] healthchecks.deadman_url not set in $INFRA_TENANT_NAME secrets"
     fi
 
+    local _critical_url
+    _critical_url=$(yq '.healthchecks.critical_url // ""' "$_infra_secrets")
+    if [ -n "$_critical_url" ] && [ "$_critical_url" != "null" ]; then
+      export HEALTHCHECKS_CRITICAL_URL="$_critical_url"
+      echo "[INFO] Healthchecks.io critical-alert URL loaded"
+    else
+      echo "[WARN] healthchecks.critical_url not set in $INFRA_TENANT_NAME secrets"
+    fi
+
     _access_token=$(yq '.alertbot.access_token // ""' "$_infra_secrets")
     if [ -n "$_access_token" ] && [ "$_access_token" != "null" ]; then
       export MATRIX_ALERTMANAGER_ACCESS_TOKEN="$_access_token"

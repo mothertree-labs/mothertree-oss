@@ -49,6 +49,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   carrying on with broken portal clients.
 
 ### Fixed
+- Jitsi: prod lost video calls for 16h (2026-11-09) after a deploy rolled
+  Jicofo twice within a second; the overlapping pods shared the `focus` JID and
+  the survivor was kicked with an XMPP conflict it never recovers from. Jicofo
+  now uses `strategy: Recreate`, and `deploy-jitsi.sh` fails the deploy unless
+  Jicofo reports an operational bridge (it used to only warn, and only after a
+  restart).
+- Alerting: critical alerts now also flip a dedicated healthchecks.io check
+  (`healthchecks.critical_url`, required outside dev) so they page off-platform;
+  email and Matrix both live on the monitored platform and paged nobody.
 - **Postfix sees the real sender IP on inbound mail (port 25).** The
   NodeBalancer now sends PROXY v2 on port 25 like every other port (the
   `linode-loadbalancer-port-25` opt-out is gone), and the tcp-services `25`

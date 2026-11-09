@@ -194,25 +194,32 @@ if mt_has_changes; then
     print_status "Waiting for Prosody to be ready before restarting Jicofo..."
     kubectl wait --for=condition=ready pod/jitsi-prosody-0 -n "$NS_JITSI" --timeout=60s 2>/dev/null || true
     kubectl rollout restart deployment/jitsi-jicofo -n "$NS_JITSI"
-    kubectl rollout status deployment/jitsi-jicofo -n "$NS_JITSI" --timeout=60s 2>/dev/null || true
-
-    # Wait for Jicofo to discover JVB bridges (up to 30s)
-    print_status "Waiting for Jicofo to discover JVB bridges..."
-    for i in $(seq 1 15); do
-        BRIDGE_COUNT=$(kubectl exec -n "$NS_JITSI" deployment/jitsi-jicofo -- \
-            curl -sf http://localhost:8888/stats 2>/dev/null | \
-            python3 -c "import sys,json; print(json.load(sys.stdin).get('bridge_selector',{}).get('bridge_count',0))" 2>/dev/null)
-        if [ "${BRIDGE_COUNT:-0}" -gt 0 ]; then
-            print_success "Jicofo found $BRIDGE_COUNT bridge(s)"
-            break
-        fi
-        sleep 2
-    done
-    if [ "${BRIDGE_COUNT:-0}" -eq 0 ]; then
-        print_warning "Jicofo has not discovered any bridges yet — calls may fail until bridges register"
-    fi
+    kubectl rollout status deployment/jitsi-jicofo -n "$NS_JITSI" --timeout=120s
 else
-    print_status "No config changes detected, skipping Jicofo restart and bridge discovery wait"
+    print_status "No config changes detected, skipping Jicofo restart"
+fi
+
+# Gate: Jicofo must be connected to Prosody with at least one OPERATIONAL
+# bridge, or no conference can start. Runs on every deploy (not only after a
+# restart): Jicofo can sit Running/Ready with a dead XMPP session — its probes
+# only check that port 8888 is open — and that is exactly how prod lost video
+# for 16h on 2026-11-09 while this script printed a warning and went green.
+print_status "Verifying Jicofo has operational JVB bridges..."
+_operational=0
+for _i in $(seq 1 30); do
+    _operational=$(kubectl exec -n "$NS_JITSI" deployment/jitsi-jicofo -- \
+        curl -sf http://localhost:8888/stats 2>/dev/null | \
+        jq -r '.bridge_selector.operational_bridge_count // 0' 2>/dev/null) || _operational=0
+    if [ "${_operational:-0}" -gt 0 ] 2>/dev/null; then
+        print_success "Jicofo reports $_operational operational bridge(s)"
+        break
+    fi
+    sleep 2
+done
+if ! [ "${_operational:-0}" -gt 0 ] 2>/dev/null; then
+    print_error "Jicofo reports no operational JVB bridges after 60s — video calls cannot start"
+    kubectl logs -n "$NS_JITSI" deployment/jitsi-jicofo --tail=40 2>&1 | grep -E '^Jicofo .*(SEVERE|WARNING)' | tail -10 || true
+    exit 1
 fi
 
 # Apply web ConfigMap — K8s does NOT auto-reload ConfigMaps in running pods,
