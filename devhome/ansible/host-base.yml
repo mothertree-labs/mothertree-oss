@@ -6,8 +6,11 @@
 # only on the box:
 #   * passwordless sudo for the operator account (Ansible connects as it)
 #   * SSH: keys only, no password or keyboard-interactive login
-#   * networking: wired NIC first, optional WiFi as fallback. cloud-init's
-#     network handling is off, so it never rewrites netplan
+#   * networking: wired NIC, optionally on a tagged VLAN (devhome_vlan_id) so
+#     the router can keep the box away from the home LAN. Optional WiFi
+#     (devhome_wifi_iface) is for a box NOT on a VLAN only: on a VLAN it would
+#     be a path around the isolation. cloud-init's network handling is off, so
+#     it never rewrites netplan
 #   * the installer's LVM root grown to the whole disk
 #   * unattended security upgrades, with a reboot at a fixed hour
 #
@@ -22,7 +25,11 @@
   become: true
   vars:
     devhome_wired_iface: ""        # e.g. eno1 (required)
-    devhome_wifi_iface: ""         # optional fallback; empty = no WiFi config
+    # 802.1Q VLAN the box lives on. Set: the wired NIC carries no address of
+    # its own and vlan<id> on top of it takes DHCP and the default route (the
+    # switch port must carry the VLAN tagged). Empty: DHCP on the wired NIC.
+    devhome_vlan_id: ""
+    devhome_wifi_iface: ""         # optional fallback; empty = no WiFi config. Never with devhome_vlan_id
     devhome_wifi_ssid: ""
     devhome_wifi_password: ""
     devhome_reboot_time: "04:30"   # local time for unattended-upgrades reboots
@@ -46,10 +53,13 @@
           - devhome_wired_iface | length > 0
           - devhome_wired_iface in ansible_facts['interfaces']
           - devhome_wifi_iface | length == 0 or (devhome_wifi_ssid | length > 0 and devhome_wifi_password | length > 0)
+          - (devhome_vlan_id | string) | length == 0 or ((devhome_vlan_id | string) is match('^[0-9]+$') and (devhome_vlan_id | int) >= 1 and (devhome_vlan_id | int) <= 4094)
+          - (devhome_vlan_id | string) | length == 0 or devhome_wifi_iface | length == 0
         fail_msg: >-
           Need ansible_user (the non-root operator account), devhome_wired_iface
           naming an existing NIC ({{ ansible_facts['interfaces'] | join(', ') }}), and,
-          when devhome_wifi_iface is set, devhome_wifi_ssid + devhome_wifi_password.
+          when devhome_wifi_iface is set, devhome_wifi_ssid + devhome_wifi_password;
+          devhome_vlan_id, when set, must be 1-4094 and excludes WiFi (a path around the VLAN).
 
     # ── sudo ──────────────────────────────────────────────────────────────
     - name: Passwordless sudo for the operator account
@@ -108,10 +118,27 @@
             version: 2
             ethernets:
               {{ devhome_wired_iface }}:
+          {% if devhome_vlan_id | string | length > 0 %}
+                dhcp4: false
+                dhcp6: false
+                link-local: []
+                optional: true
+            vlans:
+              vlan{{ devhome_vlan_id }}:
+                id: {{ devhome_vlan_id }}
+                link: {{ devhome_wired_iface }}
+                dhcp4: true
+                dhcp4-overrides:
+                  route-metric: 100
+                # IPv4 only: the gateway's devhome isolation rules are IPv4.
+                dhcp6: false
+                accept-ra: false
+          {% else %}
                 dhcp4: true
                 dhcp4-overrides:
                   route-metric: 100
                 optional: true
+          {% endif %}
         mode: "0600"
       notify: apply netplan
 

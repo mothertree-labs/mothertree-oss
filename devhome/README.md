@@ -117,3 +117,43 @@ Each tenant's Stalwart and JVB ports must be listed in **three places**:
 
 The periscope reaches the box over the tailnet, so the home router needs no
 port forwards.
+
+## Home network isolation
+
+The box runs PR code as root (CI) and holds deploy secrets, so it is kept away
+from the rest of the home network in two layers:
+
+* **Gateway (the real boundary):** the box lives on its own VLAN
+  (`devhome_vlan_id`, tagged by the box in `host-base.yml`). The gateway
+  firewall blocks that VLAN from every internal network and from the gateway's
+  own management, and allows only DHCP and DNS to the gateway. The VLAN is
+  IPv4-only (no RA, no DHCPv6), matching the IPv4 firewall rules.
+* **On the box (second layer):** the `DEVHOME-NO-LAN` chain in `box.yml`
+  rejects new connections from any container out of the uplink interfaces to
+  private ranges.
+
+Known gap: because the box sets its own tag on a port that also carries the
+untagged home LAN, root on the box could drop the tag and reach the LAN. The
+fix is a switch port of its own, configured as an access port on the devhome
+VLAN only (native = devhome, no other tagged VLANs), with the box-side tag
+removed. Verify it from the host as root: an address on the bare NIC, or on
+another VLAN ID, must reach nothing.
+
+**Switching the network is a one-way door without console access.** WiFi is
+not configured on a VLAN box, so if the VLAN doesn't come up after a netplan
+change, the box is unreachable. Arm a timed rollback before applying, e.g.:
+
+```bash
+sudo sh -c 'umask 077; tar -C /etc -czf /root/netplan-prev.tgz netplan'   # may hold a WiFi PSK
+sudo rm -f /run/devhome-net-ok        # a stale flag would disarm the watchdog
+sudo systemd-run --unit=devhome-net-watchdog --collect bash -c '
+  for i in $(seq 1 120); do sleep 5; [ -f /run/devhome-net-ok ] && exit 0; done
+  rm -rf /etc/netplan && tar -C /etc -xzf /root/netplan-prev.tgz && netplan apply'
+# run host-base.yml, find the box at its new address, then:
+sudo touch /run/devhome-net-ok && sudo rm -f /root/netplan-prev.tgz
+```
+
+Don't start this near the unattended-upgrades reboot time (`devhome_reboot_time`):
+a reboot inside the window kills the watchdog without restoring. If the
+watchdog does roll back, the box is on its previous network again, which may be
+the un-isolated LAN; check `ip -br a` before trusting the isolation.

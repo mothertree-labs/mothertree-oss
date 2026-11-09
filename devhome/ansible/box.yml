@@ -25,6 +25,15 @@
     devhome_net_subnet: "172.30.0.0/24"
     k3d_publish_ip: "127.0.0.2"
     k3d_subnet: "172.28.0.0/16"
+    # The home LAN the box sits on; containers may not open connections into it
+    # (devhome-bridge-routing). Derived from the default route unless set.
+    devhome_lan_cidr: "{{ ansible_facts['default_ipv4']['network'] }}/{{ ansible_facts['default_ipv4']['prefix'] }}"
+    devhome_lan_gateway: "{{ ansible_facts['default_ipv4']['gateway'] }}"
+    # Containers may not reach any of these through the uplink.
+    devhome_blocked_cidrs: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "{{ devhome_lan_cidr }}"]
+    # Every interface that leads to the LAN: the default route's, plus the
+    # host-base wired/WiFi interfaces when set (WiFi only on a non-VLAN box).
+    devhome_uplink_ifaces: "{{ ([ansible_facts['default_ipv4']['interface']] + [devhome_wired_iface | default('')] + [devhome_wifi_iface | default('')]) | select | unique | list }}"
     k3d_version: "v5.9.0"
     k3s_image: "rancher/k3s:v1.36.6-k3s1"
     devhome_upstream_dns: ["1.1.1.1", "8.8.8.8"]
@@ -51,6 +60,19 @@
           - devhome_env_domain | default('') | length > 0
           - operator_ssh_public_key | default('') | length > 0
         fail_msg: "headscale_url, devhome_env_domain and operator_ssh_public_key are required"
+
+    - name: Validate the home LAN (containers are blocked from it)
+      ansible.builtin.assert:
+        that:
+          - devhome_lan_cidr is match('^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$')
+          - devhome_lan_gateway is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+          - devhome_uplink_ifaces | length > 0
+          - devhome_uplink_ifaces | select('match', '^[A-Za-z0-9_.-]+$') | list | length == devhome_uplink_ifaces | length
+        fail_msg: >-
+          devhome_lan_cidr ({{ devhome_lan_cidr | default('unset') }}), devhome_lan_gateway
+          ({{ devhome_lan_gateway | default('unset') }}) and devhome_uplink_ifaces
+          ({{ devhome_uplink_ifaces | default([]) }}) must describe the box's LAN; set
+          them explicitly if the default route doesn't give them.
 
     - name: Base packages
       ansible.builtin.apt:
@@ -108,6 +130,7 @@
       ansible.builtin.command: tailscale ip -4
       register: _ts_ip_now
       changed_when: false
+      check_mode: false   # read-only; the stale-IP guard below needs it in --check too
 
     - name: Report tailnet address (set box_tailscale_ip to this for the second pass)
       ansible.builtin.debug:
@@ -197,6 +220,32 @@
               || iptables -t raw -I PREROUTING -s "$1" -d "$2" -j ACCEPT
             iptables -C DOCKER-USER -s "$1" -d "$2" -j ACCEPT 2>/dev/null \
               || iptables -I DOCKER-USER -s "$1" -d "$2" -j ACCEPT
+          done
+          # No connections from containers into the home LAN or any other
+          # private range. CI runs PR code as root in devhome-ci and holds
+          # deploy secrets; neither it nor any pod has business with other home
+          # devices (router admin UI, modem, IoT VLANs). Hooked on the uplink
+          # interfaces, so every docker network (present and future) is covered
+          # and bridge-to-bridge traffic is never matched. Replies to LAN
+          # clients (ESTABLISHED/RELATED) still pass. DNS to the gateway stays
+          # open: Docker's embedded resolver forwards from inside the
+          # container's namespace to the host's upstream (the router).
+          # Own chain, flushed and rebuilt each run, so rule order never drifts.
+          GW="{{ devhome_lan_gateway }}"
+          iptables -N DEVHOME-NO-LAN 2>/dev/null || iptables -F DEVHOME-NO-LAN
+          iptables -A DEVHOME-NO-LAN -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+          iptables -A DEVHOME-NO-LAN -d "$GW" -p udp --dport 53 -j RETURN
+          iptables -A DEVHOME-NO-LAN -d "$GW" -p tcp --dport 53 -j RETURN
+          for net in {{ devhome_blocked_cidrs | join(' ') }}; do
+            iptables -A DEVHOME-NO-LAN -d "$net" -j REJECT
+          done
+          for ifc in {{ devhome_uplink_ifaces | join(' ') }}; do
+            iptables -C DOCKER-USER -o "$ifc" -j DEVHOME-NO-LAN 2>/dev/null \
+              || iptables -I DOCKER-USER -o "$ifc" -j DEVHOME-NO-LAN
+          done
+          # Drop jumps from an older layout (keyed on source subnet).
+          for src in "$A" "$B"; do
+            while iptables -D DOCKER-USER -s "$src" -j DEVHOME-NO-LAN 2>/dev/null; do :; done
           done
       register: _bridge_script
 
