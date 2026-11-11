@@ -89,6 +89,8 @@
         // files were outside every pattern, so their pins drifted to 15
         // and 16 while the dashboard showed a single "postgres 17 -> 18" item.
         "/^scripts/lib/common\\.sh$/",
+        // scripts/devbox: the developer box's PostgreSQL container (DEVBOX_PG_IMAGE).
+        "/^scripts/devbox$/",
         "/^ci/scripts/ci-e2e-diagnostics\\.sh$/",
         "/^apps/scripts/perf/build-k6-image\\.sh$/",
         "/^apps/loki-manual\\.yaml$/",
@@ -98,6 +100,10 @@
       "matchStrings": [
         "\\n[ \\t]*-?[ \\t]*image:[ \\t]*[\"']?(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?[\"']?",
         // Probe-Job image constant in scripts/lib/nextcloud-db.sh (#548).
+        // Developer-box PostgreSQL container in scripts/devbox. A MAJOR bump
+        // there needs `scripts/devbox nuke` (the data volume is initdb'd by the
+        // old major), like the PG VMs need a pg_upgrade.
+        "\\nDEVBOX_PG_IMAGE=\"(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)\"",
         "\\nMT_NC_PROBE_IMAGE=\"(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)\"",
         // k6 base image default in apps/scripts/perf/build-k6-image.sh. This is
         // the pin that ACTUALLY wins: build-k6-image.sh passes it as

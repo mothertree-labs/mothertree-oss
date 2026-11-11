@@ -1,0 +1,12 @@
+# devbox (developer laptop, cluster.edge: local): k3d publishes the node's 80/443
+# on 127.0.0.1 and k3s's ServiceLB hands them to this controller. Nothing adds
+# a PROXY header and nothing is Cloudflare-proxied, so both are off; nginx's TCP
+# peer is the k3d network gateway (scripts/devbox creates the cluster network
+# 172.29.0.0/16, gateway 172.29.0.1; devhome uses 172.28/16 and 172.30/16). Measured in the M0 spike, 2026-11-11.
+controller:
+  replicaCount: 1
+  config:
+    use-proxy-protocol: "false"
+    use-forwarded-headers: "false"
+    enable-real-ip: "false"
+    proxy-real-ip-cidr: "172.29.0.1/32"

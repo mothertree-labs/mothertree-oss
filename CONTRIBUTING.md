@@ -42,6 +42,17 @@ Thank you for your interest in contributing to Mothertree! This document provide
 
 ### Running Locally
 
+**The whole stack on your own machine (devbox):** `scripts/devbox` runs
+Keycloak and both portals on a local k3d cluster with the real deploy scripts,
+from a plain clone (no submodules, no cloud accounts). It's the quickest way to
+try a change end to end:
+```bash
+scripts/devbox doctor && scripts/devbox init && scripts/devbox up
+scripts/devbox build admin-portal && scripts/devbox deploy admin-portal
+scripts/devbox e2e tests/admin-portal/login.spec.ts
+```
+See [docs/devbox.md](docs/devbox.md).
+
 **Account Portal (with Keycloak):**
 ```bash
 # First-time setup: starts Keycloak and account-portal

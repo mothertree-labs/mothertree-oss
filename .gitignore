@@ -119,3 +119,6 @@ __pycache__/
 # Agent worktrees. Not ignored previously, so a `git add -A` could sweep an
 # in-progress worktree into a commit on this PUBLIC repo.
 .claude/worktrees/
+
+# Developer box (scripts/devbox): generated throwaway config, secrets, CA key
+/.devbox/
