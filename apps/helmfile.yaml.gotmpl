@@ -127,7 +127,7 @@ releases:
   - name: prometheus-blackbox-exporter
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: prometheus-community/prometheus-blackbox-exporter
-    version: 11.21.1
+    version: 11.21.2
     labels:
       tier: system
     needs:
@@ -189,7 +189,7 @@ releases:
   - name: reflector
     namespace: infra-cert-manager
     chart: emberstack/reflector
-    version: 10.0.74
+    version: 10.0.76
     wait: true
     timeout: 300
     labels:
@@ -265,7 +265,7 @@ releases:
   - name: matrix-synapse
     namespace: {{ requiredEnv "NS_MATRIX" }}
     chart: ananace/matrix-synapse
-    version: 3.12.41
+    version: 3.12.43
     needs:
       - {{ requiredEnv "NS_INGRESS_INTERNAL" }}/ingress-nginx-internal
     labels:
