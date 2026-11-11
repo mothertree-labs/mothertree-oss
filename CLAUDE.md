@@ -190,7 +190,7 @@ Deploy scripts use `mt_apply` (wraps `kubectl apply`, runs a server-side `kubect
 
 ## Build/Test Commands
 
-- **Developer box (local k3d, plain clone)**: `scripts/devbox doctor|init|up|build|deploy|e2e|shell` — env `devbox`, `cluster.edge: local` (deploy scripts skip Cloudflare/ACME/Headscale and log "edge local: …"), config in gitignored `.devbox/`, local mkcert CA. See `docs/devbox.md`.
+- **Developer box (local k3d, plain clone)**: `scripts/devbox doctor|init|up|build|deploy|e2e|shell` — env `devbox`, `cluster.edge: local` (deploy scripts skip Cloudflare/ACME/Headscale and log "edge local: …"), config in gitignored `.devbox/`, local mkcert CA. Default profile: portals + Matrix + Docs with an in-cluster S3 gateway (versitygw); the tenant keys `s3.endpoint`, `s3.internal_endpoint` and `s3.addressing_style` default to Linode everywhere else. See `docs/devbox.md`.
 - **Admin Portal**: `cd apps/admin-portal && npm install && npm start`
 - **Terraform**: `cd phase1 && terraform init && terraform plan`
 - **Helmfile lint**: `cd apps && helmfile -e dev lint`

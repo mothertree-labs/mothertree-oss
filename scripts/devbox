@@ -12,6 +12,7 @@
 #   infra/terraform-outputs.devbox.env            stand-in for phase1 outputs
 #   project.conf                                  CONTAINER_REGISTRY=localhost (local builds)
 #   images.env                                    image refs of the last local builds
+#   profile                                       the init profile (standard|minimal)
 #   kubeconfig.devbox.yaml
 #   ca/                                           mkcert CA (CAROOT) — trusted by this machine
 #
@@ -19,7 +20,10 @@
 #
 # Usage: scripts/devbox <command> [args]
 #   doctor                  check prerequisites, ports and resources
-#   init [--regenerate]     write .devbox/ and create + trust the local CA
+#   init [--profile P] [--regenerate]
+#                           write .devbox/ and create + trust the local CA;
+#                           P = standard (portals, Matrix, Docs; default) or
+#                           minimal (portals only). Remembered in .devbox/profile.
 #   up                      cluster + PostgreSQL + images + deploy_infra + create_env
 #   build <component>       build a local image (admin-portal, account-portal) and import it
 #   deploy <app>            run one apps/deploy-<app>.sh against the devbox
@@ -61,6 +65,11 @@ DEVBOX_PG_VOLUME="devbox-pgdata"
 DEVBOX_PG_IMAGE="postgres:17.11"
 # Same k3s as devhome: read from its Ansible pin so there is one source.
 DEVBOX_K3D_VERSION="v5.9.0"
+# In-cluster S3 (apps/manifests/devbox/s3-gateway.yaml.tpl). Browsers and Docs
+# use the public name (ingress); Synapse talks to the Service directly.
+DEVBOX_S3_HOST="s3.${DEVBOX_HOST_SUFFIX}"
+DEVBOX_S3_INTERNAL="http://versitygw.infra-s3.svc.cluster.local:7070"
+DEVBOX_S3_REGION="local"
 
 # --- output helpers -------------------------------------------------------------
 c_blue=$'\033[0;34m'; c_green=$'\033[0;32m'; c_yellow=$'\033[1;33m'; c_red=$'\033[0;31m'; c_off=$'\033[0m'
@@ -146,8 +155,11 @@ cmd_doctor() {
   fi
   if [ -r /proc/meminfo ]; then
     local avail_mb; avail_mb=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
-    if [ "$avail_mb" -lt 3500 ]; then
-      warn "Only ${avail_mb} MiB available; the minimal devbox needs about 3.5 GiB"
+    local need_mb=4500 prof
+    prof=$(cat "$DEVBOX_DIR/profile" 2>/dev/null || echo standard)
+    [ "$prof" = "minimal" ] && need_mb=3500
+    if [ "$avail_mb" -lt "$need_mb" ]; then
+      warn "Only ${avail_mb} MiB available; the $prof devbox needs about $((need_mb / 1024)).$(( (need_mb % 1024) * 10 / 1024 )) GiB (init --profile minimal needs less)"
     else
       printf '  %-10s %s MiB available\n' "memory" "$avail_mb"
     fi
@@ -168,8 +180,9 @@ cmd_doctor() {
 rand() { openssl rand -hex "${1:-24}"; }
 
 gen_tenant_config() {
-  local out="$1"
-  yq '
+  local out="$1" chat_docs=false
+  [ "$2" = "standard" ] && chat_docs=true
+  CHAT_DOCS="$chat_docs" yq '
     .tenant.name = "devbox" |
     .tenant.display_name = "Devbox" |
     .tenant.env = "devbox" |
@@ -188,14 +201,18 @@ gen_tenant_config() {
     .s3.matrix_bucket = "devbox-matrix" |
     .s3.files_bucket = "devbox-files" |
     .s3.mail_bucket = "devbox-mail" |
-    .s3.cluster = "local" |
+    .s3.cluster = "'"$DEVBOX_S3_REGION"'" |
+    .s3.endpoint = "https://'"$DEVBOX_S3_HOST"'" |
+    .s3.internal_endpoint = "'"$DEVBOX_S3_INTERNAL"'" |
+    .s3.addressing_style = "path" |
     (.. | select(has("min_replicas")) | .min_replicas) = 1 |
     (.. | select(has("max_replicas")) | .max_replicas) = 1 |
     .resources.keycloak.replicas = 1 |
     .resources.redis.replicas = 0 |
     .alerting.oncall_email = "devbox@localhost" |
     .features = {
-      "jitsi_enabled": false, "matrix_enabled": false, "docs_enabled": false,
+      "jitsi_enabled": false,
+      "matrix_enabled": (strenv(CHAT_DOCS) == "true"), "docs_enabled": (strenv(CHAT_DOCS) == "true"),
       "files_enabled": false, "smtp_enabled": false, "turn_enabled": false,
       "mail_enabled": false, "webmail_enabled": false,
       "admin_portal_enabled": true, "account_portal_enabled": true,
@@ -246,10 +263,26 @@ gen_tenant_secrets() {
   done < "$out.tmp"
   rm -f "$out.tmp"
   chmod 600 "$out"
+  ensure_s3_keys "$out"
   # Sanity: no marker and no placeholder survived.
   if grep -qE '(: "?R"?$)|PLACEHOLDER|REPLACE_WITH' "$out"; then
     die "secret generation left a placeholder in $out"
   fi
+}
+
+# ensure_s3_keys <secrets-file> — the in-cluster S3 gateway has one root key;
+# every s3_* entry (Matrix, Docs, Files, Mail) uses it. Fills it in when
+# missing, so secrets generated before the gateway existed keep working.
+ensure_s3_keys() {
+  local f="$1"
+  if [ -n "$(yq '.s3_docs.access_key // ""' "$f")" ] && [ -n "$(yq '.s3_docs.secret_key // ""' "$f")" ]; then
+    yq -i '.s3_matrix = .s3_docs | .s3_files = .s3_docs | .s3_mail = .s3_docs' "$f"
+    return 0
+  fi
+  AK="devbox$(rand 8)" SK="$(rand 24)" yq -i '
+    .s3_docs = {"access_key": strenv(AK), "secret_key": strenv(SK)} |
+    .s3_matrix = .s3_docs | .s3_files = .s3_docs | .s3_mail = .s3_docs
+  ' "$f"
 }
 
 gen_infra_config() {
@@ -284,8 +317,18 @@ EOF
 cmd_init() {
   # Everything under .devbox/ is private to this user (secrets, CA key).
   umask 077
-  local regenerate=false
-  [ "${1:-}" = "--regenerate" ] && regenerate=true
+  local regenerate=false profile=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --regenerate) regenerate=true ;;
+      --profile) profile="${2:-}"; shift ;;
+      --profile=*) profile="${1#--profile=}" ;;
+      *) die "init: unknown argument '$1' (use --profile standard|minimal, --regenerate)" ;;
+    esac
+    shift
+  done
+  [ -n "$profile" ] || profile=$(cat "$DEVBOX_DIR/profile" 2>/dev/null || echo standard)
+  case "$profile" in standard|minimal) ;; *) die "init: --profile must be standard or minimal (got '$profile')" ;; esac
   command -v yq >/dev/null && command -v openssl >/dev/null && command -v mkcert >/dev/null \
     || die "init needs yq, openssl and mkcert (run: scripts/devbox doctor)"
 
@@ -303,13 +346,15 @@ cmd_init() {
   fi
   mkdir -p "$tdir" "$idir"
   chmod 700 "$DEVBOX_DIR"
-  gen_tenant_config "$tdir/$DEVBOX_ENV.config.yaml"
+  ensure_s3_keys "$secrets"
+  printf '%s\n' "$profile" > "$DEVBOX_DIR/profile"
+  gen_tenant_config "$tdir/$DEVBOX_ENV.config.yaml" "$profile"
   gen_infra_config "$idir/$DEVBOX_ENV.config.yaml"
   printf 'TURN_SERVER_IP=127.0.0.1\nLKE_CLUSTER_ID=\nHEADSCALE_SERVER_IP=\nPOSTGRES_SERVER_IP=%s\n' "$DEVBOX_PG_IP" \
     > "$idir/terraform-outputs.$DEVBOX_ENV.env"
   printf '# Generated by scripts/devbox init: portal images are built locally (scripts/devbox build).\nCONTAINER_REGISTRY=localhost\nGITHUB_ORG=\n' \
     > "$DEVBOX_DIR/project.conf"
-  ok "Wrote $DEVBOX_DIR/{tenants,infra,project.conf}"
+  ok "Wrote $DEVBOX_DIR/{tenants,infra,project.conf} (profile: $profile)"
 
   # Local CA, trusted by the system store (curl, the deploy gates) and the NSS
   # store (Chrome/Chromium and Firefox profiles on Linux). TRUST_STORES forces
@@ -417,6 +462,52 @@ postgres_up() {
   ok "PostgreSQL ready and bootstrapped"
 }
 
+# feature_on <name> — true when features.<name>_enabled is true in the tenant config.
+feature_on() {
+  [ "$(yq ".features.${1}_enabled" "$DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.config.yaml")" = "true" ]
+}
+
+# s3_up — the in-cluster S3 gateway (needs deploy_infra's CA ClusterIssuers).
+s3_up() {
+  local sf="$DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml" buckets key_sha
+  buckets=$(yq '[.s3.docs_bucket, .s3.matrix_bucket, .s3.files_bucket, .s3.mail_bucket] | map(select(. != null and . != "")) | join(" ")' \
+    "$DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.config.yaml")
+  [[ "$buckets" =~ ^[a-z0-9.\ -]+$ ]] || die "unexpected S3 bucket names in the tenant config: '$buckets'"
+  info "S3 gateway (versitygw) at https://$DEVBOX_S3_HOST — buckets: $buckets"
+  kubectl create namespace infra-s3 --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl apply -f <(kubectl create secret generic s3-root -n infra-s3 \
+    --from-literal=access_key="$(yq '.s3_docs.access_key' "$sf")" \
+    --from-literal=secret_key="$(yq '.s3_docs.secret_key' "$sf")" \
+    --dry-run=client -o yaml) >/dev/null
+  key_sha=$(yq '.s3_docs | .access_key + ":" + .secret_key' "$sf" | shasum -a 256 | cut -c1-16)
+  DEVBOX_S3_HOST="$DEVBOX_S3_HOST" DEVBOX_S3_REGION="$DEVBOX_S3_REGION" DEVBOX_S3_BUCKETS="$buckets" DEVBOX_S3_KEY_SHA="$key_sha" \
+    envsubst '${DEVBOX_S3_HOST} ${DEVBOX_S3_REGION} ${DEVBOX_S3_BUCKETS} ${DEVBOX_S3_KEY_SHA}' \
+    < "$REPO_ROOT/apps/manifests/devbox/s3-gateway.yaml.tpl" | kubectl apply -f - >/dev/null
+  kubectl -n infra-s3 rollout status deploy/versitygw --timeout=180s >/dev/null || die "S3 gateway did not become ready"
+  kubectl -n infra-s3 wait --for=condition=Ready certificate/versitygw-tls --timeout=120s >/dev/null \
+    || die "S3 gateway certificate was not issued"
+  ok "S3 gateway ready"
+}
+
+# dns_up — pods resolve *.devbox.mothertree.localhost to the ingress controller
+# (outside the cluster those names are loopback). k3s imports the
+# coredns-custom *.override keys into its main server block.
+dns_up() {
+  local key="devbox.override" want cur esc
+  esc=$(printf '%s' "$DEVBOX_HOST_SUFFIX" | sed 's/\./\\./g')
+  want="rewrite name regex ^(.+\\.)?${esc}\\.\$ ingress-nginx-controller.infra-ingress.svc.cluster.local. answer auto"
+  kubectl -n kube-system get configmap coredns-custom >/dev/null 2>&1 \
+    || kubectl -n kube-system create configmap coredns-custom >/dev/null
+  cur=$(kubectl -n kube-system get configmap coredns-custom -o "jsonpath={.data.devbox\\.override}")
+  if [ "$cur" != "$want" ]; then
+    kubectl -n kube-system patch configmap coredns-custom --type merge \
+      -p "$(jq -n --arg k "$key" --arg v "$want" '{data: {($k): $v}}')" >/dev/null
+    kubectl -n kube-system rollout restart deploy/coredns >/dev/null
+    kubectl -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null
+    ok "CoreDNS: *.$DEVBOX_HOST_SUFFIX -> ingress-nginx (in-cluster)"
+  fi
+}
+
 cmd_up() {
   load_env
   cluster_up
@@ -436,6 +527,17 @@ cmd_up() {
   load_env
   info "deploy_infra -e $DEVBOX_ENV ..."
   "$REPO_ROOT/scripts/deploy_infra" -e "$DEVBOX_ENV"
+  dns_up
+  if feature_on matrix || feature_on docs || feature_on files || feature_on mail; then
+    s3_up
+  fi
+  # Tenant namespaces are default-deny for egress; Synapse reaches the S3
+  # gateway's Service directly (Docs goes through the ingress on :443).
+  if feature_on matrix; then
+    kubectl create namespace "tn-$DEVBOX_TENANT-matrix" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    NAMESPACE="tn-$DEVBOX_TENANT-matrix" envsubst '${NAMESPACE}' \
+      < "$REPO_ROOT/apps/manifests/devbox/allow-s3-egress.yaml.tpl" | kubectl apply -f - >/dev/null
+  fi
   info "create_env -e $DEVBOX_ENV -t $DEVBOX_TENANT ..."
   "$REPO_ROOT/scripts/create_env" -e "$DEVBOX_ENV" -t "$DEVBOX_TENANT"
   cmd_status
@@ -516,6 +618,12 @@ cmd_status() {
   fi
   echo ""
   echo "  Admin portal:  https://admin.${DEVBOX_HOST_SUFFIX}"
+  echo "  Account:       https://account.${DEVBOX_HOST_SUFFIX}"
+  if [ -f "$DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.config.yaml" ]; then
+    feature_on matrix && echo "  Element:       https://matrix.${DEVBOX_HOST_SUFFIX}"
+    feature_on docs && echo "  Docs:          https://docs.${DEVBOX_HOST_SUFFIX}"
+    { feature_on matrix || feature_on docs; } && echo "  S3:            https://${DEVBOX_S3_HOST}  (key: yq .s3_docs $DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml)"
+  fi
   echo "  Keycloak:      https://auth.${DEVBOX_HOST_SUFFIX}/admin/  (user admin, password: yq .keycloak.admin_password $DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml)"
   echo "  Test users:    scripts/devbox users create <name> --password <pw> [--admin]"
 }
