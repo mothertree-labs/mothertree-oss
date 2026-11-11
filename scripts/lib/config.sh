@@ -112,7 +112,10 @@ _mt_set_kubeconfig() {
 # Internal: load all config fields from the tenant YAML in a single yq call
 # ---------------------------------------------------------------------------
 _mt_load_tenant_yaml() {
-  # Batch-extract all config fields in one yq invocation for performance
+  # Batch-extract all config fields in one yq invocation for performance.
+  # Flags that default to TRUE use `tostring | sub("^null$"; "true")`, never
+  # `// true`: yq's alternative operator also replaces an explicit `false`,
+  # which made features.{jitsi,matrix,docs,files}_enabled: false impossible.
   eval "$(yq '
     "TENANT_DISPLAY_NAME=" + (.tenant.display_name | @sh) + "\n" +
     "TENANT_DOMAIN=" + (.dns.domain | @sh) + "\n" +
@@ -136,10 +139,10 @@ _mt_load_tenant_yaml() {
     "CALENDAR_ENABLED=" + (.features.calendar_enabled // false | tostring | @sh) + "\n" +
     "OFFICE_ENABLED=" + (.features.office_enabled // false | tostring | @sh) + "\n" +
     "MAIL_ENABLED=" + (.features.mail_enabled // false | tostring | @sh) + "\n" +
-    "JITSI_ENABLED=" + (.features.jitsi_enabled // true | tostring | @sh) + "\n" +
-    "MATRIX_ENABLED=" + (.features.matrix_enabled // true | tostring | @sh) + "\n" +
-    "DOCS_ENABLED=" + (.features.docs_enabled // true | tostring | @sh) + "\n" +
-    "FILES_ENABLED=" + (.features.files_enabled // true | tostring | @sh) + "\n" +
+    "JITSI_ENABLED=" + (.features.jitsi_enabled | tostring | sub("^null$"; "true") | @sh) + "\n" +
+    "MATRIX_ENABLED=" + (.features.matrix_enabled | tostring | sub("^null$"; "true") | @sh) + "\n" +
+    "DOCS_ENABLED=" + (.features.docs_enabled | tostring | sub("^null$"; "true") | @sh) + "\n" +
+    "FILES_ENABLED=" + (.features.files_enabled | tostring | sub("^null$"; "true") | @sh) + "\n" +
     "WEBMAIL_ENABLED=" + (.features.webmail_enabled // false | tostring | @sh) + "\n" +
     "ADMIN_PORTAL_ENABLED=" + (.features.admin_portal_enabled // false | tostring | @sh) + "\n" +
     "ACCOUNT_PORTAL_ENABLED=" + (.features.account_portal_enabled // false | tostring | @sh) + "\n" +

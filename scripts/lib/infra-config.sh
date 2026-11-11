@@ -143,6 +143,31 @@ _mt_infra_load_env_config() {
     # Flows straight into socat args and into `kubectl exec -- nc/wget` argv —
     # must be a Tailscale CGNAT address, never a hostname or a YAML list.
     [ -z "$PG_VM_TAILSCALE_IP" ] || mt_require_mesh_ip PG_VM_TAILSCALE_IP "$PG_VM_TAILSCALE_IP" "pgbouncer.pg_vm_tailscale_ip"
+    # pgbouncer.mesh (default true): PgBouncer reaches PostgreSQL through its
+    # Tailscale sidecar at pg_vm_tailscale_ip. false = no sidecar, PostgreSQL
+    # at pgbouncer.pg_host on a directly routed network — only valid on a
+    # local-edge box (cluster.edge: local), enforced by deploy-pgbouncer.sh.
+    # (not `// true`: yq's alternative operator also replaces an explicit false)
+    PGBOUNCER_MESH=$(yq '.pgbouncer.mesh | tostring | sub("^null$"; "true")' "$infra_config")
+    case "$PGBOUNCER_MESH" in
+      true|false) ;;
+      *) echo "[ERROR] pgbouncer.mesh ('$PGBOUNCER_MESH') must be true or false in $infra_config" >&2; exit 1 ;;
+    esac
+    PGBOUNCER_PG_HOST=$(yq '.pgbouncer.pg_host // ""' "$infra_config")
+    if [ "$PGBOUNCER_MESH" = "false" ]; then
+      if ! [[ "$PGBOUNCER_PG_HOST" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        echo "[ERROR] pgbouncer.mesh is false but pgbouncer.pg_host ('$PGBOUNCER_PG_HOST') is not an IPv4 address in $infra_config" >&2
+        exit 1
+      fi
+      if [ -n "$PG_VM_TAILSCALE_IP" ]; then
+        echo "[ERROR] pgbouncer.mesh is false but pgbouncer.pg_vm_tailscale_ip is set in $infra_config — remove one of them" >&2
+        exit 1
+      fi
+    elif [ -n "$PGBOUNCER_PG_HOST" ]; then
+      echo "[ERROR] pgbouncer.pg_host is only valid with pgbouncer.mesh: false ($infra_config); the mesh path uses pg_vm_tailscale_ip" >&2
+      exit 1
+    fi
+    export PGBOUNCER_MESH PGBOUNCER_PG_HOST
     PGBOUNCER_MAX_CLIENT_CONN=$(yq '.pgbouncer.max_client_conn // 400' "$infra_config")
     PGBOUNCER_DEFAULT_POOL_SIZE=$(yq '.pgbouncer.default_pool_size // 15' "$infra_config")
     PGBOUNCER_MIN_POOL_SIZE=$(yq '.pgbouncer.min_pool_size // 2' "$infra_config")
@@ -176,6 +201,16 @@ _mt_infra_load_env_config() {
       fi
     fi
     export SMTP_RELAY_HOST SMTP_RELAY_PORT
+
+    # Monitoring stack (kube-prometheus-stack, Vector, blackbox exporter, Loki).
+    # Default true; false is for a laptop developer box only — refused on
+    # prod-like environments by deploy_infra. Read by helmfile (installed:).
+    MT_MONITORING_ENABLED=$(yq '.monitoring.enabled | tostring | sub("^null$"; "true")' "$infra_config")
+    case "$MT_MONITORING_ENABLED" in
+      true|false) ;;
+      *) echo "[ERROR] monitoring.enabled ('$MT_MONITORING_ENABLED') must be true or false in $infra_config" >&2; exit 1 ;;
+    esac
+    export MT_MONITORING_ENABLED
 
     # LLM inference model (shared Ollama)
     LLM_MODEL=$(yq '.llm.model // "llama3.2:1b"' "$infra_config")
@@ -215,6 +250,8 @@ _mt_infra_load_env_config() {
     export PG_READ_REPLICAS=1
     export KEYCLOAK_REPLICAS=2
     export PGBOUNCER_ENABLED=false
+    export PGBOUNCER_MESH=true PGBOUNCER_PG_HOST=""
+    export MT_MONITORING_ENABLED=true
   fi
 }
 

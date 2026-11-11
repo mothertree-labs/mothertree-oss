@@ -120,6 +120,15 @@ fi
 # =============================================================================
 # DNS Record
 # =============================================================================
+# shellcheck source=../scripts/lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+if mt_is_local_edge; then
+  print_status "edge local: no public DNS, skipping the admin portal DNS record"
+elif [ "${DNS_EXTERNAL:-false}" = "true" ]; then
+  # The tenant runs its own zone; our Cloudflare token cannot (and must not)
+  # write there. create_env skips tenant DNS for these tenants the same way.
+  print_status "DNS managed externally by tenant (dns_external=true), skipping the admin portal DNS record"
+else
 print_status "Creating DNS record for tenant admin portal: $ADMIN_HOST"
 DNS_RECORD_EXISTS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records?name=${ADMIN_HOST}&type=A" \
   -H "Authorization: Bearer ${TF_VAR_cloudflare_api_token}" \
@@ -128,8 +137,6 @@ DNS_RECORD_EXISTS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$
 if [ "$DNS_RECORD_EXISTS" -gt 0 ]; then
   print_status "DNS record for $ADMIN_HOST already exists"
 else
-  # shellcheck source=../scripts/lib/platform.sh
-  source "${REPO_ROOT}/scripts/lib/platform.sh"
   INGRESS_IP=$(mt_ingress_public_ip || echo "")
   if [ -n "$INGRESS_IP" ]; then
     curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${TF_VAR_cloudflare_zone_id}/dns_records" \
@@ -141,6 +148,7 @@ else
     print_warning "Could not get ingress IP, DNS record not created"
   fi
 fi
+fi  # edge / dns_external
 
 # =============================================================================
 # Image Tags & Release Version
