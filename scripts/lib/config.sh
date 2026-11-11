@@ -128,6 +128,9 @@ _mt_load_tenant_yaml() {
     "S3_MATRIX_BUCKET=" + (.s3.matrix_bucket | @sh) + "\n" +
     "S3_FILES_BUCKET=" + (.s3.files_bucket | @sh) + "\n" +
     "S3_MAIL_BUCKET=" + (.s3.mail_bucket // "" | @sh) + "\n" +
+    "S3_ENDPOINT=" + (.s3.endpoint // "" | @sh) + "\n" +
+    "S3_INTERNAL_ENDPOINT=" + (.s3.internal_endpoint // "" | @sh) + "\n" +
+    "S3_ADDRESSING_STYLE=" + (.s3.addressing_style // "" | @sh) + "\n" +
     "DOCS_DB_NAME=" + (.database.docs_db | @sh) + "\n" +
     "NEXTCLOUD_DB_NAME=" + (.database.nextcloud_db | @sh) + "\n" +
     "SYNAPSE_DB_NAME=" + (.database.synapse_db | @sh) + "\n" +
@@ -210,6 +213,23 @@ _mt_load_tenant_yaml() {
   export SYNAPSE_DB_USER="$SYNAPSE_DB_NAME"
   export STALWART_DB_USER="stalwart_${MT_TENANT}"
   export ROUNDCUBE_DB_USER="roundcube_${MT_TENANT}"
+
+  # S3 endpoint. Default: Linode Object Storage in s3.cluster, virtual-host
+  # addressing. A devbox (cluster.edge: local) points s3.endpoint at its
+  # in-cluster gateway instead. s3.endpoint is what BROWSERS are sent to (Docs
+  # redirects /media/ to presigned URLs on it); s3.internal_endpoint is what
+  # pods that never hand out URLs (Synapse) use, defaulting to s3.endpoint.
+  : "${S3_ENDPOINT:=https://${S3_CLUSTER}.linodeobjects.com}"
+  : "${S3_INTERNAL_ENDPOINT:=$S3_ENDPOINT}"
+  : "${S3_ADDRESSING_STYLE:=virtual}"
+  # Plain URLs only: they are substituted into quoted YAML strings.
+  [[ "$S3_ENDPOINT" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] \
+    || { echo "[ERROR] s3.endpoint must be an http(s) URL with no path (got '$S3_ENDPOINT')" >&2; exit 1; }
+  [[ "$S3_INTERNAL_ENDPOINT" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] \
+    || { echo "[ERROR] s3.internal_endpoint must be an http(s) URL with no path (got '$S3_INTERNAL_ENDPOINT')" >&2; exit 1; }
+  case "$S3_ADDRESSING_STYLE" in virtual|path) ;; *) echo "[ERROR] s3.addressing_style must be virtual or path (got '$S3_ADDRESSING_STYLE')" >&2; exit 1 ;; esac
+  # The Docs storage backend wants "True"/"False" for AWS_S3_USE_SSL.
+  if [ "${S3_ENDPOINT#https://}" != "$S3_ENDPOINT" ]; then S3_USE_SSL="True"; else S3_USE_SSL="False"; fi
 
   # Aliases for templates
   export BUCKET_NAME="$S3_DOCS_BUCKET"
@@ -615,6 +635,7 @@ _mt_export_all() {
   export TENANT_DISPLAY_NAME TENANT_DOMAIN TENANT_ENV_DNS_LABEL
   export TENANT_COOKIE_DOMAIN TENANT_KEYCLOAK_REALM TENANT_DB_USER
   export S3_CLUSTER S3_BUCKET_PREFIX S3_DOCS_BUCKET S3_MATRIX_BUCKET S3_FILES_BUCKET S3_MAIL_BUCKET
+  export S3_ENDPOINT S3_INTERNAL_ENDPOINT S3_ADDRESSING_STYLE S3_USE_SSL
   export DOCS_DB_NAME NEXTCLOUD_DB_NAME SYNAPSE_DB_NAME SYNAPSE_DB_USER
   export STALWART_DB_NAME STALWART_DB_USER ROUNDCUBE_DB_NAME ROUNDCUBE_DB_USER
   export INFRA_DOMAIN MAIL_SUBDOMAIN DNS_EXTERNAL

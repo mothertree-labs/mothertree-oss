@@ -23,6 +23,8 @@
 #   source "${REPO_ROOT}/scripts/lib/local-ca.sh"
 #   mt_local_ca_apply_secret                      # deploy_infra: CA files -> Secret
 #   mt_local_ca_apply_cluster_issuers <name>...   # CA ClusterIssuers (Secret must exist)
+#   mt_local_ca_publish_configmap <namespace>     # CA certificate (never the key) as ConfigMap mt-local-ca
+#   mt_local_ca_trust <manifest> <container> <env>...  # mount it into a Deployment, point <env> at it
 
 MT_LOCAL_CA_SECRET="mt-local-ca"
 
@@ -106,4 +108,50 @@ EOF
       || { print_error "ClusterIssuer $name (local CA) did not become Ready"; return 1; }
   done
   print_status "Local CA ClusterIssuers ready: $*"
+}
+
+MT_LOCAL_CA_CONFIGMAP="mt-local-ca"
+MT_LOCAL_CA_MOUNT="/etc/mt-local-ca"
+
+# mt_local_ca_publish_configmap <namespace> — copy the local CA's certificate
+# (tls.crt of the $MT_LOCAL_CA_SECRET Secret; the key never leaves
+# $NS_CERTMANAGER) into ConfigMap $MT_LOCAL_CA_CONFIGMAP (key ca.crt) in
+# <namespace>, for pods that call another devbox host over HTTPS.
+mt_local_ca_publish_configmap() {
+  local ns="${1:?mt_local_ca_publish_configmap: namespace required}" crt
+  : "${NS_CERTMANAGER:=infra-cert-manager}"
+  crt=$(kubectl get secret "$MT_LOCAL_CA_SECRET" -n "$NS_CERTMANAGER" -o jsonpath='{.data.tls\.crt}' 2>/dev/null | base64 -d 2>/dev/null || true)
+  if ! printf '%s\n' "$crt" | openssl x509 -noout 2>/dev/null; then
+    print_error "Local CA Secret $NS_CERTMANAGER/$MT_LOCAL_CA_SECRET is missing or has no certificate — run deploy_infra first"
+    return 1
+  fi
+  mt_apply kubectl apply -f <(kubectl create configmap "$MT_LOCAL_CA_CONFIGMAP" -n "$ns" \
+    --from-literal=ca.crt="$crt" --dry-run=client -o yaml)
+}
+
+# mt_local_ca_trust <manifest-file> <container> <env-var>... — edit a rendered
+# Deployment manifest in place: mount ConfigMap $MT_LOCAL_CA_CONFIGMAP at
+# $MT_LOCAL_CA_MOUNT in <container> and set each <env-var> to the CA file
+# (e.g. AWS_CA_BUNDLE for boto3). Fails if the container is not found.
+mt_local_ca_trust() {
+  local file="${1:?manifest file required}" container="${2:?container name required}"
+  shift 2
+  [ "$#" -gt 0 ] || { print_error "mt_local_ca_trust: no env var names"; return 1; }
+  local var
+  for var in "$@"; do
+    [[ "$var" =~ ^[A-Z_][A-Z0-9_]*$ ]] || { print_error "mt_local_ca_trust: invalid env var name '$var'"; return 1; }
+  done
+  if [ "$(C="$container" yq 'select(.kind == "Deployment") | [.spec.template.spec.containers[] | select(.name == strenv(C))] | length' "$file")" != "1" ]; then
+    print_error "mt_local_ca_trust: no single container '$container' in a Deployment in $file"
+    return 1
+  fi
+  C="$container" CM="$MT_LOCAL_CA_CONFIGMAP" MP="$MT_LOCAL_CA_MOUNT" yq -i '
+    (select(.kind == "Deployment") | .spec.template.spec.volumes) += [{"name": "mt-local-ca", "configMap": {"name": strenv(CM)}}] |
+    (select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == strenv(C)) | .volumeMounts) += [{"name": "mt-local-ca", "mountPath": strenv(MP), "readOnly": true}]
+  ' "$file"
+  for var in "$@"; do
+    C="$container" V="$var" F="$MT_LOCAL_CA_MOUNT/ca.crt" yq -i '
+      (select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == strenv(C)) | .env) += [{"name": strenv(V), "value": strenv(F)}]
+    ' "$file"
+  done
 }
