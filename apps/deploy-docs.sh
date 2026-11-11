@@ -35,6 +35,8 @@ source "${REPO_ROOT}/scripts/lib/config.sh"
 mt_load_tenant_config
 
 source "${REPO_ROOT}/scripts/lib/notify.sh"
+# shellcheck source=../scripts/lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
 mt_deploy_start "deploy-docs"
 
 mt_require_commands kubectl helm envsubst openssl
@@ -148,6 +150,7 @@ print_status "Database user: $TENANT_DB_USER, Database: $DOCS_DB_NAME"
 mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/storage-backends-configmap.yaml")
 mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/save-status-configmap.yaml")
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/env-d-yprovider-configmap.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
+: "${S3_ENDPOINT:?S3_ENDPOINT not set by config.sh}" "${S3_ADDRESSING_STYLE:?S3_ADDRESSING_STYLE not set by config.sh}" "${S3_USE_SSL:?S3_USE_SSL not set by config.sh}"
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/docs-config.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 
 # Python customizations ConfigMap: mt_settings.py (settings subclass selected by
@@ -253,9 +256,23 @@ print_success "Database migrations completed"
 # Step 9: Apply the backend, frontend and ingress manifests
 # Update backend deployment to reference PostgreSQL in db namespace
 # Uses envsubst for replica count from tenant config
-mt_apply kubectl apply -f <(envsubst '${DOCS_BACKEND_MIN_REPLICAS} ${DOCS_GUNICORN_WORKERS}' < "$REPO_ROOT/docs/backend-deployment.yaml" | \
+# No EXIT trap here: notify.sh owns EXIT (deploy completion message). On a
+# failed deploy the file stays in $TMPDIR; it holds only secretKeyRef names.
+BACKEND_MANIFEST=$(mktemp)
+envsubst '${DOCS_BACKEND_MIN_REPLICAS} ${DOCS_GUNICORN_WORKERS}' < "$REPO_ROOT/docs/backend-deployment.yaml" | \
   sed "s/namespace: docs/namespace: $NS_DOCS/g" | \
-  sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g")
+  sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g" > "$BACKEND_MANIFEST"
+# A devbox's S3 endpoint is an HTTPS name signed by the local CA, and the
+# upload path's boto3 client verifies TLS regardless of AWS_S3_VERIFY.
+if mt_is_local_edge; then
+  print_status "edge local: backend trusts the local CA for S3 (AWS_CA_BUNDLE)"
+  # shellcheck source=../scripts/lib/local-ca.sh
+  source "${REPO_ROOT}/scripts/lib/local-ca.sh"
+  mt_local_ca_publish_configmap "$NS_DOCS"
+  mt_local_ca_trust "$BACKEND_MANIFEST" backend AWS_CA_BUNDLE
+fi
+mt_apply kubectl apply -f "$BACKEND_MANIFEST"
+rm -f "$BACKEND_MANIFEST"
 mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/backend-service.yaml")
 
 # Deploy frontend with environment-specific configuration (includes replica count)

@@ -33,14 +33,16 @@ data:
   REDIS_HOST: "redis"
   REDIS_PORT: "6379"
   
-  # S3 Storage settings (S3_CLUSTER from tenant config)
-  AWS_S3_ENDPOINT_URL: "https://${S3_CLUSTER}.linodeobjects.com"
+  # S3 Storage settings (s3.* from tenant config; config.sh defaults the
+  # endpoint to https://<s3.cluster>.linodeobjects.com, virtual-host style).
+  # Browsers follow presigned URLs on this endpoint, so it must be public.
+  AWS_S3_ENDPOINT_URL: "${S3_ENDPOINT}"
   AWS_S3_REGION_NAME: "${S3_CLUSTER}"
   AWS_STORAGE_BUCKET_NAME: "${BUCKET_NAME}"
   AWS_S3_SIGNATURE_VERSION: "s3v4"
-  AWS_S3_ADDRESSING_STYLE: "virtual"
-  AWS_S3_USE_SSL: "True"
-  AWS_ENDPOINT_URL_S3: "https://${S3_CLUSTER}.linodeobjects.com"
+  AWS_S3_ADDRESSING_STYLE: "${S3_ADDRESSING_STYLE}"
+  AWS_S3_USE_SSL: "${S3_USE_SSL}"
+  AWS_ENDPOINT_URL_S3: "${S3_ENDPOINT}"
   # AWS_S3_CUSTOM_DOMAIN intentionally unset when using bucket endpoint
   AWS_S3_URL_PROTOCOL: "https:"
   MEDIA_BASE_URL: "https://${DOCS_HOST}"

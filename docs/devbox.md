@@ -9,13 +9,15 @@ It works from a plain `git clone` of this repository. You don't need config
 submodules, a vault password or any cloud account. Every secret is generated
 on your machine and is throwaway.
 
-The minimal profile (what `init` gives you today) has:
+`init` picks a profile:
 
-- Keycloak, with one tenant realm,
-- the admin portal and the account portal (with a real browser OIDC login),
-- ingress-nginx, cert-manager, PgBouncer and a PostgreSQL container.
+- **standard** (the default):
+  - Keycloak with one tenant realm, and the admin and account portals with a real browser OIDC login;
+  - **Matrix** (Synapse + Element) and **Docs**, storing their media in an in-cluster S3 gateway;
+  - ingress-nginx, cert-manager, PgBouncer and a PostgreSQL container.
+- **minimal** (`init --profile minimal`): the same without Matrix, Docs and S3.
 
-The other apps (Matrix, Docs, Files, Jitsi, mail) are added one at a time; see
+The other apps (Files, Jitsi, mail) are added one at a time; see
 [What's not there yet](#whats-not-there-yet).
 
 ## Requirements
@@ -24,7 +26,9 @@ The other apps (Matrix, Docs, Files, Jitsi, mail) are added one at a time; see
   not been tried yet. `*.localhost` names
   must resolve to loopback; systemd-resolved does that on current distros.
   Ubuntu 18.04 does not. macOS is not supported yet.
-- About **4 GiB of free memory** and 2 CPUs for the minimal profile.
+- Free memory: about **4.5 GiB** for the standard profile (it measured
+  3.7 GiB used in a 6 GiB VM with 4 CPUs), or about **3.5 GiB** and 2 CPUs
+  for the minimal one.
 - `127.0.0.1:80` and `127.0.0.1:443` free.
 - Tools: docker (usable without sudo), [k3d](https://k3d.io) v5.9.0, kubectl,
   helm, helmfile, kustomize, [yq](https://github.com/mikefarah/yq) v4,
@@ -46,6 +50,8 @@ Keycloak's first boot. When it finishes:
 
 - Admin portal: <https://admin.devbox.mothertree.localhost>
 - Account portal: <https://account.devbox.mothertree.localhost>
+- Element (Matrix): <https://matrix.devbox.mothertree.localhost>
+- Docs: <https://docs.devbox.mothertree.localhost>
 - Keycloak: <https://auth.devbox.mothertree.localhost/admin/> (user `admin`,
   password `yq .keycloak.admin_password .devbox/tenants/devbox/devbox.secrets.yaml`)
 
@@ -77,8 +83,8 @@ the devbox, so you can run things like `kubectl get pods -A` or
 | Command | What it does |
 |---|---|
 | `doctor` | Check tools, docker access, `*.localhost` resolution, ports, memory, browser CA trust |
-| `init [--regenerate]` | Write `.devbox/` and create + trust the local CA; re-running keeps the secrets |
-| `up` | Create or reuse the cluster and PostgreSQL, build missing portal images, run `deploy_infra` and `create_env` |
+| `init [--profile standard\|minimal] [--regenerate]` | Write `.devbox/` and create + trust the local CA. Re-running keeps the secrets and the last profile |
+| `up` | Create or reuse the cluster and PostgreSQL, build missing portal images, run `deploy_infra`, start the S3 gateway and `create_env` |
 | `build <component>` | Build `admin-portal` or `account-portal` locally and import it |
 | `deploy <app>` | Run `apps/deploy-<app>.sh -e devbox -t devbox` |
 | `e2e <spec> [args]` | Run Playwright against the devbox |
@@ -122,15 +128,31 @@ separate docker-compose world.
   is shared with devhome (`scripts/lib/pg-bootstrap-sql.sh`).
 - **Images**: the portals are always built locally (`CONTAINER_REGISTRY=localhost`).
   Upstream images are pulled as usual.
+- **S3**: [versitygw](https://github.com/versity/versitygw) in `infra-s3`
+  (`apps/manifests/devbox/s3-gateway.yaml.tpl`) serves a directory over the S3
+  API with one throwaway key; the buckets are its top-level directories.
+  - The tenant config sets `s3.endpoint` to `https://s3.devbox.mothertree.localhost`
+    with path-style addressing. Browsers follow Docs' presigned media links to
+    that name. Docs' backend reaches the same name through the ingress and
+    trusts the local CA (`edge local` mounts it and sets `AWS_CA_BUNDLE`).
+  - Synapse only stores media, so it uses `s3.internal_endpoint`, the gateway's
+    Service. A devbox-only NetworkPolicy lets the Matrix namespace reach it.
+  - On every other environment these settings default to Linode Object Storage
+    (`https://<s3.cluster>.linodeobjects.com`, virtual-host style).
+- **In-cluster names**: a CoreDNS rewrite (`kube-system/coredns-custom`, key
+  `devbox.override`) resolves `*.devbox.mothertree.localhost` to the ingress
+  controller inside the cluster. Outside it, those names are loopback.
 - **Monitoring** is off (`monitoring.enabled: false`). `deploy_infra` refuses
   that setting anywhere except a dev-class local-edge box.
 
 ## What's not there yet
 
-- Matrix, Docs, Files (Nextcloud), Jitsi, mail and webmail. Turning their
-  features on in the tenant config is not enough yet. They need an in-cluster
-  S3 (MinIO), a CoreDNS rewrite for the `*.localhost` names, and a local mail
-  relay.
+- Files (Nextcloud), Jitsi, mail and webmail. Turning their features on in
+  the tenant config is not enough yet. Nextcloud and Stalwart still hardcode
+  the Linode S3 endpoint, and mail needs a local relay.
+- Email from Matrix and Docs (notifications, Docs invitations): there is no
+  mail server yet, so they cannot send email.
+- Matrix federation.
 - macOS (Docker Desktop's VM memory cap).
 - A scheduled CI job that keeps devbox from rotting.
 
@@ -147,6 +169,9 @@ separate docker-compose world.
 - **A code change doesn't show up**: deploy after `build`. The new tag is
   only picked up by the next `deploy`. `scripts/devbox env | grep IMAGE` shows
   the current refs.
+- **After pulling a newer devbox**: run `scripts/devbox init` again. It keeps
+  your secrets and profile, regenerates the configs with the new defaults, and
+  adds any newly needed secrets (such as the S3 key). Then run `scripts/devbox up`.
 - **Start over**: `scripts/devbox nuke && scripts/devbox init && scripts/devbox up`.
   `init --regenerate` refuses to run while a cluster or database exists: new
   secrets against an old Keycloak database would break every OIDC client.

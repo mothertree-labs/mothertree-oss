@@ -6,6 +6,8 @@
 #   plain-clone detection + MT_*_DIR overrides               (scripts/lib/paths.sh)
 #   PgBouncer Deployment render with/without the mesh        (apps/deploy-pgbouncer.sh)
 #   shared PostgreSQL bootstrap SQL                          (scripts/lib/pg-bootstrap-sql.sh)
+#   s3.endpoint / internal_endpoint / addressing_style       (scripts/lib/config.sh, docs-config)
+#   local-CA trust injection into a Deployment               (scripts/lib/local-ca.sh)
 #
 #   scripts/tests/devbox-env.test.sh
 set -euo pipefail
@@ -187,6 +189,71 @@ flag_of() { printf '%s' "$1" | yq '.x | tostring | sub("^null$"; "true")'; }
 check "default-true idiom: false stays false" test "$(flag_of 'x: false')" = "false"
 check "default-true idiom: unset is true" test "$(flag_of 'y: 1')" = "true"
 check "default-true idiom: true stays true" test "$(flag_of 'x: true')" = "true"
+
+# ── config.sh: S3 endpoint settings ───────────────────────────────────────
+s3_of() {  # <yq edit for the example tenant config> -> "endpoint|internal|style|ssl" or fails
+  local t="$TEST_TMP/s3t.$RANDOM"
+  # Hermetic: own infra dir + terraform outputs, and a kubectl that always
+  # fails, so nothing from the checkout or a live cluster leaks in.
+  mkdir -p "$t/tenants/ex" "$t/infra" "$t/bin"
+  yq "$1" "$REPO_ROOT/tenants/.example/dev.config.yaml" > "$t/tenants/ex/dev.config.yaml"
+  cp "$REPO_ROOT/tenants/.example/dev.secrets.yaml.example" "$t/tenants/ex/dev.secrets.yaml"
+  : > "$t/project.conf"
+  printf 'keycloak:\n  replicas: 1\n' > "$t/infra/dev.config.yaml"
+  printf 'TURN_SERVER_IP=192.0.2.1\n' > "$t/infra/terraform-outputs.dev.env"
+  printf '#!/bin/sh\nexit 1\n' > "$t/bin/kubectl"; chmod +x "$t/bin/kubectl"
+  env -i PATH="$t/bin:$PATH" HOME="$HOME" bash -c '
+    set -euo pipefail
+    REPO_ROOT="$1"; MT_ENV=dev; MT_TENANT=ex; MT_TENANTS_DIR="$2/tenants"; MT_PROJECT_CONF="$2/project.conf"
+    MT_INFRA_CONFIG_DIR="$2/infra"
+    export REPO_ROOT MT_ENV MT_TENANT MT_TENANTS_DIR MT_PROJECT_CONF MT_INFRA_CONFIG_DIR
+    source "$REPO_ROOT/scripts/lib/common.sh"; source "$REPO_ROOT/scripts/lib/config.sh"
+    mt_load_tenant_config >/dev/null 2>&1
+    echo "$S3_ENDPOINT|$S3_INTERNAL_ENDPOINT|$S3_ADDRESSING_STYLE|$S3_USE_SSL"' _ "$REPO_ROOT" "$t" 2>/dev/null
+}
+cluster=$(yq '.s3.cluster' "$REPO_ROOT/tenants/.example/dev.config.yaml")
+check "S3 defaults are Linode, virtual-host, TLS" \
+  test "$(s3_of '.')" = "https://${cluster}.linodeobjects.com|https://${cluster}.linodeobjects.com|virtual|True"
+check "s3.endpoint override; internal defaults to it" \
+  test "$(s3_of '.s3.endpoint = "https://s3.x.localhost" | .s3.addressing_style = "path"')" = "https://s3.x.localhost|https://s3.x.localhost|path|True"
+check "s3.internal_endpoint override (http)" \
+  test "$(s3_of '.s3.endpoint = "https://s3.x.localhost" | .s3.internal_endpoint = "http://gw.ns.svc:7070"')" = "https://s3.x.localhost|http://gw.ns.svc:7070|virtual|True"
+check "plain-http endpoint turns AWS_S3_USE_SSL off" \
+  test "$(s3_of '.s3.endpoint = "http://s3.x.localhost"' | cut -d'|' -f4)" = "False"
+check_not "s3.addressing_style must be virtual or path" s3_of '.s3.addressing_style = "dns"'
+check_not "s3.endpoint must be a URL" s3_of '.s3.endpoint = "s3.x.localhost"'
+check_not "s3.endpoint rejects quotes" s3_of '.s3.endpoint = "https://a\"b.example.com"'
+check_not "s3.endpoint rejects a path" s3_of '.s3.endpoint = "https://s3.example.com/bucket"'
+check "s3.internal_endpoint may carry a port" \
+  test "$(s3_of '.s3.internal_endpoint = "http://gw.ns.svc.cluster.local:7070"' | cut -d'|' -f2)" = "http://gw.ns.svc.cluster.local:7070"
+
+# docs-config renders byte-identically to the pre-endpoint template on the defaults.
+docs_env() { env -i PATH="$PATH" S3_CLUSTER="$cluster" S3_ENDPOINT="https://${cluster}.linodeobjects.com" \
+  S3_ADDRESSING_STYLE=virtual S3_USE_SSL=True BUCKET_NAME=b DOCS_HOST=docs.example.com AUTH_HOST=auth.example.com "$@"; }
+legacy_docs=$(sed -e "s|\${S3_ENDPOINT}|https://\${S3_CLUSTER}.linodeobjects.com|g" \
+  -e 's|"${S3_ADDRESSING_STYLE}"|"virtual"|' -e 's|"${S3_USE_SSL}"|"True"|' "$REPO_ROOT/docs/docs-config.yaml.tpl")
+check "docs-config: default S3 values render as before" \
+  test "$(docs_env envsubst < "$REPO_ROOT/docs/docs-config.yaml.tpl" | grep -v '^ *#')" = "$(printf '%s\n' "$legacy_docs" | docs_env envsubst | grep -v '^ *#')"
+check "docs-config: no hardcoded linodeobjects endpoint left" \
+  test "$(grep -c 'linodeobjects' "$REPO_ROOT/docs/docs-config.yaml.tpl")" = "1"
+
+# ── local-ca.sh: trust injection ──────────────────────────────────────────
+trust_out="$TEST_TMP/backend.yaml"
+cp "$REPO_ROOT/docs/backend-deployment.yaml" "$trust_out"
+before_env=$(yq '.spec.template.spec.containers[] | select(.name == "backend") | .env | length' "$trust_out")
+before_vols=$(yq '.spec.template.spec.volumes | length' "$trust_out")
+trust() { ( print_error() { echo "$*" >&2; }; source "$REPO_ROOT/scripts/lib/local-ca.sh"; mt_local_ca_trust "$@" ) 2>/dev/null; }
+check "mt_local_ca_trust edits the backend Deployment" trust "$trust_out" backend AWS_CA_BUNDLE
+check "AWS_CA_BUNDLE points at the mounted CA" \
+  test "$(yq '.spec.template.spec.containers[] | select(.name == "backend") | .env[] | select(.name == "AWS_CA_BUNDLE") | .value' "$trust_out")" = "/etc/mt-local-ca/ca.crt"
+check "existing env vars are kept" \
+  test "$(yq '.spec.template.spec.containers[] | select(.name == "backend") | .env | length' "$trust_out")" = "$((before_env + 1))"
+check "the CA ConfigMap is added as a volume" \
+  test "$(yq '.spec.template.spec.volumes | length' "$trust_out")" = "$((before_vols + 1))"
+check "and mounted read-only" \
+  test "$(yq '.spec.template.spec.containers[] | select(.name == "backend") | .volumeMounts[] | select(.name == "mt-local-ca") | .readOnly' "$trust_out")" = "true"
+check_not "unknown container is an error" trust "$trust_out" nosuch AWS_CA_BUNDLE
+check_not "invalid env var name is an error" trust "$TEST_TMP/backend.yaml" backend 'bad-name'
 
 echo "devbox-env: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
