@@ -79,6 +79,18 @@ if [ "$PREP_ONLY" = "true" ] && [ "$FINALIZE_ONLY" = "true" ]; then
   exit 1
 fi
 
+# features.{docs,files,matrix,jitsi}_enabled (default true) decide which of
+# those apps this tenant gets. Nextcloud logs in to PostgreSQL as the tenant
+# role that the Docs db-init Job creates, so Files without Docs cannot work.
+if [ "$FILES_ENABLED" = "true" ] && [ "$DOCS_ENABLED" != "true" ]; then
+  print_error "features.files_enabled requires features.docs_enabled (the tenant DB role ${TENANT_DB_USER} is created by deploy-docs.sh)"
+  exit 1
+fi
+if mt_is_local_edge && [ "${DNS_EXTERNAL:-false}" = "true" ]; then
+  print_error "dns.dns_external makes no sense on a local-edge box (env $MT_ENV): there is no public DNS"
+  exit 1
+fi
+
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "create_env"
 
@@ -213,7 +225,26 @@ if [ "$LLM_ENABLED" = "true" ]; then
   export TENANT_NAMESPACES="${TENANT_NAMESPACES},${NS_LLM}"
 fi
 
-if [ "${DNS_EXTERNAL:-false}" = "true" ]; then
+if mt_is_local_edge; then
+  # =========================================================================
+  # Local-edge box (devbox): the wildcard + apex Certificates come from the
+  # developer's local CA. Same Certificates, same Secret names, same reflector
+  # annotations as the DNS-01 path; only the issuer behind the per-tenant name
+  # differs, and there is no Cloudflare token Secret.
+  # =========================================================================
+  print_status "edge local: wildcard TLS for $TENANT_NAME from the local CA (no ACME, no Cloudflare)"
+  source "${REPO_ROOT}/scripts/lib/local-ca.sh"
+  mt_local_ca_apply_cluster_issuers "letsencrypt-dns01-${TENANT_NAME}" || exit 1
+  # Only the Certificate documents of the DNS-01 template; its Cloudflare
+  # Secret and ACME ClusterIssuer are replaced by the CA issuer above.
+  envsubst < "$REPO_ROOT/apps/manifests/wildcard/certificate.yaml.tpl" \
+    | yq 'select(.kind == "Certificate")' | kubectl apply -f -
+  for cert in wildcard-tls apex-tls; do
+    kubectl wait --for=condition=Ready "certificate/${cert}" -n "$NS_MATRIX" --timeout=120s \
+      || { print_error "${cert} was not issued by the local CA within 120s (kubectl describe certificate ${cert} -n $NS_MATRIX)"; exit 1; }
+  done
+  print_success "wildcard-tls and apex-tls issued by the local CA"
+elif [ "${DNS_EXTERNAL:-false}" = "true" ]; then
   # =========================================================================
   # External-DNS tenant: multi-SAN HTTP-01 certificate (no Cloudflare access)
   # =========================================================================
@@ -393,7 +424,7 @@ if [ "$CERT_OK" != "true" ]; then
     print_warning "Continuing deployment — ingresses will use certs once they're issued"
   fi
 fi
-fi  # end DNS_EXTERNAL cert branch (HTTP-01 multi-SAN vs DNS-01 wildcard+apex)
+fi  # end cert branch (local CA / HTTP-01 multi-SAN / DNS-01 wildcard+apex)
 
 # Gate: the wildcard Secret must be REFLECTED into every namespace that serves
 # it — TENANT_NAMESPACES: every per-tenant ingress, Stalwart's required volume,
@@ -441,6 +472,11 @@ fi
 # =============================================================================
 # Create tenant DNS records (Cloudflare API)
 # =============================================================================
+if mt_is_local_edge; then
+  # *.localhost names resolve to loopback on the developer's machine; there is
+  # no public zone to write to.
+  print_status "edge local: no public DNS, skipping the Cloudflare IP check and all tenant DNS records"
+else
 # Validate Cloudflare IP ranges before creating DNS records (firewall depends on these)
 print_status "Validating Cloudflare IP ranges..."
 "$REPO_ROOT/scripts/check-cloudflare-ips" || { print_error "Cloudflare IPs changed. Run: ./scripts/check-cloudflare-ips --update"; exit 1; }
@@ -617,6 +653,7 @@ else
 fi
 
 fi  # end DNS_EXTERNAL DNS-record guard
+fi  # end local-edge DNS guard
 
 # Apply PriorityClass for critical services (must exist before JVB/y-provider deploy)
 print_status "Applying PriorityClass for critical services..."
@@ -633,14 +670,18 @@ fi
 export SKIP_HELM_REPO_UPDATE=true
 
 # Deploy Docs (backend, frontend, y-provider, Redis)
-print_status "Docs: deploy to $NS_DOCS namespace"
-if [ ! -f "$REPO_ROOT/apps/deploy-docs.sh" ]; then
-  print_error "deploy-docs.sh not found at $REPO_ROOT/apps/deploy-docs.sh"
-  exit 1
-fi
-if ! "$REPO_ROOT/apps/deploy-docs.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
-  print_error "deploy-docs.sh failed"
-  exit 1
+if [ "$DOCS_ENABLED" = "true" ]; then
+  print_status "Docs: deploy to $NS_DOCS namespace"
+  if [ ! -f "$REPO_ROOT/apps/deploy-docs.sh" ]; then
+    print_error "deploy-docs.sh not found at $REPO_ROOT/apps/deploy-docs.sh"
+    exit 1
+  fi
+  if ! "$REPO_ROOT/apps/deploy-docs.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
+    print_error "deploy-docs.sh failed"
+    exit 1
+  fi
+else
+  print_status "Docs: skipping (features.docs_enabled is false)"
 fi
 
 # Keycloak: create Google OAuth secret (required for realm import)
@@ -667,6 +708,15 @@ if [ ! -f "$REPO_ROOT/docs/import-keycloak-realm.sh" ]; then
 fi
 if ! MT_ENV="$MT_ENV" "$REPO_ROOT/docs/import-keycloak-realm.sh"; then
   print_error "import-keycloak-realm.sh failed"
+  exit 1
+fi
+
+# Keycloak: the tenant's public auth ingress (auth.<tenant host>) — every app's
+# OIDC login goes through it, so it is a tenant prerequisite, not part of any one
+# app. deploy-matrix.sh and deploy-llm-webui.sh apply the same manifest
+# (idempotent) for their standalone runs.
+if ! "$REPO_ROOT/apps/deploy-keycloak-tenant-ingress.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
+  print_error "deploy-keycloak-tenant-ingress.sh failed"
   exit 1
 fi
 
@@ -810,29 +860,41 @@ else
 fi
 
 # Deploy Nextcloud
-print_status "Nextcloud: deploy to $NS_FILES namespace"
-if [ ! -f "$REPO_ROOT/apps/deploy-nextcloud.sh" ]; then
-  print_error "deploy-nextcloud.sh not found at $REPO_ROOT/apps/deploy-nextcloud.sh"
-  exit 1
-fi
-if ! "$REPO_ROOT/apps/deploy-nextcloud.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
-  print_error "deploy-nextcloud.sh failed"
-  exit 1
+if [ "$FILES_ENABLED" = "true" ]; then
+  print_status "Nextcloud: deploy to $NS_FILES namespace"
+  if [ ! -f "$REPO_ROOT/apps/deploy-nextcloud.sh" ]; then
+    print_error "deploy-nextcloud.sh not found at $REPO_ROOT/apps/deploy-nextcloud.sh"
+    exit 1
+  fi
+  if ! "$REPO_ROOT/apps/deploy-nextcloud.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
+    print_error "deploy-nextcloud.sh failed"
+    exit 1
+  fi
+else
+  print_status "Nextcloud: skipping (features.files_enabled is false)"
 fi
 
 # Deploy Matrix (Synapse + Element)
-print_status "Matrix: deploy to $NS_MATRIX namespace"
-if [ ! -f "$REPO_ROOT/apps/deploy-matrix.sh" ]; then
-  print_error "deploy-matrix.sh not found at $REPO_ROOT/apps/deploy-matrix.sh"
-  exit 1
-fi
-MATRIX_EXTRA_ARGS=""
-if [ "$CREATE_ALERT_USER" = "true" ]; then
-  MATRIX_EXTRA_ARGS="--create-alert-user"
-fi
-if ! "$REPO_ROOT/apps/deploy-matrix.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)) $MATRIX_EXTRA_ARGS; then
-  print_error "deploy-matrix.sh failed"
-  exit 1
+if [ "$MATRIX_ENABLED" = "true" ]; then
+  print_status "Matrix: deploy to $NS_MATRIX namespace"
+  if [ ! -f "$REPO_ROOT/apps/deploy-matrix.sh" ]; then
+    print_error "deploy-matrix.sh not found at $REPO_ROOT/apps/deploy-matrix.sh"
+    exit 1
+  fi
+  MATRIX_EXTRA_ARGS=""
+  if [ "$CREATE_ALERT_USER" = "true" ]; then
+    MATRIX_EXTRA_ARGS="--create-alert-user"
+  fi
+  if ! "$REPO_ROOT/apps/deploy-matrix.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)) $MATRIX_EXTRA_ARGS; then
+    print_error "deploy-matrix.sh failed"
+    exit 1
+  fi
+else
+  if [ "$CREATE_ALERT_USER" = "true" ]; then
+    print_error "--create-alert-user needs Matrix (features.matrix_enabled is false)"
+    exit 1
+  fi
+  print_status "Matrix: skipping (features.matrix_enabled is false)"
 fi
 
 # Reload alertbot token if it was created by deploy-matrix.sh
@@ -844,6 +906,7 @@ if [ "$CREATE_ALERT_USER" = "true" ]; then
 fi
 
 # Deploy Jitsi
+if [ "$JITSI_ENABLED" = "true" ]; then
 print_status "Jitsi: deploy to $NS_JITSI namespace"
 if [ ! -f "$REPO_ROOT/apps/deploy-jitsi.sh" ]; then
   print_error "deploy-jitsi.sh not found at $REPO_ROOT/apps/deploy-jitsi.sh"
@@ -878,6 +941,9 @@ cat "$REPO_ROOT/apps/manifests/jitsi/jitsi-alerting-rules.yaml" | \
 kubectl delete prometheusrule jitsi-turn-alerts -n "$NS_JITSI" 2>/dev/null || true
 
 print_status "Jitsi monitoring resources deployed to namespace $NS_JITSI"
+else
+  print_status "Jitsi: skipping (features.jitsi_enabled is false)"
+fi  # JITSI_ENABLED
 
 # =============================================================================
 # Deploy Email Probe (if enabled) - non-fatal on failure
@@ -1061,12 +1127,18 @@ print_status "Deploying endpoint monitoring probes..."
 
 # Build probe targets list dynamically based on feature flags
 ENDPOINT_PROBE_TARGETS=""
-ENDPOINT_PROBE_TARGETS="${ENDPOINT_PROBE_TARGETS}        - https://${MATRIX_HOST}/
+if [ "$MATRIX_ENABLED" = "true" ]; then
+  ENDPOINT_PROBE_TARGETS="${ENDPOINT_PROBE_TARGETS}        - https://${MATRIX_HOST}/
 "
-ENDPOINT_PROBE_TARGETS="${ENDPOINT_PROBE_TARGETS}        - https://${DOCS_HOST}/
+fi
+if [ "$DOCS_ENABLED" = "true" ]; then
+  ENDPOINT_PROBE_TARGETS="${ENDPOINT_PROBE_TARGETS}        - https://${DOCS_HOST}/
 "
-ENDPOINT_PROBE_TARGETS="${ENDPOINT_PROBE_TARGETS}        - https://${FILES_HOST}/status.php
+fi
+if [ "$FILES_ENABLED" = "true" ]; then
+  ENDPOINT_PROBE_TARGETS="${ENDPOINT_PROBE_TARGETS}        - https://${FILES_HOST}/status.php
 "
+fi
 ENDPOINT_PROBE_TARGETS="${ENDPOINT_PROBE_TARGETS}        - https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}
 "
 if [ "$JITSI_ENABLED" = "true" ]; then

@@ -60,7 +60,8 @@ fi
 # declares the same toolchain as the other two Prometheus readers,
 # scripts/infra-health-gate and scripts/email-probe-metrics: any of them
 # growing an mt_prom_query call would otherwise fail late instead of here.
-mt_require_commands kubectl jq python3
+# yq reads monitoring.enabled from the infra config (Check 6).
+mt_require_commands kubectl jq python3 yq
 
 # Build namespace filter
 if [ -n "$TENANT" ]; then
@@ -211,7 +212,20 @@ echo "--- Firing Prometheus alerts ---"
 # falls back to the default and does NOT switch the check off. The only value
 # that disables it is a non-empty list of no names, i.e. ALERT_DEADMAN=","
 ALERT_DEADMAN="${ALERT_DEADMAN:-Watchdog,AlertChannelHeartbeat}"
-if FIRING=$(mt_prom_http infra-monitoring "$MT_PROM_SERVICE" "$MT_PROM_PORT" 'api/v1/alerts'); then
+# A developer box can run without the monitoring stack (monitoring.enabled:
+# false in its infra config — deploy_infra refuses that anywhere else). Only
+# that explicit setting skips this check; a missing Prometheus elsewhere stays
+# an ERROR below.
+source "${REPO_ROOT}/scripts/lib/paths.sh"
+_mt_resolve_infra_config "$MT_ENV"
+_monitoring_enabled=true
+if [ -n "${MT_INFRA_CONFIG:-}" ] && [ -f "$MT_INFRA_CONFIG" ]; then
+  _monitoring_enabled=$(yq '.monitoring.enabled | tostring | sub("^null$"; "true")' "$MT_INFRA_CONFIG")
+fi
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+if [ "$_monitoring_enabled" = "false" ] && mt_is_local_edge && ! mt_is_prod_like; then
+  echo "SKIP - monitoring.enabled is false in $MT_INFRA_CONFIG (developer box): no Prometheus to ask"
+elif FIRING=$(mt_prom_http infra-monitoring "$MT_PROM_SERVICE" "$MT_PROM_PORT" 'api/v1/alerts'); then
     ALERT_SUMMARY=$(echo "$FIRING" | ALERT_DEADMAN="$ALERT_DEADMAN" python3 -c "
 import sys, json, os
 try:

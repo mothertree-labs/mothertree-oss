@@ -7,6 +7,9 @@ import { isImapConfigured, sweepInboxOlderThan } from './helpers/imap';
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'dev-test-users.sh');
 const TENANT = process.env.E2E_TENANT || 'example';
+// Environment passed to scripts/dev-test-users.sh (-e). CI targets dev-class
+// clusters through the dev config; a developer box sets E2E_ENV=devbox.
+const E2E_ENV = process.env.E2E_ENV || 'dev';
 const IS_CI = !!process.env.CI;
 
 /** Local users to create/reset during setup (derived from TEST_USERS). */
@@ -86,7 +89,7 @@ export default async function globalSetup(): Promise<void> {
   const PERMANENT_USERS = new Set(LOCAL_USERS.map((u) => u.username));
   try {
     const listOutput = run(
-      `${SCRIPT} -e dev -t ${TENANT} list`,
+      `${SCRIPT} -e ${E2E_ENV} -t ${TENANT} list`,
     );
     const staleUsers = listOutput
       .split('\n')
@@ -94,7 +97,7 @@ export default async function globalSetup(): Promise<void> {
       .filter((username) => username?.startsWith('e2e-') && !PERMANENT_USERS.has(username));
     for (const staleUser of staleUsers) {
       try {
-        run(`${SCRIPT} -e dev -t ${TENANT} delete ${staleUser}`);
+        run(`${SCRIPT} -e ${E2E_ENV} -t ${TENANT} delete ${staleUser}`);
         console.log(`  [setup] Cleaned up stale user: ${staleUser}`);
       } catch {
         console.log(`  [setup] Failed to clean up ${staleUser} — continuing`);
@@ -112,7 +115,7 @@ export default async function globalSetup(): Promise<void> {
     const adminFlag = user.admin ? ' --admin' : '';
     try {
       run(
-        `${SCRIPT} -e dev -t ${TENANT} create ${user.username} --password ${user.password}${adminFlag}`,
+        `${SCRIPT} -e ${E2E_ENV} -t ${TENANT} create ${user.username} --password ${user.password}${adminFlag}`,
       );
       console.log(`  [setup] Created user: ${user.username}`);
       createdUsers.push(user.username);
@@ -122,7 +125,7 @@ export default async function globalSetup(): Promise<void> {
       if (msg.includes('already exists')) {
         console.log(`  [setup] User ${user.username} already exists, resetting password...`);
         run(
-          `${SCRIPT} -e dev -t ${TENANT} reset-password ${user.username} --password ${user.password}`,
+          `${SCRIPT} -e ${E2E_ENV} -t ${TENANT} reset-password ${user.username} --password ${user.password}`,
         );
         // Don't add to createdUsers — teardown should leave pre-existing users alone
       } else {

@@ -67,6 +67,10 @@ ADMIN_PORTAL_ENABLED=$(yq '.features.admin_portal_enabled // false' "$TENANT_CON
 ACCOUNT_PORTAL_ENABLED=$(yq '.features.account_portal_enabled // false' "$TENANT_CONFIG")
 CALENDAR_ENABLED=$(yq '.features.calendar_enabled // false' "$TENANT_CONFIG")
 OFFICE_ENABLED=$(yq '.features.office_enabled // false' "$TENANT_CONFIG")
+# Default true, like config.sh (not `// true`: yq's `//` also replaces false).
+MATRIX_ENABLED=$(yq '.features.matrix_enabled | tostring | sub("^null$"; "true")' "$TENANT_CONFIG")
+DOCS_ENABLED=$(yq '.features.docs_enabled | tostring | sub("^null$"; "true")' "$TENANT_CONFIG")
+FILES_ENABLED=$(yq '.features.files_enabled | tostring | sub("^null$"; "true")' "$TENANT_CONFIG")
 
 # Compute hostnames (same logic as config.sh)
 if [ -n "$TENANT_ENV_DNS_LABEL" ] && [ "$TENANT_ENV_DNS_LABEL" != "null" ]; then
@@ -111,11 +115,17 @@ ALERTMANAGER_HOST="alertmanager.${VPN_SUBDOMAIN}${INFRA_DOMAIN}"
 # Format: "NAME|URL|TYPE" where TYPE is "external" or "vpn"
 ENDPOINTS=()
 
-# External endpoints (always enabled)
-ENDPOINTS+=("Matrix/Element|https://${MATRIX_HOST}/|external")
-ENDPOINTS+=("Synapse API|https://${MATRIX_HOST}/_matrix/client/versions|external")
-ENDPOINTS+=("Docs|https://${DOCS_HOST}/|external")
-ENDPOINTS+=("Files|https://${FILES_HOST}/status.php|external")
+# External endpoints (Matrix/Docs/Files follow their feature flags, default on)
+if [ "$MATRIX_ENABLED" = "true" ]; then
+  ENDPOINTS+=("Matrix/Element|https://${MATRIX_HOST}/|external")
+  ENDPOINTS+=("Synapse API|https://${MATRIX_HOST}/_matrix/client/versions|external")
+fi
+if [ "$DOCS_ENABLED" = "true" ]; then
+  ENDPOINTS+=("Docs|https://${DOCS_HOST}/|external")
+fi
+if [ "$FILES_ENABLED" = "true" ]; then
+  ENDPOINTS+=("Files|https://${FILES_HOST}/status.php|external")
+fi
 ENDPOINTS+=("Auth|https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}|external")
 
 # Conditional external endpoints

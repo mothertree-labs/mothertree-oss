@@ -5,6 +5,11 @@
 #          PgBouncer provides connection pooling for all tenant databases.
 #          The Tailscale sidecar connects to the external PostgreSQL VM over the Headscale mesh.
 #
+#          pgbouncer.mesh: false (developer box only, cluster.edge: local): no
+#          sidecar; PostgreSQL is reached directly at pgbouncer.pg_host. The
+#          Deployment is the same template with the sidecar removed after
+#          rendering, so the mesh path is byte-for-byte what it always was.
+#
 # Creates:
 #   - ServiceAccount + RBAC (for Tailscale state Secret management)
 #   - ConfigMap (pgbouncer.ini)
@@ -53,21 +58,37 @@ MANIFESTS_DIR="$REPO_ROOT/apps/manifests/pgbouncer"
 # Load PgBouncer-specific config from infra config
 # =============================================================================
 
-# Required: PG VM Tailscale IP (set in infra config or terraform outputs)
-: "${PG_VM_TAILSCALE_IP:?PG_VM_TAILSCALE_IP not set. Add pgbouncer.pg_vm_tailscale_ip to infra config.}"
-export PG_VM_TAILSCALE_IP
+: "${PGBOUNCER_MESH:?PGBOUNCER_MESH not set by infra-config.sh}"
+if [ "$PGBOUNCER_MESH" = "true" ]; then
+  # Required: PG VM Tailscale IP (set in infra config or terraform outputs)
+  : "${PG_VM_TAILSCALE_IP:?PG_VM_TAILSCALE_IP not set. Add pgbouncer.pg_vm_tailscale_ip to infra config.}"
+  export PG_VM_TAILSCALE_IP
 
-# Required: Headscale URL
-: "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
-export HEADSCALE_URL
+  # Required: Headscale URL
+  : "${HEADSCALE_URL:?HEADSCALE_URL not set. Add headscale.url to infra config.}"
+  export HEADSCALE_URL
 
-# Tailscale pre-auth keys are minted through the Headscale API (tag:pgbouncer, 90 days)
-# on first-time bootstrap and whenever the key in the Secret turns out to be
-# missing, untagged, single-use, expired or near expiry (#613). The in-cluster
-# key-rotator CronJob runs the same check daily. See scripts/lib/tailscale-keys.sh.
-: "${TAILSCALE_ROTATOR_API_KEY:?tailscale.rotator_api_key not set in infra secrets — required to mint/verify the PgBouncer sidecar pre-auth key (headscale apikeys create --expiration 87600h)}"
-HEADSCALE_API_KEY="$TAILSCALE_ROTATOR_API_KEY"
-source "${REPO_ROOT}/scripts/lib/tailscale-keys.sh"
+  # Tailscale pre-auth keys are minted through the Headscale API (tag:pgbouncer, 90 days)
+  # on first-time bootstrap and whenever the key in the Secret turns out to be
+  # missing, untagged, single-use, expired or near expiry (#613). The in-cluster
+  # key-rotator CronJob runs the same check daily. See scripts/lib/tailscale-keys.sh.
+  : "${TAILSCALE_ROTATOR_API_KEY:?tailscale.rotator_api_key not set in infra secrets — required to mint/verify the PgBouncer sidecar pre-auth key (headscale apikeys create --expiration 87600h)}"
+  HEADSCALE_API_KEY="$TAILSCALE_ROTATOR_API_KEY"
+  source "${REPO_ROOT}/scripts/lib/tailscale-keys.sh"
+else
+  # No mesh is only ever valid on a developer box: prod and dev must never
+  # silently lose the tunnel to their PostgreSQL VM.
+  source "${REPO_ROOT}/scripts/lib/platform.sh"
+  if ! mt_is_local_edge; then
+    print_error "pgbouncer.mesh: false is only valid with cluster.edge: local (env $MT_ENV has edge '${MT_CLUSTER_EDGE}')"
+    exit 1
+  fi
+  : "${PGBOUNCER_PG_HOST:?pgbouncer.pg_host is required when pgbouncer.mesh is false}"
+  # The templates name the PostgreSQL address PG_VM_TAILSCALE_IP; on a local
+  # box it is the PostgreSQL container's address instead.
+  export PG_VM_TAILSCALE_IP="$PGBOUNCER_PG_HOST"
+  export HEADSCALE_URL="unused-no-mesh"
+fi
 
 # Required: PgBouncer auth password (for auth_query bootstrap)
 : "${PGBOUNCER_AUTH_PASSWORD:?PGBOUNCER_AUTH_PASSWORD not set. Add pgbouncer.auth_password to infra secrets.}"
@@ -83,8 +104,12 @@ export PGBOUNCER_MIN_POOL_SIZE="${PGBOUNCER_MIN_POOL_SIZE:-2}"
 export PGBOUNCER_RESERVE_POOL_SIZE="${PGBOUNCER_RESERVE_POOL_SIZE:-2}"
 
 print_status "Deploying PgBouncer to $NS_DB (env: $MT_ENV)"
-print_status "  PG VM Tailscale IP: $PG_VM_TAILSCALE_IP"
-print_status "  Headscale URL: $HEADSCALE_URL"
+if [ "$PGBOUNCER_MESH" = "true" ]; then
+  print_status "  PG VM Tailscale IP: $PG_VM_TAILSCALE_IP"
+  print_status "  Headscale URL: $HEADSCALE_URL"
+else
+  print_status "  PostgreSQL (no mesh, edge local): $PG_VM_TAILSCALE_IP"
+fi
 print_status "  Max client connections: $PGBOUNCER_MAX_CLIENT_CONN"
 print_status "  Default pool size: $PGBOUNCER_DEFAULT_POOL_SIZE"
 
@@ -135,8 +160,12 @@ mt_apply kubectl apply -f <(envsubst '${NS_DB} ${PGBOUNCER_AUTH_PASSWORD} ${PG_S
 # Tailscale auth secret: verify the key it holds against Headscale; mint and
 # write a tag:pgbouncer key if the Secret is missing or its key is unusable.
 # A write flags the change tracker, so the restart below picks the key up.
-print_status "Verifying PgBouncer Tailscale auth key..."
-mt_ts_ensure_secret "$NS_DB" pgbouncer-tailscale-auth tag:pgbouncer
+if [ "$PGBOUNCER_MESH" = "true" ]; then
+  print_status "Verifying PgBouncer Tailscale auth key..."
+  mt_ts_ensure_secret "$NS_DB" pgbouncer-tailscale-auth tag:pgbouncer
+else
+  print_status "edge local, pgbouncer.mesh false: no Tailscale auth key"
+fi
 
 # Create postgres-credentials Secret for deploy scripts (mt_psql / mt_pg_password helpers).
 # This replaces the Bitnami-generated docs-postgresql secret that scripts previously read.
@@ -151,8 +180,13 @@ mt_apply kubectl apply -f <(kubectl create secret generic postgres-credentials -
 
 print_status "Applying PgBouncer Deployment..."
 [[ "${PGBOUNCER_REPLICAS:-}" =~ ^[1-9][0-9]*$ ]] || { print_error "PGBOUNCER_REPLICAS ('${PGBOUNCER_REPLICAS:-}') must be a positive integer (pgbouncer.replicas in the infra config)"; exit 1; }
-mt_apply kubectl apply -f <(envsubst '${NS_DB} ${PG_VM_TAILSCALE_IP} ${HEADSCALE_URL} ${CHECKSUM_PGBOUNCER_CONFIG} ${CHECKSUM_PGBOUNCER_USERLIST} ${PGBOUNCER_REPLICAS}' \
-  < "$MANIFESTS_DIR/pgbouncer-deployment.yaml.tpl")
+envsubst '${NS_DB} ${PG_VM_TAILSCALE_IP} ${HEADSCALE_URL} ${CHECKSUM_PGBOUNCER_CONFIG} ${CHECKSUM_PGBOUNCER_USERLIST} ${PGBOUNCER_REPLICAS}' \
+  < "$MANIFESTS_DIR/pgbouncer-deployment.yaml.tpl" > "$WORK_DIR/deployment.yaml"
+if [ "$PGBOUNCER_MESH" = "false" ]; then
+  # The tailscale native sidecar is the template's only initContainer.
+  yq -i 'del(.spec.template.spec.initContainers)' "$WORK_DIR/deployment.yaml"
+fi
+mt_apply kubectl apply -f "$WORK_DIR/deployment.yaml"
 
 # =============================================================================
 # Apply Service
@@ -178,14 +212,21 @@ kubectl rollout status deployment/pgbouncer -n "$NS_DB" --timeout=120s
 # Mesh gate — unconditional (a Ready pod says nothing about the tunnel, #613)
 # =============================================================================
 
-mt_wait_for_tailscale_sidecar "$NS_DB" app=pgbouncer tag:pgbouncer
-# Positive control on the real target: a TCP handshake with PostgreSQL on the
-# PG VM through the tunnel and the ACL (tag:pgbouncer -> tag:postgres:5432).
-# The SQL path itself is verified by the DB checks that follow in deploy_infra.
-mt_tailscale_sidecar_tcp_check "$NS_DB" app=pgbouncer "$PG_VM_TAILSCALE_IP" 5432 60 \
-  || { print_error "PgBouncer sidecar cannot reach PostgreSQL at ${PG_VM_TAILSCALE_IP}:5432 over the mesh"; exit 1; }
+if [ "$PGBOUNCER_MESH" = "true" ]; then
+  mt_wait_for_tailscale_sidecar "$NS_DB" app=pgbouncer tag:pgbouncer
+  # Positive control on the real target: a TCP handshake with PostgreSQL on the
+  # PG VM through the tunnel and the ACL (tag:pgbouncer -> tag:postgres:5432).
+  # The SQL path itself is verified by the DB checks that follow in deploy_infra.
+  mt_tailscale_sidecar_tcp_check "$NS_DB" app=pgbouncer "$PG_VM_TAILSCALE_IP" 5432 60 \
+    || { print_error "PgBouncer sidecar cannot reach PostgreSQL at ${PG_VM_TAILSCALE_IP}:5432 over the mesh"; exit 1; }
 
-# Per-pod state Secrets: every rolling replacement leaves the old pods' behind.
-mt_ts_prune_pod_state_secrets "$NS_DB" pgbouncer
+  # Per-pod state Secrets: every rolling replacement leaves the old pods' behind.
+  mt_ts_prune_pod_state_secrets "$NS_DB" pgbouncer
+else
+  # Same positive control without a tunnel: a TCP handshake with PostgreSQL
+  # from the PgBouncer container itself. Still fatal.
+  mt_tailscale_sidecar_tcp_check "$NS_DB" app=pgbouncer "$PG_VM_TAILSCALE_IP" 5432 60 pgbouncer \
+    || { print_error "PgBouncer cannot reach PostgreSQL at ${PG_VM_TAILSCALE_IP}:5432"; exit 1; }
+fi
 
 print_success "PgBouncer deployed to $NS_DB"

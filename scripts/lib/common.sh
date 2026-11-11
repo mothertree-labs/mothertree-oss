@@ -1522,14 +1522,16 @@ mt_tailscale_sidecar_fetch() {
 # open never answers the SYN and times out). Retries until the timeout.
 # ---------------------------------------------------------------------------
 mt_tailscale_sidecar_tcp_check() {
-    local namespace="${1:?}" selector="${2:?}" host="${3:?}" port="${4:?}" timeout="${5:-60}"
+    # [container] (default tailscale): the container that runs `nc`. A
+    # no-mesh PgBouncer (developer box) passes its own container.
+    local namespace="${1:?}" selector="${2:?}" host="${3:?}" port="${4:?}" timeout="${5:-60}" container="${6:-tailscale}"
     local start=$SECONDS pod
     while :; do
         pod=$(kubectl get pods -n "$namespace" -l "$selector" -o json 2>/dev/null \
             | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | .[0].metadata.name // empty') || pod=""
         local nc_err=""
         if [ -n "$pod" ]; then
-            if nc_err=$(kubectl exec -n "$namespace" "$pod" -c tailscale -- nc -z -w 5 "$host" "$port" 2>&1 >/dev/null); then
+            if nc_err=$(kubectl exec -n "$namespace" "$pod" -c "$container" -- nc -z -w 5 "$host" "$port" 2>&1 >/dev/null); then
                 print_success "Mesh positive control OK: ${host}:${port} reachable from $namespace/$pod ($((SECONDS - start))s)"
                 return 0
             fi

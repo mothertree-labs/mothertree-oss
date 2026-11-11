@@ -200,6 +200,12 @@ ensure_stalwart_principal() {
     local email="$1"
     local display_name="${2:-$email}"
 
+    # A tenant without mail (e.g. a minimal devbox) has no Stalwart to provision.
+    if [ "${MAIL_ENABLED:-false}" != "true" ]; then
+        print_status "features.mail_enabled is not true — no mail principal for $email"
+        return 0
+    fi
+
     if [ -z "${STALWART_ADMIN_PASSWORD:-}" ]; then
         print_warning "STALWART_ADMIN_PASSWORD not set — skipping Stalwart principal creation"
         return 0

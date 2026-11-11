@@ -58,7 +58,17 @@ mt_load_infra_config
 # Linode-only releases out on k3s.
 source "${REPO_ROOT}/scripts/lib/platform.sh"
 mt_load_cluster_platform
-print_status "Cluster platform: $MT_CLUSTER_PLATFORM${MT_PUBLIC_INGRESS_IP:+ (public ingress IP $MT_PUBLIC_INGRESS_IP)}"
+print_status "Cluster platform: $MT_CLUSTER_PLATFORM, edge $MT_CLUSTER_EDGE${MT_PUBLIC_INGRESS_IP:+ (public ingress IP $MT_PUBLIC_INGRESS_IP)}"
+
+# monitoring.enabled: false is a developer-box setting. A prod-like environment
+# without Prometheus/Alertmanager would have no alerting at all.
+if [ "${MT_MONITORING_ENABLED:-true}" != "true" ]; then
+  if mt_is_prod_like || ! mt_is_local_edge; then
+    print_error "monitoring.enabled: false is only allowed on a dev-class local-edge box (env $MT_ENV, edge $MT_CLUSTER_EDGE)"
+    exit 1
+  fi
+  print_status "edge local: monitoring.enabled is false -- no Prometheus, Grafana, Vector, Loki or blackbox exporter"
+fi
 
 # Alert delivery is mandatory outside dev (Fail Fast — never silently skip).
 # The loader only [WARN]s when these keys are absent, and the Alertmanager
@@ -121,8 +131,12 @@ if mt_has_flag "--rotate-all-keys"; then
 fi
 
 # Validate Cloudflare IP ranges before deploying (firewall rules depend on these)
-print_status "Validating Cloudflare IP ranges..."
-"$REPO_ROOT/scripts/check-cloudflare-ips" || { print_error "Cloudflare IPs changed. Run: ./scripts/check-cloudflare-ips --update"; exit 1; }
+if mt_is_local_edge; then
+  print_status "edge local: nothing is behind Cloudflare, skipping the Cloudflare IP range check"
+else
+  print_status "Validating Cloudflare IP ranges..."
+  "$REPO_ROOT/scripts/check-cloudflare-ips" || { print_error "Cloudflare IPs changed. Run: ./scripts/check-cloudflare-ips --update"; exit 1; }
+fi
 
 print_status "Deploying shared infrastructure for environment: $MT_ENV"
 print_status "Kubeconfig: $KUBECONFIG"
@@ -159,7 +173,7 @@ print_status "Helm repo update started in background (PID: $HELM_REPO_UPDATE_PID
 # Start linkeditor build early (runs in background while other work proceeds)
 # =============================================================================
 LINKEDITOR_BUILD_PID=""
-if [ -d "$REPO_ROOT/submodules/files_linkeditor" ] && [ -f "$REPO_ROOT/scripts/build-linkeditor.sh" ]; then
+if [ -n "$(ls -A "$REPO_ROOT/submodules/files_linkeditor" 2>/dev/null)" ] && [ -f "$REPO_ROOT/scripts/build-linkeditor.sh" ]; then
   print_status "Starting files_linkeditor build in background..."
   "$REPO_ROOT/scripts/build-linkeditor.sh" --nesting-level=$((MT_NESTING_LEVEL+1)) > /tmp/linkeditor-build.log 2>&1 &
   LINKEDITOR_BUILD_PID=$!
@@ -183,6 +197,11 @@ print_status "Helm repo update complete"
 print_status "Setting internal ingress whitelist CIDRs (stable)..."
 
 STABLE_CIDRS="100.64.0.0/10,10.8.0.0/24,10.9.0.0/24,192.168.0.0/16,10.2.0.0/16"
+# A developer box reaches its internal ingress from the host through the k3d
+# Docker network (172.16.0.0/12 holds the Docker bridge subnets).
+if mt_is_local_edge; then
+  STABLE_CIDRS="${STABLE_CIDRS},172.16.0.0/12"
+fi
 export INGRESS_INTERNAL_WHITELIST="$STABLE_CIDRS"
 print_status "Internal ingress whitelist: $STABLE_CIDRS"
 
@@ -577,6 +596,7 @@ fi
 print_status "Deploying nginx ingress ServiceMonitor..."
 kubectl apply -f "$REPO_ROOT/apps/manifests/nginx-ingress-servicemonitor.yaml"
 
+if [ "$MT_MONITORING_ENABLED" = "true" ]; then
 # =============================================================================
 # Wait for monitoring stack
 # =============================================================================
@@ -710,6 +730,9 @@ else
   print_status "Waiting for Loki to be ready (max 2 min)..."
   kubectl wait --for=condition=ready pod -l app=loki -n "$NS_MONITORING" --timeout=120s 2>/dev/null || print_warning "Loki may not be fully ready yet"
 fi
+else
+  print_status "monitoring.enabled is false: skipping the Prometheus/Grafana readiness wait, probes, dashboards and Loki"
+fi  # MT_MONITORING_ENABLED
 
 # Wait for cert-manager to be ready
 print_status "Waiting for cert-manager to be ready (parallel)..."
@@ -728,6 +751,15 @@ print_status "Cert-manager is ready"
 # =============================================================================
 # Deploy ClusterIssuers and Cloudflare API token for cert-manager
 # =============================================================================
+if mt_is_local_edge; then
+  # No public names, so no ACME. The developer's local CA (scripts/devbox init,
+  # trusted by the host) signs everything, under the SAME issuer names, so every
+  # ingress annotation and Certificate deploys unchanged.
+  print_status "edge local: ClusterIssuers sign with the local CA (no Let's Encrypt, no Cloudflare token)"
+  source "${REPO_ROOT}/scripts/lib/local-ca.sh"
+  mt_local_ca_apply_secret || exit 1
+  mt_local_ca_apply_cluster_issuers letsencrypt-prod letsencrypt-prod-dns01 || exit 1
+else
 print_status "Deploying ClusterIssuers and Cloudflare API token..."
 export TLS_EMAIL="$TF_VAR_tls_email"
 export CLOUDFLARE_API_TOKEN="$TF_VAR_cloudflare_api_token"
@@ -735,6 +767,7 @@ envsubst '${CLOUDFLARE_API_TOKEN} ${NS_CERTMANAGER}' < "$REPO_ROOT/apps/manifest
 envsubst '${TLS_EMAIL}' < "$REPO_ROOT/apps/manifests/cert-manager/clusterissuer-http01.yaml.tpl" | kubectl apply -f -
 envsubst '${TLS_EMAIL}' < "$REPO_ROOT/apps/manifests/cert-manager/clusterissuer-dns01.yaml.tpl" | kubectl apply -f -
 print_status "ClusterIssuers and Cloudflare API token deployed"
+fi  # edge
 
 # =============================================================================
 # Deploy PgBouncer + Tailscale sidecar (connects to external PG VM via mesh)
@@ -750,8 +783,10 @@ fi
 # =============================================================================
 # Deploy PG Metrics Bridge (forwards postgres_exporter from PG VM into cluster)
 # =============================================================================
-print_status "Deploying PG metrics bridge to $NS_DB namespace..."
-if [ -x "$REPO_ROOT/apps/deploy-pg-metrics-bridge.sh" ]; then
+if mt_is_local_edge; then
+  print_status "edge local: no PG VM exporter over the mesh, skipping the PG metrics bridge"
+elif [ -x "$REPO_ROOT/apps/deploy-pg-metrics-bridge.sh" ]; then
+  print_status "Deploying PG metrics bridge to $NS_DB namespace..."
   "$REPO_ROOT/apps/deploy-pg-metrics-bridge.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
 else
   print_error "deploy-pg-metrics-bridge.sh not found or not executable"
@@ -774,8 +809,10 @@ fi
 # =============================================================================
 # Deploy Tailscale Key Rotator CronJob
 # =============================================================================
-print_status "Deploying Tailscale key rotator CronJob..."
-if [ -x "$REPO_ROOT/apps/deploy-tailscale-key-rotator.sh" ]; then
+if mt_is_local_edge; then
+  print_status "edge local: no Tailscale sidecars, skipping the key rotator CronJob"
+elif [ -x "$REPO_ROOT/apps/deploy-tailscale-key-rotator.sh" ]; then
+  print_status "Deploying Tailscale key rotator CronJob..."
   "$REPO_ROOT/apps/deploy-tailscale-key-rotator.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
 else
   print_warning "deploy-tailscale-key-rotator.sh not found"
@@ -784,8 +821,10 @@ fi
 # =============================================================================
 # Deploy Headscale Cleanup CronJob
 # =============================================================================
-print_status "Deploying Headscale cleanup CronJob..."
-if [ -x "$REPO_ROOT/apps/deploy-headscale-cleanup.sh" ]; then
+if mt_is_local_edge; then
+  print_status "edge local: no Headscale, skipping the Headscale cleanup CronJob"
+elif [ -x "$REPO_ROOT/apps/deploy-headscale-cleanup.sh" ]; then
+  print_status "Deploying Headscale cleanup CronJob..."
   "$REPO_ROOT/apps/deploy-headscale-cleanup.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
 else
   print_warning "deploy-headscale-cleanup.sh not found"
@@ -794,8 +833,10 @@ fi
 # =============================================================================
 # Deploy ACME challenge cleanup CronJob
 # =============================================================================
-print_status "Deploying ACME challenge cleanup CronJob..."
-if [ -x "$REPO_ROOT/apps/deploy-acme-challenge-cleanup.sh" ]; then
+if mt_is_local_edge; then
+  print_status "edge local: no ACME and no Cloudflare zone, skipping the ACME challenge cleanup CronJob"
+elif [ -x "$REPO_ROOT/apps/deploy-acme-challenge-cleanup.sh" ]; then
+  print_status "Deploying ACME challenge cleanup CronJob..."
   "$REPO_ROOT/apps/deploy-acme-challenge-cleanup.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'
 else
   print_warning "deploy-acme-challenge-cleanup.sh not found"
@@ -844,7 +885,11 @@ print_status "Platform theme ConfigMap applied in namespace $NS_AUTH"
 # PgBouncer is the sole database entrypoint (connects to external PG VM via Tailscale mesh)
 export PG_SERVICE_NAME="pgbouncer"
 export PG_HOST="${PG_SERVICE_NAME}.${NS_DB}.svc.cluster.local"
-print_status "PostgreSQL: using PgBouncer at $PG_HOST (external PG VM via Tailscale mesh)"
+if [ "$PGBOUNCER_MESH" = "true" ]; then
+  print_status "PostgreSQL: using PgBouncer at $PG_HOST (external PG VM via Tailscale mesh)"
+else
+  print_status "PostgreSQL: using PgBouncer at $PG_HOST (PostgreSQL at $PGBOUNCER_PG_HOST, no mesh)"
+fi
 
 # Verify shared infra secrets were loaded by infra-config.sh
 # (KEYCLOAK_ADMIN_PASSWORD, KEYCLOAK_DB_PASSWORD, TF_VAR_grafana_admin_password)
@@ -1070,7 +1115,7 @@ if [ -n "$LINKEDITOR_BUILD_PID" ]; then
     print_warning "files_linkeditor build may have failed. Check /tmp/linkeditor-build.log"
     cat /tmp/linkeditor-build.log 2>/dev/null | tail -20 || true
   fi
-elif [ -d "$REPO_ROOT/submodules/files_linkeditor" ]; then
+elif [ -n "$(ls -A "$REPO_ROOT/submodules/files_linkeditor" 2>/dev/null)" ]; then
   if [ -f "$REPO_ROOT/scripts/build-linkeditor.sh" ]; then
     print_status "Building files_linkeditor Nextcloud app..."
     "$REPO_ROOT/scripts/build-linkeditor.sh" --nesting-level=$((MT_NESTING_LEVEL+1))
@@ -1085,7 +1130,9 @@ fi
 # =============================================================================
 # Deploy Ollama inference engine (shared LLM backend)
 # =============================================================================
-if [ -x "$REPO_ROOT/apps/deploy-llm.sh" ]; then
+if mt_is_local_edge; then
+  print_status "edge local: the shared LLM (Ollama + S3 model cache) is not part of a developer box, skipping"
+elif [ -x "$REPO_ROOT/apps/deploy-llm.sh" ]; then
   print_status "Deploying Ollama inference engine..."
   "$REPO_ROOT/apps/deploy-llm.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /' || \
     print_warning "Ollama deploy incomplete — model may still be pulling on a cold-start node"
@@ -1096,7 +1143,9 @@ fi
 # Deploy Tailscale subnet router for operator access to internal services.
 # Provides split DNS + subnet routing so operators can reach Grafana, Prometheus, etc.
 # Non-blocking — router failure shouldn't fail the deploy.
-if [ -x "$REPO_ROOT/apps/deploy-tailscale-router.sh" ]; then
+if mt_is_local_edge; then
+  print_status "edge local: no mesh, skipping the Tailscale subnet router"
+elif [ -x "$REPO_ROOT/apps/deploy-tailscale-router.sh" ]; then
   print_status "Deploying Tailscale subnet router..."
   "$REPO_ROOT/apps/deploy-tailscale-router.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /' || \
     print_warning "Tailscale router deploy failed (non-fatal)"

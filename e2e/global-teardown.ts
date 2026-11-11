@@ -5,6 +5,9 @@ import * as fs from 'fs';
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'dev-test-users.sh');
 const TENANT = process.env.E2E_TENANT || 'example';
+// Environment passed to scripts/dev-test-users.sh (-e). CI targets dev-class
+// clusters through the dev config; a developer box sets E2E_ENV=devbox.
+const E2E_ENV = process.env.E2E_ENV || 'dev';
 const IS_CI = !!process.env.CI;
 
 function run(cmd: string): void {
@@ -53,7 +56,7 @@ export default async function globalTeardown(): Promise<void> {
   console.log('\n[E2E Global Teardown] Deleting test users created by this run...\n');
 
   for (const username of usersToDelete) {
-    run(`${SCRIPT} -e dev -t ${TENANT} delete ${username}`);
+    run(`${SCRIPT} -e ${E2E_ENV} -t ${TENANT} delete ${username}`);
     console.log(`  [teardown] Deleted user: ${username}`);
   }
 

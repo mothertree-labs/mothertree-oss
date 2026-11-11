@@ -3,6 +3,10 @@ environments:
   # devhome: single-node k3s on one box (see devhome/). Its values directory
   # environments/devhome is a symlink to environments/dev — same dev sizing.
   devhome: {}
+  # devbox: a developer's laptop (k3d, cluster.edge: local — see docs/devbox.md).
+  # environments/devbox is a directory of per-file symlinks into dev/ plus real
+  # files for its own overrides (ingress without PROXY, single replicas).
+  devbox: {}
   prod: {}
 
 ---
@@ -61,12 +65,15 @@ releases:
 
   # Cert Manager
   # needs kube-prometheus-stack because ServiceMonitor CRDs must exist first
+  # (deploy_infra also pre-applies the CRDs, so with monitoring.enabled=false —
+  # devbox — the need is dropped rather than pointing at an uninstalled release)
   - name: cert-manager
     namespace: {{ requiredEnv "NS_CERTMANAGER" }}
     chart: jetstack/cert-manager
     version: v1.21.3
-    needs:
-      - {{ requiredEnv "NS_MONITORING" }}/kube-prometheus-stack
+    # (one line: scripts/lib/prometheus-crds.sh parses this file with every
+    # template action replaced by a placeholder, so no standalone template lines)
+    needs: {{ if not (and (eq (env "MT_MONITORING_ENABLED") "false") (eq (env "MT_CLUSTER_EDGE") "local") (ne .Environment.Name "prod")) }}[{{ requiredEnv "NS_MONITORING" }}/kube-prometheus-stack]{{ else }}[]{{ end }}
     wait: true
     timeout: 600
     labels:
@@ -94,6 +101,10 @@ releases:
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: prometheus-community/kube-prometheus-stack
     version: 91.9.0
+    # monitoring.enabled in the infra config. Off ONLY when it is false AND the
+    # edge is local AND this is not prod (deploy_infra refuses the setting
+    # elsewhere too), so a stray env var cannot uninstall prod monitoring.
+    installed: {{ not (and (eq (env "MT_MONITORING_ENABLED") "false") (eq (env "MT_CLUSTER_EDGE") "local") (ne .Environment.Name "prod")) }}
     disableValidation: true
     needs:
       - {{ requiredEnv "NS_INGRESS" }}/ingress-nginx
@@ -115,6 +126,7 @@ releases:
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: vector/vector
     version: 0.61.0
+    installed: {{ not (and (eq (env "MT_MONITORING_ENABLED") "false") (eq (env "MT_CLUSTER_EDGE") "local") (ne .Environment.Name "prod")) }}
     needs:
       - {{ requiredEnv "NS_MONITORING" }}/kube-prometheus-stack
     labels:
@@ -128,6 +140,7 @@ releases:
     namespace: {{ requiredEnv "NS_MONITORING" }}
     chart: prometheus-community/prometheus-blackbox-exporter
     version: 11.21.2
+    installed: {{ not (and (eq (env "MT_MONITORING_ENABLED") "false") (eq (env "MT_CLUSTER_EDGE") "local") (ne .Environment.Name "prod")) }}
     labels:
       tier: system
     needs:
