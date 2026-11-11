@@ -1,0 +1,562 @@
+#!/usr/bin/env bash
+# devbox — a Mothertree developer box on your own machine.
+#
+# Runs the SAME deploy scripts and manifests as dev/devhome/prod against a local
+# single-node k3d cluster (cluster.platform: k3s, cluster.edge: local), from a
+# plain clone of the public repo: no config submodules, no vault, no cloud
+# accounts. Every secret is generated locally and is throwaway.
+#
+# Everything generated lives in .devbox/ (gitignored):
+#   tenants/devbox/devbox.{config,secrets}.yaml   the one tenant (also the infra tenant)
+#   infra/devbox.config.yaml                      cluster/pgbouncer/monitoring/tls settings
+#   infra/terraform-outputs.devbox.env            stand-in for phase1 outputs
+#   project.conf                                  CONTAINER_REGISTRY=localhost (local builds)
+#   images.env                                    image refs of the last local builds
+#   kubeconfig.devbox.yaml
+#   ca/                                           mkcert CA (CAROOT) — trusted by this machine
+#
+# Docs: docs/devbox.md
+#
+# Usage: scripts/devbox <command> [args]
+#   doctor                  check prerequisites, ports and resources
+#   init [--regenerate]     write .devbox/ and create + trust the local CA
+#   up                      cluster + PostgreSQL + images + deploy_infra + create_env
+#   build <component>       build a local image (admin-portal, account-portal) and import it
+#   deploy <app>            run one apps/deploy-<app>.sh against the devbox
+#   e2e <spec> [args]       run Playwright spec(s) against the devbox
+#   users <args>            scripts/dev-test-users.sh against the devbox (e.g. users list)
+#   shell                   a subshell with KUBECONFIG and the MT_* paths exported
+#   env                     print those exports (eval "$(scripts/devbox env)")
+#   status                  cluster, PostgreSQL and URLs
+#   down                    delete the cluster and stop PostgreSQL (keeps data + .devbox/)
+#   nuke                    delete the cluster, PostgreSQL data and .devbox/ (asks first)
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEVBOX_DIR="${MT_DEVBOX_DIR:-$REPO_ROOT/.devbox}"
+# init chmods this directory to 0700 and nuke deletes it recursively, so an
+# override must name a dedicated .devbox directory, never $HOME or the repo.
+case "$DEVBOX_DIR" in
+  */.devbox) ;;
+  *) echo "[devbox] ERROR: MT_DEVBOX_DIR must end in /.devbox (got: $DEVBOX_DIR)" >&2; exit 1 ;;
+esac
+
+# --- fixed shape of the box ---------------------------------------------------
+DEVBOX_ENV="devbox"
+DEVBOX_TENANT="devbox"
+# What the local CA may vouch for. Every name type is listed: a type left out
+# of nameConstraints is unrestricted.
+DEVBOX_CA_NAME_CONSTRAINTS="permitted;DNS:localhost,permitted;IP:127.0.0.0/255.0.0.0,permitted;IP:0:0:0:0:0:0:0:1/FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF,permitted;email:localhost"
+DEVBOX_DOMAIN="mothertree.localhost"            # *.localhost resolves to loopback (RFC 6761)
+DEVBOX_HOST_SUFFIX="${DEVBOX_ENV}.${DEVBOX_DOMAIN}"
+DEVBOX_CLUSTER="devbox"
+# Docker network of the k3d cluster. The ingress overlay
+# (apps/environments/devbox/ingress-nginx.yaml.gotmpl) trusts its gateway .1;
+# devhome uses 172.28/16 and 172.30/16, so the two can share a host.
+DEVBOX_SUBNET="172.29.0.0/16"
+DEVBOX_PG_IP="172.29.0.20"
+DEVBOX_PG_CONTAINER="devbox-postgres"
+DEVBOX_PG_VOLUME="devbox-pgdata"
+# PostgreSQL major matches postgresql.version of the real environments (17).
+DEVBOX_PG_IMAGE="postgres:17.11"
+# Same k3s as devhome: read from its Ansible pin so there is one source.
+DEVBOX_K3D_VERSION="v5.9.0"
+
+# --- output helpers -------------------------------------------------------------
+c_blue=$'\033[0;34m'; c_green=$'\033[0;32m'; c_yellow=$'\033[1;33m'; c_red=$'\033[0;31m'; c_off=$'\033[0m'
+[ -t 1 ] || { c_blue=""; c_green=""; c_yellow=""; c_red=""; c_off=""; }
+info() { printf '%s[devbox]%s %s\n' "$c_blue" "$c_off" "$*"; }
+ok()   { printf '%s[devbox]%s %s\n' "$c_green" "$c_off" "$*"; }
+warn() { printf '%s[devbox]%s %s\n' "$c_yellow" "$c_off" "$*" >&2; }
+die()  { printf '%s[devbox]%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
+
+usage() { sed -n '/^# Usage:/,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+k3s_image() {
+  local img
+  img=$(sed -n 's/^[[:space:]]*k3s_image:[[:space:]]*"\{0,1\}\(rancher\/k3s:[^"]*\)"\{0,1\}[[:space:]]*$/\1/p' \
+    "$REPO_ROOT/devhome/ansible/box.yml" | head -1)
+  [ -n "$img" ] || die "Could not read k3s_image from devhome/ansible/box.yml"
+  printf '%s\n' "$img"
+}
+
+# --- environment for the deploy scripts ----------------------------------------
+devbox_exports() {
+  # %q-quoted: this output is eval'd (load_env, `eval "$(scripts/devbox env)"`).
+  printf 'export %s=%q\n' \
+    MT_TENANTS_DIR "$DEVBOX_DIR/tenants" \
+    MT_INFRA_CONFIG_DIR "$DEVBOX_DIR/infra" \
+    MT_PROJECT_CONF "$DEVBOX_DIR/project.conf" \
+    KUBECONFIG "$DEVBOX_DIR/kubeconfig.devbox.yaml" \
+    CAROOT "$DEVBOX_DIR/ca"
+  if [ -f "$DEVBOX_DIR/images.env" ]; then
+    local k v
+    while IFS='=' read -r k v; do
+      [[ "$k" =~ ^[A-Z_]+_IMAGE$ ]] && [[ "$v" =~ ^[A-Za-z0-9._/:-]+$ ]] \
+        || die "Unexpected line in $DEVBOX_DIR/images.env: $k=$v"
+      printf 'export %s=%q\n' "$k" "$v"
+    done < "$DEVBOX_DIR/images.env"
+  fi
+}
+load_env() {
+  [ -f "$DEVBOX_DIR/infra/devbox.config.yaml" ] || die "No .devbox/ yet — run: scripts/devbox init"
+  eval "$(devbox_exports)"
+}
+
+secret() { yq "$1" "$DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml"; }
+
+# =============================================================================
+# doctor
+# =============================================================================
+cmd_doctor() {
+  local bad=0 c
+  info "Checking prerequisites..."
+  for c in docker k3d kubectl helm helmfile kustomize yq jq mkcert openssl envsubst shasum curl git node npm certutil; do
+    if command -v "$c" >/dev/null 2>&1; then
+      printf '  %-10s %s\n' "$c" "ok"
+    else
+      printf '  %-10s %s\n' "$c" "MISSING"; bad=1
+    fi
+  done
+  if command -v yq >/dev/null 2>&1 && ! yq --version 2>&1 | grep -q mikefarah; then
+    warn "yq is not mikefarah/yq v4 (the scripts use its syntax)"; bad=1
+  fi
+  if command -v k3d >/dev/null 2>&1; then
+    local kv; kv=$(k3d version 2>/dev/null | sed -n 's/^k3d version //p')
+    [ "$kv" = "$DEVBOX_K3D_VERSION" ] || warn "k3d is $kv; devbox is tested with $DEVBOX_K3D_VERSION"
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    warn "docker is not reachable by $(id -un) (is the daemon running / are you in the docker group?)"; bad=1
+  fi
+  # *.localhost must resolve to loopback for curl and the deploy gates.
+  if command -v getent >/dev/null 2>&1; then
+    if getent hosts "admin.${DEVBOX_HOST_SUFFIX}" >/dev/null 2>&1; then
+      printf '  %-10s %s\n' "*.localhost" "resolves"
+    else
+      warn "admin.${DEVBOX_HOST_SUFFIX} does not resolve (needs systemd-resolved or an /etc/hosts entry; Ubuntu 18.04 does not)"; bad=1
+    fi
+  fi
+  # Ports 80/443 on loopback.
+  if ! k3d cluster list "$DEVBOX_CLUSTER" >/dev/null 2>&1; then
+    for c in 80 443; do
+      if (exec 3<>"/dev/tcp/127.0.0.1/$c") 2>/dev/null; then
+        warn "127.0.0.1:$c is already in use — the devbox ingress needs it"; bad=1
+      fi
+    done
+  fi
+  if [ -r /proc/meminfo ]; then
+    local avail_mb; avail_mb=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+    if [ "$avail_mb" -lt 3500 ]; then
+      warn "Only ${avail_mb} MiB available; the minimal devbox needs about 3.5 GiB"
+    else
+      printf '  %-10s %s MiB available\n' "memory" "$avail_mb"
+    fi
+  fi
+  if [ -d "$DEVBOX_DIR/ca" ] && command -v certutil >/dev/null 2>&1 && [ -d "$HOME/.pki/nssdb" ]; then
+    if certutil -L -d "sql:$HOME/.pki/nssdb" 2>/dev/null | grep -q mkcert; then
+      printf '  %-10s %s\n' "browser CA" "trusted (NSS)"
+    else
+      warn "The devbox CA is not in the browser trust store (~/.pki/nssdb) — run: scripts/devbox init"
+    fi
+  fi
+  [ "$bad" -eq 0 ] && ok "doctor: all good" || die "doctor: fix the items above"
+}
+
+# =============================================================================
+# init — generate .devbox/
+# =============================================================================
+rand() { openssl rand -hex "${1:-24}"; }
+
+gen_tenant_config() {
+  local out="$1"
+  yq '
+    .tenant.name = "devbox" |
+    .tenant.display_name = "Devbox" |
+    .tenant.env = "devbox" |
+    .dns.domain = "'"$DEVBOX_DOMAIN"'" |
+    .dns.env_dns_label = "devbox" |
+    .dns.cookie_domain = ".'"$DEVBOX_HOST_SUFFIX"'" |
+    .keycloak.realm = "devbox" |
+    .smtp.domain = "'"$DEVBOX_HOST_SUFFIX"'" |
+    .database.docs_db = "docs_devbox" |
+    .database.nextcloud_db = "nextcloud_devbox" |
+    .database.stalwart_db = "stalwart_devbox" |
+    .database.roundcube_db = "roundcube_devbox" |
+    .database.synapse_db = "synapse_devbox" |
+    .s3.bucket_prefix = "devbox" |
+    .s3.docs_bucket = "devbox-docs" |
+    .s3.matrix_bucket = "devbox-matrix" |
+    .s3.files_bucket = "devbox-files" |
+    .s3.mail_bucket = "devbox-mail" |
+    .s3.cluster = "local" |
+    (.. | select(has("min_replicas")) | .min_replicas) = 1 |
+    (.. | select(has("max_replicas")) | .max_replicas) = 1 |
+    .resources.keycloak.replicas = 1 |
+    .resources.redis.replicas = 0 |
+    .alerting.oncall_email = "devbox@localhost" |
+    .features = {
+      "jitsi_enabled": false, "matrix_enabled": false, "docs_enabled": false,
+      "files_enabled": false, "smtp_enabled": false, "turn_enabled": false,
+      "mail_enabled": false, "webmail_enabled": false,
+      "admin_portal_enabled": true, "account_portal_enabled": true,
+      "calendar_enabled": false, "office_enabled": false,
+      "google_import_enabled": false, "llm_enabled": false,
+      "login_methods": {"passkey": true, "magic_link": false, "google_sso": false}
+    } |
+    . head_comment = "Generated by scripts/devbox init — throwaway developer box config. Edit features.* to add apps."
+  ' "$REPO_ROOT/tenants/.example/dev.config.yaml" > "$out"
+}
+
+gen_tenant_secrets() {
+  local out="$1" dkim_priv dkim_pub
+  dkim_priv=$(openssl genrsa 2048 2>/dev/null)
+  dkim_pub=$(printf '%s\n' "$dkim_priv" | openssl rsa -pubout 2>/dev/null | grep -v '^-' | tr -d '\n')
+  # Every placeholder in the template becomes a fresh random value; the
+  # credentials for outside services a devbox never talks to become empty, so
+  # nothing pretends to hold a real Cloudflare/Linode/Google/Headscale token.
+  DKIM_PRIV="$dkim_priv" DKIM_PUB="$dkim_pub" yq '
+    (.. | select(tag == "!!str" and (test("PLACEHOLDER") or test("REPLACE_WITH")))) |= "R" |
+    .linode.token = "" | .cloudflare.api_token = "" | .cloudflare.zone_id = "" |
+    .tls.email = "devbox@localhost" |
+    .google.client_id = "" | .google.client_secret = "" |
+    .alertbot = {"access_token": "", "room_id": "", "deploy_room_id": "", "homeserver": ""} |
+    .healthchecks = {"deadman_url": "", "critical_url": ""} |
+    .tailscale = {"rotator_api_key": "", "authkey": "", "turn_authkey": ""} |
+    .github.pat = "" |
+    .ssh.public_key = "" |
+    .s3_matrix = {"access_key": "", "secret_key": ""} |
+    .s3_docs = {"access_key": "", "secret_key": ""} |
+    .s3_files = {"access_key": "", "secret_key": ""} |
+    .s3_mail = {"access_key": "", "secret_key": ""} |
+    .dkim.private_key = strenv(DKIM_PRIV) | .dkim.public_key = strenv(DKIM_PUB) |
+    .pgbouncer.auth_password = "R" |
+    .admin_portal.redis_password = "R" |
+    .admin_portal.beginsetup_secret = "R" |
+    . head_comment = "Generated by scripts/devbox init — THROWAWAY secrets for a local developer box. Never reuse them anywhere."
+  ' "$REPO_ROOT/tenants/.example/dev.secrets.yaml.example" > "$out.tmp"
+  # Replace each "R" marker with its own random value (one openssl call each).
+  local n i
+  n=$(grep -c '"R"$\|: R$' "$out.tmp" || true)
+  : > "$out"
+  while IFS= read -r line; do
+    case "$line" in
+      *': R'|*': "R"') printf '%s "%s"\n' "${line%:*}:" "$(rand 24)" >> "$out" ;;
+      *) printf '%s\n' "$line" >> "$out" ;;
+    esac
+  done < "$out.tmp"
+  rm -f "$out.tmp"
+  chmod 600 "$out"
+  # Sanity: no marker and no placeholder survived.
+  if grep -qE '(: "?R"?$)|PLACEHOLDER|REPLACE_WITH' "$out"; then
+    die "secret generation left a placeholder in $out"
+  fi
+}
+
+gen_infra_config() {
+  cat > "$1" <<EOF
+# Generated by scripts/devbox init — developer box infrastructure config.
+cluster:
+  platform: k3s
+  edge: local          # no public DNS, no ACME, no Headscale mesh
+postgresql:
+  version: "17"
+keycloak:
+  replicas: 1
+pgbouncer:
+  enabled: true
+  mesh: false          # PostgreSQL is a plain container on the k3d network
+  pg_host: "$DEVBOX_PG_IP"
+  replicas: 1
+  max_client_conn: 200
+  default_pool_size: 20
+  min_pool_size: 1
+  reserve_pool_size: 2
+monitoring:
+  enabled: false       # no Prometheus/Grafana/Loki/Vector on a laptop by default
+tls:
+  local_ca:            # mkcert CA, relative to this directory
+    cert: ../ca/rootCA.pem
+    key: ../ca/rootCA-key.pem
+auth_host: ""
+EOF
+}
+
+cmd_init() {
+  # Everything under .devbox/ is private to this user (secrets, CA key).
+  umask 077
+  local regenerate=false
+  [ "${1:-}" = "--regenerate" ] && regenerate=true
+  command -v yq >/dev/null && command -v openssl >/dev/null && command -v mkcert >/dev/null \
+    || die "init needs yq, openssl and mkcert (run: scripts/devbox doctor)"
+
+  local tdir="$DEVBOX_DIR/tenants/$DEVBOX_TENANT" idir="$DEVBOX_DIR/infra"
+  local secrets="$tdir/$DEVBOX_ENV.secrets.yaml"
+  if [ -f "$secrets" ] && [ "$regenerate" != "true" ]; then
+    info "Keeping existing secrets ($secrets); use --regenerate for new ones (implies nuke)"
+  else
+    if [ "$regenerate" = "true" ] && { k3d cluster list "$DEVBOX_CLUSTER" >/dev/null 2>&1 || docker volume inspect "$DEVBOX_PG_VOLUME" >/dev/null 2>&1; }; then
+      die "--regenerate with an existing cluster or database would desync Keycloak and PostgreSQL from the new secrets — run: scripts/devbox nuke"
+    fi
+    mkdir -p "$tdir"
+    gen_tenant_secrets "$secrets"
+    ok "Generated throwaway secrets: $secrets"
+  fi
+  mkdir -p "$tdir" "$idir"
+  chmod 700 "$DEVBOX_DIR"
+  gen_tenant_config "$tdir/$DEVBOX_ENV.config.yaml"
+  gen_infra_config "$idir/$DEVBOX_ENV.config.yaml"
+  printf 'TURN_SERVER_IP=127.0.0.1\nLKE_CLUSTER_ID=\nHEADSCALE_SERVER_IP=\nPOSTGRES_SERVER_IP=%s\n' "$DEVBOX_PG_IP" \
+    > "$idir/terraform-outputs.$DEVBOX_ENV.env"
+  printf '# Generated by scripts/devbox init: portal images are built locally (scripts/devbox build).\nCONTAINER_REGISTRY=localhost\nGITHUB_ORG=\n' \
+    > "$DEVBOX_DIR/project.conf"
+  ok "Wrote $DEVBOX_DIR/{tenants,infra,project.conf}"
+
+  # Local CA, trusted by the system store (curl, the deploy gates) and the NSS
+  # store (Chrome/Chromium and Firefox profiles on Linux). TRUST_STORES forces
+  # NSS even when mkcert sees no installed browser yet.
+  #
+  # The CA is created here rather than by mkcert so it can carry a critical
+  # nameConstraints extension: it can only vouch for *.localhost names,
+  # loopback addresses and @localhost email. A constraint only restricts the
+  # name types it lists (RFC 5280), so IP and email are pinned too. Its key
+  # also lives in a cluster Secret (cert-manager signs with it), and an
+  # unconstrained root in the host's trust stores would let anything that can
+  # read that Secret mint certificates browsers trust for ANY domain.
+  mkdir -p "$DEVBOX_DIR/ca"
+  if [ ! -f "$DEVBOX_DIR/ca/rootCA.pem" ]; then
+    ( umask 077
+      openssl req -x509 -new -nodes -newkey rsa:3072 -sha256 -days 825 \
+        -keyout "$DEVBOX_DIR/ca/rootCA-key.pem" -out "$DEVBOX_DIR/ca/rootCA.pem" \
+        -subj "/O=mothertree devbox/OU=$(id -un)@$(hostname)/CN=mothertree devbox CA ($(id -un)@$(hostname))" \
+        -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+        -addext "keyUsage=critical,keyCertSign,cRLSign" \
+        -addext "nameConstraints=critical,$DEVBOX_CA_NAME_CONSTRAINTS" ) 2>/dev/null \
+      || die "Could not create the local CA (needs OpenSSL 1.1.1+ for -addext)"
+    chmod 644 "$DEVBOX_DIR/ca/rootCA.pem"
+  fi
+  local nc
+  nc=$(openssl x509 -in "$DEVBOX_DIR/ca/rootCA.pem" -noout -ext nameConstraints 2>/dev/null || true)
+  { grep -q 'DNS:localhost' <<<"$nc" && grep -q 'IP:127.0.0.0/255.0.0.0' <<<"$nc" && grep -q 'email:localhost' <<<"$nc"; } \
+    || die "$DEVBOX_DIR/ca/rootCA.pem is not limited to localhost names, loopback IPs and @localhost email (an older devbox CA?) — run: scripts/devbox nuke && scripts/devbox init"
+  info "Adding the devbox CA to the system and browser trust stores (may ask for sudo)..."
+  CAROOT="$DEVBOX_DIR/ca" TRUST_STORES="system,nss" mkcert -install
+  chmod 600 "$DEVBOX_DIR/ca/rootCA-key.pem"
+  ok "Local CA ready and trusted: $DEVBOX_DIR/ca/rootCA.pem"
+  info "Next: scripts/devbox up"
+}
+
+# =============================================================================
+# up
+# =============================================================================
+cluster_up() {
+  if k3d cluster list "$DEVBOX_CLUSTER" >/dev/null 2>&1; then
+    info "k3d cluster $DEVBOX_CLUSTER exists"
+  else
+    local img; img=$(k3s_image)
+    info "Creating k3d cluster $DEVBOX_CLUSTER ($img, network $DEVBOX_SUBNET, ports 127.0.0.1:80/443)..."
+    # The devhome flags (devhome/ansible/box.yml), minus its tailnet bits:
+    # traefik + metrics-server off, LKE-matching CIDRs and cluster DNS. Ingress
+    # ports bind to loopback only — the devbox is not a LAN service.
+    k3d cluster create "$DEVBOX_CLUSTER" \
+      --image "$img" \
+      --servers 1 --agents 0 --no-lb \
+      --api-port 127.0.0.1:6550 \
+      --subnet "$DEVBOX_SUBNET" \
+      --port "127.0.0.1:80:80@server:0:direct" \
+      --port "127.0.0.1:443:443@server:0:direct" \
+      --k3s-arg "--disable=traefik@server:0" \
+      --k3s-arg "--disable=metrics-server@server:0" \
+      --k3s-arg "--cluster-cidr=10.2.0.0/16@server:0" \
+      --k3s-arg "--service-cidr=10.128.0.0/16@server:0" \
+      --k3s-arg "--cluster-dns=10.128.0.10@server:0" \
+      --kubeconfig-update-default=false --wait --timeout 300s
+  fi
+  ( umask 077; k3d kubeconfig get "$DEVBOX_CLUSTER" > "$DEVBOX_DIR/kubeconfig.devbox.yaml" )
+  kubectl --kubeconfig "$DEVBOX_DIR/kubeconfig.devbox.yaml" wait --for=condition=Ready node --all --timeout=120s >/dev/null
+  ok "Cluster ready"
+}
+
+postgres_up() {
+  local net="k3d-$DEVBOX_CLUSTER"
+  if docker inspect "$DEVBOX_PG_CONTAINER" >/dev/null 2>&1; then
+    docker start "$DEVBOX_PG_CONTAINER" >/dev/null
+    # A cluster re-create makes a new network; reattach with the fixed address.
+    if [ "$(docker inspect -f "{{with index .NetworkSettings.Networks \"$net\"}}{{.IPAddress}}{{end}}" "$DEVBOX_PG_CONTAINER")" != "$DEVBOX_PG_IP" ]; then
+      docker network disconnect "$net" "$DEVBOX_PG_CONTAINER" >/dev/null 2>&1 || true
+      docker network connect --ip "$DEVBOX_PG_IP" "$net" "$DEVBOX_PG_CONTAINER"
+    fi
+  else
+    info "Starting PostgreSQL ($DEVBOX_PG_IMAGE) at $DEVBOX_PG_IP on $net..."
+    # The superuser password goes in through a file (POSTGRES_PASSWORD_FILE),
+    # never argv or the container's env. Only read at initdb. 0644 because the
+    # image's entrypoint reads it as the postgres user; it stays private on the
+    # host because .devbox/ itself is 0700.
+    local pw_file="$DEVBOX_DIR/pg-superuser-password"
+    [ "$(stat -c %a "$DEVBOX_DIR" 2>/dev/null || stat -f %Lp "$DEVBOX_DIR")" = "700" ] \
+      || die "$DEVBOX_DIR must be mode 700 (run: scripts/devbox init)"
+    secret '.database.postgres_password' | tr -d '\n' > "$pw_file"
+    chmod 644 "$pw_file"
+    # C locale + UTF8: what the PG VMs' initdb uses. Not published to the host.
+    docker run -d --name "$DEVBOX_PG_CONTAINER" --restart unless-stopped \
+      --network "$net" --ip "$DEVBOX_PG_IP" \
+      -v "$pw_file:/run/secrets/pg_pw:ro" -e POSTGRES_PASSWORD_FILE=/run/secrets/pg_pw \
+      -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" \
+      -v "$DEVBOX_PG_VOLUME:/var/lib/postgresql/data" \
+      "$DEVBOX_PG_IMAGE" -c max_connections=300 >/dev/null
+  fi
+  local i
+  for i in $(seq 1 60); do
+    docker exec "$DEVBOX_PG_CONTAINER" pg_isready -U postgres -q 2>/dev/null && break
+    sleep 2
+  done
+  docker exec "$DEVBOX_PG_CONTAINER" pg_isready -U postgres -q || die "PostgreSQL did not become ready"
+  # shellcheck source=lib/pg-bootstrap-sql.sh
+  source "$REPO_ROOT/scripts/lib/pg-bootstrap-sql.sh"
+  local sql; sql=$(mt_pg_bootstrap_sql "$DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml")
+  printf '%s\n' "$sql" | docker exec -i "$DEVBOX_PG_CONTAINER" psql -U postgres -q -d postgres >/dev/null
+  ok "PostgreSQL ready and bootstrapped"
+}
+
+cmd_up() {
+  load_env
+  cluster_up
+  postgres_up
+  # Portal images are always built locally (no registry default in public code,
+  # and the published images are amd64-only). Build once; `build` rebuilds.
+  local feature comp
+  for comp in admin-portal account-portal; do
+    feature="${comp//-/_}_enabled"
+    if [ "$(yq ".features.${feature}" "$DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.config.yaml")" = "true" ]; then
+      local var; var="$(printf '%s' "${comp//-/_}" | tr '[:lower:]' '[:upper:]')_IMAGE"
+      if ! grep -q "^${var}=" "$DEVBOX_DIR/images.env" 2>/dev/null; then
+        cmd_build "$comp"
+      fi
+    fi
+  done
+  load_env
+  info "deploy_infra -e $DEVBOX_ENV ..."
+  "$REPO_ROOT/scripts/deploy_infra" -e "$DEVBOX_ENV"
+  info "create_env -e $DEVBOX_ENV -t $DEVBOX_TENANT ..."
+  "$REPO_ROOT/scripts/create_env" -e "$DEVBOX_ENV" -t "$DEVBOX_TENANT"
+  cmd_status
+}
+
+# =============================================================================
+# build / deploy / e2e / users
+# =============================================================================
+cmd_build() {
+  local comp="${1:?Usage: scripts/devbox build <admin-portal|account-portal>}"
+  load_env
+  case "$comp" in admin-portal|account-portal) ;; *) die "build supports admin-portal and account-portal" ;; esac
+  local version tag var
+  version=$(tr -d '[:space:]' < "$REPO_ROOT/apps/$comp/VERSION")
+  # A unique tag per build: the Deployment's image changes, so the deploy's
+  # apply rolls the pod (re-importing the same tag would not).
+  tag="localhost/mothertree-$comp:${version}-dev-$(git -C "$REPO_ROOT" rev-parse --short HEAD)-$(date +%s)"
+  [[ "$tag" =~ ^[A-Za-z0-9._/:-]+$ ]] || die "Refusing odd image tag '$tag' (check apps/$comp/VERSION)"
+  info "Building $tag ..."
+  IMAGE_TAG="$tag" PUSH=false "$REPO_ROOT/ci/scripts/build-$comp.sh"
+  info "Importing into k3d cluster $DEVBOX_CLUSTER ..."
+  k3d image import "$tag" -c "$DEVBOX_CLUSTER"
+  var="$(printf '%s' "${comp//-/_}" | tr '[:lower:]' '[:upper:]')_IMAGE"
+  touch "$DEVBOX_DIR/images.env"
+  grep -v "^${var}=" "$DEVBOX_DIR/images.env" > "$DEVBOX_DIR/images.env.tmp" || true
+  printf '%s=%s\n' "$var" "$tag" >> "$DEVBOX_DIR/images.env.tmp"
+  mv "$DEVBOX_DIR/images.env.tmp" "$DEVBOX_DIR/images.env"
+  ok "$var=$tag (used by the next deploy)"
+}
+
+cmd_deploy() {
+  local app="${1:?Usage: scripts/devbox deploy <app> (e.g. admin-portal)}"
+  [[ "$app" =~ ^[a-z0-9-]+$ ]] || die "App names are lowercase letters, digits and dashes (got '$app')"
+  load_env
+  local script="$REPO_ROOT/apps/deploy-${app}.sh"
+  [ -x "$script" ] || die "No such deploy script: $script"
+  "$script" -e "$DEVBOX_ENV" -t "$DEVBOX_TENANT" --nesting-level=0
+}
+
+cmd_users() {
+  load_env
+  "$REPO_ROOT/scripts/dev-test-users.sh" -e "$DEVBOX_ENV" -t "$DEVBOX_TENANT" "$@"
+}
+
+cmd_e2e() {
+  [ "$#" -gt 0 ] || die "Usage: scripts/devbox e2e <spec> [playwright args]"
+  load_env
+  cd "$REPO_ROOT/e2e"
+  [ -d node_modules ] || npm ci
+  E2E_ENV="$DEVBOX_ENV" E2E_TENANT="$DEVBOX_TENANT" E2E_BASE_DOMAIN="$DEVBOX_HOST_SUFFIX" \
+    NODE_EXTRA_CA_CERTS="$DEVBOX_DIR/ca/rootCA.pem" \
+    npx playwright test "$@" --project=ci
+}
+
+# =============================================================================
+# shell / env / status / down / nuke
+# =============================================================================
+cmd_env() { load_env; devbox_exports; }
+
+cmd_shell() {
+  load_env
+  info "devbox shell — KUBECONFIG and MT_* point at .devbox/ (exit to leave)"
+  PS1="(devbox) ${PS1:-\$ }" exec "${SHELL:-bash}" -i
+}
+
+cmd_status() {
+  load_env
+  if k3d cluster list "$DEVBOX_CLUSTER" >/dev/null 2>&1; then
+    ok "cluster: $DEVBOX_CLUSTER"
+    kubectl get pods -A --no-headers 2>/dev/null | awk '{print "  " $1 "/" $2 "  " $4}' | sort
+  else
+    warn "cluster: not running (scripts/devbox up)"
+  fi
+  if [ "$(docker inspect -f '{{.State.Running}}' "$DEVBOX_PG_CONTAINER" 2>/dev/null)" = "true" ]; then
+    ok "postgres: $DEVBOX_PG_CONTAINER at $DEVBOX_PG_IP"
+  else
+    warn "postgres: not running"
+  fi
+  echo ""
+  echo "  Admin portal:  https://admin.${DEVBOX_HOST_SUFFIX}"
+  echo "  Keycloak:      https://auth.${DEVBOX_HOST_SUFFIX}/admin/  (user admin, password: yq .keycloak.admin_password $DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml)"
+  echo "  Test users:    scripts/devbox users create <name> --password <pw> [--admin]"
+}
+
+cmd_down() {
+  if k3d cluster list "$DEVBOX_CLUSTER" >/dev/null 2>&1; then
+    docker network disconnect "k3d-$DEVBOX_CLUSTER" "$DEVBOX_PG_CONTAINER" >/dev/null 2>&1 || true
+    k3d cluster delete "$DEVBOX_CLUSTER"
+  fi
+  docker stop "$DEVBOX_PG_CONTAINER" >/dev/null 2>&1 || true
+  ok "devbox down (PostgreSQL data in volume $DEVBOX_PG_VOLUME and $DEVBOX_DIR kept)"
+}
+
+cmd_nuke() {
+  printf 'Delete the devbox cluster, its PostgreSQL data and %s (CA, secrets)? [y/N] ' "$DEVBOX_DIR"
+  local a; read -r a
+  [ "$a" = "y" ] || [ "$a" = "Y" ] || die "aborted"
+  k3d cluster delete "$DEVBOX_CLUSTER" >/dev/null 2>&1 || true
+  docker rm -f "$DEVBOX_PG_CONTAINER" >/dev/null 2>&1 || true
+  docker volume rm "$DEVBOX_PG_VOLUME" >/dev/null 2>&1 || true
+  if [ -f "$DEVBOX_DIR/ca/rootCA.pem" ]; then
+    CAROOT="$DEVBOX_DIR/ca" TRUST_STORES="system,nss" mkcert -uninstall || warn "Could not remove the devbox CA from the trust stores"
+  fi
+  rm -rf "$DEVBOX_DIR"
+  ok "devbox removed"
+}
+
+cmd="${1:-}"; [ -n "$cmd" ] && shift
+case "$cmd" in
+  doctor) cmd_doctor "$@" ;;
+  init)   cmd_init "$@" ;;
+  up)     cmd_up "$@" ;;
+  build)  cmd_build "$@" ;;
+  deploy) cmd_deploy "$@" ;;
+  e2e)    cmd_e2e "$@" ;;
+  users)  cmd_users "$@" ;;
+  shell)  cmd_shell "$@" ;;
+  env)    cmd_env "$@" ;;
+  status) cmd_status "$@" ;;
+  down)   cmd_down "$@" ;;
+  nuke)   cmd_nuke "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *) usage; die "unknown command: $cmd" ;;
+esac
