@@ -2,14 +2,14 @@
   "platform_version": "32.0.5",
   "apps": {
     "user_oidc": {
-      "version": "8.11.0",
-      "url": "https://github.com/nextcloud-releases/user_oidc/releases/download/v8.11.0/user_oidc-v8.11.0.tar.gz",
-      "sha256": "887920504c2f0e0d055abd66225ee7b66d756f50fe5a3739779d6b2ce108633f"
+      "version": "8.13.0",
+      "url": "https://github.com/nextcloud-releases/user_oidc/releases/download/v8.13.0/user_oidc-v8.13.0.tar.gz",
+      "sha256": "6f13fa0477144a6812d8648626c64cee91807d1d0b60ca41424543086b9e2775"
     },
     "calendar": {
-      "version": "6.6.4",
-      "url": "https://github.com/nextcloud-releases/calendar/releases/download/v6.6.4/calendar-v6.6.4.tar.gz",
-      "sha256": "0557b6b5852a467cf3f746e59d56478d227f78bf7a66357b30dfc10cae4c7e3c"
+      "version": "6.6.5",
+      "url": "https://github.com/nextcloud-releases/calendar/releases/download/v6.6.5/calendar-v6.6.5.tar.gz",
+      "sha256": "e3afbc2a10db87920f5347279423422411010550a809b2902c0e8cf2f2492107"
     },
     "richdocuments": {
       "version": "9.2.3",
