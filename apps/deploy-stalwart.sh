@@ -188,11 +188,13 @@ elif [[ "${SMTP_RELAY_HOST:-}" == *.svc.cluster.local. ]] && mt_is_local_edge; t
     # cannot inject TOML. Plain SMTP inside the cluster; nothing leaves it.
     STALWART_SES_ENABLED=false
     SMTP_RELAY_NAMESPACE=$(cut -d. -f2 <<<"$SMTP_RELAY_HOST")
+    # Already an absolute Service name: the route uses it as is.
+    SMTP_RELAY_SVC_HOST="$SMTP_RELAY_HOST"
     export STALWART_OUTBOUND_ROUTE_NAME="relay"
     export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - in-cluster catch-all (devbox Mailpit, mail.smtp_relay).
     [queue.route.\"relay\"]
     type = \"relay\"
-    address = \"${SMTP_RELAY_HOST}\"
+    address = \"${SMTP_RELAY_SVC_HOST}\"
     port = ${SMTP_RELAY_PORT}
     protocol = \"smtp\"
 
