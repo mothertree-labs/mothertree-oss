@@ -341,6 +341,22 @@ check "the cache image is a pinned registry tag" \
 check "k3d gets the mirror config at create time" \
   grep -qF -- '--registry-config "$DEVBOX_DIR/registries.yaml"' "$REPO_ROOT/scripts/devbox"
 
+# up on a fresh .devbox (no images.env yet) must reach the portal build; it
+# used to die silently there (sed on the missing file + pipefail).
+up_fresh() {  # <cmd_build body>
+  bash -c "PATH='$STUBS':\$PATH MT_DEVBOX_DIR='$DBX'; export PATH MT_DEVBOX_DIR
+    source '$REPO_ROOT/scripts/devbox' env >/dev/null
+    cluster_up() { :; }; postgres_up() { :; }; cmd_build() { $1; }
+    cmd_up" 2>&1
+}
+rm -f "$DBX/images.env"
+check "up on a fresh .devbox reaches the portal build" \
+  grep -q '^BUILD admin-portal$' <<<"$(up_fresh 'echo BUILD $1; exit 0')"
+check "a failing command is named, not silent" \
+  grep -qE 'failed \(exit 1\) at line [0-9]+: false' <<<"$(up_fresh false)"
+check "die() prints only its own message" \
+  test "$(up_fresh 'die boom' | grep -c 'devbox\]')" = 1
+
 # ── infra-config.sh: mail.smtp_relay host rules ───────────────────────────
 relay_of() {  # <edge or ""> <host> -> "host|port" or fails
   # The full config `devbox init` generated above, with only edge/relay edited.
