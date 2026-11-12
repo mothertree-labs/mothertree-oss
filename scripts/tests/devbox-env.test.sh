@@ -259,6 +259,18 @@ check "stalwart: default S3 endpoint renders as before" \
   test "$(env -i PATH="$PATH" S3_CLUSTER=us-lax-1 S3_INTERNAL_ENDPOINT=https://us-lax-1.linodeobjects.com envsubst '${S3_CLUSTER} ${S3_INTERNAL_ENDPOINT}' < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl")" = \
        "$(sed 's|${S3_INTERNAL_ENDPOINT}|https://${S3_CLUSTER}.linodeobjects.com|' "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" | env -i PATH="$PATH" S3_CLUSTER=us-lax-1 envsubst '${S3_CLUSTER}')"
 
+# Jitsi JVB: public edges keep require-stun and STUN via the TURN server.
+jvb_env() { env -i PATH="$PATH" JVB_PORT=31000 JITSI_HOST=jitsi.example.com TURN_SERVER_IP=192.0.2.9 \
+  JVB_MIN_REPLICAS=1 NS_JITSI=tn-x-jitsi JVB_PUBLIC_IP= "$@"; }
+jvb_vars='${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI} ${JVB_PUBLIC_IP} ${JVB_REQUIRE_STUN} ${JVB_STUN_SERVERS}'
+legacy_jvb=$(sed -e 's|require-stun = ${JVB_REQUIRE_STUN}|require-stun = true|' \
+  -e 's|value: "${JVB_STUN_SERVERS}"|value: "${TURN_SERVER_IP}:3478"|' "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl")
+check "jvb: public-edge render unchanged (require-stun, STUN via TURN)" \
+  test "$(jvb_env JVB_REQUIRE_STUN=true JVB_STUN_SERVERS=192.0.2.9:3478 envsubst "$jvb_vars" < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl")" = \
+       "$(printf '%s\n' "$legacy_jvb" | jvb_env envsubst "$jvb_vars")"
+check "deploy-jitsi passes the STUN vars to envsubst" \
+  grep -qF '${JVB_REQUIRE_STUN} ${JVB_STUN_SERVERS}' "$REPO_ROOT/apps/deploy-jitsi.sh"
+
 # ── local-ca.sh: trust injection ──────────────────────────────────────────
 trust_out="$TEST_TMP/backend.yaml"
 cp "$REPO_ROOT/docs/backend-deployment.yaml" "$trust_out"

@@ -187,7 +187,7 @@ spec:
               // This makes TURN reachability a prerequisite for JVB to run,
               // giving us proactive detection of firewall/network issues
               // blocking the JVB media port — even without active calls.
-              require-stun = true
+              require-stun = ${JVB_REQUIRE_STUN}
             }
           }
 
@@ -268,7 +268,7 @@ spec:
         - name: JVB_PORT
           value: "${JVB_PORT}"
         - name: JVB_STUN_SERVERS
-          value: "${TURN_SERVER_IP}:3478"
+          value: "${JVB_STUN_SERVERS}"
         - name: JVB_TCP_HARVESTER_DISABLED
           value: "1"
         - name: COLIBRI_REST_ENABLED
