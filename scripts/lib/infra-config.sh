@@ -193,8 +193,17 @@ _mt_infra_load_env_config() {
     # unauthenticated hop over the internet. Both keys or neither.
     SMTP_RELAY_HOST=$(yq '.mail.smtp_relay.host // ""' "$infra_config")
     SMTP_RELAY_PORT=$(yq '.mail.smtp_relay.port // ""' "$infra_config")
+    # The one exception is a local-edge developer box (cluster.edge: local),
+    # whose catch-all (Mailpit) is an in-cluster Service: it may name that
+    # Service by its absolute cluster-local name, which only cluster DNS
+    # answers. Everywhere else the mesh-IP rule stands.
     if [ -n "$SMTP_RELAY_HOST" ] || [ -n "$SMTP_RELAY_PORT" ]; then
-      mt_require_mesh_ip SMTP_RELAY_HOST "${SMTP_RELAY_HOST:-<unset>}" "mail.smtp_relay.host"
+      if [ "$(yq '.cluster.edge // ""' "$infra_config")" = "local" ] \
+         && [[ "$SMTP_RELAY_HOST" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.svc\.cluster\.local\.$ ]]; then
+        :
+      else
+        mt_require_mesh_ip SMTP_RELAY_HOST "${SMTP_RELAY_HOST:-<unset>}" "mail.smtp_relay.host"
+      fi
       if ! [[ "$SMTP_RELAY_PORT" =~ ^[0-9]{1,5}$ ]] || [ "$SMTP_RELAY_PORT" -lt 1 ] || [ "$SMTP_RELAY_PORT" -gt 65535 ]; then
         echo "[ERROR] mail.smtp_relay.port ('$SMTP_RELAY_PORT') must be a TCP port when mail.smtp_relay.host is set" >&2
         exit 1

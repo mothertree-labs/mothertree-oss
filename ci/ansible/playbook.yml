@@ -534,6 +534,31 @@
         dest: /usr/local/bin/kubectl
         mode: "0755"
 
+    # The scheduled devbox drift check (.woodpecker/devbox-drift.yaml) runs
+    # scripts/devbox in this host's Docker. Same k3d as scripts/devbox
+    # (DEVBOX_K3D_VERSION) and devhome/ansible/box.yml.
+    - name: Install k3d (devbox drift check)
+      ansible.builtin.get_url:
+        url: https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64
+        checksum: sha256:06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0
+        dest: /usr/local/bin/k3d
+        mode: "0755"
+
+    # The devbox names (*.devbox.mothertree.localhost) must resolve to
+    # loopback for the deploy scripts' checks. nss-myhostname resolves every
+    # *.localhost name to 127.0.0.1/::1 without DNS (systemd-resolved does the
+    # same on a desktop, but this container host has no resolved).
+    - name: Install nss-myhostname (*.localhost -> loopback, devbox drift check)
+      ansible.builtin.apt:
+        name: libnss-myhostname
+        state: present
+
+    - name: Resolve *.localhost through nss-myhostname
+      ansible.builtin.replace:
+        path: /etc/nsswitch.conf
+        regexp: '^(hosts:\s+files)(?!.*\bmyhostname\b)'
+        replace: '\1 myhostname'
+
     - name: Install jq, envsubst, ansible-core, dig, redis-cli, rsync
       ansible.builtin.apt:
         name:

@@ -1,0 +1,28 @@
+# Scheduled devbox drift check: build the minimal developer box from the plain
+# public checkout and run the admin-portal login spec against it, so a change
+# that breaks scripts/devbox shows up within a day. Not part of the PR
+# pipeline: devhome has one CI slot, and this holds it for the whole run.
+#
+# Triggers: the Woodpecker cron entry "devbox-drift" (repo settings → Crons,
+# see ci/RUNBOOK.md) and "Run pipeline" in the UI. Every other workflow only
+# runs on pull_request and push, so neither trigger starts them.
+when:
+  - event: cron
+    cron: devbox-drift
+  - event: manual
+
+clone:
+  - name: clone
+    image: woodpeckerci/plugin-git
+    settings:
+      # The point is a plain public clone: no config submodules, no vault.
+      recursive: false
+
+steps:
+  - name: devbox-drift
+    image: bash
+    environment:
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+    commands:
+      - ci/scripts/devbox-drift.sh

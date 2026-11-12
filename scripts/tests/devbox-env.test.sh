@@ -8,6 +8,7 @@
 #   shared PostgreSQL bootstrap SQL                          (scripts/lib/pg-bootstrap-sql.sh)
 #   s3.endpoint / internal_endpoint / addressing_style       (scripts/lib/config.sh, docs-config)
 #   local-CA trust injection into a Deployment               (scripts/lib/local-ca.sh)
+#   DEVBOX_TRUST=process + the image-cache mirror config     (scripts/devbox)
 #
 #   scripts/tests/devbox-env.test.sh
 set -euo pipefail
@@ -288,6 +289,94 @@ check "and mounted read-only" \
   test "$(yq '.spec.template.spec.containers[] | select(.name == "backend") | .volumeMounts[] | select(.name == "mt-local-ca") | .readOnly' "$trust_out")" = "true"
 check_not "unknown container is an error" trust "$trust_out" nosuch AWS_CA_BUNDLE
 check_not "invalid env var name is an error" trust "$TEST_TMP/backend.yaml" backend 'bad-name'
+
+# ── scripts/devbox: CA trust without root + image caches ──────────────────
+# Hermetic: a temp .devbox, and stub docker/k3d/mkcert on PATH that only log.
+DBX="$TEST_TMP/box/.devbox"
+STUBS="$TEST_TMP/stubs"; mkdir -p "$STUBS"
+STUB_LOG="$TEST_TMP/stub.log"; : > "$STUB_LOG"
+for s in docker k3d mkcert; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >> "%s"\n[ "%s" != mkcert ]\n' "$s" "$STUB_LOG" "$s" > "$STUBS/$s"
+  chmod +x "$STUBS/$s"
+done
+devbox() { PATH="$STUBS:$PATH" MT_DEVBOX_DIR="$DBX" "$REPO_ROOT/scripts/devbox" "$@"; }
+check "init with DEVBOX_TRUST=process succeeds without root" \
+  env DEVBOX_TRUST=process bash -c "$(declare -f devbox); STUBS='$STUBS' DBX='$DBX' REPO_ROOT='$REPO_ROOT' devbox init --profile minimal >/dev/null 2>&1"
+check_not "process trust never calls mkcert" grep -q '^mkcert' "$STUB_LOG"
+check "process trust writes the extended bundle" test -s "$DBX/ca/bundle.pem"
+check "the bundle ends with the devbox CA" \
+  test "$(tail -n "$(wc -l < "$DBX/ca/rootCA.pem")" "$DBX/ca/bundle.pem")" = "$(cat "$DBX/ca/rootCA.pem")"
+check "the bundle also carries the system CAs" \
+  test "$(grep -c 'BEGIN CERTIFICATE' "$DBX/ca/bundle.pem")" -gt 1
+dbx_env=$(devbox env 2>/dev/null)
+check "env points curl at the bundle" grep -qF "export CURL_CA_BUNDLE=$DBX/ca/bundle.pem" <<<"$dbx_env"
+check "env points Go/OpenSSL at the bundle" grep -qF "export SSL_CERT_FILE=$DBX/ca/bundle.pem" <<<"$dbx_env"
+check "env points Node at the CA" grep -qF "export NODE_EXTRA_CA_CERTS=$DBX/ca/rootCA.pem" <<<"$dbx_env"
+mv "$DBX/ca/bundle.pem" "$TEST_TMP/bundle.pem"
+check_not "system trust (no bundle) exports no CA overrides" grep -q 'SSL_CERT_FILE\|CURL_CA_BUNDLE' <<<"$(devbox env 2>/dev/null)"
+check "an unknown DEVBOX_TRUST is rejected" grep -q 'DEVBOX_TRUST must be system' <<<"$(env DEVBOX_TRUST=bogus bash -c "$(declare -f devbox); STUBS='$STUBS' DBX='$DBX' REPO_ROOT='$REPO_ROOT' devbox init 2>&1")"
+mv "$TEST_TMP/bundle.pem" "$DBX/ca/bundle.pem"
+
+# cache_up with a docker stub that reports nothing existing.
+: > "$STUB_LOG"
+printf '#!/usr/bin/env bash\necho "docker $*" >> "%s"\ncase "$1 $2" in "network inspect"|"container inspect") exit 1 ;; esac\n' "$STUB_LOG" > "$STUBS/docker"
+check "cache_up runs with no caches yet" \
+  bash -c "PATH='$STUBS':\$PATH MT_DEVBOX_DIR='$DBX'; export PATH MT_DEVBOX_DIR; source '$REPO_ROOT/scripts/devbox' env >/dev/null; cache_up >/dev/null"
+REG="$DBX/registries.yaml"
+check "registries.yaml mirrors the four upstreams" \
+  test "$(yq '.mirrors | keys | join(" ")' "$REG")" = "docker.io ghcr.io quay.io registry.k8s.io"
+check "docker.io goes to its cache over the cache network" \
+  test "$(yq '.mirrors."docker.io".endpoint[0]' "$REG")" = "http://devbox-cache-docker-io:5000"
+check "registry.k8s.io cache name is a valid container name" \
+  test "$(yq '.mirrors."registry.k8s.io".endpoint[0]' "$REG")" = "http://devbox-cache-registry-k8s-io:5000"
+check "one cache container per upstream" test "$(grep -c '^docker run ' "$STUB_LOG")" = 4
+check "the cache network is created" grep -q '^docker network create .*devbox-cache$' "$STUB_LOG"
+check "caches drop all capabilities" test "$(grep '^docker run ' "$STUB_LOG" | grep -c -- '--cap-drop ALL --security-opt no-new-privileges')" = 4
+check "caches never expire content" test "$(grep '^docker run ' "$STUB_LOG" | grep -c 'REGISTRY_PROXY_TTL=0s')" = 4
+check_not "caches publish no ports" grep -qE '^docker run .*(-p |--publish)' "$STUB_LOG"
+check "Docker Hub cache proxies registry-1.docker.io" \
+  grep -q '^docker run .*devbox-cache-docker-io .*REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io ' "$STUB_LOG"
+check "the cache image is a pinned registry tag" \
+  grep -qE '^DEVBOX_CACHE_IMAGE="registry:[0-9]+\.[0-9]+\.[0-9]+"$' "$REPO_ROOT/scripts/devbox"
+check "k3d gets the mirror config at create time" \
+  grep -qF -- '--registry-config "$DEVBOX_DIR/registries.yaml"' "$REPO_ROOT/scripts/devbox"
+
+# ── infra-config.sh: mail.smtp_relay host rules ───────────────────────────
+relay_of() {  # <edge or ""> <host> -> "host|port" or fails
+  # The full config `devbox init` generated above, with only edge/relay edited.
+  local t="$TEST_TMP/relay.$RANDOM"
+  cp -R "$DBX" "$t"; : > "$t/kubeconfig"
+  E="$1" H="$2" yq -i '.mail.smtp_relay.host = strenv(H) | .mail.smtp_relay.port = 1025
+    | (select(strenv(E) == "") | del(.cluster.edge)) // .
+    | (select(strenv(E) != "") | .cluster.edge = strenv(E)) // .
+    | (select(strenv(E) != "local") | .cluster.public_ip = "203.0.113.7") // .' "$t/infra/devbox.config.yaml"
+  env -i PATH="$PATH" HOME="$HOME" bash -c '
+    set -euo pipefail
+    REPO_ROOT="$1"; MT_ENV=devbox; MT_INFRA_CONFIG_DIR="$2/infra"; MT_PROJECT_CONF="$2/project.conf"; MT_TENANTS_DIR="$2/tenants"
+    KUBECONFIG="$2/kubeconfig"
+    export REPO_ROOT MT_ENV MT_INFRA_CONFIG_DIR MT_PROJECT_CONF MT_TENANTS_DIR KUBECONFIG
+    source "$REPO_ROOT/scripts/lib/common.sh"; source "$REPO_ROOT/scripts/lib/infra-config.sh"
+    mt_load_infra_config >/dev/null
+    printf "%s|%s" "$SMTP_RELAY_HOST" "$SMTP_RELAY_PORT"' _ "$REPO_ROOT" "$t" 2>/dev/null
+}
+MP=mailpit.infra-mailpit.svc.cluster.local.
+check "local edge: in-cluster relay name accepted" test "$(relay_of local "$MP")" = "$MP|1025"
+check "local edge: a mesh IP is still accepted" test "$(relay_of local 100.64.99.1)" = "100.64.99.1|1025"
+check "public edge: mesh IP relay unchanged" test "$(relay_of public 100.64.99.1)" = "100.64.99.1|1025"
+check_not "public edge: in-cluster name refused" relay_of public "$MP"
+check_not "no edge (devhome default): in-cluster name refused" relay_of "" "$MP"
+check_not "local edge: relative cluster name refused" relay_of local "${MP%.}"
+check_not "local edge: internet hostname refused" relay_of local smtp.example.com
+check_not "local edge: name with a TOML quote refused" relay_of local 'a".infra.svc.cluster.local.'
+
+# ── deploy-stalwart.sh: in-cluster relay route ────────────────────────────
+check "stalwart: in-cluster relay is its own branch, before the tailnet one" \
+  test "$(grep -n 'SMTP_RELAY_HOST:-}" == \*.svc.cluster.local.' "$REPO_ROOT/apps/deploy-stalwart.sh" | cut -d: -f1)" \
+       -lt "$(grep -n 'elif \[ -n "${SMTP_RELAY_HOST:-}" \]; then' "$REPO_ROOT/apps/deploy-stalwart.sh" | head -1 | cut -d: -f1)"
+check "stalwart: in-cluster relay egress is scoped to the relay namespace" \
+  grep -qF 'kubernetes.io/metadata.name: ${SMTP_RELAY_NAMESPACE}' "$REPO_ROOT/apps/deploy-stalwart.sh"
+check "devbox: infra config points the relay at Mailpit" \
+  grep -qF 'DEVBOX_MAILPIT_RELAY="mailpit.infra-mailpit.svc.cluster.local."' "$REPO_ROOT/scripts/devbox"
 
 echo "devbox-env: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
