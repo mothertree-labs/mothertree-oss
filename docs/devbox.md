@@ -15,7 +15,10 @@ on your machine and is throwaway.
   - Keycloak with one tenant realm, and the admin and account portals with a real browser OIDC login;
   - **Matrix** (Synapse + Element) and **Docs**, storing their media in an in-cluster S3 gateway;
   - ingress-nginx, cert-manager, PgBouncer and a PostgreSQL container.
-- **full** (`init --profile full`): standard plus **Files** (Nextcloud).
+- **full** (`init --profile full`): standard plus **Files** (Nextcloud),
+  **mail** (a Stalwart server for the tenant) and **webmail** (Roundcube,
+  built locally like the portals). Mail is delivered between devbox users;
+  nothing leaves the machine.
 - **minimal** (`init --profile minimal`): the same without Matrix, Docs and S3.
 
 The other apps (Files, Jitsi, mail) are added one at a time; see
@@ -31,6 +34,8 @@ The other apps (Files, Jitsi, mail) are added one at a time; see
   3.7 GiB used in a 6 GiB VM with 4 CPUs), or about **3.5 GiB** and 2 CPUs
   for the minimal one.
 - `127.0.0.1:80` and `127.0.0.1:443` free.
+- Disk: about **25 GiB free** for docker with the full profile (images plus the
+  Roundcube and portal build cache); less for the smaller profiles.
 - Tools: docker (usable without sudo), [k3d](https://k3d.io) v5.9.0, kubectl,
   helm, helmfile, kustomize, [yq](https://github.com/mikefarah/yq) v4,
   jq, mkcert, openssl, envsubst (gettext), shasum (perl), curl, git, node + npm,
@@ -54,6 +59,7 @@ Keycloak's first boot. When it finishes:
 - Element (Matrix): <https://matrix.devbox.mothertree.localhost>
 - Docs: <https://docs.devbox.mothertree.localhost>
 - Files (full profile): <https://files.devbox.mothertree.localhost>
+- Webmail (full profile): <https://webmail.devbox.mothertree.localhost>
 - Keycloak: <https://auth.devbox.mothertree.localhost/admin/> (user `admin`,
   password `yq .keycloak.admin_password .devbox/tenants/devbox/devbox.secrets.yaml`)
 
@@ -87,9 +93,9 @@ the devbox, so you can run things like `kubectl get pods -A` or
 | `doctor` | Check tools, docker access, `*.localhost` resolution, ports, memory, browser CA trust |
 | `init [--profile minimal\|standard\|full] [--regenerate]` | Write `.devbox/` and create + trust the local CA. Re-running keeps the secrets and the last profile |
 | `up` | Create or reuse the cluster and PostgreSQL, build missing portal images, run `deploy_infra`, start the S3 gateway and `create_env` |
-| `build <component>` | Build `admin-portal` or `account-portal` locally and import it |
+| `build <component>` | Build `admin-portal`, `account-portal` or `roundcube` locally and import it |
 | `deploy <app>` | Run `apps/deploy-<app>.sh -e devbox -t devbox` |
-| `e2e <spec> [args]` | Run Playwright against the devbox |
+| `e2e <spec> [args]` | Run Playwright against the devbox (with mail on, it port-forwards Stalwart's IMAPS and submission ports for the mail specs) |
 | `users <args>` | `scripts/dev-test-users.sh` against the devbox |
 | `shell` / `env` | Subshell / exports with `KUBECONFIG` and the config paths |
 | `status` | Pods, PostgreSQL, URLs |
@@ -149,6 +155,13 @@ separate docker-compose world.
   `user_oidc` fetches discovery from Keycloak's in-cluster Service, which then
   advertises in-cluster token, userinfo and JWKS endpoints. The issuer and the
   browser endpoints stay `https://auth.devbox.mothertree.localhost`.
+- **Keycloak's truststore**: realm mail (invitations, password resets) goes
+  to the tenant's Stalwart over STARTTLS with a local-CA certificate, so the
+  devbox Keycloak values mount the CA (`KC_TRUSTSTORE_PATHS`).
+- **Mail**: Stalwart only. Postfix (inbound internet MX) and the load-balancer
+  TCP ports for IMAP/SMTP are skipped on `edge: local` ("edge local: …" in the
+  logs); there is no outbound relay, so mail to outside addresses goes nowhere.
+  The SMTP smoke test after provisioning trusts the local CA.
 - **In-cluster names**: a CoreDNS rewrite (`kube-system/coredns-custom`, key
   `devbox.override`) resolves `*.devbox.mothertree.localhost` to the ingress
   controller inside the cluster. Outside it, those names are loopback.
@@ -157,15 +170,19 @@ separate docker-compose world.
 
 ## What's not there yet
 
-- Jitsi, mail and webmail. Turning their features on in the tenant config is
-  not enough yet: Stalwart still hardcodes the Linode S3 endpoint, mail needs a
-  local relay, and JVB requires a STUN server.
+- Jitsi. Its Keycloak adapter image is amd64-only, JVB requires a STUN server,
+  its media port needs a k3d port mapping, and the deploy applies a
+  ServiceMonitor that needs the monitoring CRDs.
+- Outbound mail to real addresses (a catch-all such as Mailpit would show it),
+  and the mail e2e specs that need it: `email-roundtrip` (external echo group)
+  and `dkim-signature-validation`. `mail/sasl-auth-failure` misreads replies
+  through the port-forward.
 - Nextcloud's notify_push (its image is amd64-only; on arm64 it is skipped and
   clients poll), Collabora (Office) and the Nextcloud calendar integrations.
 - The S3 gateway's data lives in the k3d node, so `down` loses uploaded media
   (the PostgreSQL data survives).
-- Email from Matrix and Docs (notifications, Docs invitations): there is no
-  mail server yet, so they cannot send email.
+- Email in the standard profile: it has no mail server, so Matrix and Docs
+  cannot send notifications or invitations (use the full profile).
 - Matrix federation.
 - macOS (Docker Desktop's VM memory cap).
 - A scheduled CI job that keeps devbox from rotting.

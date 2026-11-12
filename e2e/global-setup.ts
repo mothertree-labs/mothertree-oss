@@ -52,11 +52,18 @@ async function sweepFixedMailUsers(): Promise<void> {
   }
 
   for (const user of [TEST_USERS.emailTest, TEST_USERS.emailRecv]) {
-    const { deleted, remaining } = await sweepInboxOlderThan({
-      userEmail: user.email,
-      maxAgeMs: MAIL_SWEEP_MAX_AGE_MS,
-    });
-    console.log(`  [setup] Mail sweep ${user.username}: deleted ${deleted}, ${remaining} remaining`);
+    try {
+      const { deleted, remaining } = await sweepInboxOlderThan({
+        userEmail: user.email,
+        maxAgeMs: MAIL_SWEEP_MAX_AGE_MS,
+      });
+      console.log(`  [setup] Mail sweep ${user.username}: deleted ${deleted}, ${remaining} remaining`);
+    } catch (err) {
+      // CI keeps the fixed mail users across runs, so a failure there is real.
+      // Locally the sweep is housekeeping only; never block a local run on it.
+      if (IS_CI) throw err;
+      console.log(`  [setup] Mail sweep ${user.username}: skipped (${err instanceof Error ? err.message : err})`);
+    }
   }
 }
 
@@ -71,12 +78,11 @@ export default async function globalSetup(): Promise<void> {
   }
   fs.mkdirSync(authDir, { recursive: true });
 
-  await sweepFixedMailUsers();
-
   // In CI, pipeline-scoped test users are created by ci-lease-tenant.sh via the
   // Keycloak API — no further user management needed here.
   // Locally, create/reset users via dev-test-users.sh (requires kubectl port-forward).
   if (IS_CI) {
+    await sweepFixedMailUsers();
     console.log('  [setup] CI detected — users created by ci-lease-tenant.sh\n');
     return;
   }
@@ -137,6 +143,10 @@ export default async function globalSetup(): Promise<void> {
   // Write marker so teardown knows which users to clean up
   const markerPath = path.join(__dirname, '.auth', 'created-users.json');
   fs.writeFileSync(markerPath, JSON.stringify(createdUsers));
+
+  // Locally the fixed mail users (and their mailboxes) only exist once created
+  // above — teardown deletes them again — so sweep after creating them.
+  await sweepFixedMailUsers();
 
   console.log('\n[E2E Global Setup] All test users ready.\n');
 }

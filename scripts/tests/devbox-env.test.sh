@@ -254,6 +254,11 @@ check "nextcloud-oidc job: public-edge discovery URL renders as before" \
 check "deploy-nextcloud: public edges use https://\$AUTH_HOST" \
   grep -qF 'OIDC_DISCOVERY_BASE="https://${AUTH_HOST}"' "$REPO_ROOT/apps/deploy-nextcloud.sh"
 
+# Stalwart: the S3 store endpoint renders as the old hardcoded Linode value.
+check "stalwart: default S3 endpoint renders as before" \
+  test "$(env -i PATH="$PATH" S3_CLUSTER=us-lax-1 S3_INTERNAL_ENDPOINT=https://us-lax-1.linodeobjects.com envsubst '${S3_CLUSTER} ${S3_INTERNAL_ENDPOINT}' < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl")" = \
+       "$(sed 's|${S3_INTERNAL_ENDPOINT}|https://${S3_CLUSTER}.linodeobjects.com|' "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" | env -i PATH="$PATH" S3_CLUSTER=us-lax-1 envsubst '${S3_CLUSTER}')"
+
 # ── local-ca.sh: trust injection ──────────────────────────────────────────
 trust_out="$TEST_TMP/backend.yaml"
 cp "$REPO_ROOT/docs/backend-deployment.yaml" "$trust_out"

@@ -23,7 +23,7 @@
 #   init [--profile P] [--regenerate]
 #                           write .devbox/ and create + trust the local CA;
 #                           P = standard (portals, Matrix, Docs; default),
-#                           full (standard + Files) or minimal (portals only).
+#                           full (standard + Files, mail, webmail) or minimal (portals only).
 #                           Remembered in .devbox/profile.
 #   up                      cluster + PostgreSQL + images + deploy_infra + create_env
 #   build <component>       build a local image (admin-portal, account-portal) and import it
@@ -165,6 +165,14 @@ cmd_doctor() {
       printf '  %-10s %s MiB available\n' "memory" "$avail_mb"
     fi
   fi
+  if command -v df >/dev/null 2>&1; then
+    local disk_gb; disk_gb=$(df -Pk "$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /)" 2>/dev/null | awk 'NR==2 {print int($4/1048576)}')
+    if [ -n "$disk_gb" ] && [ "$disk_gb" -lt 25 ]; then
+      warn "Only ${disk_gb} GiB free for docker; the full profile needs about 25 GiB (images + build cache). Try: docker system prune"
+    elif [ -n "$disk_gb" ]; then
+      printf '  %-10s %s GiB free for docker\n' "disk" "$disk_gb"
+    fi
+  fi
   if [ -d "$DEVBOX_DIR/ca" ] && command -v certutil >/dev/null 2>&1 && [ -d "$HOME/.pki/nssdb" ]; then
     if certutil -L -d "sql:$HOME/.pki/nssdb" 2>/dev/null | grep -q mkcert; then
       printf '  %-10s %s\n' "browser CA" "trusted (NSS)"
@@ -218,7 +226,7 @@ gen_tenant_config() {
       "jitsi_enabled": false,
       "matrix_enabled": (strenv(CHAT_DOCS) == "true"), "docs_enabled": (strenv(CHAT_DOCS) == "true"),
       "files_enabled": (strenv(FILES) == "true"), "smtp_enabled": false, "turn_enabled": false,
-      "mail_enabled": false, "webmail_enabled": false,
+      "mail_enabled": (strenv(FILES) == "true"), "webmail_enabled": (strenv(FILES) == "true"),
       "admin_portal_enabled": true, "account_portal_enabled": true,
       "calendar_enabled": false, "office_enabled": false,
       "google_import_enabled": false, "llm_enabled": false,
@@ -497,12 +505,21 @@ s3_up() {
 # (outside the cluster those names are loopback). k3s imports the
 # coredns-custom *.override keys into its main server block.
 dns_up() {
-  local key="devbox.override" want cur esc
+  # zz-: k3s imports custom/*.override in name order and the first matching
+  # rewrite wins, so per-host rewrites (deploy-stalwart's mail-<tenant>.override
+  # sends mail.<domain> to Stalwart) must sort before this wildcard.
+  local key="zz-devbox.override" want cur esc
   esc=$(printf '%s' "$DEVBOX_HOST_SUFFIX" | sed 's/\./\\./g')
   want="rewrite name regex ^(.+\\.)?${esc}\\.\$ ingress-nginx-controller.infra-ingress.svc.cluster.local. answer auto"
   kubectl -n kube-system get configmap coredns-custom >/dev/null 2>&1 \
     || kubectl -n kube-system create configmap coredns-custom >/dev/null
-  cur=$(kubectl -n kube-system get configmap coredns-custom -o "jsonpath={.data.devbox\\.override}")
+  cur=$(kubectl -n kube-system get configmap coredns-custom -o "jsonpath={.data.zz-devbox\\.override}")
+  # Older devboxes used the key devbox.override, which sorted first.
+  if [ -n "$(kubectl -n kube-system get configmap coredns-custom -o "jsonpath={.data.devbox\\.override}")" ]; then
+    kubectl -n kube-system patch configmap coredns-custom --type json \
+      -p '[{"op": "remove", "path": "/data/devbox.override"}]' >/dev/null
+    cur=""
+  fi
   if [ "$cur" != "$want" ]; then
     kubectl -n kube-system patch configmap coredns-custom --type merge \
       -p "$(jq -n --arg k "$key" --arg v "$want" '{data: {($k): $v}}')" >/dev/null
@@ -519,8 +536,9 @@ cmd_up() {
   # Portal images are always built locally (no registry default in public code,
   # and the published images are amd64-only). Build once; `build` rebuilds.
   local feature comp
-  for comp in admin-portal account-portal; do
+  for comp in admin-portal account-portal roundcube; do
     feature="${comp//-/_}_enabled"
+    [ "$comp" = "roundcube" ] && feature="webmail_enabled"
     if [ "$(yq ".features.${feature}" "$DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.config.yaml")" = "true" ]; then
       local var; var="$(printf '%s' "${comp//-/_}" | tr '[:lower:]' '[:upper:]')_IMAGE"
       if ! grep -q "^${var}=" "$DEVBOX_DIR/images.env" 2>/dev/null; then
@@ -535,11 +553,11 @@ cmd_up() {
   if feature_on matrix || feature_on docs || feature_on files || feature_on mail; then
     s3_up
   fi
-  # Tenant namespaces are default-deny for egress; Synapse and Nextcloud
-  # reach the S3 gateway's Service directly (Docs goes through the ingress
-  # on :443, which allow-internet-egress already permits).
+  # Tenant namespaces are default-deny for egress; Synapse, Nextcloud and
+  # Stalwart reach the S3 gateway's Service directly (Docs goes through the
+  # ingress on :443, which allow-internet-egress already permits).
   local app
-  for app in matrix files; do
+  for app in matrix files mail; do
     feature_on "$app" || continue
     kubectl create namespace "tn-$DEVBOX_TENANT-$app" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
     NAMESPACE="tn-$DEVBOX_TENANT-$app" envsubst '${NAMESPACE}' \
@@ -554,19 +572,37 @@ cmd_up() {
 # build / deploy / e2e / users
 # =============================================================================
 cmd_build() {
-  local comp="${1:?Usage: scripts/devbox build <admin-portal|account-portal>}"
+  local comp="${1:?Usage: scripts/devbox build <admin-portal|account-portal|roundcube>}"
   load_env
-  case "$comp" in admin-portal|account-portal) ;; *) die "build supports admin-portal and account-portal" ;; esac
+  local version_file
+  case "$comp" in
+    admin-portal|account-portal) version_file="$REPO_ROOT/apps/$comp/VERSION" ;;
+    roundcube) version_file="$REPO_ROOT/apps/docker/roundcube/VERSION" ;;
+    *) die "build supports admin-portal, account-portal and roundcube" ;;
+  esac
   local version tag var
-  version=$(tr -d '[:space:]' < "$REPO_ROOT/apps/$comp/VERSION")
+  version=$(tr -d '[:space:]' < "$version_file")
   # A unique tag per build: the Deployment's image changes, so the deploy's
   # apply rolls the pod (re-importing the same tag would not).
   tag="localhost/mothertree-$comp:${version}-dev-$(git -C "$REPO_ROOT" rev-parse --short HEAD)-$(date +%s)"
   [[ "$tag" =~ ^[A-Za-z0-9._/:-]+$ ]] || die "Refusing odd image tag '$tag' (check apps/$comp/VERSION)"
   info "Building $tag ..."
-  IMAGE_TAG="$tag" PUSH=false "$REPO_ROOT/ci/scripts/build-$comp.sh"
+  if [ "$comp" = "roundcube" ]; then
+    # The image bundles two public plugin repos (git submodules, empty in a
+    # --no-recurse-submodules clone). Native-arch build, loaded into docker.
+    git -C "$REPO_ROOT" submodule update --init submodules/roundcubemail-plugins-kolab submodules/mailvelope_client
+    IMAGE_TAG="$tag" PUSH=false PLATFORMS="linux/$(docker version -f '{{.Server.Arch}}')" \
+      "$REPO_ROOT/apps/scripts/build-roundcube-image.sh"
+  else
+    IMAGE_TAG="$tag" PUSH=false "$REPO_ROOT/ci/scripts/build-$comp.sh"
+  fi
   info "Importing into k3d cluster $DEVBOX_CLUSTER ..."
   k3d image import "$tag" -c "$DEVBOX_CLUSTER"
+  # Pin it: the image cannot be pulled again (localhost/ is not a registry),
+  # so the kubelet's image garbage collection must never remove it, even when
+  # the disk fills up between the build and the deploy that uses it.
+  docker exec "k3d-${DEVBOX_CLUSTER}-server-0" ctr -n k8s.io images label "$tag" io.cri-containerd.pinned=pinned >/dev/null \
+    || die "Could not pin $tag in the k3d node"
   var="$(printf '%s' "${comp//-/_}" | tr '[:lower:]' '[:upper:]')_IMAGE"
   touch "$DEVBOX_DIR/images.env"
   grep -v "^${var}=" "$DEVBOX_DIR/images.env" > "$DEVBOX_DIR/images.env.tmp" || true
@@ -594,9 +630,24 @@ cmd_e2e() {
   load_env
   cd "$REPO_ROOT/e2e"
   [ -d node_modules ] || npm ci
+  # Mail specs talk IMAP/SMTP to the tenant's Stalwart from this machine. The
+  # devbox has no load balancer for those ports, so forward them for the run.
+  local pf_pid="" rc=0
+  if feature_on mail; then
+    local imap_port=19940 sub_port=15880
+    kubectl -n "tn-$DEVBOX_TENANT-mail" port-forward svc/stalwart "$imap_port:994" "$sub_port:588" >/dev/null 2>&1 &
+    pf_pid=$!
+    local i
+    for i in $(seq 1 20); do (exec 3<>"/dev/tcp/127.0.0.1/$imap_port") 2>/dev/null && break; sleep 0.5; done
+    export E2E_STALWART_IMAP_HOST=127.0.0.1 E2E_STALWART_IMAP_PORT="$imap_port" \
+      E2E_STALWART_SMTP_SUBMISSION_PORT="$sub_port" \
+      E2E_STALWART_ADMIN_PASSWORD="$(secret '.stalwart.admin_password')"
+  fi
   E2E_ENV="$DEVBOX_ENV" E2E_TENANT="$DEVBOX_TENANT" E2E_BASE_DOMAIN="$DEVBOX_HOST_SUFFIX" \
     NODE_EXTRA_CA_CERTS="$DEVBOX_DIR/ca/rootCA.pem" \
-    npx playwright test "$@" --project=ci
+    npx playwright test "$@" --project=ci || rc=$?
+  [ -z "$pf_pid" ] || kill "$pf_pid" 2>/dev/null || true
+  return "$rc"
 }
 
 # =============================================================================
@@ -630,7 +681,9 @@ cmd_status() {
     feature_on matrix && echo "  Element:       https://matrix.${DEVBOX_HOST_SUFFIX}"
     feature_on docs && echo "  Docs:          https://docs.${DEVBOX_HOST_SUFFIX}"
     feature_on files && echo "  Files:         https://files.${DEVBOX_HOST_SUFFIX}"
-    { feature_on matrix || feature_on docs || feature_on files; } && echo "  S3:            https://${DEVBOX_S3_HOST}  (key: yq .s3_docs $DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml)"
+    feature_on webmail && echo "  Webmail:       https://webmail.${DEVBOX_HOST_SUFFIX}"
+    feature_on mail && echo "  Mail (IMAP):   kubectl -n tn-$DEVBOX_TENANT-mail port-forward svc/stalwart 1993:993  (IMAPS)"
+    { feature_on matrix || feature_on docs || feature_on files || feature_on mail; } && echo "  S3:            https://${DEVBOX_S3_HOST}  (key: yq .s3_docs $DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml)"
   fi
   echo "  Keycloak:      https://auth.${DEVBOX_HOST_SUFFIX}/admin/  (user admin, password: yq .keycloak.admin_password $DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml)"
   echo "  Test users:    scripts/devbox users create <name> --password <pw> [--admin]"
