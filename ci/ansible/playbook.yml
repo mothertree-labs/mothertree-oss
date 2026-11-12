@@ -105,12 +105,21 @@
         - woodpecker-agent
         - woodpecker-cli
 
+    # Used by the upgrade block, the agent restart handler and the final
+    # agent check; see the script for why :3000/healthz is not enough.
+    - name: Install the agent stability check
+      ansible.builtin.copy:
+        src: files/woodpecker-agent-stable.sh
+        dest: /usr/local/bin/woodpecker-agent-stable
+        mode: "0755"
+
     # Installing the .deb only swaps the binary on disk — it does NOT restart
     # the running services. A pure version bump changes no config file, so the
     # restart handlers never fire, leaving the old process running. The agent
     # then crash-loops on a GRPC version mismatch against the stale server.
     # This block detects that drift and cycles the services in the correct
-    # order (server first, wait until it reports the new version, then agent).
+    # order (server first, wait until it reports the new version, then let the
+    # agent it took down with it settle).
     # It is idempotent: on a no-op re-run the running version already matches
     # the desired version, so nothing is restarted and pipelines are undisturbed.
     - name: Query the running Woodpecker server version
@@ -150,10 +159,39 @@
           retries: 24
           delay: 5
 
-        - name: Restart woodpecker-agent so its GRPC version matches the server
+        # No second restart here: the agent unit `Requires=` the server, so
+        # systemd already restarted it with the server. Restarting it again
+        # while it is still starting up makes it unregister itself from the
+        # server *after* it saved its agent ID to agent.conf, and every later
+        # start then fails with "AgentID not found in database" (2026-11-08,
+        # 2026-11-12). Its :3000 endpoints answer as soon as the process
+        # binds, before it registers, so they cannot tell "started up" apart
+        # from "still starting"; woodpecker-agent-stable (installed above)
+        # can. Restart only if the settled agent still runs the old binary.
+        - name: Wait for the agent restarted with the server to settle
+          ansible.builtin.command: /usr/local/bin/woodpecker-agent-stable
+          register: _wp_agent_settled
+          until: _wp_agent_settled.rc == 0
+          retries: 24
+          delay: 5
+          changed_when: false
+          failed_when: false
+
+        - name: Read the settled agent's version
+          ansible.builtin.uri:
+            url: http://127.0.0.1:3000/version
+            return_content: true
+          register: _wp_agent_version
+          failed_when: false
+
+        - name: Restart woodpecker-agent if it still runs the old version
           ansible.builtin.systemd:
             name: woodpecker-agent
             state: restarted
+          when: >-
+            _wp_agent_settled.rc == 0
+            and (_wp_agent_version.json.version | default('') | string)
+                != (woodpecker_version | string)
 
     # ── Install Tailscale (mesh networking for SSH access) ─────────
     - name: Install Tailscale
@@ -839,6 +877,73 @@
       loop_control:
         label: "{{ item.path }}"
 
+    # ── Agent registered? ───────────────────────────────────────────
+    # Run any pending (re)start handlers first, then require a settled agent.
+    # A healthy-looking server with a crash-looping agent is a silent CI
+    # outage: pipelines just queue. /healthz cannot be the test: a
+    # crash-looping agent answers it for a moment on every restart.
+    - name: Run pending handlers before checking the agent
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify the Woodpecker agent is registered and settled
+      block:
+        - name: Wait for the agent to settle
+          ansible.builtin.command: /usr/local/bin/woodpecker-agent-stable
+          register: _wp_agent_stable
+          until: _wp_agent_stable.rc == 0
+          retries: 12
+          delay: 5
+          changed_when: false
+      rescue:
+        # The one failure with a known cure: agent.conf holds an ID the server
+        # deleted (see the upgrade block above). An empty agent.conf makes the
+        # agent register afresh with the shared secret (the deleted agent's
+        # row is already gone; nothing else is left behind).
+        - name: Look for the stale agent ID error
+          # Only the current activation (or crash-loop cycle): an old match
+          # must not clear the ID of an agent that is unhealthy for another
+          # reason.
+          ansible.builtin.shell: >-
+            journalctl -u woodpecker-agent --no-pager
+            --since "$(systemctl show -p InactiveExitTimestamp --value woodpecker-agent)"
+            | grep -q 'AgentID not found in database'
+          register: _wp_stale_agent_id
+          changed_when: false
+          failed_when: false
+
+        - name: Fail when the agent is unhealthy for another reason
+          ansible.builtin.fail:
+            msg: >-
+              woodpecker-agent did not settle and the cause is not a stale
+              agent ID; check `journalctl -u woodpecker-agent`.
+          when: _wp_stale_agent_id.rc != 0
+
+        - name: Stop the agent to clear its stale agent ID
+          ansible.builtin.systemd:
+            name: woodpecker-agent
+            state: stopped
+
+        - name: Clear the stale agent ID
+          ansible.builtin.copy:
+            content: ""
+            dest: /etc/woodpecker/agent.conf
+            owner: woodpecker
+            group: woodpecker
+            mode: "0644"
+
+        - name: Start the agent so it registers afresh
+          ansible.builtin.systemd:
+            name: woodpecker-agent
+            state: started
+
+        - name: Wait for the re-registered agent to settle
+          ansible.builtin.command: /usr/local/bin/woodpecker-agent-stable
+          register: _wp_agent_stable_retry
+          until: _wp_agent_stable_retry.rc == 0
+          retries: 12
+          delay: 5
+          changed_when: false
+
   handlers:
     - name: Restart Docker
       ansible.builtin.systemd:
@@ -854,8 +959,31 @@
         name: woodpecker-server
         state: restarted
 
+    # Handlers run in the order they are defined here. A restart of the server
+    # restarts the agent too (its unit `Requires=` the server, and the
+    # daemon-reload above runs first, so it starts with any new unit or env).
+    # Restarting it again right after lands while it is still starting up and
+    # strands it with a deleted agent ID, so skip the agent restart then; when
+    # it does run, let the agent settle first.
+    - name: Note that the server restart also restarted the agent
+      ansible.builtin.set_fact:
+        _wp_agent_restarted_with_server: true
+      listen: Restart Woodpecker server
+
+    - name: Wait for the agent to settle before restarting it
+      ansible.builtin.command: /usr/local/bin/woodpecker-agent-stable
+      register: _wp_agent_pre_restart
+      until: _wp_agent_pre_restart.rc == 0
+      retries: 6
+      delay: 5
+      changed_when: false
+      failed_when: false
+      when: not (_wp_agent_restarted_with_server | default(false))
+      listen: Restart Woodpecker agent
+
     - name: Restart Woodpecker agent
       ansible.builtin.systemd:
         name: woodpecker-agent
         state: restarted
+      when: not (_wp_agent_restarted_with_server | default(false))
 

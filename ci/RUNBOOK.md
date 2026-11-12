@@ -185,7 +185,24 @@ ansible-playbook -i config/platform/devhome/ci-inventory.yml \
    ```
 
 **Verify afterwards**: both services `active` and reporting the same version, and
-the agent registered and online.
+the agent registered and online. The playbook itself ends by requiring a settled
+agent: `/usr/local/bin/woodpecker-agent-stable` (active for 20s, no stale-ID
+error). Do not use `:3000/healthz` for this; a crash-looping agent answers it
+for a moment on every restart.
+
+**Agent crash-looping with `AgentID not found in database`:** the agent was
+restarted while it was still starting up (a quick double restart), so it
+unregistered itself from the server after it had saved its ID to
+`/etc/woodpecker/agent.conf`. The server looks healthy, but pipelines just queue.
+The playbook no longer double-restarts and repairs this case itself; by hand,
+empty the file so the agent registers afresh:
+
+```bash
+# inside devhome-ci:
+systemctl stop woodpecker-agent
+: > /etc/woodpecker/agent.conf && chown woodpecker:woodpecker /etc/woodpecker/agent.conf
+systemctl start woodpecker-agent
+```
 
 Then re-check the fork-PR approval gate. A Woodpecker upgrade or a settings
 migration can reset it. It must read exactly `forks` — check the **value**, not
