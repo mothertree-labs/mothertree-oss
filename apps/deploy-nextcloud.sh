@@ -40,6 +40,8 @@ source "${REPO_ROOT}/scripts/lib/config.sh"
 mt_load_tenant_config
 
 source "${REPO_ROOT}/scripts/lib/notify.sh"
+# shellcheck source=../scripts/lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
 mt_deploy_start "deploy-nextcloud"
 
 mt_require_commands kubectl helm envsubst openssl shasum
@@ -1190,8 +1192,22 @@ if [ -f "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl" ]; then
         sleep 2
     fi
 
+    # Where user_oidc fetches the provider's discovery document (server side).
+    # On a devbox the public name is *.localhost, which libcurl (PHP) resolves
+    # to loopback without asking DNS, so it uses Keycloak's in-cluster URL;
+    # the devbox Keycloak runs with --hostname-backchannel-dynamic, so the
+    # token/userinfo/jwks endpoints it advertises there are in-cluster too.
+    if mt_is_local_edge; then
+        OIDC_DISCOVERY_BASE="$KEYCLOAK_INTERNAL_URL"
+        print_status "edge local: Nextcloud discovers Keycloak in-cluster ($OIDC_DISCOVERY_BASE)"
+    else
+        OIDC_DISCOVERY_BASE="https://${AUTH_HOST}"
+    fi
+    : "${OIDC_DISCOVERY_BASE:?OIDC discovery base URL is empty}"
+    export OIDC_DISCOVERY_BASE
+
     # Generate the job manifest from template
-    envsubst '${FILES_HOST} ${AUTH_HOST} ${TENANT_KEYCLOAK_REALM} ${CALENDAR_ENABLED} ${SMTP_DOMAIN} ${JITSI_HOST} ${OFFICE_ENABLED} ${OFFICE_HOST} ${NS_OFFICE} ${GOOGLE_IMPORT_ENABLED}' < "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl" | \
+    envsubst '${FILES_HOST} ${AUTH_HOST} ${OIDC_DISCOVERY_BASE} ${TENANT_KEYCLOAK_REALM} ${CALENDAR_ENABLED} ${SMTP_DOMAIN} ${JITSI_HOST} ${OFFICE_ENABLED} ${OFFICE_HOST} ${NS_OFFICE} ${GOOGLE_IMPORT_ENABLED}' < "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl" | \
       sed "s/namespace: files/namespace: $NS_FILES/g" > /tmp/nextcloud-oidc-config-job.yaml
 
     # Delete previous job if exists
@@ -1299,7 +1315,19 @@ fi
 # Step 9c: Deploy notify_push (Client Push) — replaces browser polling with WebSocket push
 print_status "Deploying notify_push (Client Push)..."
 NEXTCLOUD_POD=$(_get_nc_pod)
-if [ -n "$NEXTCLOUD_POD" ]; then
+# icewind1991/notify_push publishes amd64 images only. On a cluster with no
+# amd64 node (an arm64 devbox) the pod can only crashloop with "exec format
+# error"; clients then fall back to polling, which is what skipping gives too.
+# A failed or empty lookup must not read as "no amd64 node" (that would
+# delete notify-push on a real cluster), so it is fatal.
+if ! NODE_ARCHES=$(kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.architecture}') || [ -z "$NODE_ARCHES" ]; then
+    print_error "Could not read node architectures (kubectl get nodes) — refusing to guess whether notify_push can run"
+    exit 1
+fi
+if [[ " $NODE_ARCHES " != *" amd64 "* ]]; then
+    print_warning "notify_push: its image is amd64-only and no node is amd64 (${NODE_ARCHES:-unknown}) — skipping; clients poll instead"
+    kubectl delete deployment notify-push -n "$NS_FILES" --ignore-not-found >/dev/null
+elif [ -n "$NEXTCLOUD_POD" ]; then
     # Build connection URLs from values already available in this script
     # URL-encode passwords: base64 can contain +, /, = which break URL parsing
     url_encode() { python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.stdin.read().strip(), safe=''))"; }

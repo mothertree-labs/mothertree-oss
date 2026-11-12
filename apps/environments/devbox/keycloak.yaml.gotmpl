@@ -1,1 +1,76 @@
-../dev/keycloak.yaml.gotmpl
+# devbox: the dev values (../dev/keycloak.yaml.gotmpl) plus dynamic
+# back-channel URLs. Pods on a devbox cannot use the public *.localhost names
+# for server-to-server calls (libcurl, e.g. PHP's, resolves them to loopback),
+# so clients such as Nextcloud's user_oidc fetch discovery from the in-cluster
+# Service; with --hostname-backchannel-dynamic Keycloak then advertises
+# in-cluster token/userinfo/jwks endpoints to them, while the issuer and the
+# browser endpoints stay https://auth.<devbox>. That option needs --hostname
+# as a full URL. Keep the rest in step with the dev file. devbox ONLY: never
+# copy --hostname-backchannel-dynamic into dev/devhome/prod values (it makes
+# back-channel URLs follow the request's Host header).
+command:
+  - "/opt/keycloak/bin/kc.sh"
+  - "start"
+  - '--hostname=https://{{ env "AUTH_HOST" }}'
+  - "--hostname-backchannel-dynamic=true"
+  - "--hostname-strict=false"
+
+# Replicas from tenant config
+replicas: {{ env "KEYCLOAK_REPLICAS" }}
+
+# Database connection - hostname varies based on PostgreSQL architecture (standalone vs replication)
+# Override extraEnv to set dynamic PG_HOST
+extraEnv: |
+  - name: KEYCLOAK_ADMIN
+    value: admin
+  - name: KEYCLOAK_ADMIN_PASSWORD
+    value: '{{ env "KEYCLOAK_ADMIN_PASSWORD" }}'
+  - name: KC_DB
+    value: postgres
+  - name: KC_DB_URL
+    value: 'jdbc:postgresql://{{ env "PG_HOST" }}:5432/keycloak'
+  - name: KC_DB_USERNAME
+    value: keycloak
+  - name: KC_DB_PASSWORD
+    value: '{{ env "KEYCLOAK_DB_PASSWORD" }}'
+  # Set by deploy_infra to PgBouncer's default_pool_size. PgBouncer runs in
+  # session mode, so each Keycloak connection holds a server connection for its
+  # whole life. With the Quarkus default (100), Keycloak opens more than the pool
+  # under load, and the extra connections wait in PgBouncer's queue while Keycloak
+  # has idle connections of its own, until query_wait_timeout (#2587).
+  - name: KC_DB_POOL_MAX_SIZE
+    value: '{{ requiredEnv "KC_DB_POOL_MAX_SIZE" }}'
+  - name: KC_LOG_LEVEL
+    value: INFO
+  - name: KC_SPI_THEME_CACHE_THEMES
+    value: "false"
+  - name: KC_SPI_THEME_STATIC_MAX_AGE
+    value: "-1"
+  # devbox: trust the local CA as well as the JVM defaults, so realm mail to
+  # the tenant's Stalwart (STARTTLS, local-CA certificate) verifies.
+  - name: KC_TRUSTSTORE_PATHS
+    value: /etc/mt-local-ca/ca.crt
+
+# devbox: the base lists (values/keycloak-codecentric.yaml) plus the local CA
+# ConfigMap (published by deploy_infra on edge local). Read from the base file
+# so the two cannot drift.
+extraVolumes: |
+  {{ readFile "../../values/keycloak-codecentric.yaml" | fromYaml | get "extraVolumes" | indent 2 | trim }}
+  - name: mt-local-ca
+    configMap:
+      name: mt-local-ca
+extraVolumeMounts: |
+  {{ readFile "../../values/keycloak-codecentric.yaml" | fromYaml | get "extraVolumeMounts" | indent 2 | trim }}
+  - name: mt-local-ca
+    mountPath: /etc/mt-local-ca
+    readOnly: true
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 768Mi
+  limits:
+    memory: 1536Mi
+
+# Ingress is managed separately per-tenant via apps/manifests/keycloak/tenant-auth-ingress.yaml.tpl
+# This allows multiple tenants to share a single Keycloak instance with different auth domains

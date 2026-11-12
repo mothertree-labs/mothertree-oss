@@ -444,6 +444,13 @@ fi
 print_status "Applying Stalwart manifests..."
 
 # Apply main Stalwart manifest (Secret, ConfigMap, Deployment, Service)
+# The template is rendered with a bare envsubst: an unset S3 endpoint would
+# silently become an empty string, so require it (config.sh sets it). The
+# store's endpoint is s3.internal_endpoint (default
+# https://<s3.cluster>.linodeobjects.com, the value it had hardcoded);
+# Stalwart's S3 client always uses path-style requests. (Kept here, not in the
+# template, so the rendered config stays byte-identical.)
+: "${S3_INTERNAL_ENDPOINT:?S3_INTERNAL_ENDPOINT not set by config.sh}"
 envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" | kubectl apply -f -
 print_success "Stalwart Deployment and Service applied"
 
@@ -472,9 +479,12 @@ print_success "Internal ingress applied for $WEBADMIN_HOST"
 # to the correct tenant's Stalwart based on recipient domain using transport_maps.
 # Uses the shared configure-mail-routing script that scans ALL tenants to ensure
 # consistent configuration whether running create_env or deploy-stalwart standalone.
-print_status "Configuring Postfix inbound mail routing for all tenants..."
-
-if [ -x "$REPO_ROOT/scripts/configure-mail-routing" ]; then
+# shellcheck source=../scripts/lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+if mt_is_local_edge; then
+    print_status "edge local: no inbound internet mail and no Postfix, skipping Postfix mail routing"
+elif [ -x "$REPO_ROOT/scripts/configure-mail-routing" ]; then
+    print_status "Configuring Postfix inbound mail routing for all tenants..."
     "$REPO_ROOT/scripts/configure-mail-routing" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | while read line; do
         echo "  $line"
     done
@@ -490,44 +500,51 @@ fi
 # ClusterIP service on standard internal ports. Two things are needed:
 #   1. tcp-services ConfigMap entries (tells nginx where to proxy)
 #   2. LB service ports (tells the cloud LB to forward to nginx's NodePort)
-print_status "Configuring nginx TCP proxy for tenant mail ports..."
+if mt_is_local_edge; then
+    # Every tcp-services entry decodes PROXY protocol from the cloud load
+    # balancer, which a devbox does not have; mail clients on the developer's
+    # machine use kubectl port-forward instead (docs/devbox.md).
+    print_status "edge local: no load balancer, skipping the nginx TCP proxy for tenant mail ports"
+else
+    print_status "Configuring nginx TCP proxy for tenant mail ports..."
 
-# Create tcp-services ConfigMap if it doesn't exist
-if ! kubectl get configmap tcp-services -n "$NS_INGRESS" >/dev/null 2>&1; then
-    print_status "Creating tcp-services ConfigMap..."
-    kubectl create configmap tcp-services -n "$NS_INGRESS"
-fi
-
-# Patch tcp-services ConfigMap with this tenant's port mappings
-print_status "Updating tcp-services ConfigMap for tenant $TENANT..."
-kubectl patch configmap tcp-services -n "$NS_INGRESS" --type merge -p "$(cat <<EOF
-{"data": {
-  "${STALWART_SMTPS_PORT}": "${NS_MAIL}/stalwart:465:PROXY:",
-  "${STALWART_SUBMISSION_PORT}": "${NS_MAIL}/stalwart:587:PROXY:",
-  "${STALWART_IMAPS_PORT}": "${NS_MAIL}/stalwart:993:PROXY:",
-  "${STALWART_IMAPS_APP_PORT}": "${NS_MAIL}/stalwart:994:PROXY:",
-  "${STALWART_SUBMISSION_APP_PORT}": "${NS_MAIL}/stalwart:588:PROXY:"
-}}
-EOF
-)"
-print_success "tcp-services ConfigMap updated"
-
-# Add ports to LB service (so cloud LB forwards them to nginx's NodePort)
-print_status "Ensuring LB service has tenant mail ports..."
-EXISTING_PORTS=$(kubectl get svc ingress-nginx-controller -n "$NS_INGRESS" -o jsonpath='{.spec.ports[*].port}' 2>/dev/null || echo "")
-
-for port_info in "smtps-${TENANT}:${STALWART_SMTPS_PORT}" "submission-${TENANT}:${STALWART_SUBMISSION_PORT}" "imaps-${TENANT}:${STALWART_IMAPS_PORT}" "imaps-app-${TENANT}:${STALWART_IMAPS_APP_PORT}" "sub-app-${TENANT}:${STALWART_SUBMISSION_APP_PORT}"; do
-    port_name="${port_info%%:*}"
-    port_num="${port_info##*:}"
-    if ! echo "$EXISTING_PORTS" | grep -qw "$port_num"; then
-        print_status "Adding port $port_name ($port_num) to LB..."
-        kubectl patch svc ingress-nginx-controller -n "$NS_INGRESS" --type='json' \
-            -p='[{"op": "add", "path": "/spec/ports/-", "value": {"name": "'"$port_name"'", "port": '"$port_num"', "targetPort": '"$port_num"', "protocol": "TCP"}}]'
-    else
-        print_status "Port $port_num already on LB"
+    # Create tcp-services ConfigMap if it doesn't exist
+    if ! kubectl get configmap tcp-services -n "$NS_INGRESS" >/dev/null 2>&1; then
+        print_status "Creating tcp-services ConfigMap..."
+        kubectl create configmap tcp-services -n "$NS_INGRESS"
     fi
-done
-print_success "Tenant mail ports configured on LB and nginx TCP proxy"
+
+    # Patch tcp-services ConfigMap with this tenant's port mappings
+    print_status "Updating tcp-services ConfigMap for tenant $TENANT..."
+    kubectl patch configmap tcp-services -n "$NS_INGRESS" --type merge -p "$(cat <<EOF
+    {"data": {
+      "${STALWART_SMTPS_PORT}": "${NS_MAIL}/stalwart:465:PROXY:",
+      "${STALWART_SUBMISSION_PORT}": "${NS_MAIL}/stalwart:587:PROXY:",
+      "${STALWART_IMAPS_PORT}": "${NS_MAIL}/stalwart:993:PROXY:",
+      "${STALWART_IMAPS_APP_PORT}": "${NS_MAIL}/stalwart:994:PROXY:",
+      "${STALWART_SUBMISSION_APP_PORT}": "${NS_MAIL}/stalwart:588:PROXY:"
+    }}
+EOF
+    )"
+    print_success "tcp-services ConfigMap updated"
+
+    # Add ports to LB service (so cloud LB forwards them to nginx's NodePort)
+    print_status "Ensuring LB service has tenant mail ports..."
+    EXISTING_PORTS=$(kubectl get svc ingress-nginx-controller -n "$NS_INGRESS" -o jsonpath='{.spec.ports[*].port}' 2>/dev/null || echo "")
+
+    for port_info in "smtps-${TENANT}:${STALWART_SMTPS_PORT}" "submission-${TENANT}:${STALWART_SUBMISSION_PORT}" "imaps-${TENANT}:${STALWART_IMAPS_PORT}" "imaps-app-${TENANT}:${STALWART_IMAPS_APP_PORT}" "sub-app-${TENANT}:${STALWART_SUBMISSION_APP_PORT}"; do
+        port_name="${port_info%%:*}"
+        port_num="${port_info##*:}"
+        if ! echo "$EXISTING_PORTS" | grep -qw "$port_num"; then
+            print_status "Adding port $port_name ($port_num) to LB..."
+            kubectl patch svc ingress-nginx-controller -n "$NS_INGRESS" --type='json' \
+                -p='[{"op": "add", "path": "/spec/ports/-", "value": {"name": "'"$port_name"'", "port": '"$port_num"', "targetPort": '"$port_num"', "protocol": "TCP"}}]'
+        else
+            print_status "Port $port_num already on LB"
+        fi
+    done
+    print_success "Tenant mail ports configured on LB and nginx TCP proxy"
+fi
 
 # =============================================================================
 # CoreDNS rewrite: make mail.<tenant-domain> resolve to the in-cluster Stalwart

@@ -759,6 +759,10 @@ if mt_is_local_edge; then
   source "${REPO_ROOT}/scripts/lib/local-ca.sh"
   mt_local_ca_apply_secret || exit 1
   mt_local_ca_apply_cluster_issuers letsencrypt-prod letsencrypt-prod-dns01 || exit 1
+  # Keycloak sends realm mail (invitations, password resets) to the tenant's
+  # Stalwart over STARTTLS with a local-CA certificate; the devbox Keycloak
+  # values mount this ConfigMap into its truststore (KC_TRUSTSTORE_PATHS).
+  mt_local_ca_publish_configmap "$NS_AUTH" || exit 1
 else
 print_status "Deploying ClusterIssuers and Cloudflare API token..."
 export TLS_EMAIL="$TF_VAR_tls_email"
@@ -1029,7 +1033,11 @@ for _tdir in "$MT_TENANTS_DIR"/*/; do
   fi
 done
 
-if [ "$_mail_enabled_any" = "true" ]; then
+if [ "$_mail_enabled_any" = "true" ] && mt_is_local_edge; then
+  # Postfix only receives internet mail (MX on port 25, PROXY protocol from the
+  # load balancer). A devbox has neither; tenant Stalwart handles local mail.
+  print_status "edge local: no inbound internet mail, skipping K8s Postfix"
+elif [ "$_mail_enabled_any" = "true" ]; then
   print_status "Deploying K8s Postfix..."
   if [ -x "$REPO_ROOT/apps/deploy-postfix.sh" ]; then
     "$REPO_ROOT/apps/deploy-postfix.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /'

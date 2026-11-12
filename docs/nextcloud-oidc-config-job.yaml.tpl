@@ -180,7 +180,7 @@ spec:
               nc_exec su -s /bin/sh www-data -c "php occ user_oidc:provider 'Google' \
                 --clientid='$OIDC_CLIENT_ID' \
                 --clientsecret='$OIDC_CLIENT_SECRET' \
-                --discoveryuri='https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}/.well-known/openid-configuration' \
+                --discoveryuri='${OIDC_DISCOVERY_BASE}/realms/${TENANT_KEYCLOAK_REALM}/.well-known/openid-configuration' \
                 --scope='openid email profile' \
                 --unique-uid=0 \
                 --mapping-uid=email \

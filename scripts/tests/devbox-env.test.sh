@@ -209,17 +209,25 @@ s3_of() {  # <yq edit for the example tenant config> -> "endpoint|internal|style
     export REPO_ROOT MT_ENV MT_TENANT MT_TENANTS_DIR MT_PROJECT_CONF MT_INFRA_CONFIG_DIR
     source "$REPO_ROOT/scripts/lib/common.sh"; source "$REPO_ROOT/scripts/lib/config.sh"
     mt_load_tenant_config >/dev/null 2>&1
-    echo "$S3_ENDPOINT|$S3_INTERNAL_ENDPOINT|$S3_ADDRESSING_STYLE|$S3_USE_SSL"' _ "$REPO_ROOT" "$t" 2>/dev/null
+    echo "$S3_ENDPOINT|$S3_INTERNAL_ENDPOINT|$S3_ADDRESSING_STYLE|$S3_USE_SSL|$S3_INTERNAL_HOST|$S3_INTERNAL_PORT|$S3_INTERNAL_SSL|$S3_USE_PATH_STYLE"' _ "$REPO_ROOT" "$t" 2>/dev/null
 }
+s3_main() { s3_of "$1" | cut -d'|' -f1-4; }   # endpoint|internal|style|ssl
+s3_split() { s3_of "$1" | cut -d'|' -f5-8; }  # host|port|ssl|path-style (Nextcloud)
 cluster=$(yq '.s3.cluster' "$REPO_ROOT/tenants/.example/dev.config.yaml")
 check "S3 defaults are Linode, virtual-host, TLS" \
-  test "$(s3_of '.')" = "https://${cluster}.linodeobjects.com|https://${cluster}.linodeobjects.com|virtual|True"
+  test "$(s3_main '.')" = "https://${cluster}.linodeobjects.com|https://${cluster}.linodeobjects.com|virtual|True"
 check "s3.endpoint override; internal defaults to it" \
-  test "$(s3_of '.s3.endpoint = "https://s3.x.localhost" | .s3.addressing_style = "path"')" = "https://s3.x.localhost|https://s3.x.localhost|path|True"
+  test "$(s3_main '.s3.endpoint = "https://s3.x.localhost" | .s3.addressing_style = "path"')" = "https://s3.x.localhost|https://s3.x.localhost|path|True"
 check "s3.internal_endpoint override (http)" \
-  test "$(s3_of '.s3.endpoint = "https://s3.x.localhost" | .s3.internal_endpoint = "http://gw.ns.svc:7070"')" = "https://s3.x.localhost|http://gw.ns.svc:7070|virtual|True"
+  test "$(s3_main '.s3.endpoint = "https://s3.x.localhost" | .s3.internal_endpoint = "http://gw.ns.svc:7070"')" = "https://s3.x.localhost|http://gw.ns.svc:7070|virtual|True"
 check "plain-http endpoint turns AWS_S3_USE_SSL off" \
   test "$(s3_of '.s3.endpoint = "http://s3.x.localhost"' | cut -d'|' -f4)" = "False"
+check "split S3 defaults are what Nextcloud had hardcoded" \
+  test "$(s3_split '.')" = "${cluster}.linodeobjects.com|443|true|false"
+check "split S3 for an http gateway with a port, path-style" \
+  test "$(s3_split '.s3.internal_endpoint = "http://gw.ns.svc.cluster.local:7070" | .s3.addressing_style = "path"')" = "gw.ns.svc.cluster.local|7070|false|true"
+check "split S3 for https without a port" \
+  test "$(s3_split '.s3.endpoint = "https://s3.x.localhost/"')" = "s3.x.localhost|443|true|false"
 check_not "s3.addressing_style must be virtual or path" s3_of '.s3.addressing_style = "dns"'
 check_not "s3.endpoint must be a URL" s3_of '.s3.endpoint = "s3.x.localhost"'
 check_not "s3.endpoint rejects quotes" s3_of '.s3.endpoint = "https://a\"b.example.com"'
@@ -236,6 +244,20 @@ check "docs-config: default S3 values render as before" \
   test "$(docs_env envsubst < "$REPO_ROOT/docs/docs-config.yaml.tpl" | grep -v '^ *#')" = "$(printf '%s\n' "$legacy_docs" | docs_env envsubst | grep -v '^ *#')"
 check "docs-config: no hardcoded linodeobjects endpoint left" \
   test "$(grep -c 'linodeobjects' "$REPO_ROOT/docs/docs-config.yaml.tpl")" = "1"
+
+# Nextcloud OIDC job: public edges still discover Keycloak at https://$AUTH_HOST.
+nc_job_env() { env -i PATH="$PATH" AUTH_HOST=auth.example.com TENANT_KEYCLOAK_REALM=r FILES_HOST=files.example.com "$@"; }
+legacy_nc=$(sed "s|\${OIDC_DISCOVERY_BASE}|https://\${AUTH_HOST}|" "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl")
+check "nextcloud-oidc job: public-edge discovery URL renders as before" \
+  test "$(nc_job_env OIDC_DISCOVERY_BASE=https://auth.example.com envsubst '${AUTH_HOST} ${OIDC_DISCOVERY_BASE} ${TENANT_KEYCLOAK_REALM} ${FILES_HOST}' < "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl")" = \
+       "$(printf '%s\n' "$legacy_nc" | nc_job_env envsubst '${AUTH_HOST} ${TENANT_KEYCLOAK_REALM} ${FILES_HOST}')"
+check "deploy-nextcloud: public edges use https://\$AUTH_HOST" \
+  grep -qF 'OIDC_DISCOVERY_BASE="https://${AUTH_HOST}"' "$REPO_ROOT/apps/deploy-nextcloud.sh"
+
+# Stalwart: the S3 store endpoint renders as the old hardcoded Linode value.
+check "stalwart: default S3 endpoint renders as before" \
+  test "$(env -i PATH="$PATH" S3_CLUSTER=us-lax-1 S3_INTERNAL_ENDPOINT=https://us-lax-1.linodeobjects.com envsubst '${S3_CLUSTER} ${S3_INTERNAL_ENDPOINT}' < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl")" = \
+       "$(sed 's|${S3_INTERNAL_ENDPOINT}|https://${S3_CLUSTER}.linodeobjects.com|' "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" | env -i PATH="$PATH" S3_CLUSTER=us-lax-1 envsubst '${S3_CLUSTER}')"
 
 # ── local-ca.sh: trust injection ──────────────────────────────────────────
 trust_out="$TEST_TMP/backend.yaml"

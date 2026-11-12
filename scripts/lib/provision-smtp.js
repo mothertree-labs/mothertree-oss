@@ -238,10 +238,20 @@ function readSecretField(namespace, name, key) {
 // bind, cert issuance) instead of hard-failing on the first miss.
 function smtpSmokeAttempt() {
   const podName = `smtp-smoke-${process.pid}-${Date.now()}`;
+  // SMTP_SMOKE_CA_B64 (set by provision-smtp-service-accounts on a devbox,
+  // cluster.edge: local): the base64 PEM of the local CA the tenant certs
+  // chain to. Verification stays strict; it only adds that trust anchor.
+  const caB64 = process.env.SMTP_SMOKE_CA_B64 || '';
+  if (caB64 && !/^[A-Za-z0-9+/=]+$/.test(caB64)) {
+    throw new Error('SMTP_SMOKE_CA_B64 is not base64');
+  }
+  const caSetup = caB64 ? `echo '${caB64}' | base64 -d > /tmp/ca.pem` : '';
+  const caFlag = caB64 ? ' -CAfile /tmp/ca.pem' : '';
   const shellScript = `
     apk add --no-cache openssl >/dev/null 2>&1
+    ${caSetup}
     printf 'EHLO probe\\nQUIT\\n' | openssl s_client \\
-      -connect ${MAIL_HOST}:588 \\
+      -connect ${MAIL_HOST}:588${caFlag} \\
       -starttls smtp \\
       -verify_hostname ${MAIL_HOST} \\
       -verify_return_error \\

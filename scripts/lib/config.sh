@@ -228,6 +228,15 @@ _mt_load_tenant_yaml() {
   [[ "$S3_INTERNAL_ENDPOINT" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] \
     || { echo "[ERROR] s3.internal_endpoint must be an http(s) URL with no path (got '$S3_INTERNAL_ENDPOINT')" >&2; exit 1; }
   case "$S3_ADDRESSING_STYLE" in virtual|path) ;; *) echo "[ERROR] s3.addressing_style must be virtual or path (got '$S3_ADDRESSING_STYLE')" >&2; exit 1 ;; esac
+  # Split form of s3.internal_endpoint for clients that take host/port/ssl
+  # separately (the Nextcloud chart's objectStore.s3). Defaults reproduce
+  # <cluster>.linodeobjects.com / 443 / true.
+  local _s3_hostport="${S3_INTERNAL_ENDPOINT#*://}"
+  _s3_hostport="${_s3_hostport%/}"
+  S3_INTERNAL_HOST="${_s3_hostport%%:*}"
+  if [ "${S3_INTERNAL_ENDPOINT%%://*}" = "https" ]; then S3_INTERNAL_SSL=true; S3_INTERNAL_PORT=443; else S3_INTERNAL_SSL=false; S3_INTERNAL_PORT=80; fi
+  case "$_s3_hostport" in *:*) S3_INTERNAL_PORT="${_s3_hostport##*:}" ;; esac
+  if [ "$S3_ADDRESSING_STYLE" = "path" ]; then S3_USE_PATH_STYLE=true; else S3_USE_PATH_STYLE=false; fi
   # The Docs storage backend wants "True"/"False" for AWS_S3_USE_SSL.
   if [ "${S3_ENDPOINT#https://}" != "$S3_ENDPOINT" ]; then S3_USE_SSL="True"; else S3_USE_SSL="False"; fi
 
@@ -636,6 +645,7 @@ _mt_export_all() {
   export TENANT_COOKIE_DOMAIN TENANT_KEYCLOAK_REALM TENANT_DB_USER
   export S3_CLUSTER S3_BUCKET_PREFIX S3_DOCS_BUCKET S3_MATRIX_BUCKET S3_FILES_BUCKET S3_MAIL_BUCKET
   export S3_ENDPOINT S3_INTERNAL_ENDPOINT S3_ADDRESSING_STYLE S3_USE_SSL
+  export S3_INTERNAL_HOST S3_INTERNAL_PORT S3_INTERNAL_SSL S3_USE_PATH_STYLE
   export DOCS_DB_NAME NEXTCLOUD_DB_NAME SYNAPSE_DB_NAME SYNAPSE_DB_USER
   export STALWART_DB_NAME STALWART_DB_USER ROUNDCUBE_DB_NAME ROUNDCUBE_DB_USER
   export INFRA_DOMAIN MAIL_SUBDOMAIN DNS_EXTERNAL

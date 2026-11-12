@@ -156,7 +156,7 @@ data:
     type = "s3"
     bucket = "${S3_MAIL_BUCKET}"
     region = "${S3_CLUSTER}"
-    endpoint = "https://${S3_CLUSTER}.linodeobjects.com"
+    endpoint = "${S3_INTERNAL_ENDPOINT}"
     access-key = "%{env:S3_ACCESS_KEY}%"
     secret-key = "%{env:S3_SECRET_KEY}%"
     timeout = "30s"
