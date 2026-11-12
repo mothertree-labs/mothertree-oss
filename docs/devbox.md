@@ -16,9 +16,9 @@ on your machine and is throwaway.
   - **Matrix** (Synapse + Element) and **Docs**, storing their media in an in-cluster S3 gateway;
   - ingress-nginx, cert-manager, PgBouncer and a PostgreSQL container.
 - **full** (`init --profile full`): standard plus **Files** (Nextcloud),
-  **mail** (a Stalwart server for the tenant) and **webmail** (Roundcube,
-  built locally like the portals). Mail is delivered between devbox users;
-  nothing leaves the machine.
+  **mail** (a Stalwart server for the tenant), **webmail** (Roundcube,
+  built locally like the portals) and **Jitsi**. Mail is delivered between
+  devbox users; nothing leaves the machine.
 - **minimal** (`init --profile minimal`): the same without Matrix, Docs and S3.
 
 The other apps (Files, Jitsi, mail) are added one at a time; see
@@ -60,6 +60,7 @@ Keycloak's first boot. When it finishes:
 - Docs: <https://docs.devbox.mothertree.localhost>
 - Files (full profile): <https://files.devbox.mothertree.localhost>
 - Webmail (full profile): <https://webmail.devbox.mothertree.localhost>
+- Jitsi (full profile): <https://jitsi.devbox.mothertree.localhost>
 - Keycloak: <https://auth.devbox.mothertree.localhost/admin/> (user `admin`,
   password `yq .keycloak.admin_password .devbox/tenants/devbox/devbox.secrets.yaml`)
 
@@ -162,6 +163,13 @@ separate docker-compose world.
   TCP ports for IMAP/SMTP are skipped on `edge: local` ("edge local: …" in the
   logs); there is no outbound relay, so mail to outside addresses goes nowhere.
   The SMTP smoke test after provisioning trusts the local CA.
+- **Jitsi**: JVB's media port (31000/udp) is published on `127.0.0.1` when the
+  cluster is created (k3d cannot add ports later; `up` warns if an older
+  cluster lacks it — `down` then `up` recreates it and keeps PostgreSQL and
+  `.devbox/`). JVB advertises 127.0.0.1 and runs without STUN (there is no
+  TURN server); the intent is calls between browsers on the same machine
+  (not yet tested). Its
+  ServiceMonitor is skipped when monitoring is off.
 - **In-cluster names**: a CoreDNS rewrite (`kube-system/coredns-custom`, key
   `devbox.override`) resolves `*.devbox.mothertree.localhost` to the ingress
   controller inside the cluster. Outside it, those names are loopback.
@@ -170,9 +178,12 @@ separate docker-compose world.
 
 ## What's not there yet
 
-- Jitsi. Its Keycloak adapter image is amd64-only, JVB requires a STUN server,
-  its media port needs a k3d port mapping, and the deploy applies a
-  ServiceMonitor that needs the monitoring CRDs.
+- Jitsi sign-in on **arm64** hosts: the Keycloak adapter image
+  (`nordeck/jitsi-keycloak-adapter`) is published for amd64 only, so on arm64
+  its pod cannot pull and joining a room stops at the SSO step. Jitsi itself
+  deploys and the app loads. A two-browser call has not been tested yet.
+- A local image cache: `down` + `up` creates a new cluster, which pulls every
+  upstream image again (20–40 minutes).
 - Outbound mail to real addresses (a catch-all such as Mailpit would show it),
   and the mail e2e specs that need it: `email-roundtrip` (external echo group)
   and `dkim-signature-validation`. `mail/sasl-auth-failure` misreads replies

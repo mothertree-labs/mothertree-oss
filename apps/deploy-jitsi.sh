@@ -84,6 +84,17 @@ else
     print_status "JVB public IP: discovered from the node ExternalIP"
 fi
 
+# STUN: JVB discovers its public address through the TURN server and, with
+# require-stun, fails its health check when it cannot (proactive detection of
+# a blocked media path). A devbox has no TURN server and nothing to discover —
+# the browser is on the same machine and JVB_PUBLIC_IP is 127.0.0.1.
+if mt_is_local_edge; then
+    export JVB_REQUIRE_STUN=false JVB_STUN_SERVERS=""
+    print_status "edge local: no TURN server, JVB runs without STUN (advertises $JVB_PUBLIC_IP)"
+else
+    export JVB_REQUIRE_STUN=true JVB_STUN_SERVERS="${TURN_SERVER_IP}:3478"
+fi
+
 # Ensure namespace exists
 print_status "Ensuring $NS_JITSI namespace exists..."
 kubectl create namespace "$NS_JITSI" --dry-run=client -o yaml | kubectl apply -f -
@@ -177,7 +188,7 @@ _prosody_restarted="$_mt_deploy_changed"
 # Apply JVB — K8s handles rolling update (with graceful drain) if spec changed
 # JVB uses specific variable substitution to preserve shell variables in init container scripts
 # NS_JITSI is included for tenant-specific ClusterRole/ClusterRoleBinding names (avoids multi-tenant RBAC collision)
-envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI} ${JVB_PUBLIC_IP}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI} ${JVB_PUBLIC_IP} ${JVB_REQUIRE_STUN} ${JVB_STUN_SERVERS}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 # Clean up old non-namespaced RBAC resources (replaced by tenant-specific names)
 kubectl delete clusterrole jitsi-jvb-node-reader --ignore-not-found >/dev/null 2>&1
 kubectl delete clusterrolebinding jitsi-jvb-node-reader --ignore-not-found >/dev/null 2>&1
@@ -232,7 +243,11 @@ envsubst < "$REPO_ROOT/apps/manifests/jitsi/ingress.yaml.tpl" | sed "s/namespace
 # Deploy metrics exporter (ServiceAccount + Deployment + Service + ConfigMap)
 print_status "Deploying Jitsi metrics exporter..."
 envsubst < "$REPO_ROOT/apps/manifests/jitsi/jitsi-metrics-exporter.yaml" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
-cat "$REPO_ROOT/apps/manifests/jitsi/jitsi-metrics-exporter-servicemonitor.yaml" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+if mt_is_local_edge && ! kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1; then
+    print_status "edge local: no monitoring stack (no ServiceMonitor CRD), skipping the Jitsi ServiceMonitor"
+else
+    cat "$REPO_ROOT/apps/manifests/jitsi/jitsi-metrics-exporter-servicemonitor.yaml" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+fi
 
 # Deploy HorizontalPodAutoscalers (HPA) for auto-scaling (only if min != max replicas)
 if [ "$JITSI_WEB_MIN_REPLICAS" != "$JITSI_WEB_MAX_REPLICAS" ]; then
