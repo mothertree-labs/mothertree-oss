@@ -18,7 +18,8 @@ on your machine and is throwaway.
 - **full** (`init --profile full`): standard plus **Files** (Nextcloud),
   **mail** (a Stalwart server for the tenant), **webmail** (Roundcube,
   built locally like the portals) and **Jitsi**. Mail is delivered between
-  devbox users; nothing leaves the machine.
+  devbox users, and mail to any other address lands in **Mailpit**; nothing
+  leaves the machine.
 - **minimal** (`init --profile minimal`): the same without Matrix, Docs and S3.
 
 The other apps (Files, Jitsi, mail) are added one at a time; see
@@ -34,12 +35,15 @@ The other apps (Files, Jitsi, mail) are added one at a time; see
   3.7 GiB used in a 6 GiB VM with 4 CPUs), or about **3.5 GiB** and 2 CPUs
   for the minimal one.
 - `127.0.0.1:80` and `127.0.0.1:443` free.
-- Disk: about **25 GiB free** for docker with the full profile (images plus the
-  Roundcube and portal build cache); less for the smaller profiles.
+- Disk: about **30 GiB free** for docker with the full profile (images, the
+  image caches and the Roundcube and portal build cache); less for the smaller
+  profiles.
 - Tools: docker (usable without sudo), [k3d](https://k3d.io) v5.9.0, kubectl,
   helm, helmfile, kustomize, [yq](https://github.com/mikefarah/yq) v4,
   jq, mkcert, openssl, envsubst (gettext), shasum (perl), curl, git, node + npm,
   certutil (`libnss3-tools`).
+- `fs.inotify.max_user_instances` of at least 512 if other k3s clusters or
+  IDEs run next to it (the common default of 128 can stop k3s from starting).
 
 `scripts/devbox doctor` checks all of these.
 
@@ -61,6 +65,8 @@ Keycloak's first boot. When it finishes:
 - Files (full profile): <https://files.devbox.mothertree.localhost>
 - Webmail (full profile): <https://webmail.devbox.mothertree.localhost>
 - Jitsi (full profile): <https://jitsi.devbox.mothertree.localhost>
+- Mailpit, outbound mail (full profile): <https://mailpit.devbox.mothertree.localhost>
+  (user `devbox`, password `cat .devbox/mailpit-ui-password`)
 - Keycloak: <https://auth.devbox.mothertree.localhost/admin/> (user `admin`,
   password `yq .keycloak.admin_password .devbox/tenants/devbox/devbox.secrets.yaml`)
 
@@ -100,8 +106,9 @@ the devbox, so you can run things like `kubectl get pods -A` or
 | `users <args>` | `scripts/dev-test-users.sh` against the devbox |
 | `shell` / `env` | Subshell / exports with `KUBECONFIG` and the config paths |
 | `status` | Pods, PostgreSQL, URLs |
-| `down` | Delete the cluster and stop PostgreSQL; keeps the data and `.devbox/` |
-| `nuke` | Delete the cluster, the PostgreSQL data, `.devbox/` and the CA's trust entries |
+| `cache [status\|clear]` | Sizes of the pull-through image caches; `clear` deletes them |
+| `down` | Delete the cluster and stop PostgreSQL; keeps the data, `.devbox/` and the image caches |
+| `nuke` | Delete the cluster, the PostgreSQL data, `.devbox/` and the CA's trust entries; keeps the image caches |
 
 ## How it works
 
@@ -136,7 +143,20 @@ separate docker-compose world.
   Tailscale sidecar), so apps keep using the same `PG_HOST`. The bootstrap SQL
   is shared with devhome (`scripts/lib/pg-bootstrap-sql.sh`).
 - **Images**: the portals are always built locally (`CONTAINER_REGISTRY=localhost`).
-  Upstream images are pulled as usual.
+  Upstream images come through **pull-through caches**: one `registry`
+  container per upstream (Docker Hub, ghcr.io, quay.io, registry.k8s.io) on
+  their own docker network (`devbox-cache`) with no published ports, and k3s
+  mirror settings (`.devbox/registries.yaml`) pointing at them. Their volumes
+  outlive `down` and `nuke` and never expire content, so a recreated cluster
+  pulls from disk; `scripts/devbox cache clear` deletes them. k3s falls back
+  to the upstream when a cache does not answer, which covers the few images a
+  new node pulls before `up` attaches it to the cache network. A cluster
+  created before the caches existed keeps pulling from the internet until it
+  is recreated (`up` says so).
+- **CA trust without root** (`DEVBOX_TRUST=process`, used by the CI drift
+  check): `init` installs nothing and writes `.devbox/ca/bundle.pem` (the
+  system CAs plus the devbox CA), and every devbox command points curl, Go,
+  Python and Node at it. Browsers on that machine do not trust the devbox.
 - **S3**: [versitygw](https://github.com/versity/versitygw) in `infra-s3`
   (`apps/manifests/devbox/s3-gateway.yaml.tpl`) serves a directory over the S3
   API with one throwaway key; the buckets are its top-level directories.
@@ -161,7 +181,12 @@ separate docker-compose world.
   devbox Keycloak values mount the CA (`KC_TRUSTSTORE_PATHS`).
 - **Mail**: Stalwart only. Postfix (inbound internet MX) and the load-balancer
   TCP ports for IMAP/SMTP are skipped on `edge: local` ("edge local: …" in the
-  logs); there is no outbound relay, so mail to outside addresses goes nowhere.
+  logs). Mail for other domains goes to **Mailpit** in `infra-mailpit`
+  (`apps/manifests/devbox/mailpit.yaml.tpl`): the generated infra config sets
+  `mail.smtp_relay` to its Service name, which `mt_load_infra_config` accepts
+  only on `edge: local` (everywhere else the relay must be a tailnet IP), and
+  `deploy-stalwart.sh` opens Stalwart's egress to that namespace only. The web
+  UI has a generated login because the inbox holds reset and invitation links.
   The SMTP smoke test after provisioning trusts the local CA.
 - **Jitsi**: JVB's media port (31000/udp) is published on `127.0.0.1` when the
   cluster is created (k3d cannot add ports later; `up` warns if an older
@@ -182,12 +207,9 @@ separate docker-compose world.
   (`nordeck/jitsi-keycloak-adapter`) is published for amd64 only, so on arm64
   its pod cannot pull and joining a room stops at the SSO step. Jitsi itself
   deploys and the app loads. A two-browser call has not been tested yet.
-- A local image cache: `down` + `up` creates a new cluster, which pulls every
-  upstream image again (20–40 minutes).
-- Outbound mail to real addresses (a catch-all such as Mailpit would show it),
-  and the mail e2e specs that need it: `email-roundtrip` (external echo group)
-  and `dkim-signature-validation`. `mail/sasl-auth-failure` misreads replies
-  through the port-forward.
+- The mail e2e specs that need real outside mail: `email-roundtrip` (external
+  echo group) and `dkim-signature-validation`. `mail/sasl-auth-failure`
+  misreads replies through the port-forward.
 - Nextcloud's notify_push (its image is amd64-only; on arm64 it is skipped and
   clients poll), Collabora (Office) and the Nextcloud calendar integrations.
 - The S3 gateway's data lives in the k3d node, so `down` loses uploaded media
@@ -196,7 +218,13 @@ separate docker-compose world.
   cannot send notifications or invitations (use the full profile).
 - Matrix federation.
 - macOS (Docker Desktop's VM memory cap).
-- A scheduled CI job that keeps devbox from rotting.
+
+## Drift check
+
+A scheduled CI job on devhome (`.woodpecker/devbox-drift.yaml`) builds the
+minimal profile from a plain checkout every night and runs the admin-portal
+login spec against it (see `ci/RUNBOOK.md`). A red cron pipeline on `main`
+means a merged change broke the devbox.
 
 ## Troubleshooting
 

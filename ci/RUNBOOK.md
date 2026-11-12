@@ -204,6 +204,38 @@ value is unexpected, restore it and see the security notes in the private
 
 ---
 
+## Scheduled devbox drift check
+
+`.woodpecker/devbox-drift.yaml` runs `ci/scripts/devbox-drift.sh`. It builds the
+minimal developer box (`scripts/devbox`, see `docs/devbox.md`) from the plain public
+checkout in a throwaway k3d cluster inside devhome-ci, runs the admin-portal login
+spec, then deletes the box. It holds the pool slot for the whole run (about 10–15
+minutes with warm image caches), so a PR started meanwhile waits for it. The image
+caches it creates (`devbox-cache-*` containers and volumes in devhome-ci's Docker)
+are kept between runs on purpose.
+
+The job needs one Woodpecker secret, `ci_valkey_password` (for the pool lease),
+and that secret must allow the `cron` and `manual` events. Add those events to that
+secret only: a manual run can target any branch, so `deploy_vault_password`,
+`linode_token`, `github_pat` and the `e2e_pool*` secrets must keep their current
+event list.
+
+The schedule is a Woodpecker cron entry, stored in Woodpecker's database rather
+than in this repo. Create it once (repo settings → Crons, or the API):
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $WP_TOKEN" -H 'Content-Type: application/json' \
+  $WP/api/repos/1/cron -d '{"name":"devbox-drift","branch":"main","schedule":"0 9 * * *"}'
+```
+
+The schedule is standard 5-field cron in the server's time zone (UTC); pick an hour
+when no PRs run. Run it by hand with
+"Run pipeline" on `main` in the UI: only this workflow runs on a manual event.
+A failure shows as a failed cron pipeline on `main`. Reproduce it locally with
+`scripts/devbox init --profile minimal && scripts/devbox up`.
+
+---
+
 ## Related known issues
 
 - **#646** — a cancelled workflow leaves its child steps at `success`/exit 0, so

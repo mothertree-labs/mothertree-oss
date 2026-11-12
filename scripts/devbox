@@ -13,6 +13,7 @@
 #   project.conf                                  CONTAINER_REGISTRY=localhost (local builds)
 #   images.env                                    image refs of the last local builds
 #   profile                                       the init profile (minimal|standard|full)
+#   registries.yaml                               k3s mirrors -> the image caches below
 #   kubeconfig.devbox.yaml
 #   ca/                                           mkcert CA (CAROOT) — trusted by this machine
 #
@@ -21,7 +22,8 @@
 # Usage: scripts/devbox <command> [args]
 #   doctor                  check prerequisites, ports and resources
 #   init [--profile P] [--regenerate]
-#                           write .devbox/ and create + trust the local CA;
+#                           write .devbox/ and create + trust the local CA
+#                           (DEVBOX_TRUST=process: no root, trusted only by devbox commands);
 #                           P = standard (portals, Matrix, Docs; default),
 #                           full (standard + Files, mail, webmail, Jitsi) or minimal (portals only).
 #                           Remembered in .devbox/profile.
@@ -33,8 +35,9 @@
 #   shell                   a subshell with KUBECONFIG and the MT_* paths exported
 #   env                     print those exports (eval "$(scripts/devbox env)")
 #   status                  cluster, PostgreSQL and URLs
-#   down                    delete the cluster and stop PostgreSQL (keeps data + .devbox/)
-#   nuke                    delete the cluster, PostgreSQL data and .devbox/ (asks first)
+#   cache [status|clear]    the pull-through image caches (sizes; clear deletes them)
+#   down                    delete the cluster and stop PostgreSQL (keeps data, .devbox/, image caches)
+#   nuke                    delete the cluster, PostgreSQL data and .devbox/ (asks first; keeps image caches)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -75,6 +78,19 @@ DEVBOX_S3_REGION="local"
 # config, a hostPort). Published on loopback when the cluster is created —
 # k3d cannot add ports to an existing --no-lb cluster.
 DEVBOX_JVB_PORT=31000
+# Outbound-mail catch-all (apps/manifests/devbox/mailpit.yaml.tpl), with mail
+# on: Stalwart relays every non-local recipient to it (mail.smtp_relay).
+DEVBOX_MAILPIT_HOST="mailpit.${DEVBOX_HOST_SUFFIX}"
+DEVBOX_MAILPIT_RELAY="mailpit.infra-mailpit.svc.cluster.local."
+# Pull-through image caches, one registry container per upstream (a
+# distribution proxy serves exactly one remote). They live outside the cluster
+# on their own docker network with no published ports, keep their volumes
+# across down/up and nuke, and never expire content (ttl 0), so a recreated
+# cluster pulls from disk instead of the internet. k3s falls back to the
+# upstream when a cache does not answer.
+DEVBOX_CACHE_IMAGE="registry:3.1.1"
+DEVBOX_CACHE_NETWORK="devbox-cache"
+DEVBOX_CACHES="docker.io=https://registry-1.docker.io ghcr.io=https://ghcr.io quay.io=https://quay.io registry.k8s.io=https://registry.k8s.io"
 
 # --- output helpers -------------------------------------------------------------
 c_blue=$'\033[0;34m'; c_green=$'\033[0;32m'; c_yellow=$'\033[1;33m'; c_red=$'\033[0;31m'; c_off=$'\033[0m'
@@ -103,6 +119,15 @@ devbox_exports() {
     MT_PROJECT_CONF "$DEVBOX_DIR/project.conf" \
     KUBECONFIG "$DEVBOX_DIR/kubeconfig.devbox.yaml" \
     CAROOT "$DEVBOX_DIR/ca"
+  # DEVBOX_TRUST=process (see init): the CA is in no trust store, so point
+  # the TLS clients the deploy scripts and e2e use at the extended bundle.
+  if [ -f "$DEVBOX_DIR/ca/bundle.pem" ]; then
+    printf 'export %s=%q\n' \
+      SSL_CERT_FILE "$DEVBOX_DIR/ca/bundle.pem" \
+      CURL_CA_BUNDLE "$DEVBOX_DIR/ca/bundle.pem" \
+      REQUESTS_CA_BUNDLE "$DEVBOX_DIR/ca/bundle.pem" \
+      NODE_EXTRA_CA_CERTS "$DEVBOX_DIR/ca/rootCA.pem"
+  fi
   if [ -f "$DEVBOX_DIR/images.env" ]; then
     local k v
     while IFS='=' read -r k v; do
@@ -123,9 +148,11 @@ secret() { yq "$1" "$DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml"
 # doctor
 # =============================================================================
 cmd_doctor() {
-  local bad=0 c
+  local bad=0 c tools="docker k3d kubectl helm helmfile kustomize yq jq openssl envsubst shasum curl git node npm"
+  # mkcert/certutil install the CA into the trust stores; DEVBOX_TRUST=process skips that.
+  [ "${DEVBOX_TRUST:-system}" = "process" ] || tools="$tools mkcert certutil"
   info "Checking prerequisites..."
-  for c in docker k3d kubectl helm helmfile kustomize yq jq mkcert openssl envsubst shasum curl git node npm certutil; do
+  for c in $tools; do
     if command -v "$c" >/dev/null 2>&1; then
       printf '  %-10s %s\n' "$c" "ok"
     else
@@ -169,10 +196,19 @@ cmd_doctor() {
       printf '  %-10s %s MiB available\n' "memory" "$avail_mb"
     fi
   fi
+  # k3s takes a share of the per-user inotify instances; at the common
+  # default of 128, a second cluster or an IDE leaves it unable to start
+  # ("inotify_init: too many open files" in the node's log).
+  if [ -r /proc/sys/fs/inotify/max_user_instances ]; then
+    local inst; inst=$(cat /proc/sys/fs/inotify/max_user_instances)
+    if [ "$inst" -lt 512 ]; then
+      warn "fs.inotify.max_user_instances is $inst; k3s may fail to start next to other watchers. Raise it: sudo sysctl -w fs.inotify.max_user_instances=1024 (persist in /etc/sysctl.d/)"
+    fi
+  fi
   if command -v df >/dev/null 2>&1; then
     local disk_gb; disk_gb=$(df -Pk "$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /)" 2>/dev/null | awk 'NR==2 {print int($4/1048576)}')
-    if [ -n "$disk_gb" ] && [ "$disk_gb" -lt 25 ]; then
-      warn "Only ${disk_gb} GiB free for docker; the full profile needs about 25 GiB (images + build cache). Try: docker system prune"
+    if [ -n "$disk_gb" ] && [ "$disk_gb" -lt 30 ]; then
+      warn "Only ${disk_gb} GiB free for docker; the full profile needs about 30 GiB (images, image caches, build cache). Try: docker system prune, or scripts/devbox cache clear"
     elif [ -n "$disk_gb" ]; then
       printf '  %-10s %s GiB free for docker\n' "disk" "$disk_gb"
     fi
@@ -323,6 +359,10 @@ pgbouncer:
   reserve_pool_size: 2
 monitoring:
   enabled: false       # no Prometheus/Grafana/Loki/Vector on a laptop by default
+mail:
+  smtp_relay:          # Stalwart relays mail for other domains to Mailpit (full profile)
+    host: "$DEVBOX_MAILPIT_RELAY"
+    port: 1025
 tls:
   local_ca:            # mkcert CA, relative to this directory
     cert: ../ca/rootCA.pem
@@ -346,7 +386,8 @@ cmd_init() {
   done
   [ -n "$profile" ] || profile=$(cat "$DEVBOX_DIR/profile" 2>/dev/null || echo standard)
   case "$profile" in minimal|standard|full) ;; *) die "init: --profile must be minimal, standard or full (got '$profile')" ;; esac
-  command -v yq >/dev/null && command -v openssl >/dev/null && command -v mkcert >/dev/null \
+  command -v yq >/dev/null && command -v openssl >/dev/null \
+    && { [ "${DEVBOX_TRUST:-system}" = "process" ] || command -v mkcert >/dev/null; } \
     || die "init needs yq, openssl and mkcert (run: scripts/devbox doctor)"
 
   local tdir="$DEVBOX_DIR/tenants/$DEVBOX_TENANT" idir="$DEVBOX_DIR/infra"
@@ -400,17 +441,113 @@ cmd_init() {
   nc=$(openssl x509 -in "$DEVBOX_DIR/ca/rootCA.pem" -noout -ext nameConstraints 2>/dev/null || true)
   { grep -q 'DNS:localhost' <<<"$nc" && grep -q 'IP:127.0.0.0/255.0.0.0' <<<"$nc" && grep -q 'email:localhost' <<<"$nc"; } \
     || die "$DEVBOX_DIR/ca/rootCA.pem is not limited to localhost names, loopback IPs and @localhost email (an older devbox CA?) — run: scripts/devbox nuke && scripts/devbox init"
-  info "Adding the devbox CA to the system and browser trust stores (may ask for sudo)..."
-  CAROOT="$DEVBOX_DIR/ca" TRUST_STORES="system,nss" mkcert -install
   chmod 600 "$DEVBOX_DIR/ca/rootCA-key.pem"
-  ok "Local CA ready and trusted: $DEVBOX_DIR/ca/rootCA.pem"
+  case "${DEVBOX_TRUST:-system}" in
+    system)
+      rm -f "$DEVBOX_DIR/ca/bundle.pem"
+      info "Adding the devbox CA to the system and browser trust stores (may ask for sudo)..."
+      CAROOT="$DEVBOX_DIR/ca" TRUST_STORES="system,nss" mkcert -install
+      ok "Local CA ready and trusted: $DEVBOX_DIR/ca/rootCA.pem"
+      ;;
+    process)
+      # No root (CI): nothing is installed. The system CAs plus the devbox CA
+      # go into one bundle that `scripts/devbox env` (and every devbox
+      # command) points curl, Go, Python and Node at. Browsers do not trust it.
+      local sys_bundle f
+      for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+        [ -s "$f" ] && { sys_bundle="$f"; break; }
+      done
+      [ -n "${sys_bundle:-}" ] || die "DEVBOX_TRUST=process: no system CA bundle found to extend"
+      cat "$sys_bundle" "$DEVBOX_DIR/ca/rootCA.pem" > "$DEVBOX_DIR/ca/bundle.pem"
+      ok "Local CA ready: $DEVBOX_DIR/ca/rootCA.pem (DEVBOX_TRUST=process: trusted only by devbox commands, via $DEVBOX_DIR/ca/bundle.pem)"
+      ;;
+    *) die "DEVBOX_TRUST must be system (default) or process, got: $DEVBOX_TRUST" ;;
+  esac
   info "Next: scripts/devbox up"
 }
 
 # =============================================================================
 # up
 # =============================================================================
+cache_container() { printf 'devbox-cache-%s\n' "${1//./-}"; }
+
+# cache_up — start (or create) the pull-through caches and write the k3s
+# mirror config that points each upstream at its cache.
+cache_up() {
+  local entry upstream remote name
+  docker network inspect "$DEVBOX_CACHE_NETWORK" >/dev/null 2>&1 \
+    || docker network create --label app=mothertree-devbox "$DEVBOX_CACHE_NETWORK" >/dev/null
+  {
+    echo "# Generated by scripts/devbox: k3s pulls through the devbox image caches."
+    echo "mirrors:"
+    for entry in $DEVBOX_CACHES; do
+      upstream="${entry%%=*}"; name=$(cache_container "$upstream")
+      printf '  %s:\n    endpoint:\n      - http://%s:5000\n' "$upstream" "$name"
+    done
+  } > "$DEVBOX_DIR/registries.yaml"
+  for entry in $DEVBOX_CACHES; do
+    upstream="${entry%%=*}"; remote="${entry#*=}"; name=$(cache_container "$upstream")
+    if docker container inspect "$name" >/dev/null 2>&1; then
+      docker start "$name" >/dev/null
+    else
+      info "Creating image cache $name ($upstream) ..."
+      docker run -d --name "$name" --network "$DEVBOX_CACHE_NETWORK" \
+        --restart unless-stopped --label app=mothertree-devbox \
+        --cap-drop ALL --security-opt no-new-privileges \
+        -e REGISTRY_PROXY_REMOTEURL="$remote" -e REGISTRY_PROXY_TTL=0s \
+        -v "$name:/var/lib/registry" "$DEVBOX_CACHE_IMAGE" >/dev/null
+    fi
+  done
+}
+
+# cache_attach — put the k3d node on the cache network so the mirror names
+# resolve. A new node starts before it can be attached; the few images k3s
+# pulls in that window come from the upstream (containerd's fallback).
+cache_attach() {
+  local node="k3d-${DEVBOX_CLUSTER}-server-0"
+  if ! docker inspect -f '{{json .NetworkSettings.Networks}}' "$node" | jq -e --arg n "$DEVBOX_CACHE_NETWORK" 'has($n)' >/dev/null; then
+    docker network connect "$DEVBOX_CACHE_NETWORK" "$node"
+  fi
+  if ! docker exec "$node" test -f /etc/rancher/k3s/registries.yaml; then
+    warn "This cluster predates the image cache, so it pulls from the internet; to use the cache recreate it: scripts/devbox down && scripts/devbox up (keeps PostgreSQL and .devbox/)"
+  fi
+}
+
+cmd_cache() {
+  local sub="${1:-status}" entry name size total=0
+  case "$sub" in
+    status)
+      for entry in $DEVBOX_CACHES; do
+        name=$(cache_container "${entry%%=*}")
+        if [ "$(docker container inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = "true" ]; then
+          size=$(docker exec "$name" du -sm /var/lib/registry | awk '{print $1}')
+          total=$((total + size))
+          printf '  %-17s %-30s %6s MiB\n' "${entry%%=*}" "$name" "$size"
+        else
+          printf '  %-17s %-30s %s\n' "${entry%%=*}" "$name" "not running (started by: scripts/devbox up)"
+        fi
+      done
+      printf '  %-48s %6s MiB\n' "total" "$total"
+      ;;
+    clear)
+      printf 'Delete the devbox image caches and their volumes (the next up pulls everything again)? [y/N] '
+      local a; read -r a
+      [ "$a" = "y" ] || [ "$a" = "Y" ] || die "aborted"
+      for entry in $DEVBOX_CACHES; do
+        name=$(cache_container "${entry%%=*}")
+        docker rm -f "$name" >/dev/null 2>&1 || true
+        docker volume rm "$name" >/dev/null 2>&1 || true
+      done
+      docker network disconnect "$DEVBOX_CACHE_NETWORK" "k3d-${DEVBOX_CLUSTER}-server-0" >/dev/null 2>&1 || true
+      docker network rm "$DEVBOX_CACHE_NETWORK" >/dev/null 2>&1 || true
+      ok "Image caches removed"
+      ;;
+    *) die "Usage: scripts/devbox cache [status|clear]" ;;
+  esac
+}
+
 cluster_up() {
+  cache_up
   if k3d cluster list "$DEVBOX_CLUSTER" >/dev/null 2>&1; then
     info "k3d cluster $DEVBOX_CLUSTER exists"
   else
@@ -432,8 +569,10 @@ cluster_up() {
       --k3s-arg "--cluster-cidr=10.2.0.0/16@server:0" \
       --k3s-arg "--service-cidr=10.128.0.0/16@server:0" \
       --k3s-arg "--cluster-dns=10.128.0.10@server:0" \
+      --registry-config "$DEVBOX_DIR/registries.yaml" \
       --kubeconfig-update-default=false --wait --timeout 300s
   fi
+  cache_attach
   ( umask 077; k3d kubeconfig get "$DEVBOX_CLUSTER" > "$DEVBOX_DIR/kubeconfig.devbox.yaml" )
   kubectl --kubeconfig "$DEVBOX_DIR/kubeconfig.devbox.yaml" wait --for=condition=Ready node --all --timeout=120s >/dev/null
   ok "Cluster ready"
@@ -507,6 +646,27 @@ s3_up() {
   ok "S3 gateway ready"
 }
 
+# mailpit_up — the outbound-mail catch-all, with a generated UI login kept in
+# .devbox/mailpit-ui-password (user: devbox).
+mailpit_up() {
+  local pw_file="$DEVBOX_DIR/mailpit-ui-password" auth auth_sha
+  [ -s "$pw_file" ] || ( umask 077; rand 16 > "$pw_file" )
+  auth="devbox:$(cat "$pw_file")"
+  auth_sha=$(printf '%s' "$auth" | shasum -a 256 | cut -c1-16)
+  info "Mailpit (outbound-mail catch-all) at https://$DEVBOX_MAILPIT_HOST"
+  kubectl create namespace infra-mailpit --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  # --from-file, not --from-literal: keeps the password out of the process list.
+  kubectl apply -f <(kubectl create secret generic mailpit-ui -n infra-mailpit \
+    --from-file=auth=<(printf '%s' "$auth") --dry-run=client -o yaml) >/dev/null
+  DEVBOX_MAILPIT_HOST="$DEVBOX_MAILPIT_HOST" DEVBOX_MAILPIT_AUTH_SHA="$auth_sha" \
+    envsubst '${DEVBOX_MAILPIT_HOST} ${DEVBOX_MAILPIT_AUTH_SHA}' \
+    < "$REPO_ROOT/apps/manifests/devbox/mailpit.yaml.tpl" | kubectl apply -f - >/dev/null
+  kubectl -n infra-mailpit rollout status deploy/mailpit --timeout=180s >/dev/null || die "Mailpit did not become ready"
+  kubectl -n infra-mailpit wait --for=condition=Ready certificate/mailpit-tls --timeout=120s >/dev/null \
+    || die "Mailpit certificate was not issued"
+  ok "Mailpit ready"
+}
+
 # dns_up — pods resolve *.devbox.mothertree.localhost to the ingress controller
 # (outside the cluster those names are loopback). k3s imports the
 # coredns-custom *.override keys into its main server block.
@@ -572,6 +732,9 @@ cmd_up() {
   fi
   if feature_on matrix || feature_on docs || feature_on files || feature_on mail; then
     s3_up
+  fi
+  if feature_on mail; then
+    mailpit_up
   fi
   # Tenant namespaces are default-deny for egress; Synapse, Nextcloud and
   # Stalwart reach the S3 gateway's Service directly (Docs goes through the
@@ -708,11 +871,13 @@ cmd_status() {
     feature_on files && echo "  Files:         https://files.${DEVBOX_HOST_SUFFIX}"
     feature_on webmail && echo "  Webmail:       https://webmail.${DEVBOX_HOST_SUFFIX}"
     feature_on jitsi && echo "  Jitsi:         https://jitsi.${DEVBOX_HOST_SUFFIX}"
+    feature_on mail && echo "  Mailpit:       https://${DEVBOX_MAILPIT_HOST}  (user devbox, password: cat $DEVBOX_DIR/mailpit-ui-password) — mail to non-devbox addresses"
     feature_on mail && echo "  Mail (IMAP):   kubectl -n tn-$DEVBOX_TENANT-mail port-forward svc/stalwart 1993:993  (IMAPS)"
     { feature_on matrix || feature_on docs || feature_on files || feature_on mail; } && echo "  S3:            https://${DEVBOX_S3_HOST}  (key: yq .s3_docs $DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml)"
   fi
   echo "  Keycloak:      https://auth.${DEVBOX_HOST_SUFFIX}/admin/  (user admin, password: yq .keycloak.admin_password $DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml)"
   echo "  Test users:    scripts/devbox users create <name> --password <pw> [--admin]"
+  echo "  Image caches:  scripts/devbox cache status"
 }
 
 cmd_down() {
@@ -721,7 +886,7 @@ cmd_down() {
     k3d cluster delete "$DEVBOX_CLUSTER"
   fi
   docker stop "$DEVBOX_PG_CONTAINER" >/dev/null 2>&1 || true
-  ok "devbox down (PostgreSQL data in volume $DEVBOX_PG_VOLUME and $DEVBOX_DIR kept)"
+  ok "devbox down (PostgreSQL data in volume $DEVBOX_PG_VOLUME, $DEVBOX_DIR and the image caches kept)"
 }
 
 cmd_nuke() {
@@ -731,11 +896,11 @@ cmd_nuke() {
   k3d cluster delete "$DEVBOX_CLUSTER" >/dev/null 2>&1 || true
   docker rm -f "$DEVBOX_PG_CONTAINER" >/dev/null 2>&1 || true
   docker volume rm "$DEVBOX_PG_VOLUME" >/dev/null 2>&1 || true
-  if [ -f "$DEVBOX_DIR/ca/rootCA.pem" ]; then
+  if [ -f "$DEVBOX_DIR/ca/rootCA.pem" ] && [ ! -f "$DEVBOX_DIR/ca/bundle.pem" ]; then
     CAROOT="$DEVBOX_DIR/ca" TRUST_STORES="system,nss" mkcert -uninstall || warn "Could not remove the devbox CA from the trust stores"
   fi
   rm -rf "$DEVBOX_DIR"
-  ok "devbox removed"
+  ok "devbox removed (image caches kept; delete them with: scripts/devbox cache clear)"
 }
 
 cmd="${1:-}"; [ -n "$cmd" ] && shift
@@ -750,6 +915,7 @@ case "$cmd" in
   shell)  cmd_shell "$@" ;;
   env)    cmd_env "$@" ;;
   status) cmd_status "$@" ;;
+  cache)  cmd_cache "$@" ;;
   down)   cmd_down "$@" ;;
   nuke)   cmd_nuke "$@" ;;
   ""|-h|--help|help) usage ;;

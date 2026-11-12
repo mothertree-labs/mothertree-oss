@@ -104,6 +104,8 @@
         // there needs `scripts/devbox nuke` (the data volume is initdb'd by the
         // old major), like the PG VMs need a pg_upgrade.
         "\\nDEVBOX_PG_IMAGE=\"(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)\"",
+        // Developer-box pull-through image caches (registry, scripts/devbox).
+        "\\nDEVBOX_CACHE_IMAGE=\"(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)\"",
         "\\nMT_NC_PROBE_IMAGE=\"(?<depName>[a-z0-9][a-z0-9._\\-]*(?:/[a-z0-9._\\-]+)*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._\\-]*)\"",
         // k6 base image default in apps/scripts/perf/build-k6-image.sh. This is
         // the pin that ACTUALLY wins: build-k6-image.sh passes it as

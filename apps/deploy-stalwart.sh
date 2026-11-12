@@ -149,6 +149,9 @@ print_status "Master-user secret hash generated"
 # (the OpenDKIM sidecar and infra-mail dkim-key-<tenant> Secrets were removed
 # in step 2 PR-4). The field is kept in the secrets YAML for rollback safety.
 
+# shellcheck source=../scripts/lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
+
 if [ -n "${SMTP_RELAY_HOST:-}" ] && [ -n "${SES_SMTP_ENDPOINT:-}" ]; then
     print_error "Both SES (ses.* in infra secrets) and mail.smtp_relay (infra config) are set for $MT_ENV; pick one outbound route"
     exit 1
@@ -178,6 +181,27 @@ if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "$
     username = \"%{env:SES_SMTP_USER}%\"
     secret = \"%{env:SES_SMTP_PASSWORD}%\""
     print_status "Outbound relay: AWS SES ($SES_SMTP_ENDPOINT)"
+elif [[ "${SMTP_RELAY_HOST:-}" == *.svc.cluster.local. ]] && mt_is_local_edge; then
+    # Local-edge developer box only: mt_load_infra_config accepts a
+    # cluster-local Service name solely on cluster.edge: local (the devbox's
+    # Mailpit catch-all). Name and port are validated there, so inlining them
+    # cannot inject TOML. Plain SMTP inside the cluster; nothing leaves it.
+    STALWART_SES_ENABLED=false
+    SMTP_RELAY_NAMESPACE=$(cut -d. -f2 <<<"$SMTP_RELAY_HOST")
+    # Already an absolute Service name: the route uses it as is.
+    SMTP_RELAY_SVC_HOST="$SMTP_RELAY_HOST"
+    export STALWART_OUTBOUND_ROUTE_NAME="relay"
+    export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - in-cluster catch-all (devbox Mailpit, mail.smtp_relay).
+    [queue.route.\"relay\"]
+    type = \"relay\"
+    address = \"${SMTP_RELAY_SVC_HOST}\"
+    port = ${SMTP_RELAY_PORT}
+    protocol = \"smtp\"
+
+    [queue.route.\"relay\".tls]
+    implicit = false
+    allow-invalid-certs = false"
+    print_status "Outbound relay: in-cluster catch-all ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}"
 elif [ -n "${SMTP_RELAY_HOST:-}" ]; then
     # Host/port were validated by mt_load_infra_config (mesh IP, numeric port),
     # so inlining them cannot inject TOML.
@@ -257,7 +281,34 @@ print_success "Namespace ready: $NS_MAIL"
 # Tailnet smart host Service (mail.smtp_relay only)
 # =============================================================================
 # The DNS name Stalwart's relay route points at (see the route block above).
-if [ -n "${SMTP_RELAY_HOST:-}" ]; then
+if [ -n "${SMTP_RELAY_NAMESPACE:-}" ]; then
+    # In-cluster catch-all: Stalwart resolves the Service itself; only open
+    # egress to that namespace on the relay port.
+    kubectl delete service smtp-relay -n "$NS_MAIL" --ignore-not-found=true >/dev/null
+    kubectl delete endpointslice smtp-relay-tailnet -n "$NS_MAIL" --ignore-not-found=true >/dev/null
+    print_status "Applying egress to ${SMTP_RELAY_NAMESPACE}:${SMTP_RELAY_PORT} for the in-cluster relay..."
+    kubectl apply -f - <<EOF_RELAY
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-smtp-relay-egress
+  namespace: ${NS_MAIL}
+spec:
+  podSelector:
+    matchLabels:
+      app: stalwart
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ${SMTP_RELAY_NAMESPACE}
+      ports:
+        - port: ${SMTP_RELAY_PORT}
+          protocol: TCP
+EOF_RELAY
+    print_success "In-cluster relay egress ready"
+elif [ -n "${SMTP_RELAY_HOST:-}" ]; then
     print_status "Applying smtp-relay Service -> ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}..."
     kubectl apply -f - <<EOF_RELAY
 apiVersion: v1
