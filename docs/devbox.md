@@ -15,6 +15,7 @@ on your machine and is throwaway.
   - Keycloak with one tenant realm, and the admin and account portals with a real browser OIDC login;
   - **Matrix** (Synapse + Element) and **Docs**, storing their media in an in-cluster S3 gateway;
   - ingress-nginx, cert-manager, PgBouncer and a PostgreSQL container.
+- **full** (`init --profile full`): standard plus **Files** (Nextcloud).
 - **minimal** (`init --profile minimal`): the same without Matrix, Docs and S3.
 
 The other apps (Files, Jitsi, mail) are added one at a time; see
@@ -52,6 +53,7 @@ Keycloak's first boot. When it finishes:
 - Account portal: <https://account.devbox.mothertree.localhost>
 - Element (Matrix): <https://matrix.devbox.mothertree.localhost>
 - Docs: <https://docs.devbox.mothertree.localhost>
+- Files (full profile): <https://files.devbox.mothertree.localhost>
 - Keycloak: <https://auth.devbox.mothertree.localhost/admin/> (user `admin`,
   password `yq .keycloak.admin_password .devbox/tenants/devbox/devbox.secrets.yaml`)
 
@@ -83,7 +85,7 @@ the devbox, so you can run things like `kubectl get pods -A` or
 | Command | What it does |
 |---|---|
 | `doctor` | Check tools, docker access, `*.localhost` resolution, ports, memory, browser CA trust |
-| `init [--profile standard\|minimal] [--regenerate]` | Write `.devbox/` and create + trust the local CA. Re-running keeps the secrets and the last profile |
+| `init [--profile minimal\|standard\|full] [--regenerate]` | Write `.devbox/` and create + trust the local CA. Re-running keeps the secrets and the last profile |
 | `up` | Create or reuse the cluster and PostgreSQL, build missing portal images, run `deploy_infra`, start the S3 gateway and `create_env` |
 | `build <component>` | Build `admin-portal` or `account-portal` locally and import it |
 | `deploy <app>` | Run `apps/deploy-<app>.sh -e devbox -t devbox` |
@@ -135,10 +137,18 @@ separate docker-compose world.
     with path-style addressing. Browsers follow Docs' presigned media links to
     that name. Docs' backend reaches the same name through the ingress and
     trusts the local CA (`edge local` mounts it and sets `AWS_CA_BUNDLE`).
-  - Synapse only stores media, so it uses `s3.internal_endpoint`, the gateway's
-    Service. A devbox-only NetworkPolicy lets the Matrix namespace reach it.
+  - Synapse and Nextcloud only store objects (Nextcloud proxies downloads), so
+    they use `s3.internal_endpoint`, the gateway's Service. A devbox-only
+    NetworkPolicy lets the Matrix and Files namespaces reach it.
   - On every other environment these settings default to Linode Object Storage
     (`https://<s3.cluster>.linodeobjects.com`, virtual-host style).
+- **Keycloak from pods**: libcurl (and so PHP, e.g. Nextcloud) resolves any
+  `*.localhost` name to loopback without asking DNS. The devbox Keycloak
+  (`apps/environments/devbox/keycloak.yaml.gotmpl`) runs with
+  `--hostname-backchannel-dynamic`, and on `edge: local` Nextcloud's
+  `user_oidc` fetches discovery from Keycloak's in-cluster Service, which then
+  advertises in-cluster token, userinfo and JWKS endpoints. The issuer and the
+  browser endpoints stay `https://auth.devbox.mothertree.localhost`.
 - **In-cluster names**: a CoreDNS rewrite (`kube-system/coredns-custom`, key
   `devbox.override`) resolves `*.devbox.mothertree.localhost` to the ingress
   controller inside the cluster. Outside it, those names are loopback.
@@ -147,9 +157,13 @@ separate docker-compose world.
 
 ## What's not there yet
 
-- Files (Nextcloud), Jitsi, mail and webmail. Turning their features on in
-  the tenant config is not enough yet. Nextcloud and Stalwart still hardcode
-  the Linode S3 endpoint, and mail needs a local relay.
+- Jitsi, mail and webmail. Turning their features on in the tenant config is
+  not enough yet: Stalwart still hardcodes the Linode S3 endpoint, mail needs a
+  local relay, and JVB requires a STUN server.
+- Nextcloud's notify_push (its image is amd64-only; on arm64 it is skipped and
+  clients poll), Collabora (Office) and the Nextcloud calendar integrations.
+- The S3 gateway's data lives in the k3d node, so `down` loses uploaded media
+  (the PostgreSQL data survives).
 - Email from Matrix and Docs (notifications, Docs invitations): there is no
   mail server yet, so they cannot send email.
 - Matrix federation.

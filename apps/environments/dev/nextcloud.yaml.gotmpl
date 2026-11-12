@@ -58,12 +58,15 @@ nextcloud:
   objectStore:
     s3:
       enabled: true
-      host: '{{ env "S3_CLUSTER" }}.linodeobjects.com'
-      ssl: true
-      port: "443"
+      # s3.internal_endpoint split by config.sh (default: <cluster>.linodeobjects.com,
+      # 443, TLS, virtual-host). Nextcloud proxies every download itself, so
+      # the in-cluster endpoint is enough.
+      host: '{{ env "S3_INTERNAL_HOST" }}'
+      ssl: {{ env "S3_INTERNAL_SSL" | default "true" }}
+      port: '{{ env "S3_INTERNAL_PORT" }}'
       region: '{{ env "S3_CLUSTER" }}'
       bucket: '{{ env "S3_FILES_BUCKET" }}'
-      usePathStyle: false
+      usePathStyle: {{ env "S3_USE_PATH_STYLE" | default "false" }}
       autoCreate: false
       existingSecret: "nextcloud-s3-credentials"
       secretKeys:

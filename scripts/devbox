@@ -12,7 +12,7 @@
 #   infra/terraform-outputs.devbox.env            stand-in for phase1 outputs
 #   project.conf                                  CONTAINER_REGISTRY=localhost (local builds)
 #   images.env                                    image refs of the last local builds
-#   profile                                       the init profile (standard|minimal)
+#   profile                                       the init profile (minimal|standard|full)
 #   kubeconfig.devbox.yaml
 #   ca/                                           mkcert CA (CAROOT) — trusted by this machine
 #
@@ -22,8 +22,9 @@
 #   doctor                  check prerequisites, ports and resources
 #   init [--profile P] [--regenerate]
 #                           write .devbox/ and create + trust the local CA;
-#                           P = standard (portals, Matrix, Docs; default) or
-#                           minimal (portals only). Remembered in .devbox/profile.
+#                           P = standard (portals, Matrix, Docs; default),
+#                           full (standard + Files) or minimal (portals only).
+#                           Remembered in .devbox/profile.
 #   up                      cluster + PostgreSQL + images + deploy_infra + create_env
 #   build <component>       build a local image (admin-portal, account-portal) and import it
 #   deploy <app>            run one apps/deploy-<app>.sh against the devbox
@@ -180,9 +181,12 @@ cmd_doctor() {
 rand() { openssl rand -hex "${1:-24}"; }
 
 gen_tenant_config() {
-  local out="$1" chat_docs=false
-  [ "$2" = "standard" ] && chat_docs=true
-  CHAT_DOCS="$chat_docs" yq '
+  local out="$1" chat_docs=false files=false
+  case "$2" in
+    standard) chat_docs=true ;;
+    full) chat_docs=true; files=true ;;
+  esac
+  CHAT_DOCS="$chat_docs" FILES="$files" yq '
     .tenant.name = "devbox" |
     .tenant.display_name = "Devbox" |
     .tenant.env = "devbox" |
@@ -213,7 +217,7 @@ gen_tenant_config() {
     .features = {
       "jitsi_enabled": false,
       "matrix_enabled": (strenv(CHAT_DOCS) == "true"), "docs_enabled": (strenv(CHAT_DOCS) == "true"),
-      "files_enabled": false, "smtp_enabled": false, "turn_enabled": false,
+      "files_enabled": (strenv(FILES) == "true"), "smtp_enabled": false, "turn_enabled": false,
       "mail_enabled": false, "webmail_enabled": false,
       "admin_portal_enabled": true, "account_portal_enabled": true,
       "calendar_enabled": false, "office_enabled": false,
@@ -323,12 +327,12 @@ cmd_init() {
       --regenerate) regenerate=true ;;
       --profile) profile="${2:-}"; shift ;;
       --profile=*) profile="${1#--profile=}" ;;
-      *) die "init: unknown argument '$1' (use --profile standard|minimal, --regenerate)" ;;
+      *) die "init: unknown argument '$1' (use --profile minimal|standard|full, --regenerate)" ;;
     esac
     shift
   done
   [ -n "$profile" ] || profile=$(cat "$DEVBOX_DIR/profile" 2>/dev/null || echo standard)
-  case "$profile" in standard|minimal) ;; *) die "init: --profile must be standard or minimal (got '$profile')" ;; esac
+  case "$profile" in minimal|standard|full) ;; *) die "init: --profile must be minimal, standard or full (got '$profile')" ;; esac
   command -v yq >/dev/null && command -v openssl >/dev/null && command -v mkcert >/dev/null \
     || die "init needs yq, openssl and mkcert (run: scripts/devbox doctor)"
 
@@ -531,13 +535,16 @@ cmd_up() {
   if feature_on matrix || feature_on docs || feature_on files || feature_on mail; then
     s3_up
   fi
-  # Tenant namespaces are default-deny for egress; Synapse reaches the S3
-  # gateway's Service directly (Docs goes through the ingress on :443).
-  if feature_on matrix; then
-    kubectl create namespace "tn-$DEVBOX_TENANT-matrix" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-    NAMESPACE="tn-$DEVBOX_TENANT-matrix" envsubst '${NAMESPACE}' \
+  # Tenant namespaces are default-deny for egress; Synapse and Nextcloud
+  # reach the S3 gateway's Service directly (Docs goes through the ingress
+  # on :443, which allow-internet-egress already permits).
+  local app
+  for app in matrix files; do
+    feature_on "$app" || continue
+    kubectl create namespace "tn-$DEVBOX_TENANT-$app" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    NAMESPACE="tn-$DEVBOX_TENANT-$app" envsubst '${NAMESPACE}' \
       < "$REPO_ROOT/apps/manifests/devbox/allow-s3-egress.yaml.tpl" | kubectl apply -f - >/dev/null
-  fi
+  done
   info "create_env -e $DEVBOX_ENV -t $DEVBOX_TENANT ..."
   "$REPO_ROOT/scripts/create_env" -e "$DEVBOX_ENV" -t "$DEVBOX_TENANT"
   cmd_status
@@ -622,7 +629,8 @@ cmd_status() {
   if [ -f "$DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.config.yaml" ]; then
     feature_on matrix && echo "  Element:       https://matrix.${DEVBOX_HOST_SUFFIX}"
     feature_on docs && echo "  Docs:          https://docs.${DEVBOX_HOST_SUFFIX}"
-    { feature_on matrix || feature_on docs; } && echo "  S3:            https://${DEVBOX_S3_HOST}  (key: yq .s3_docs $DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml)"
+    feature_on files && echo "  Files:         https://files.${DEVBOX_HOST_SUFFIX}"
+    { feature_on matrix || feature_on docs || feature_on files; } && echo "  S3:            https://${DEVBOX_S3_HOST}  (key: yq .s3_docs $DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml)"
   fi
   echo "  Keycloak:      https://auth.${DEVBOX_HOST_SUFFIX}/admin/  (user admin, password: yq .keycloak.admin_password $DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.secrets.yaml)"
   echo "  Test users:    scripts/devbox users create <name> --password <pw> [--admin]"
