@@ -710,7 +710,12 @@ cmd_up() {
     [ "$comp" = "roundcube" ] && feature="webmail_enabled"
     if [ "$(yq ".features.${feature}" "$DEVBOX_DIR/tenants/$DEVBOX_TENANT/$DEVBOX_ENV.config.yaml")" = "true" ]; then
       var="$(printf '%s' "${comp//-/_}" | tr '[:lower:]' '[:upper:]')_IMAGE"
-      tag=$(sed -n "s/^${var}=//p" "$DEVBOX_DIR/images.env" 2>/dev/null | tail -1)
+      # Absent before the first build: sed would exit 2 and, under pipefail,
+      # end the script without a word.
+      tag=""
+      if [ -f "$DEVBOX_DIR/images.env" ]; then
+        tag=$(sed -n "s/^${var}=//p" "$DEVBOX_DIR/images.env" | tail -1)
+      fi
       if [ -z "$tag" ]; then
         cmd_build "$comp"
       elif ! grep -qxF "$tag" <<<"$node_images"; then
@@ -902,6 +907,17 @@ cmd_nuke() {
   rm -rf "$DEVBOX_DIR"
   ok "devbox removed (image caches kept; delete them with: scripts/devbox cache clear)"
 }
+
+# set -e stops at the first failing command without saying which one; name it.
+# The ERR trap only records (it also runs inside $(...), where printing would
+# be noise); the EXIT trap reports when the script really fails. die() exits
+# without a failing command, so its own message stays the only one.
+# BASH_COMMAND is the unexpanded text, except under eval: never eval a string
+# holding a secret here, it would be printed when that eval fails.
+DEVBOX_FAILED_AT=""
+set -E
+trap 'DEVBOX_FAILED_AT="line $LINENO: $BASH_COMMAND"' ERR
+trap 'rc=$?; if [ "$rc" -ne 0 ] && [ -n "$DEVBOX_FAILED_AT" ]; then printf "%s[devbox]%s failed (exit %s) at %s\n" "$c_red" "$c_off" "$rc" "$DEVBOX_FAILED_AT" >&2; fi' EXIT
 
 cmd="${1:-}"; [ -n "$cmd" ] && shift
 case "$cmd" in
