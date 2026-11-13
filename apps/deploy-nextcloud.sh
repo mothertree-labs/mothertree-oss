@@ -1011,6 +1011,19 @@ else
         kubectl patch deployment collabora-online -n "$NS_OFFICE" \
             --type=strategic \
             -p '{"spec":{"template":{"spec":{"hostAliases":[{"ip":"'"$INTERNAL_INGRESS_IP"'","hostnames":["'"$FILES_HOST"'"]}]}}}}'
+        # On a devbox https://$FILES_HOST is signed by the local CA: Collabora
+        # (OpenSSL default paths) gets the public roots + that CA.
+        if mt_is_local_edge; then
+            print_status "edge local: Collabora trusts the local CA for WOPI callbacks (SSL_CERT_FILE)"
+            # shellcheck source=../scripts/lib/local-ca.sh
+            source "${REPO_ROOT}/scripts/lib/local-ca.sh"
+            mt_local_ca_publish_configmap "$NS_OFFICE"
+            kubectl patch deployment collabora-online -n "$NS_OFFICE" --type=strategic -p '{"spec":{"template":{"spec":{
+              "volumes":[{"name":"mt-local-ca","configMap":{"name":"'"$MT_LOCAL_CA_CONFIGMAP"'"}}],
+              "containers":[{"name":"collabora-online",
+                "volumeMounts":[{"name":"mt-local-ca","mountPath":"'"$MT_LOCAL_CA_MOUNT"'","readOnly":true}],
+                "env":[{"name":"SSL_CERT_FILE","value":"'"$MT_LOCAL_CA_MOUNT"'/bundle.pem"}]}]}}}}'
+        fi
 
         kubectl rollout status deployment/collabora-online -n "$NS_OFFICE" --timeout=300s
         print_success "Collabora configured to route WOPI traffic internally"
@@ -1214,8 +1227,20 @@ if [ -f "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl" ]; then
     : "${OIDC_DISCOVERY_BASE:?OIDC discovery base URL is empty}"
     export OIDC_DISCOVERY_BASE
 
+    # Where richdocuments (server side) reaches Collabora. Same libcurl
+    # *.localhost issue on a devbox: there it uses Collabora's Service, and
+    # public_wopi_url keeps the browser on https://$OFFICE_HOST.
+    if mt_is_local_edge; then
+        RICHDOCUMENTS_WOPI_URL="http://collabora-online.${NS_OFFICE}.svc.cluster.local:9980"
+        RICHDOCUMENTS_PUBLIC_WOPI_URL="https://${OFFICE_HOST}"
+    else
+        RICHDOCUMENTS_WOPI_URL="https://${OFFICE_HOST}"
+        RICHDOCUMENTS_PUBLIC_WOPI_URL=""
+    fi
+    export RICHDOCUMENTS_WOPI_URL RICHDOCUMENTS_PUBLIC_WOPI_URL
+
     # Generate the job manifest from template
-    envsubst '${FILES_HOST} ${AUTH_HOST} ${OIDC_DISCOVERY_BASE} ${TENANT_KEYCLOAK_REALM} ${CALENDAR_ENABLED} ${SMTP_DOMAIN} ${JITSI_HOST} ${OFFICE_ENABLED} ${OFFICE_HOST} ${NS_OFFICE} ${GOOGLE_IMPORT_ENABLED}' < "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl" | \
+    envsubst '${FILES_HOST} ${AUTH_HOST} ${OIDC_DISCOVERY_BASE} ${TENANT_KEYCLOAK_REALM} ${CALENDAR_ENABLED} ${SMTP_DOMAIN} ${JITSI_HOST} ${OFFICE_ENABLED} ${OFFICE_HOST} ${NS_OFFICE} ${GOOGLE_IMPORT_ENABLED} ${RICHDOCUMENTS_WOPI_URL} ${RICHDOCUMENTS_PUBLIC_WOPI_URL}' < "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl" | \
       sed "s/namespace: files/namespace: $NS_FILES/g" > /tmp/nextcloud-oidc-config-job.yaml
 
     # Delete previous job if exists

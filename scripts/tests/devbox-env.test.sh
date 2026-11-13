@@ -378,6 +378,59 @@ check "full profile: e2e skips exactly what is off" \
 check "minimal profile: e2e skips the apps it lacks" \
   grep -qE '(^|,)matrix,docs,files(,|$)' <<<"$(disabled_of minimal)"
 
+# everything profile: full + Office + LLM, with the model in the infra config.
+EV=$(profile_of everything)
+EVI="${EV%/tenants/devbox/devbox.config.yaml}/infra/devbox.config.yaml"
+check "everything profile: Office and LLM on" test "$(yq '.features.office_enabled, .features.llm_enabled' "$EV" | tr '\n' ' ')" = "true true "
+check "everything profile: still has calendar and magic link" test "$(yq '.features.calendar_enabled, .features.login_methods.magic_link' "$EV" | tr '\n' ' ')" = "true true "
+check "everything profile: infra config turns the LLM on with the default model" \
+  test "$(yq '.llm.enabled, .llm.model' "$EVI" | tr '\n' ' ')" = "true llama3.2:1b "
+check "full profile: no LLM in the infra config" test "$(yq '.llm // "none"' "${FULL%/tenants/devbox/devbox.config.yaml}/infra/devbox.config.yaml")" = none
+check "everything profile: e2e skips nothing it deploys" \
+  test "$(disabled_of everything)" = "smtp,turn,google_import,google_sso,external_mail"
+EVD="$TEST_TMP/prof-everything/.devbox"
+# Arguments go through as real argv (never pasted into a shell string: one
+# of them is a shell-injection probe).
+evinit() { PATH="$STUBS:$PATH" MT_DEVBOX_DIR="$EVD" DEVBOX_TRUST=process "$REPO_ROOT/scripts/devbox" init "$@" 2>&1; }
+evinit --llm-model qwen2.5:0.5b >/dev/null
+check "--llm-model is written and remembered" test "$(yq .llm.model "$EVI"):$(cat "$EVD/llm-model")" = "qwen2.5:0.5b:qwen2.5:0.5b"
+evinit >/dev/null
+check "a later init keeps the chosen model" test "$(yq .llm.model "$EVI")" = "qwen2.5:0.5b"
+check "--llm-model rejects a leading dash (would be an ollama option)" grep -q 'must be an Ollama model' <<<"$(evinit --llm-model '-foo')"
+check "--llm-model rejects shell metacharacters" grep -q 'must be an Ollama model' <<<"$(evinit --llm-model 'x;touch /nonexistent-probe')"
+check "--llm-model is refused on other profiles" grep -q 'only applies to --profile everything' <<<"$(evinit --profile full --llm-model qwen2.5:0.5b)"
+evinit --profile everything >/dev/null
+
+# local-ca: what each trust variable points at.
+ca_trust_of() {  # <env var> -> value written into a one-container Deployment
+  local m="$TEST_TMP/catrust.$RANDOM.yaml"
+  printf 'kind: Deployment\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n' > "$m"
+  ( source "$REPO_ROOT/scripts/lib/common.sh"; source "$REPO_ROOT/scripts/lib/local-ca.sh"
+    mt_local_ca_trust "$m" app "$1" >/dev/null 2>&1 ) || return 1
+  V="$1" yq '.spec.template.spec.containers[0].env[] | select(.name == strenv(V)) | .value' "$m"
+}
+check "local CA: SSL_CERT_DIR -> the mount directory" test "$(ca_trust_of SSL_CERT_DIR)" = /etc/mt-local-ca
+check "local CA: SSL_CERT_FILE -> public roots + CA bundle" test "$(ca_trust_of SSL_CERT_FILE)" = /etc/mt-local-ca/bundle.pem
+check "local CA: REQUESTS_CA_BUNDLE -> the bundle" test "$(ca_trust_of REQUESTS_CA_BUNDLE)" = /etc/mt-local-ca/bundle.pem
+check "local CA: AWS_CA_BUNDLE -> the CA alone" test "$(ca_trust_of AWS_CA_BUNDLE)" = /etc/mt-local-ca/ca.crt
+mdoc="$TEST_TMP/catrust-multi.yaml"
+printf 'kind: Secret\nmetadata: {name: s}\n---\nkind: Deployment\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n---\nkind: Service\nmetadata: {name: s}\n' > "$mdoc"
+check "local CA: trust works on a multi-document manifest (Open WebUI's)" \
+  bash -c "source '$REPO_ROOT/scripts/lib/common.sh'; source '$REPO_ROOT/scripts/lib/local-ca.sh'; mt_local_ca_trust '$mdoc' app SSL_CERT_FILE >/dev/null 2>&1"
+check "local CA: only the Deployment gets the mount" \
+  test "$(yq ea '[select(.kind == "Deployment") | .spec.template.spec.volumes[]] | length' "$mdoc"):$(yq ea '[select(.kind != "Deployment") | select(.spec != null)] | length' "$mdoc")" = "1:0"
+
+# Nextcloud: public edges keep wopi_url = https://$OFFICE_HOST and set no public_wopi_url.
+rd_render() { env -i PATH="$PATH" OFFICE_HOST=office.example.com "$@" envsubst '${OFFICE_HOST} ${RICHDOCUMENTS_WOPI_URL} ${RICHDOCUMENTS_PUBLIC_WOPI_URL}' < "$REPO_ROOT/docs/nextcloud-oidc-config-job.yaml.tpl"; }
+check "richdocuments: public edge wopi_url renders as before" \
+  grep -qF "richdocuments wopi_url --value='https://office.example.com'" <<<"$(rd_render RICHDOCUMENTS_WOPI_URL=https://office.example.com RICHDOCUMENTS_PUBLIC_WOPI_URL=)"
+check "richdocuments: public edge sets no public_wopi_url" \
+  grep -qF 'if [ -n "" ]; then' <<<"$(rd_render RICHDOCUMENTS_WOPI_URL=https://office.example.com RICHDOCUMENTS_PUBLIC_WOPI_URL=)"
+check "deploy-nextcloud: public edges keep wopi_url on https://\$OFFICE_HOST" \
+  grep -qF 'RICHDOCUMENTS_WOPI_URL="https://${OFFICE_HOST}"' "$REPO_ROOT/apps/deploy-nextcloud.sh"
+check "deploy_infra: the LLM on local edge only with llm.enabled" \
+  grep -qF "mt_is_local_edge && [ \"\$(yq '.llm.enabled // false' \"\$MT_INFRA_CONFIG\")\" != \"true\" ]" "$REPO_ROOT/scripts/deploy_infra"
+
 # ── infra-config.sh: mail.smtp_relay host rules ───────────────────────────
 relay_of() {  # <edge or ""> <host> -> "host|port" or fails
   # The full config `devbox init` generated above, with only edge/relay edited.

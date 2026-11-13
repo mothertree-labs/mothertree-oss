@@ -11,6 +11,10 @@ const config = fs.existsSync(configPath)
   ? JSON.parse(fs.readFileSync(configPath, 'utf-8'))
   : {};
 
+// The tenant's default model (llm.model). `scripts/devbox e2e` exports it
+// (the everything profile can pick another); elsewhere it is the repo default.
+const expectedModel = process.env.E2E_LLM_MODEL || 'llama3.2:1b';
+
 async function checkLLMAvailable(page: any): Promise<boolean> {
   if (config.llmEnabled === false || featureDisabled('llm')) return false;
   const checkContext = await page.context().browser()!.newContext({ ignoreHTTPSErrors: true });
@@ -78,6 +82,6 @@ test.describe('LLM', () => {
       await page.waitForTimeout(500);
     }
 
-    await expect(page.locator('text=llama3.2:1b').first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(`text=${expectedModel}`).first()).toBeVisible({ timeout: 10_000 });
   });
 });

@@ -79,9 +79,10 @@ print_status "Setting up port-forward to Keycloak on port ${LOCAL_PORT}..."
 kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http ${LOCAL_PORT}:80 > /tmp/keycloak-pf.log 2>&1 &
 PF_PID=$!
 # One EXIT trap only — a second `trap ... EXIT` replaces rather than appends,
-# which would silently drop the port-forward kill. gate_log is set much later;
-# ${gate_log:-} keeps this valid under `set -u` before then.
-trap 'kill $PF_PID 2>/dev/null || true; rm -f "${gate_log:-}"' EXIT
+# which would silently drop the port-forward kill. gate_log and WEBUI_MANIFEST
+# (the rendered manifest, which holds the OIDC client secret) are set much
+# later; ${...:-} keeps this valid under `set -u` before then.
+trap 'kill $PF_PID 2>/dev/null || true; rm -f "${gate_log:-}" "${WEBUI_MANIFEST:-}"' EXIT
 sleep 3
 
 KEYCLOAK_URL="http://localhost:${LOCAL_PORT}"
@@ -319,7 +320,21 @@ else
 fi
 export LLM_WEBUI_STORAGE_VALUE
 
-mt_apply kubectl apply -f <(envsubst < "${REPO_ROOT}/apps/manifests/llm/open-webui-tenant.yaml.tpl")
+WEBUI_MANIFEST=$(mktemp) || exit 1
+envsubst < "${REPO_ROOT}/apps/manifests/llm/open-webui-tenant.yaml.tpl" > "$WEBUI_MANIFEST"
+# A devbox's Keycloak is an HTTPS name signed by the local CA, and Open WebUI
+# fetches its OIDC metadata and tokens server-side (Python: httpx/aiohttp via
+# SSL_CERT_FILE, requests via REQUESTS_CA_BUNDLE). bundle.pem keeps the public
+# roots (Debian-based image).
+if mt_is_local_edge; then
+    print_status "edge local: Open WebUI trusts the local CA (SSL_CERT_FILE, REQUESTS_CA_BUNDLE)"
+    # shellcheck source=../scripts/lib/local-ca.sh
+    source "${REPO_ROOT}/scripts/lib/local-ca.sh"
+    mt_local_ca_publish_configmap "$NS_LLM"
+    mt_local_ca_trust "$WEBUI_MANIFEST" open-webui SSL_CERT_FILE REQUESTS_CA_BUNDLE
+fi
+mt_apply kubectl apply -f "$WEBUI_MANIFEST"
+rm -f "$WEBUI_MANIFEST"
 
 # ---------------------------------------------------------------------------
 # 7. Deploy HPA for Open WebUI auto-scaling (only if min != max replicas)

@@ -222,7 +222,12 @@ spec:
                 echo "Enabling Collabora Online (richdocuments)..."
                 nc_exec su -s /bin/sh www-data -c "php occ app:install richdocuments" 2>/dev/null || true
                 nc_exec su -s /bin/sh www-data -c "php occ app:enable richdocuments"
-                nc_exec su -s /bin/sh www-data -c "php occ config:app:set richdocuments wopi_url --value='https://${OFFICE_HOST}'"
+                nc_exec su -s /bin/sh www-data -c "php occ config:app:set richdocuments wopi_url --value='${RICHDOCUMENTS_WOPI_URL}'"
+                # Developer box only: Nextcloud reaches Collabora in-cluster (wopi_url),
+                # browsers at the public name. Empty everywhere else.
+                if [ -n "${RICHDOCUMENTS_PUBLIC_WOPI_URL}" ]; then
+                  nc_exec su -s /bin/sh www-data -c "php occ config:app:set richdocuments public_wopi_url --value='${RICHDOCUMENTS_PUBLIC_WOPI_URL}'"
+                fi
                 # No wopi_allowlist — Collabora callbacks go through the external URL which may
                 # traverse Cloudflare (prod) or hairpin through the LB (dev). The source IP varies
                 # (Cloudflare edge, node IP, pod IP) making an IP allowlist fragile. WOPI security
