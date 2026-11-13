@@ -1,0 +1,5 @@
+node_modules
+npm-debug.log*
+# Local secrets (gitignored) must never reach an image layer via COPY . .
+.env
+.env.*

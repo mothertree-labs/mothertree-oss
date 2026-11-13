@@ -29,11 +29,10 @@ fi
 
 cd "$ACCOUNT_PORTAL_SRC"
 
-# Install npm dependencies if needed (for Tailwind CSS build inside Docker)
-if [ ! -d "node_modules" ]; then
-  echo "Installing npm dependencies..."
-  npm install
-fi
+# No host-side npm step: the Dockerfile runs `npm ci` against the committed
+# lockfile itself. A host `npm install` here only rewrote package-lock.json
+# with whatever npm the host has (leaving a fresh clone dirty after a devbox
+# build) and never fed the image (.dockerignore keeps node_modules out).
 
 if [[ "${PUSH}" == "true" ]]; then
   docker build -t "${IMAGE_TAG}" .
