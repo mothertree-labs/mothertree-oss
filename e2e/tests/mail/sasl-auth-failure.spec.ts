@@ -129,7 +129,8 @@ test.describe('Mail — SASL Auth Failure (PR-2b regression guard)', () => {
       replyTimeoutMs: 10_000,
     });
 
-    const authCode = result.codes[result.codes.length - 2]; // second-to-last (last is QUIT)
+    // Last recorded reply: the QUIT reply is read best-effort and never pushed.
+    const authCode = result.codes[result.codes.length - 1];
     expect(
       authCode,
       `Expected 535 (auth failure) from Stalwart, got ${authCode}. Transcript:\n${result.transcript}`,

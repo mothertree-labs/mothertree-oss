@@ -357,6 +357,27 @@ check "a failing command is named, not silent" \
 check "die() prints only its own message" \
   test "$(up_fresh 'die boom' | grep -c 'devbox\]')" = 1
 
+# Profiles: what init writes, and what the e2e specs are told is off.
+profile_of() {  # <profile> -> generated tenant config path
+  local d="$TEST_TMP/prof-$1/.devbox"
+  bash -c "PATH='$STUBS':\$PATH MT_DEVBOX_DIR='$d' DEVBOX_TRUST=process '$REPO_ROOT/scripts/devbox' init --profile $1" >/dev/null 2>&1
+  printf '%s' "$d/tenants/devbox/devbox.config.yaml"
+}
+disabled_of() {  # <profile> -> E2E_DISABLED_FEATURES for that profile
+  bash -c "PATH='$STUBS':\$PATH MT_DEVBOX_DIR='$TEST_TMP/prof-$1/.devbox'; export PATH MT_DEVBOX_DIR
+    source '$REPO_ROOT/scripts/devbox' env >/dev/null; disabled_features"
+}
+FULL=$(profile_of full); MIN=$(profile_of minimal)
+check "full profile: calendar on" test "$(yq .features.calendar_enabled "$FULL")" = true
+check "full profile: magic-link login on" test "$(yq .features.login_methods.magic_link "$FULL")" = true
+check "full profile: office and LLM off" test "$(yq '.features.office_enabled, .features.llm_enabled' "$FULL" | tr '\n' ' ')" = "false false "
+check "minimal profile: calendar and magic link off" \
+  test "$(yq '.features.calendar_enabled, .features.login_methods.magic_link' "$MIN" | tr '\n' ' ')" = "false false "
+check "full profile: e2e skips exactly what is off" \
+  test "$(disabled_of full)" = "smtp,turn,office,google_import,llm,google_sso,external_mail"
+check "minimal profile: e2e skips the apps it lacks" \
+  grep -qE '(^|,)matrix,docs,files(,|$)' <<<"$(disabled_of minimal)"
+
 # ── infra-config.sh: mail.smtp_relay host rules ───────────────────────────
 relay_of() {  # <edge or ""> <host> -> "host|port" or fails
   # The full config `devbox init` generated above, with only edge/relay edited.

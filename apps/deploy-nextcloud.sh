@@ -675,7 +675,15 @@ rm -rf "$CUSTOM_APPS_STAGING"
 # This replaces the old approach of running occ config:system:set on a single pod.
 if [ -d "$REPO_ROOT/apps/nextcloud-guest-bridge" ]; then
     GUEST_BRIDGE_API_URL="http://account-portal.${NS_ADMIN}.svc.cluster.local/api/provision-guest"
-    GUEST_API_KEY=$(kubectl get secret account-portal-secrets -n "$NS_ADMIN" -o jsonpath='{.data.guest-provisioning-api-key}' 2>/dev/null | base64 -d || echo "")
+    # The key from the tenant secrets first: on a new tenant this runs before
+    # deploy-account-portal.sh has created account-portal-secrets. Fall back
+    # to that Secret for tenants whose key the account portal generated
+    # (guest_provisioning_api_key is optional in the secrets file).
+    # Same "unset" test as deploy-account-portal.sh, so both always agree.
+    GUEST_API_KEY="${GUEST_PROVISIONING_API_KEY:-}"
+    if [ -z "$GUEST_API_KEY" ] || [ "$GUEST_API_KEY" = "null" ] || [[ "$GUEST_API_KEY" == *"PLACEHOLDER"* ]]; then
+        GUEST_API_KEY=$(kubectl get secret account-portal-secrets -n "$NS_ADMIN" -o jsonpath='{.data.guest-provisioning-api-key}' 2>/dev/null | base64 -d || echo "")
+    fi
     if [ -n "$GUEST_API_KEY" ]; then
         kubectl create secret generic nextcloud-guest-bridge \
             --namespace "$NS_FILES" \

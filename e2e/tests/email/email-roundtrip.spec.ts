@@ -1,4 +1,5 @@
 import { test, expect } from '../../fixtures/authenticated';
+import { featureDisabled, disabledReason } from '../../helpers/features';
 import { TEST_USERS } from '../../helpers/test-users';
 import { roundcubeOidcLogin } from '../../helpers/roundcube';
 import { isImapConfigured, waitForEmailBody, deleteEmailsBySubject } from '../../helpers/imap';
@@ -14,6 +15,9 @@ const config = fs.existsSync(configPath)
 const echoGroupAddress = process.env.E2E_ECHO_GROUP_ADDRESS || config.echoGroupAddress;
 
 test.describe('Email — Round-Trip via Echo Group', () => {
+  // The echo group lives on the internet; a devbox never sends mail out.
+  test.skip(featureDisabled('external_mail'), disabledReason('external_mail'));
+
   // This test verifies the full email path: outbound (Roundcube → Stalwart → Postfix → internet)
   // and inbound (internet → Postfix → Stalwart → inbox). It sends from one user (e2e-mailrt)
   // to an external echo group, which forwards to a different user (e2e-mailrcv) who is a

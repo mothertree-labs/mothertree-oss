@@ -1,5 +1,6 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
+import { featureDisabled, disabledReason } from '../../helpers/features';
 import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
 import {
@@ -52,6 +53,8 @@ async function loginToCalendar(
 }
 
 test.describe('Calendar — Internal Invite Round-Trip', () => {
+  test.skip(featureDisabled('calendar'), disabledReason('calendar'));
+
   test.setTimeout(180_000); // 3 minutes
 
   test('prerequisites: calendar must be enabled', () => {
