@@ -1,9 +1,12 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
+import { featureDisabled, disabledReason } from '../../helpers/features';
 import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
 
 test.describe('Smoke — Calendar', () => {
+  test.skip(featureDisabled('calendar'), disabledReason('calendar'));
+
   test('Calendar subdomain redirects to Nextcloud calendar app', async ({ memberPage: page }) => {
     // The calendar subdomain should redirect to /apps/calendar on the Nextcloud host.
     // If overwrite.cli.url is not set, Apache's .htaccess rewrite rules are missing,

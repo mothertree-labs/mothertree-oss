@@ -1,5 +1,6 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
+import { featureDisabled, disabledReason } from '../../helpers/features';
 import { TEST_USERS } from '../../helpers/test-users';
 import { keycloakLogin } from '../../helpers/auth';
 import {
@@ -61,6 +62,8 @@ async function loginToCalendar(
 }
 
 test.describe('Calendar — External Invite via Calendar Automation', () => {
+  test.skip(featureDisabled('calendar'), disabledReason('calendar'));
+
   // Cold-start dev provisioning + accumulated e2e users occasionally pushes
   // a single calendar-automation poll past 90s. Bump per-test budget to 4min
   // so the 150s polls below still fit with login/navigation overhead. (#386)

@@ -17,23 +17,25 @@ on your machine and is throwaway.
   - ingress-nginx, cert-manager, PgBouncer and a PostgreSQL container.
 - **full** (`init --profile full`): standard plus **Files** (Nextcloud),
   **mail** (a Stalwart server for the tenant), **webmail** (Roundcube,
-  built locally like the portals) and **Jitsi**. Mail is delivered between
-  devbox users, and mail to any other address lands in **Mailpit**; nothing
-  leaves the machine.
+  built locally like the portals), **Jitsi**, the Nextcloud **calendar**
+  with its calendar automation (invitations by email), and the **magic-link**
+  login. Mail is delivered between devbox users, and mail to any other address
+  lands in **Mailpit**; nothing leaves the machine.
 - **minimal** (`init --profile minimal`): the same without Matrix, Docs and S3.
 
-The other apps (Files, Jitsi, mail) are added one at a time; see
+Office (Collabora) and the LLM chat are not in any profile yet; see
 [What's not there yet](#whats-not-there-yet).
 
 ## Requirements
 
-- **Linux.** Tested on Ubuntu 24.04 arm64; amd64 is expected to work but has
-  not been tried yet. `*.localhost` names
+- **Linux.** Tested on Ubuntu 24.04, amd64 and arm64. `*.localhost` names
   must resolve to loopback; systemd-resolved does that on current distros.
   Ubuntu 18.04 does not. macOS is not supported yet.
 - Free memory: about **4.5 GiB** for the standard profile (it measured
-  3.7 GiB used in a 6 GiB VM with 4 CPUs), or about **3.5 GiB** and 2 CPUs
-  for the minimal one.
+  3.7 GiB used in a 6 GiB VM with 4 CPUs), about **3.5 GiB** and 2 CPUs
+  for the minimal one, and about **8.5 GiB** and 4–6 CPUs for the full one
+  (it measured 7 GiB used on a 16 GiB, 6-CPU machine). A first full `up`
+  took 24 minutes there with empty image caches.
 - `127.0.0.1:80` and `127.0.0.1:443` free.
 - Disk: about **30 GiB free** for docker with the full profile (images, the
   image caches and the Roundcube and portal build cache); less for the smaller
@@ -85,6 +87,14 @@ scripts/devbox deploy admin-portal    # apps/deploy-admin-portal.sh -e devbox -t
 scripts/devbox e2e tests/admin-portal/login.spec.ts
 ```
 
+Before the first `e2e`, install Playwright's browser once:
+`cd e2e && npm ci && npx playwright install --with-deps chromium`
+(`--with-deps` installs the system libraries with sudo). `scripts/devbox e2e
+tests/` runs the whole suite. Specs for apps the profile does not deploy
+(Office, LLM, and on the smaller profiles Files, mail, calendar …) and the
+ones that need mail to leave for the internet skip themselves: `e2e` passes
+the tenant's switched-off features in `E2E_DISABLED_FEATURES`.
+
 Each `build` gets a unique tag, so the following `deploy` always rolls the
 pod. The tag is recorded in `.devbox/images.env`.
 
@@ -102,7 +112,7 @@ the devbox, so you can run things like `kubectl get pods -A` or
 | `up` | Create or reuse the cluster and PostgreSQL, build missing portal images, run `deploy_infra`, start the S3 gateway and `create_env` |
 | `build <component>` | Build `admin-portal`, `account-portal` or `roundcube` locally and import it |
 | `deploy <app>` | Run `apps/deploy-<app>.sh -e devbox -t devbox` |
-| `e2e <spec> [args]` | Run Playwright against the devbox (with mail on, it port-forwards Stalwart's IMAPS and submission ports for the mail specs) |
+| `e2e <spec> [args]` | Run Playwright against the devbox (with mail on, it port-forwards Stalwart's IMAPS and submission ports for the mail specs); specs for switched-off features skip |
 | `users <args>` | `scripts/dev-test-users.sh` against the devbox |
 | `shell` / `env` | Subshell / exports with `KUBECONFIG` and the config paths |
 | `status` | Pods, PostgreSQL, URLs |
@@ -208,10 +218,10 @@ separate docker-compose world.
   its pod cannot pull and joining a room stops at the SSO step. Jitsi itself
   deploys and the app loads. A two-browser call has not been tested yet.
 - The mail e2e specs that need real outside mail: `email-roundtrip` (external
-  echo group) and `dkim-signature-validation`. `mail/sasl-auth-failure`
-  misreads replies through the port-forward.
-- Nextcloud's notify_push (its image is amd64-only; on arm64 it is skipped and
-  clients poll), Collabora (Office) and the Nextcloud calendar integrations.
+  echo group) and `dkim-signature-validation`. They skip.
+- Nextcloud's notify_push on arm64 (its image is amd64-only; it is skipped
+  there and clients poll).
+- Collabora (Office) and the LLM chat (Ollama + Open WebUI).
 - The S3 gateway's data lives in the k3d node, so `down` loses uploaded media
   (the PostgreSQL data survives).
 - Email in the standard profile: it has no mail server, so Matrix and Docs

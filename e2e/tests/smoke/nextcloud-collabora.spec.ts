@@ -1,5 +1,6 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
+import { featureDisabled, disabledReason } from '../../helpers/features';
 import { handleNextcloudLogin, waitForNextcloudReady } from '../../helpers/nextcloud';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -10,6 +11,8 @@ const config = fs.existsSync(configPath)
   : {};
 
 test.describe('Smoke — Nextcloud Collabora (Office)', () => {
+  test.skip(featureDisabled('office'), disabledReason('office'));
+
   test('Collabora discovery endpoint responds', async ({ memberPage: page }) => {
     if (!config.collaboraEnabled) {
       test.skip(true, 'Set collaboraEnabled: true in e2e.config.json');

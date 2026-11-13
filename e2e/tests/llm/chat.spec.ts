@@ -1,5 +1,6 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
+import { featureDisabled, disabledReason } from '../../helpers/features';
 import { loginToApp, keycloakLogin } from '../../helpers/auth';
 import { TEST_USERS } from '../../helpers/test-users';
 import * as fs from 'fs';
@@ -11,7 +12,7 @@ const config = fs.existsSync(configPath)
   : {};
 
 async function checkLLMAvailable(page: any): Promise<boolean> {
-  if (config.llmEnabled === false) return false;
+  if (config.llmEnabled === false || featureDisabled('llm')) return false;
   const checkContext = await page.context().browser()!.newContext({ ignoreHTTPSErrors: true });
   const checkPage = await checkContext.newPage();
   const response = await checkPage.goto(urls.llm).catch(() => null);

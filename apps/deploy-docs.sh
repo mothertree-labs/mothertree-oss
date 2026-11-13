@@ -262,14 +262,16 @@ BACKEND_MANIFEST=$(mktemp)
 envsubst '${DOCS_BACKEND_MIN_REPLICAS} ${DOCS_GUNICORN_WORKERS}' < "$REPO_ROOT/docs/backend-deployment.yaml" | \
   sed "s/namespace: docs/namespace: $NS_DOCS/g" | \
   sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g" > "$BACKEND_MANIFEST"
-# A devbox's S3 endpoint is an HTTPS name signed by the local CA, and the
-# upload path's boto3 client verifies TLS regardless of AWS_S3_VERIFY.
+# A devbox's S3 endpoint and its Stalwart submission host are HTTPS/STARTTLS
+# names signed by the local CA. boto3 verifies TLS regardless of AWS_S3_VERIFY
+# (AWS_CA_BUNDLE); Django's SMTP STARTTLS uses OpenSSL's default paths
+# (SSL_CERT_DIR adds the CA without dropping the public roots).
 if mt_is_local_edge; then
-  print_status "edge local: backend trusts the local CA for S3 (AWS_CA_BUNDLE)"
+  print_status "edge local: backend trusts the local CA for S3 and SMTP (AWS_CA_BUNDLE, SSL_CERT_DIR)"
   # shellcheck source=../scripts/lib/local-ca.sh
   source "${REPO_ROOT}/scripts/lib/local-ca.sh"
   mt_local_ca_publish_configmap "$NS_DOCS"
-  mt_local_ca_trust "$BACKEND_MANIFEST" backend AWS_CA_BUNDLE
+  mt_local_ca_trust "$BACKEND_MANIFEST" backend AWS_CA_BUNDLE SSL_CERT_DIR
 fi
 mt_apply kubectl apply -f "$BACKEND_MANIFEST"
 rm -f "$BACKEND_MANIFEST"

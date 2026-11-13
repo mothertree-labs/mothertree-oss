@@ -1,5 +1,6 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
+import { featureDisabled, disabledReason } from '../../helpers/features';
 import { selectors } from '../../helpers/selectors';
 import { TEST_USERS } from '../../helpers/test-users';
 import { e2ePrefix } from '../../helpers/e2e-prefix';
@@ -25,6 +26,8 @@ const baseDomain = urls.baseDomain;
  * 6. Navigate to magic-link URL -> authenticated -> account portal home
  */
 test.describe('Keycloak Native Magic-Link (credential-less user)', () => {
+  test.skip(featureDisabled('magic_link'), disabledReason('magic_link'));
+
   test.setTimeout(180_000); // 5 minutes
 
   test('credential-less user authenticates via Keycloak-native magic link', async ({ adminPage }) => {
