@@ -45,17 +45,33 @@ mt_require_env
 # secrets). All required inputs are validated below — no silent skips.
 source "${REPO_ROOT}/scripts/lib/infra-config.sh"
 mt_load_infra_config
+# shellcheck source=../scripts/lib/platform.sh
+source "${REPO_ROOT}/scripts/lib/platform.sh"
 
-# Fail fast — the restore initContainer and seed Job are expected to run, so a
-# missing S3 cache config is a hard error (see CLAUDE.md).
-: "${LLM_S3_BUCKET:?LLM_S3_BUCKET not set — add 'llm.s3_bucket' to $MT_INFRA_CONFIG}"
-: "${LLM_S3_ENDPOINT:?LLM_S3_ENDPOINT not set — add 'llm.s3_endpoint' to $MT_INFRA_CONFIG}"
-: "${LLM_S3_REGION:?LLM_S3_REGION not set — add 'llm.s3_region' to $MT_INFRA_CONFIG}"
-: "${LLM_S3_KEY:?LLM_S3_KEY not set — add 'llm.s3_key' to the infra tenant secrets}"
-: "${LLM_S3_SECRET:?LLM_S3_SECRET not set — add 'llm.s3_secret' to the infra tenant secrets}"
+# A developer box (cluster.edge: local) has no S3 model cache: no restore
+# initContainer, no seed Job. The Ollama container pulls the model from
+# ollama.com itself when it is missing (ollama.yaml.tpl), on every new pod.
+_mt_s3_cache=true
+if mt_is_local_edge; then
+  _mt_s3_cache=false
+fi
+
+if [ "$_mt_s3_cache" = "true" ]; then
+  # Fail fast — the restore initContainer and seed Job are expected to run, so a
+  # missing S3 cache config is a hard error (see CLAUDE.md).
+  : "${LLM_S3_BUCKET:?LLM_S3_BUCKET not set — add 'llm.s3_bucket' to $MT_INFRA_CONFIG}"
+  : "${LLM_S3_ENDPOINT:?LLM_S3_ENDPOINT not set — add 'llm.s3_endpoint' to $MT_INFRA_CONFIG}"
+  : "${LLM_S3_REGION:?LLM_S3_REGION not set — add 'llm.s3_region' to $MT_INFRA_CONFIG}"
+  : "${LLM_S3_KEY:?LLM_S3_KEY not set — add 'llm.s3_key' to the infra tenant secrets}"
+  : "${LLM_S3_SECRET:?LLM_S3_SECRET not set — add 'llm.s3_secret' to the infra tenant secrets}"
+fi
 
 print_status "Deploying Ollama inference engine to env=${MT_ENV}, model=${LLM_MODEL}"
-print_status "  S3 model cache: s3://${LLM_S3_BUCKET}/${LLM_S3_PREFIX} (${LLM_S3_REGION})"
+if [ "$_mt_s3_cache" = "true" ]; then
+  print_status "  S3 model cache: s3://${LLM_S3_BUCKET}/${LLM_S3_PREFIX} (${LLM_S3_REGION})"
+else
+  print_status "  edge local: no S3 model cache — Ollama pulls ${LLM_MODEL} from ollama.com when it starts"
+fi
 
 MANIFESTS_DIR="$REPO_ROOT/apps/manifests/llm"
 mt_require_commands kubectl yq
@@ -68,14 +84,16 @@ mt_reset_change_tracker
 # S3 model cache credentials — referenced via envFrom by the restore
 # initContainer and the seed Job. Wrapped in mt_apply so a credential change is
 # tracked and triggers a rollout (conditional-restart system).
-print_status "Creating ollama-s3 secret..."
-mt_apply kubectl apply -f <(kubectl create secret generic ollama-s3 \
-  --from-literal=AWS_ACCESS_KEY_ID="$LLM_S3_KEY" \
-  --from-literal=AWS_SECRET_ACCESS_KEY="$LLM_S3_SECRET" \
-  --from-literal=AWS_ENDPOINT_URL="https://${LLM_S3_ENDPOINT}" \
-  --from-literal=AWS_REGION="$LLM_S3_REGION" \
-  -n infra-llm \
-  --dry-run=client -o yaml)
+if [ "$_mt_s3_cache" = "true" ]; then
+  print_status "Creating ollama-s3 secret..."
+  mt_apply kubectl apply -f <(kubectl create secret generic ollama-s3 \
+    --from-literal=AWS_ACCESS_KEY_ID="$LLM_S3_KEY" \
+    --from-literal=AWS_SECRET_ACCESS_KEY="$LLM_S3_SECRET" \
+    --from-literal=AWS_ENDPOINT_URL="https://${LLM_S3_ENDPOINT}" \
+    --from-literal=AWS_REGION="$LLM_S3_REGION" \
+    -n infra-llm \
+    --dry-run=client -o yaml)
+fi
 
 # Canonical model ref — bare names (no :tag) are equivalent to :latest in
 # Ollama's registry layout, and `ollama list` prints the tag explicitly. Both
@@ -98,7 +116,13 @@ export LLM_S3_BUCKET LLM_S3_PREFIX LLM_MODEL LLM_MODEL_CANONICAL
 # exported var a template references (and blank unknowns) — this makes the
 # contract explicit and keeps unrelated env values out of rendered manifests.
 _MT_ENVSUBST_VARS='${LLM_MODEL} ${LLM_MODEL_CANONICAL} ${LLM_S3_BUCKET} ${LLM_S3_PREFIX}'
-mt_apply kubectl apply -f <(envsubst "${_MT_ENVSUBST_VARS}" < "${MANIFESTS_DIR}/ollama.yaml.tpl")
+_mt_ollama_manifest=$(mktemp) || exit 1
+envsubst "${_MT_ENVSUBST_VARS}" < "${MANIFESTS_DIR}/ollama.yaml.tpl" > "${_mt_ollama_manifest}"
+if [ "$_mt_s3_cache" != "true" ]; then
+  yq -i '(select(.kind == "Deployment") | .spec.template.spec) |= del(.initContainers)' "${_mt_ollama_manifest}"
+fi
+mt_apply kubectl apply -f "${_mt_ollama_manifest}"
+rm -f "${_mt_ollama_manifest}"
 
 # Restart only when config actually changed (mt_apply tracked it). In particular
 # an ollama-s3 credential rotation does not change the pod template, so without
@@ -117,6 +141,9 @@ kubectl rollout status deployment/ollama -n infra-llm --timeout=300s || {
 # Job is still running; retry when the Job failed (backoffLimit exhausted, e.g.
 # a transient ollama.com outage) — a failed Job must not silently suppress
 # re-seeding forever. Finished Jobs also self-delete (ttlSecondsAfterFinished).
+if [ "$_mt_s3_cache" != "true" ]; then
+  print_status "edge local: no S3 model cache to seed"
+else
 print_status "Checking whether the model is already in the S3 model cache..."
 # Check the model manifest (content-addressed, so presence == seeded). Uses the
 # pinned aws-cli image via a throwaway pod that references the ollama-s3 Secret
@@ -198,6 +225,7 @@ EOF
   rm -f "${_mt_seed_manifest}"
   kubectl delete pod "${_mt_check_pod}" -n infra-llm --wait=false >/dev/null 2>&1 || true
 fi
+fi  # _mt_s3_cache
 
 print_status "Verifying pods..."
 kubectl get pods -n infra-llm

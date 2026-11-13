@@ -21,10 +21,14 @@ on your machine and is throwaway.
   with its calendar automation (invitations by email), and the **magic-link**
   login. Mail is delivered between devbox users, and mail to any other address
   lands in **Mailpit**; nothing leaves the machine.
-- **minimal** (`init --profile minimal`): the same without Matrix, Docs and S3.
-
-Office (Collabora) and the LLM chat are not in any profile yet; see
-[What's not there yet](#whats-not-there-yet).
+- **everything** (`init --profile everything [--llm-model M]`): full plus
+  **Office** (Collabora, opened from Files) and the **LLM chat** (Open WebUI
+  with an Ollama backend and SearXNG web search). The model defaults to
+  `llama3.2:1b`; pick a smaller one such as `qwen2.5:0.5b` with `--llm-model`
+  (any Ollama model name; remembered in `.devbox/llm-model`). Unlike the real
+  environments there is no S3 model cache: Ollama pulls the model from
+  ollama.com whenever its pod starts.
+- **minimal** (`init --profile minimal`): the same as standard without Matrix, Docs and S3.
 
 ## Requirements
 
@@ -33,9 +37,10 @@ Office (Collabora) and the LLM chat are not in any profile yet; see
   Ubuntu 18.04 does not. macOS is not supported yet.
 - Free memory: about **4.5 GiB** for the standard profile (it measured
   3.7 GiB used in a 6 GiB VM with 4 CPUs), about **3.5 GiB** and 2 CPUs
-  for the minimal one, and about **8.5 GiB** and 4–6 CPUs for the full one
-  (it measured 7 GiB used on a 16 GiB, 6-CPU machine). A first full `up`
-  took 24 minutes there with empty image caches.
+  for the minimal one, about **8.5 GiB** and 4–6 CPUs for the full one
+  (it measured 7 GiB used on a 16 GiB, 6-CPU machine), and about
+  **11.5 GiB** for everything with a small model (more for a bigger model).
+  A first full `up` took 24 minutes there with empty image caches.
 - `127.0.0.1:80` and `127.0.0.1:443` free.
 - Disk: about **30 GiB free** for docker with the full profile (images, the
   image caches and the Roundcube and portal build cache); less for the smaller
@@ -108,7 +113,7 @@ the devbox, so you can run things like `kubectl get pods -A` or
 | Command | What it does |
 |---|---|
 | `doctor` | Check tools, docker access, `*.localhost` resolution, ports, memory, browser CA trust |
-| `init [--profile minimal\|standard\|full] [--regenerate]` | Write `.devbox/` and create + trust the local CA. Re-running keeps the secrets and the last profile |
+| `init [--profile minimal\|standard\|full\|everything] [--llm-model M] [--regenerate]` | Write `.devbox/` and create + trust the local CA. Re-running keeps the secrets, the last profile and the LLM model |
 | `up` | Create or reuse the cluster and PostgreSQL, build missing portal images, run `deploy_infra`, start the S3 gateway and `create_env` |
 | `build <component>` | Build `admin-portal`, `account-portal` or `roundcube` locally and import it |
 | `deploy <app>` | Run `apps/deploy-<app>.sh -e devbox -t devbox` |
@@ -129,8 +134,15 @@ separate docker-compose world.
   config. `edge: local` means nothing on the internet points at the cluster.
   The deploy scripts skip whatever needs a public edge, and log why ("edge
   local: …"): Cloudflare DNS and IP checks, Let's Encrypt, the Headscale mesh
-  and its CronJobs, and the shared LLM. On every other environment those steps
-  are unchanged and a missing token is still fatal.
+  and its CronJobs, and the shared LLM unless `llm.enabled` (everything
+  profile; then without the S3 model cache). On every other environment those
+  steps are unchanged and a missing token is still fatal.
+- **Local CA inside pods**: apps that call another devbox name over HTTPS
+  server side get the CA from ConfigMap `mt-local-ca`
+  (`scripts/lib/local-ca.sh`): Docs (S3 and SMTP), Open WebUI (Keycloak) and
+  Collabora (WOPI callbacks to Files). Nextcloud reaches Keycloak and
+  Collabora at their in-cluster URLs instead, because PHP's libcurl resolves
+  every `*.localhost` name to loopback on its own.
 - **Config**: `scripts/devbox` points the deploy scripts at the gitignored
   `.devbox/` directory through `MT_TENANTS_DIR`, `MT_INFRA_CONFIG_DIR`,
   `MT_PROJECT_CONF` and `KUBECONFIG` (see `scripts/lib/paths.sh`). One tenant,
@@ -221,7 +233,8 @@ separate docker-compose world.
   echo group) and `dkim-signature-validation`. They skip.
 - Nextcloud's notify_push on arm64 (its image is amd64-only; it is skipped
   there and clients poll).
-- Collabora (Office) and the LLM chat (Ollama + Open WebUI).
+- An S3 model cache for the LLM: the everything profile's Ollama downloads
+  its model again on every new pod.
 - The S3 gateway's data lives in the k3d node, so `down` loses uploaded media
   (the PostgreSQL data survives).
 - Email in the standard profile: it has no mail server, so Matrix and Docs

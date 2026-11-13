@@ -1138,8 +1138,8 @@ fi
 # =============================================================================
 # Deploy Ollama inference engine (shared LLM backend)
 # =============================================================================
-if mt_is_local_edge; then
-  print_status "edge local: the shared LLM (Ollama + S3 model cache) is not part of a developer box, skipping"
+if mt_is_local_edge && [ "$(yq '.llm.enabled // false' "$MT_INFRA_CONFIG")" != "true" ]; then
+  print_status "edge local: the shared LLM is off (llm.enabled; the devbox everything profile turns it on), skipping"
 elif [ -x "$REPO_ROOT/apps/deploy-llm.sh" ]; then
   print_status "Deploying Ollama inference engine..."
   "$REPO_ROOT/apps/deploy-llm.sh" -e "$MT_ENV" --nesting-level=$((MT_NESTING_LEVEL+1)) 2>&1 | sed 's/^/  /' || \

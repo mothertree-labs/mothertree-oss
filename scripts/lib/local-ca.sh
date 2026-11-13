@@ -26,10 +26,17 @@
 #   mt_local_ca_publish_configmap <namespace>     # CA certificate (never the key) as ConfigMap mt-local-ca
 #   mt_local_ca_trust <manifest> <container> <env>...  # mount it into a Deployment, point <env> at it
 #
-# Pointing SSL_CERT_FILE at the CA would replace a container's public roots.
-# Pass SSL_CERT_DIR instead: it gets the mount directory, where the CA also
-# sits under its OpenSSL hash name, so OpenSSL-based clients (Python ssl,
-# PHP, curl) trust it IN ADDITION to their built-in bundle.
+# Pointing SSL_CERT_FILE at the CA alone would replace a container's public
+# roots. So the variable decides what it points at:
+#   SSL_CERT_DIR                     -> the mount directory, where the CA also
+#                                       sits under its OpenSSL hash name; adds
+#                                       it to an image whose OpenSSL default
+#                                       CA *file* holds the public roots
+#                                       (Alpine: /etc/ssl/cert.pem).
+#   SSL_CERT_FILE, REQUESTS_CA_BUNDLE,
+#   CURL_CA_BUNDLE                   -> bundle.pem: the host's public roots plus
+#                                       the CA (Debian-based images, requests).
+#   anything else (AWS_CA_BUNDLE …)  -> ca.crt, the CA alone.
 
 MT_LOCAL_CA_SECRET="mt-local-ca"
 
@@ -123,9 +130,10 @@ MT_LOCAL_CA_MOUNT="/etc/mt-local-ca"
 # $NS_CERTMANAGER) into ConfigMap $MT_LOCAL_CA_CONFIGMAP (key ca.crt) in
 # <namespace>, for pods that call another devbox host over HTTPS. The same
 # certificate is also stored as <subject-hash>.0, OpenSSL's lookup name, so
-# the mount works as an SSL_CERT_DIR.
+# the mount works as an SSL_CERT_DIR, and appended to the host's public roots
+# as bundle.pem (see mt_local_ca_trust).
 mt_local_ca_publish_configmap() {
-  local ns="${1:?mt_local_ca_publish_configmap: namespace required}" crt hash
+  local ns="${1:?mt_local_ca_publish_configmap: namespace required}" crt hash roots
   : "${NS_CERTMANAGER:=infra-cert-manager}"
   crt=$(kubectl get secret "$MT_LOCAL_CA_SECRET" -n "$NS_CERTMANAGER" -o jsonpath='{.data.tls\.crt}' 2>/dev/null | base64 -d 2>/dev/null || true)
   if ! printf '%s\n' "$crt" | openssl x509 -noout 2>/dev/null; then
@@ -133,8 +141,38 @@ mt_local_ca_publish_configmap() {
     return 1
   fi
   hash=$(printf '%s\n' "$crt" | openssl x509 -noout -hash)
-  mt_apply kubectl apply -f <(kubectl create configmap "$MT_LOCAL_CA_CONFIGMAP" -n "$ns" \
-    --from-literal=ca.crt="$crt" --from-literal="${hash}.0"="$crt" --dry-run=client -o yaml)
+  roots=$(_mt_system_ca_roots) || return 1
+  # Files, not --from-literal: one ~200 KB argument exceeds Linux's 128 KiB
+  # per-argument limit ("Argument list too long").
+  local dir rc=0
+  dir=$(mktemp -d) || return 1
+  printf '%s\n' "$crt" > "$dir/ca.crt"
+  printf '%s\n%s\n' "$roots" "$crt" > "$dir/bundle.pem"
+  # Server-side apply: a client-side apply would copy the bundle into the
+  # last-applied annotation, which is capped at 256 KiB.
+  mt_apply kubectl apply --server-side --force-conflicts -f <(kubectl create configmap "$MT_LOCAL_CA_CONFIGMAP" -n "$ns" \
+    --from-file=ca.crt="$dir/ca.crt" --from-file="${hash}.0"="$dir/ca.crt" \
+    --from-file=bundle.pem="$dir/bundle.pem" --dry-run=client -o yaml) || rc=$?
+  rm -rf "$dir"
+  return "$rc"
+}
+
+# _mt_system_ca_roots — print the deploying host's public CA bundle. Pods that
+# get bundle.pem therefore trust what the developer's host trusts (including
+# any locally added CA), not their image's own roots — acceptable on a devbox,
+# the only place this runs. The devbox is Linux: Debian/Ubuntu/Arch/Alpine or
+# Fedora/RHEL paths. Fails when none is found: a bundle without public roots
+# would break every outside call.
+_mt_system_ca_roots() {
+  local f
+  for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+    if [ -s "$f" ] && grep -q 'BEGIN CERTIFICATE' "$f"; then
+      cat "$f"
+      return 0
+    fi
+  done
+  print_error "No system CA bundle found on this host (looked for /etc/ssl/certs/ca-certificates.crt, /etc/pki/tls/certs/ca-bundle.crt, /etc/ssl/cert.pem)"
+  return 1
 }
 
 # mt_local_ca_trust <manifest-file> <container> <env-var>... — edit a rendered
@@ -149,7 +187,8 @@ mt_local_ca_trust() {
   for var in "$@"; do
     [[ "$var" =~ ^[A-Z_][A-Z0-9_]*$ ]] || { print_error "mt_local_ca_trust: invalid env var name '$var'"; return 1; }
   done
-  if [ "$(C="$container" yq 'select(.kind == "Deployment") | [.spec.template.spec.containers[] | select(.name == strenv(C))] | length' "$file")" != "1" ]; then
+  # eval-all: one count across every document (plain yq prints one per document).
+  if [ "$(C="$container" yq ea '[select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == strenv(C))] | length' "$file")" != "1" ]; then
     print_error "mt_local_ca_trust: no single container '$container' in a Deployment in $file"
     return 1
   fi
@@ -159,8 +198,11 @@ mt_local_ca_trust() {
   ' "$file"
   local val
   for var in "$@"; do
-    val="$MT_LOCAL_CA_MOUNT/ca.crt"
-    [ "$var" = "SSL_CERT_DIR" ] && val="$MT_LOCAL_CA_MOUNT"
+    case "$var" in
+      SSL_CERT_DIR) val="$MT_LOCAL_CA_MOUNT" ;;
+      SSL_CERT_FILE|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE) val="$MT_LOCAL_CA_MOUNT/bundle.pem" ;;
+      *) val="$MT_LOCAL_CA_MOUNT/ca.crt" ;;
+    esac
     C="$container" V="$var" F="$val" yq -i '
       (select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == strenv(C)) | .env) += [{"name": strenv(V), "value": strenv(F)}]
     ' "$file"
