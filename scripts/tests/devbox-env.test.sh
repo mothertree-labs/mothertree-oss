@@ -263,14 +263,22 @@ check "stalwart: default S3 endpoint renders as before" \
 # Jitsi JVB: public edges keep require-stun and STUN via the TURN server.
 jvb_env() { env -i PATH="$PATH" JVB_PORT=31000 JITSI_HOST=jitsi.example.com TURN_SERVER_IP=192.0.2.9 \
   JVB_MIN_REPLICAS=1 NS_JITSI=tn-x-jitsi JVB_PUBLIC_IP= "$@"; }
-jvb_vars='${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI} ${JVB_PUBLIC_IP} ${JVB_REQUIRE_STUN} ${JVB_STUN_SERVERS}'
+jvb_vars='${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI} ${JVB_PUBLIC_IP} ${JVB_REQUIRE_STUN} ${JVB_STUN_SERVERS} ${JVB_MAX_SURGE} ${JVB_MAX_UNAVAILABLE}'
 legacy_jvb=$(sed -e 's|require-stun = ${JVB_REQUIRE_STUN}|require-stun = true|' \
-  -e 's|value: "${JVB_STUN_SERVERS}"|value: "${TURN_SERVER_IP}:3478"|' "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl")
-check "jvb: public-edge render unchanged (require-stun, STUN via TURN)" \
-  test "$(jvb_env JVB_REQUIRE_STUN=true JVB_STUN_SERVERS=192.0.2.9:3478 envsubst "$jvb_vars" < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl")" = \
+  -e 's|value: "${JVB_STUN_SERVERS}"|value: "${TURN_SERVER_IP}:3478"|' \
+  -e 's|maxUnavailable: ${JVB_MAX_UNAVAILABLE}|maxUnavailable: 0|' \
+  -e 's|maxSurge: ${JVB_MAX_SURGE}|maxSurge: 1|' "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl")
+check "jvb: public-edge render unchanged (require-stun, STUN via TURN, surge rollout)" \
+  test "$(jvb_env JVB_REQUIRE_STUN=true JVB_STUN_SERVERS=192.0.2.9:3478 JVB_MAX_SURGE=1 JVB_MAX_UNAVAILABLE=0 envsubst "$jvb_vars" < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl")" = \
        "$(printf '%s\n' "$legacy_jvb" | jvb_env envsubst "$jvb_vars")"
 check "deploy-jitsi passes the STUN vars to envsubst" \
   grep -qF '${JVB_REQUIRE_STUN} ${JVB_STUN_SERVERS}' "$REPO_ROOT/apps/deploy-jitsi.sh"
+check "deploy-jitsi passes the rollout vars to envsubst" \
+  grep -qF '${JVB_MAX_SURGE} ${JVB_MAX_UNAVAILABLE}' "$REPO_ROOT/apps/deploy-jitsi.sh"
+# Single-node k3s: the old pod must go first, or the surge pod waits forever
+# for the hostPort it holds.
+check "jvb: single-node render replaces in place (0 surge, 1 unavailable)" \
+  sh -c 'jvb=$(env -i PATH="$PATH" JVB_MAX_SURGE=0 JVB_MAX_UNAVAILABLE=1 envsubst '"'"'${JVB_MAX_SURGE} ${JVB_MAX_UNAVAILABLE}'"'"' < "$1"); [ "$(printf "%s\n" "$jvb" | yq "select(.kind == \"Deployment\") | .spec.strategy.rollingUpdate.maxSurge")" = 0 ] && [ "$(printf "%s\n" "$jvb" | yq "select(.kind == \"Deployment\") | .spec.strategy.rollingUpdate.maxUnavailable")" = 1 ]' _ "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl"
 
 # ── local-ca.sh: trust injection ──────────────────────────────────────────
 trust_out="$TEST_TMP/backend.yaml"

@@ -188,6 +188,20 @@ if [ "$MT_CLUSTER_PLATFORM" = "k3s" ]; then
   fi
 fi
 
+# A k3s env owns no TURN VM: its TURN_SERVER_IP names another env's coturn,
+# borrowed for STUN (devhome uses turn-server-prod's). Configuring that host
+# from here would render THIS env's turn shared secret onto the other env's
+# server (breaking its relay, and handing it a dev-class credential), so the
+# TURN server is never an Ansible target for a k3s env.
+_TURN_MANAGED=true
+if [ "$MT_CLUSTER_PLATFORM" = "k3s" ]; then
+  _TURN_MANAGED=false
+  if [[ ",${ANSIBLE_LIMIT}," == *",turn,"* ]]; then
+    print_error "--limit=turn: env '$MT_ENV' runs on k3s and owns no TURN server (its TURN_SERVER_IP belongs to another env)."
+    exit 2
+  fi
+fi
+
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "manage_infra"
 
@@ -502,7 +516,7 @@ if [ "$RUN_ANSIBLE" = "true" ] && [ "$PLAN_ONLY" != "true" ] && [ "$DESTROY" != 
 
   # Check if there are any servers to provision
   _has_targets=false
-  [ -n "${TURN_SERVER_IP:-}" ] && _ansible_wants turn && _has_targets=true
+  [ "$_TURN_MANAGED" = "true" ] && [ -n "${TURN_SERVER_IP:-}" ] && _ansible_wants turn && _has_targets=true
   [ -n "${HEADSCALE_SERVER_IP:-}" ] && [ "${HEADSCALE_SERVER_IP}" != "null" ] && _ansible_wants headscale && _has_targets=true
   [ -n "${POSTGRES_SERVER_IP:-}" ] && [ "${POSTGRES_SERVER_IP}" != "null" ] && _ansible_wants postgres && _has_targets=true
 
@@ -529,7 +543,7 @@ if [ "$RUN_ANSIBLE" = "true" ] && [ "$PLAN_ONLY" != "true" ] && [ "$DESTROY" != 
       _ansible_hosts=""
 
       # TURN server — prefer Tailscale IP (public SSH may be blocked at cloud firewall)
-      if [ -n "${TURN_SERVER_IP:-}" ] && _ansible_wants turn; then
+      if [ "$_TURN_MANAGED" = "true" ] && [ -n "${TURN_SERVER_IP:-}" ] && _ansible_wants turn; then
         _turn_ansible_host="${TURN_SERVER_IP}"
         if [ -n "${TURN_TAILSCALE_IP:-}" ] && [ "$TURN_TAILSCALE_IP" != "null" ]; then
           _turn_ansible_host="${TURN_TAILSCALE_IP}"
