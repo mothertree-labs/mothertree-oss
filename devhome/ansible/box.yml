@@ -247,6 +247,19 @@
           for src in "$A" "$B"; do
             while iptables -D DOCKER-USER -s "$src" -j DEVHOME-NO-LAN 2>/dev/null; do :; done
           done
+          # Tailnet peers (the CI container's kubectl) reach the k3s API on
+          # this box's tailnet IP; docker DNATs that into the k3d network.
+          # They must arrive from a private address: the API server forwards
+          # the caller's IP as X-Forwarded-For through service proxies, and
+          # Keycloak (sslRequired=external) answers "HTTPS required" to
+          # anything outside RFC 1918 — 100.64.0.0/10 included — which hangs
+          # the deploy's OIDC discovery gate. tailscaled masquerades forwarded
+          # tailnet traffic only when its ts-forward chain sees the packet
+          # first; whenever docker restarts after tailscaled (an apt upgrade
+          # of both), DOCKER-FORWARD accepts it first and the CGNAT source
+          # leaks through. Masquerade explicitly so rule order never matters.
+          iptables -t nat -C POSTROUTING -s 100.64.0.0/10 -d "$A" -j MASQUERADE 2>/dev/null \
+            || iptables -t nat -I POSTROUTING -s 100.64.0.0/10 -d "$A" -j MASQUERADE
       register: _bridge_script
 
     - name: Bridge routing between the k3d and devhome networks (unit)

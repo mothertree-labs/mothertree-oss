@@ -630,16 +630,23 @@ mt_wait_for_keycloak_oidc() {
     # + master realm import — has been observed at ~6-8 min in pipeline
     # #1252/#1253. Warm-restart still responds in 30-90s.
     print_status "Waiting for Keycloak OIDC discovery (in-cluster, realm=$realm)"
-    local i
+    local i last_err=""
     for i in $(seq 1 180); do
-        if kubectl --kubeconfig="$KUBECONFIG" --request-timeout=5s \
-               get --raw="$proxy_path" >/dev/null 2>&1; then
+        if last_err=$(kubectl --kubeconfig="$KUBECONFIG" --request-timeout=5s \
+               get --raw="$proxy_path" 2>&1 >/dev/null); then
             print_success "Keycloak OIDC discovery responsive after $((i*5))s (realm=$realm)"
             return 0
+        fi
+        # Surface the error once a minute: a deterministic failure (e.g.
+        # Keycloak's 403 "HTTPS required" when the caller's IP is not
+        # private) otherwise hides behind 15 minutes of silent retries.
+        if (( i % 12 == 0 )); then
+            print_warning "Keycloak OIDC discovery still failing after $((i*5))s: ${last_err:0:500}"
         fi
         sleep 5
     done
     print_error "Keycloak OIDC discovery never became responsive via kubectl proxy (900s, realm=$realm)"
+    print_error "Last error: ${last_err:0:500}"
     return 1
 }
 
