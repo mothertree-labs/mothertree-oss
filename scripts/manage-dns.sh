@@ -125,7 +125,12 @@ else
 fi
 
 # 2. TURN server A record
-if [ -n "${TURN_SERVER_IP:-}" ]; then
+# A k3s env (devhome) owns no TURN server: its TURN_SERVER_IP is another env's
+# coturn, borrowed for STUN. Don't name that box under this env's domain.
+mt_load_cluster_platform
+if [ "$MT_CLUSTER_PLATFORM" = "k3s" ]; then
+  print_status "Skipping TURN A record — env '$MT_ENV' runs on k3s and owns no TURN server"
+elif [ -n "${TURN_SERVER_IP:-}" ]; then
   create_dns_record "turn.${ENV_DOT}${DOMAIN}" "A" "$TURN_SERVER_IP"
 else
   print_warning "Skipping TURN A record — TURN server IP not available"
