@@ -79,9 +79,13 @@ source "${REPO_ROOT}/scripts/lib/platform.sh"
 if mt_is_k3s; then
     export JVB_PUBLIC_IP="$MT_PUBLIC_INGRESS_IP"
     print_status "JVB public IP: $JVB_PUBLIC_IP (k3s: cluster.public_ip)"
+    # One node: a surge pod can never bind the hostPort the old pod holds,
+    # so a rolling update would wait forever. Replace in place instead.
+    export JVB_MAX_SURGE=0 JVB_MAX_UNAVAILABLE=1
 else
     export JVB_PUBLIC_IP=""
     print_status "JVB public IP: discovered from the node ExternalIP"
+    export JVB_MAX_SURGE=1 JVB_MAX_UNAVAILABLE=0
 fi
 
 # STUN: JVB discovers its public address through the TURN server and, with
@@ -186,9 +190,10 @@ fi
 _prosody_restarted="$_mt_deploy_changed"
 
 # Apply JVB — K8s handles rolling update (with graceful drain) if spec changed
+: "${JVB_MAX_SURGE:?JVB_MAX_SURGE not set}" "${JVB_MAX_UNAVAILABLE:?JVB_MAX_UNAVAILABLE not set}"
 # JVB uses specific variable substitution to preserve shell variables in init container scripts
 # NS_JITSI is included for tenant-specific ClusterRole/ClusterRoleBinding names (avoids multi-tenant RBAC collision)
-envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI} ${JVB_PUBLIC_IP} ${JVB_REQUIRE_STUN} ${JVB_STUN_SERVERS}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
+envsubst '${JVB_PORT} ${JITSI_HOST} ${TURN_SERVER_IP} ${JVB_MIN_REPLICAS} ${NS_JITSI} ${JVB_PUBLIC_IP} ${JVB_REQUIRE_STUN} ${JVB_STUN_SERVERS} ${JVB_MAX_SURGE} ${JVB_MAX_UNAVAILABLE}' < "$REPO_ROOT/apps/manifests/jitsi/jvb.yaml.tpl" | sed "s/namespace: matrix/namespace: $NS_JITSI/g" | kubectl apply -f -
 # Clean up old non-namespaced RBAC resources (replaced by tenant-specific names)
 kubectl delete clusterrole jitsi-jvb-node-reader --ignore-not-found >/dev/null 2>&1
 kubectl delete clusterrolebinding jitsi-jvb-node-reader --ignore-not-found >/dev/null 2>&1

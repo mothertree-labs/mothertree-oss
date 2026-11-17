@@ -56,10 +56,13 @@ spec:
     # RollingUpdate (was Recreate): allows graceful drain of in-flight calls.
     # Pod anti-affinity ensures the surge pod lands on a different node,
     # avoiding hostPort conflicts. Requires cluster to have a schedulable node.
+    # Single-node k3s (devhome, devbox) has no other node: a surge pod can
+    # never get the hostPort and the rollout deadlocks, so there the old pod
+    # goes first (deploy-jitsi.sh sets 0 surge / 1 unavailable).
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+      maxUnavailable: ${JVB_MAX_UNAVAILABLE}
+      maxSurge: ${JVB_MAX_SURGE}
   template:
     metadata:
       labels:
