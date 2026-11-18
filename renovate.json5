@@ -5,7 +5,8 @@
 //     terraform (the phase1 root -- Dependabot
 //     follows each root's ../modules sources itself), and the three Dockerfiles it
 //     already tracks (admin-portal, account-portal, docker/roundcube — these
-//     also feed .github/workflows/dependabot-version-bump.yml).
+//     also feed .github/workflows/dependabot-version-bump.yml, which also
+//     bumps perf/VERSION for Renovate's k6 runner updates).
 //   Renovate owns: container image tags embedded in Helm values, helmfile
 //     chart versions, raw K8s manifests (*.yaml / *.yaml.tpl / *.yaml.gotmpl),
 //     inline manifests in deploy-*.sh, Docs (root docs/), Ansible version pins,
