@@ -134,12 +134,35 @@ from the rest of the home network in two layers:
   rejects new connections from any container out of the uplink interfaces to
   private ranges.
 
-Known gap: because the box sets its own tag on a port that also carries the
-untagged home LAN, root on the box could drop the tag and reach the LAN. The
-fix is a switch port of its own, configured as an access port on the devhome
-VLAN only (native = devhome, no other tagged VLANs), with the box-side tag
-removed. Verify it from the host as root: an address on the bare NIC, or on
-another VLAN ID, must reach nothing.
+The box's switch port carries the devhome VLAN only: native VLAN "None"
+and that one VLAN allowed tagged (the box keeps tagging it itself). Untagged
+frames and frames tagged with any other VLAN ID are dropped by the switch, so
+root on the box cannot step onto another network by dropping or changing the
+tag. Re-check it after any switch change (a reset of the switch silently
+reopens the box onto the home LAN). The commands below spot-check untagged
+frames and VLAN 1; probe your other VLAN IDs the same way. Run them from the host as root (nothing is
+configured; `-s /bin/true` only reports the lease):
+
+```bash
+busybox udhcpc -i eno1 -n -q -t 4 -T 3 -s /bin/true -f      # untagged: "no lease"
+ip link add link eno1 name vt1 type vlan id 1 && sysctl -qw net.ipv6.conf.vt1.disable_ipv6=1 \
+  && ip link set vt1 up && busybox udhcpc -i vt1 -n -q -t 4 -T 3 -s /bin/true -f; ip link del vt1   # "no lease"
+busybox udhcpc -i vlan<ID> -n -q -t 4 -T 3 -s /bin/true -f    # control: a lease from the gateway
+```
+
+A `tcpdump -e -nn -i eno1` on the bare NIC should show inbound frames tagged
+with the devhome VLAN (`devhome_vlan_id`) only (the inner `ethertype IPv4` after `vlan <ID>` is not
+an untagged frame).
+
+**Boot order and DNS.** Docker hands each container the host's upstream DNS
+servers when it starts it. `box.yml` holds docker back
+(`devhome-wait-dns`) until the host has a DNS server from DHCP; without that,
+a slow lease after a power cut (the switch port can take over two minutes)
+leaves every pod unable to resolve names. The flip side: while the host has
+no upstream DNS, docker (and any `systemctl restart docker`, including one
+from an apt upgrade) stays in `activating`; `journalctl -u docker` shows
+`devhome-wait-dns: no upstream DNS server ... holding docker`. If pods report `bad address` after
+some other host DNS change, `docker restart k3d-devhome-server-0`.
 
 **Switching the network is a one-way door without console access.** WiFi is
 not configured on a VLAN box, so if the VLAN doesn't come up after a netplan
