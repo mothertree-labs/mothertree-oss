@@ -108,6 +108,63 @@
       args:
         creates: /usr/bin/docker
 
+    # Docker copies the host's upstream DNS servers into each container when
+    # it starts it, and never refreshes them. If dockerd starts before DHCP has
+    # handed the host a DNS server, the k3d node gets a dead fallback
+    # (ExtServers: host(127.0.0.1)) and every pod fails name lookups until the
+    # node is restarted. network-online.target does not prevent this:
+    # systemd-networkd-wait-online gives up after 120 s and the target is
+    # reached anyway, and a switch port coming up after a power cut can take
+    # longer than that (2 min 9 s to the first lease on 2026-11-17). So wait
+    # for an actual upstream before docker starts, however long that takes:
+    # without one nothing on the box works either way, and docker comes up
+    # the moment the lease arrives instead of needing a manual restart.
+    - name: Wait-for-DNS gate for docker (script)
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/devhome-wait-dns
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # Managed by devhome/ansible/box.yml
+          # The file dockerd reads for upstream DNS when the host runs
+          # systemd-resolved; it lists no nameserver until a link has one.
+          # IPv4 only: the VLAN's DNS comes with the DHCPv4 lease, and an IPv6
+          # server (RA) alone would open the gate too early.
+          f=/run/systemd/resolve/resolv.conf
+          i=0
+          until grep -Eqs '^nameserver [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$f"; do
+            if [ $((i % 30)) -eq 0 ]; then
+              echo "devhome-wait-dns: no upstream DNS server in $f yet (${i}s); holding docker"
+            fi
+            sleep 1
+            i=$((i + 1))
+          done
+
+    - name: docker drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/docker.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Wait-for-DNS gate for docker (drop-in)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/docker.service.d/10-devhome-wait-dns.conf
+        content: |
+          # Managed by devhome/ansible/box.yml
+          [Service]
+          ExecStartPre=/usr/local/sbin/devhome-wait-dns
+          # Wait for the lease however long it takes (docker's own default).
+          TimeoutStartSec=infinity
+        mode: "0644"
+      register: _docker_dns_dropin
+
+    # Takes effect at the next docker start; no restart here (that would take
+    # the cluster and CI down).
+    - name: Load the docker drop-in
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: _docker_dns_dropin.changed
+
     - name: Install Tailscale
       ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
       args:
