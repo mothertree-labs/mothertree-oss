@@ -32,7 +32,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: web
-        image: ghcr.io/jitsi/web:stable-11248-3
+        image: ghcr.io/jitsi/web:stable-11509
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
