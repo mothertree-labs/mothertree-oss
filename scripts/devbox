@@ -70,7 +70,7 @@ DEVBOX_PG_IP="172.29.0.20"
 DEVBOX_PG_CONTAINER="devbox-postgres"
 DEVBOX_PG_VOLUME="devbox-pgdata"
 # PostgreSQL major matches postgresql.version of the real environments (17).
-DEVBOX_PG_IMAGE="postgres:17.11"
+DEVBOX_PG_IMAGE="postgres:17.12"
 # Same k3s as devhome: read from its Ansible pin so there is one source.
 DEVBOX_K3D_VERSION="v5.9.0"
 # In-cluster S3 (apps/manifests/devbox/s3-gateway.yaml.tpl). Browsers and Docs
@@ -92,7 +92,7 @@ DEVBOX_MAILPIT_RELAY="mailpit.infra-mailpit.svc.cluster.local."
 # across down/up and nuke, and never expire content (ttl 0), so a recreated
 # cluster pulls from disk instead of the internet. k3s falls back to the
 # upstream when a cache does not answer.
-DEVBOX_CACHE_IMAGE="registry:3.1.1"
+DEVBOX_CACHE_IMAGE="registry:3.1.2"
 DEVBOX_CACHE_NETWORK="devbox-cache"
 DEVBOX_CACHES="docker.io=https://registry-1.docker.io ghcr.io=https://ghcr.io quay.io=https://quay.io registry.k8s.io=https://registry.k8s.io"
 

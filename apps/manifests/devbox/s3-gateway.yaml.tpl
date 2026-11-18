@@ -56,7 +56,7 @@ spec:
     spec:
       initContainers:
         - name: buckets
-          image: versity/versitygw:v1.10.0
+          image: versity/versitygw:v1.11.0
           command: ["/bin/sh", "-c", "for b in ${DEVBOX_S3_BUCKETS}; do mkdir -p \"/data/$b\"; done; ls /data"]
           securityContext:
             allowPrivilegeEscalation: false
@@ -67,7 +67,7 @@ spec:
               mountPath: /data
       containers:
         - name: versitygw
-          image: versity/versitygw:v1.10.0
+          image: versity/versitygw:v1.11.0
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

@@ -26,7 +26,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: adapter
-        image: ghcr.io/nordeck/jitsi-keycloak-adapter:v20260623
+        image: ghcr.io/nordeck/jitsi-keycloak-adapter:v20261116
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

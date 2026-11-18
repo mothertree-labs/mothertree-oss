@@ -54,7 +54,7 @@ spec:
         - name: tailscale
           # tailscale/tailscale — stable release, multi-arch (version pinned on the image: line below)
           # https://hub.docker.com/r/tailscale/tailscale
-          image: tailscale/tailscale:v1.104.4
+          image: tailscale/tailscale:v1.104.7
           restartPolicy: Always
           env:
             - name: POD_NAME

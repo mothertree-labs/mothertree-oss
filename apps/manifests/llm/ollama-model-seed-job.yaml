@@ -64,7 +64,7 @@ spec:
               mountPath: /root/.ollama
       containers:
         - name: upload
-          image: amazon/aws-cli:2.40.0
+          image: amazon/aws-cli:2.41.0
           command:
             - /bin/sh
             - -c

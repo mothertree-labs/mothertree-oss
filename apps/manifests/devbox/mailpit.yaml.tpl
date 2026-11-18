@@ -49,7 +49,7 @@ spec:
         fsGroup: 65534
       containers:
         - name: mailpit
-          image: axllent/mailpit:v1.33.1
+          image: axllent/mailpit:v1.34.0
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
