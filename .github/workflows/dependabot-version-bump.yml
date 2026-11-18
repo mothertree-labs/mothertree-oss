@@ -1,8 +1,16 @@
-name: "Dependabot Version Bump"
+name: "Dependency Version Bump"
 
-# Auto-bump VERSION files and image-versions.env when Dependabot updates
-# a package's dependencies. Uses pull_request_target so the workflow has
-# write permissions to push back to the Dependabot PR branch.
+# Auto-bump VERSION files and image-versions.env when Dependabot or Renovate
+# updates a component's dependencies. Uses pull_request_target so the workflow
+# has write permissions to push back to the bot's PR branch.
+#
+# Renovate was added (2026-11-18) because its weekly batch bumps grafana/k6 in
+# perf/docker/k6-runner.Dockerfile, which ci/scripts/version-check.sh counts as
+# a perf source change. With nothing bumping perf/VERSION + PERF_IMAGE_TAG, the
+# batch failed validate (#728 in September, #821 in November), each time fixed
+# by hand. Every component version-check.sh tracks must be in VERSION_MAP below.
+# The bump commit is authored by github-actions[bot], which renovate.json5 lists
+# in gitIgnoredAuthors, so Renovate keeps managing the branch.
 
 on:
   pull_request_target:
@@ -11,13 +19,14 @@ on:
       - "apps/admin-portal/**"
       - "apps/account-portal/**"
       - "apps/docker/roundcube/**"
+      - "perf/**"
 
 permissions:
   contents: write
 
 jobs:
   version-bump:
-    if: github.actor == 'dependabot[bot]'
+    if: github.actor == 'dependabot[bot]' || github.actor == 'renovate[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR branch
@@ -42,6 +51,7 @@ jobs:
           VERSION_MAP["apps/admin-portal"]="apps/admin-portal/VERSION:ADMIN_PORTAL_IMAGE_TAG"
           VERSION_MAP["apps/account-portal"]="apps/account-portal/VERSION:ACCOUNT_PORTAL_IMAGE_TAG"
           VERSION_MAP["apps/docker/roundcube"]="apps/docker/roundcube/VERSION:ROUNDCUBE_IMAGE_TAG"
+          VERSION_MAP["perf"]="perf/VERSION:PERF_IMAGE_TAG"
 
           BUMPED=""
           for dir in "${!VERSION_MAP[@]}"; do
@@ -83,7 +93,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add apps/*/VERSION apps/docker/*/VERSION apps/image-versions.env
+          git add apps/*/VERSION apps/docker/*/VERSION perf/VERSION apps/image-versions.env
           git diff --cached --quiet && echo "No changes to commit" && exit 0
           git commit -m "chore: bump image version for dependency update"
           # Checked out by SHA (detached HEAD) — push explicitly to the PR branch
