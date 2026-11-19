@@ -7,9 +7,9 @@
       "sha256": "6f13fa0477144a6812d8648626c64cee91807d1d0b60ca41424543086b9e2775"
     },
     "calendar": {
-      "version": "6.6.5",
-      "url": "https://github.com/nextcloud-releases/calendar/releases/download/v6.6.5/calendar-v6.6.5.tar.gz",
-      "sha256": "e3afbc2a10db87920f5347279423422411010550a809b2902c0e8cf2f2492107"
+      "version": "6.6.6",
+      "url": "https://github.com/nextcloud-releases/calendar/releases/download/v6.6.6/calendar-v6.6.6.tar.gz",
+      "sha256": "b19149fad6462ce8ec028e53551651d1b1291f30cd3dbd70e85434b1d28b4abe"
     },
     "richdocuments": {
       "version": "9.2.3",
