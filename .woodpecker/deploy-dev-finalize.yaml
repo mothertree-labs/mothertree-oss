@@ -57,9 +57,11 @@ steps:
   # deploy-prod as well.
   #
   # Rollouts still settling right after the deploy are re-sampled for up to
-  # 3 minutes before the gate decides; only shared infra namespaces are in
-  # scope (infra-llm is excluded: dev's LLM stack is memory-evicted on its
-  # own schedule and must not gate deploy-prod).
+  # 3 minutes before the gate decides. In scope: the shared infra namespaces
+  # (infra-llm is excluded: dev's LLM stack is memory-evicted on its own
+  # schedule and must not gate deploy-prod) and the leased tenant's
+  # tn-<tenant>-* namespaces (#835). The same gate runs again after e2e
+  # (ci-release.yaml) to catch pods that only start failing later.
   #
   # INFRA_GATE_IGNORE lists KNOWN, TRACKED breakage as an extended regex on
   # the pod/daemonset/deployment name; matches are printed as IGNORED in the

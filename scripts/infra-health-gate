@@ -13,6 +13,14 @@
 #         errors within the last 3 minutes
 #   FAIL  DaemonSets with ready < desired, or updated < desired (stalled rollout)
 #   FAIL  Deployments with available < spec replicas
+#   FAIL  Deployments with a stuck rollout: more pods than spec replicas (the
+#         old ReplicaSet's pods are still there because the new ones never
+#         became available), or updated < spec (new pods not even created).
+#         This is the case available < spec misses: the new pod crash-loops,
+#         the OLD pod keeps serving, so available == spec — and the crashing
+#         new pod still counts as "updated" (#835: account-portal crash-looped
+#         on connect-redis 11 while e2e passed against the old pod)
+#   FAIL  StatefulSets with ready < replicas, or updated < replicas
 #   WARN  scrape targets down (up == 0) — informational only for now; dev has
 #         known-down targets that are tracked separately (#613, probe modules)
 #
@@ -23,7 +31,14 @@
 # Scope: INFRA_GATE_NAMESPACES (a PromQL regex, default: the shared infra
 # namespaces deploy_infra owns; infra-llm is excluded on purpose — the LLM
 # stack on dev is memory-evicted independently of any PR and is tracked on
-# its own).
+# its own). INFRA_GATE_TENANT=<name> adds that tenant's app namespaces
+# (tn-<name>-<app>, apps listed in INFRA_GATE_TENANT_APPS), so CI also gates the
+# apps it just deployed for the leased tenant, and only that tenant: other
+# tenants on a shared cluster cannot fail the PR. The apps are listed rather
+# than matched with tn-<name>-.+ so tenant "foo" never picks up tenant
+# "foo-bar"'s namespaces. tn-<name>-llm is left out for the same reason as
+# infra-llm (memory-evicted on dev independently of any PR). If the tenant has
+# none of those namespaces the gate exits 2 instead of checking infra only.
 #
 # Known, tracked breakage can be excluded with INFRA_GATE_IGNORE (an extended
 # regex matched against the pod / daemonset / deployment name). Matches are
@@ -54,6 +69,8 @@ mt_usage() {
   echo "  MT_PROM_SERVICE             Prometheus Service name (default: kube-prometheus-stack-prometheus)"
   echo "  MT_PROM_PORT                Prometheus Service port (default: 9090)"
   echo "  INFRA_GATE_NAMESPACES       PromQL regex of namespaces to check"
+  echo "  INFRA_GATE_TENANT           also check that tenant's tn-<tenant>-<app> namespaces"
+  echo "  INFRA_GATE_TENANT_APPS      PromQL alternation of <app> suffixes (default: all but llm)"
   echo "  INFRA_GATE_SETTLE_SECONDS   keep re-sampling this long while unhealthy (default 180)"
   echo "  INFRA_GATE_IGNORE           extended regex of pod/daemonset/deployment names to"
   echo "                              report as IGNORED instead of failing (known issues only)"
@@ -74,6 +91,16 @@ mt_require_commands kubectl jq
 
 NS_MON="${NS_MONITORING:-infra-monitoring}"
 NS_RE="${INFRA_GATE_NAMESPACES:-infra-(ingress|ingress-internal|cert-manager|db|auth|monitoring|mail)}"
+GATE_TENANT="${INFRA_GATE_TENANT:-}"
+if [ -n "$GATE_TENANT" ]; then
+  if ! [[ "$GATE_TENANT" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+    print_error "INFRA_GATE_TENANT is not a valid tenant name: ${GATE_TENANT}"
+    exit 2
+  fi
+  TENANT_APPS="${INFRA_GATE_TENANT_APPS:-admin|docs|files|jitsi|mail|matrix|office|webmail}"
+  TENANT_NS_RE="tn-${GATE_TENANT}-(${TENANT_APPS})"
+  NS_RE="(${NS_RE})|${TENANT_NS_RE}"
+fi
 SETTLE="${INFRA_GATE_SETTLE_SECONDS:-180}"
 IGNORE_RE="${INFRA_GATE_IGNORE:-}"
 BAD_REASONS='CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError|CreateContainerError|InvalidImageName'
@@ -120,6 +147,16 @@ nsmatch=$(_prom_query "count(kube_namespace_created{namespace=~\"${NS_RE}\"})") 
 if [ "$(jq 'length' <<< "$nsmatch")" -eq 0 ]; then
   print_error "INFRA_GATE_NAMESPACES matches no namespace on this cluster: ${NS_RE}"
   exit 2
+fi
+# The union above is satisfied by the infra namespaces alone; a tenant whose
+# namespaces are missing (wrong name, different prefix) must not quietly
+# reduce the gate to infra-only.
+if [ -n "$GATE_TENANT" ]; then
+  tnmatch=$(_prom_query "count(kube_namespace_created{namespace=~\"${TENANT_NS_RE}\"})") || exit 2
+  if [ "$(jq 'length' <<< "$tnmatch")" -eq 0 ]; then
+    print_error "INFRA_GATE_TENANT=${GATE_TENANT}: no namespace matches ${TENANT_NS_RE} on this cluster"
+    exit 2
+  fi
 fi
 
 FAILURES=0
@@ -173,6 +210,14 @@ _run_checks() {
     "kube_daemonset_status_updated_number_scheduled{namespace=~\"${NS_RE}\"} < kube_daemonset_status_desired_number_scheduled{namespace=~\"${NS_RE}\"}" daemonset
   _check FAIL "Deployments with available < spec replicas" \
     "kube_deployment_status_replicas_available{namespace=~\"${NS_RE}\"} < kube_deployment_spec_replicas{namespace=~\"${NS_RE}\"}" deployment
+  _check FAIL "Deployments with a stuck rollout (old pods still present: pods > spec)" \
+    "kube_deployment_status_replicas{namespace=~\"${NS_RE}\"} > kube_deployment_spec_replicas{namespace=~\"${NS_RE}\"}" deployment
+  _check FAIL "Deployments with a stalled rollout (updated < spec)" \
+    "kube_deployment_status_replicas_updated{namespace=~\"${NS_RE}\"} < kube_deployment_spec_replicas{namespace=~\"${NS_RE}\"}" deployment
+  _check FAIL "StatefulSets with ready < replicas" \
+    "kube_statefulset_status_replicas_ready{namespace=~\"${NS_RE}\"} < kube_statefulset_replicas{namespace=~\"${NS_RE}\"}" statefulset
+  _check FAIL "StatefulSets with a stalled rollout (updated < replicas)" \
+    "kube_statefulset_status_replicas_updated{namespace=~\"${NS_RE}\"} < kube_statefulset_replicas{namespace=~\"${NS_RE}\"}" statefulset
   _check WARN "scrape targets down (up == 0) — informational" \
     "up{namespace=~\"${NS_RE}\"} == 0" pod 1
 }
