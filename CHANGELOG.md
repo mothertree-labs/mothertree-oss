@@ -244,6 +244,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   from the prod-eu terraform outputs until then.
 
 ### Security
+- **Unattended security upgrades on the rest of devhome**: only the box itself
+  had them (`host-base.yml`), so the devhome-ci and devhome-pg containers had
+  security updates piling up, and the periscope (the env's only public host)
+  had no update policy in Ansible at all. New shared task file
+  `devhome/ansible/tasks/unattended-upgrades.yml`, imported by
+  `ci/ansible/playbook.yml`, `devhome/ansible/pg-prepare.yml` and
+  `devhome/ansible/periscope.yml`, installs daily updates from Ubuntu's
+  security pockets only. Docker, Woodpecker and PGDG are left alone, so the
+  CI server and PostgreSQL are not restarted by these upgrades. The containers
+  never reboot: they share the box's kernel, which the box's own reboot
+  covers, but a long-running process there (PostgreSQL) keeps an old
+  libssl/libc mapped until it is restarted. The periscope also follows the
+  Tailscale repo (tailscaled is its path into the box) and reboots at
+  11:45 UTC when an upgrade needs it, so a patched kernel is actually loaded.
 - **Keycloak 26.7.3 → 26.7.4** (`apps/values/keycloak-codecentric.yaml`), a security
   release closing six CVEs. Two are **unauthenticated DoS against public
   endpoints** — CVE-2026-79651 (locale-cache OOM) and CVE-2026-18212 (SAML
