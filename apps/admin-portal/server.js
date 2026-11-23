@@ -6,8 +6,8 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const { Issuer, Strategy } = require('openid-client');
 
-// Redis session store for HA deployments (multiple replicas)
-const { RedisStore } = require('connect-redis');
+// Redis session store for HA deployments (multiple replicas). connect-redis
+// (>=11) is ESM-only, so it is loaded with import() in createSessionStore().
 const { createClient } = require('redis');
 
 // Fail fast if required environment variables are not set
@@ -66,46 +66,53 @@ app.set('views', path.join(__dirname, 'views'));
 
 // Initialize Redis client for session storage
 // This enables HA with multiple replicas - sessions are shared across all pods
-let sessionStore;
-const redisHost = process.env.REDIS_HOST;
-const redisPort = process.env.REDIS_PORT || '6379';
-const redisPassword = process.env.REDIS_PASSWORD;
+// Returns the Redis session store, or undefined (express-session then uses
+// its in-memory store) when REDIS_HOST is not set. Async only because
+// connect-redis has to be loaded with import().
+async function createSessionStore() {
+  let sessionStore;
+  const redisHost = process.env.REDIS_HOST;
+  const redisPort = process.env.REDIS_PORT || '6379';
+  const redisPassword = process.env.REDIS_PASSWORD;
 
-if (redisHost) {
-  const redisUrl = redisPassword
-    ? `redis://:${encodeURIComponent(redisPassword)}@${redisHost}:${redisPort}`
-    : `redis://${redisHost}:${redisPort}`;
-  const redisClient = createClient({
-    url: redisUrl,
-    socket: {
-      reconnectStrategy: (retries) => {
-        if (retries > 10) {
-          console.error('Redis: Too many reconnection attempts, giving up');
-          return new Error('Redis reconnection failed');
+  if (redisHost) {
+    const { RedisStore } = await import('connect-redis');
+    const redisUrl = redisPassword
+      ? `redis://:${encodeURIComponent(redisPassword)}@${redisHost}:${redisPort}`
+      : `redis://${redisHost}:${redisPort}`;
+    const redisClient = createClient({
+      url: redisUrl,
+      socket: {
+        reconnectStrategy: (retries) => {
+          if (retries > 10) {
+            console.error('Redis: Too many reconnection attempts, giving up');
+            return new Error('Redis reconnection failed');
+          }
+          return Math.min(retries * 100, 3000);
         }
-        return Math.min(retries * 100, 3000);
       }
-    }
-  });
+    });
 
-  redisClient.on('error', (err) => console.error('Redis Client Error:', err));
-  redisClient.on('connect', () => console.log('Redis: Connected'));
-  redisClient.on('reconnecting', () => console.log('Redis: Reconnecting...'));
+    redisClient.on('error', (err) => console.error('Redis Client Error:', err));
+    redisClient.on('connect', () => console.log('Redis: Connected'));
+    redisClient.on('reconnecting', () => console.log('Redis: Reconnecting...'));
 
-  // Connect to Redis (async, but we don't need to wait - connect-redis handles it)
-  redisClient.connect().catch(err => {
-    console.error('Redis: Initial connection failed:', err.message);
-    console.error('Redis: Sessions will use in-memory store (not HA-safe)');
-  });
+    // Connect to Redis (async, but we don't need to wait - connect-redis handles it)
+    redisClient.connect().catch(err => {
+      console.error('Redis: Initial connection failed:', err.message);
+      console.error('Redis: Sessions will use in-memory store (not HA-safe)');
+    });
 
-  sessionStore = new RedisStore({
-    client: redisClient,
-    prefix: 'admin-portal:sess:',
-  });
-  console.log(`Redis: Session store configured (${redisHost}:${redisPort})`);
-} else {
-  console.warn('WARNING: REDIS_HOST not set - using in-memory sessions (not HA-safe)');
-  console.warn('WARNING: With multiple replicas, OIDC login will fail randomly');
+    sessionStore = new RedisStore({
+      client: redisClient,
+      prefix: 'admin-portal:sess:',
+    });
+    console.log(`Redis: Session store configured (${redisHost}:${redisPort})`);
+  } else {
+    console.warn('WARNING: REDIS_HOST not set - using in-memory sessions (not HA-safe)');
+    console.warn('WARNING: With multiple replicas, OIDC login will fail randomly');
+  }
+  return sessionStore;
 }
 
 // Compute shared cookie domain from BASE_URL (e.g., https://admin.dev.example.com -> .dev.example.com)
@@ -121,20 +128,12 @@ const cookieDomain = (() => {
 
 // Session - must be configured correctly for OIDC callback to work
 // sameSite: 'lax' permits GET navigations from cross-origin (OIDC redirects are GET)
-app.use(session({
-  name: 'admin.sid',        // Unique cookie name (account portal uses 'account.sid')
-  store: sessionStore,      // Redis store for HA, undefined falls back to MemoryStore
-  secret: process.env.SESSION_SECRET,
-  resave: false,            // Don't save session if unmodified (Redis handles expiry)
-  saveUninitialized: false, // Don't create session until something is stored
-  cookie: {
-    domain: cookieDomain,   // Shared parent domain so logout clears both portals
-    secure: process.env.NODE_ENV !== 'development',
-    httpOnly: true,
-    sameSite: process.env.NODE_ENV === 'development' ? false : 'lax',
-    maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days (matches Remember Me / offline token lifespan)
-  }
-}));
+// The middleware and its options live in start() because the Redis store is
+// created asynchronously (see createSessionStore). Its position in the
+// chain is fixed here, and start() sets it before app.listen, so no request
+// is ever handled without it.
+let sessionMiddleware;
+app.use((req, res, next) => sessionMiddleware(req, res, next));
 
 // Passport
 app.use(passport.initialize());
@@ -532,6 +531,20 @@ app.use((err, req, res, next) => {
 // Start server
 async function start() {
   try {
+    sessionMiddleware = session({
+      name: 'admin.sid',        // Unique cookie name (account portal uses 'account.sid')
+      store: await createSessionStore(), // undefined falls back to express-session's MemoryStore
+      secret: process.env.SESSION_SECRET,
+      resave: false,            // Don't save session if unmodified (Redis handles expiry)
+      saveUninitialized: false, // Don't create session until something is stored
+      cookie: {
+        domain: cookieDomain,   // Shared parent domain so logout clears both portals
+        secure: process.env.NODE_ENV !== 'development',
+        httpOnly: true,
+        sameSite: process.env.NODE_ENV === 'development' ? false : 'lax',
+        maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days (matches Remember Me / offline token lifespan)
+      }
+    });
     await initializeOIDC();
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Admin Portal running on port ${PORT}`);
