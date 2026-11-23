@@ -259,6 +259,7 @@ gen_tenant_config() {
     .database.stalwart_db = "stalwart_devbox" |
     .database.roundcube_db = "roundcube_devbox" |
     .database.synapse_db = "synapse_devbox" |
+    .database.mas_db = "mas_devbox" |
     .s3.bucket_prefix = "devbox" |
     .s3.docs_bucket = "devbox-docs" |
     .s3.matrix_bucket = "devbox-matrix" |

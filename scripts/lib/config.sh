@@ -134,6 +134,7 @@ _mt_load_tenant_yaml() {
     "DOCS_DB_NAME=" + (.database.docs_db | @sh) + "\n" +
     "NEXTCLOUD_DB_NAME=" + (.database.nextcloud_db | @sh) + "\n" +
     "SYNAPSE_DB_NAME=" + (.database.synapse_db | @sh) + "\n" +
+    "MAS_DB_NAME=" + (.database.mas_db | @sh) + "\n" +
     "STALWART_DB_NAME=" + (.database.stalwart_db // "" | @sh) + "\n" +
     "ROUNDCUBE_DB_NAME=" + (.database.roundcube_db // "" | @sh) + "\n" +
     "INFRA_DOMAIN=" + (.infra.domain // .dns.domain | @sh) + "\n" +
@@ -169,6 +170,11 @@ _mt_load_tenant_yaml() {
   [ -z "$DOCS_DB_NAME" ] || [ "$DOCS_DB_NAME" = "null" ] && missing+=("database.docs_db")
   [ -z "$NEXTCLOUD_DB_NAME" ] || [ "$NEXTCLOUD_DB_NAME" = "null" ] && missing+=("database.nextcloud_db")
   [ -z "$SYNAPSE_DB_NAME" ] || [ "$SYNAPSE_DB_NAME" = "null" ] && missing+=("database.synapse_db")
+  # Matrix Authentication Service DB (shared PG VM, like synapse_db). Required
+  # whenever Matrix is on: MAS is part of the Matrix deploy (#824).
+  if [ "$MATRIX_ENABLED" = "true" ]; then
+    [ -z "$MAS_DB_NAME" ] || [ "$MAS_DB_NAME" = "null" ] && missing+=("database.mas_db")
+  fi
 
   if [ ${#missing[@]} -gt 0 ]; then
     echo "[ERROR] Required config missing in $TENANT_CONFIG: ${missing[*]}" >&2
@@ -211,6 +217,7 @@ _mt_load_tenant_yaml() {
   export TENANT_NAME="$MT_TENANT"
   export TENANT_DB_USER="docs_${MT_TENANT}"
   export SYNAPSE_DB_USER="$SYNAPSE_DB_NAME"
+  export MAS_DB_USER="$MAS_DB_NAME"
   export STALWART_DB_USER="stalwart_${MT_TENANT}"
   export ROUNDCUBE_DB_USER="roundcube_${MT_TENANT}"
 
@@ -267,6 +274,7 @@ _mt_derive_hostnames() {
   if [ -n "$label" ] && [ "$label" != "null" ]; then
     export MATRIX_HOST="matrix.${label}.${TENANT_DOMAIN}"
     export SYNAPSE_HOST="synapse.${label}.${TENANT_DOMAIN}"
+    export MAS_HOST="mas.${label}.${TENANT_DOMAIN}"
     export SYNAPSE_ADMIN_HOST="synapse-admin.internal.${label}.${TENANT_DOMAIN}"
     export ADMIN_HOST="admin.${label}.${TENANT_DOMAIN}"
     export ACCOUNT_HOST="account.${label}.${TENANT_DOMAIN}"
@@ -287,6 +295,7 @@ _mt_derive_hostnames() {
   else
     export MATRIX_HOST="matrix.${TENANT_DOMAIN}"
     export SYNAPSE_HOST="synapse.${TENANT_DOMAIN}"
+    export MAS_HOST="mas.${TENANT_DOMAIN}"
     export SYNAPSE_ADMIN_HOST="synapse-admin.prod.${TENANT_DOMAIN}"
     export ADMIN_HOST="admin.${TENANT_DOMAIN}"
     export ACCOUNT_HOST="account.${TENANT_DOMAIN}"
@@ -504,6 +513,10 @@ _mt_load_tenant_secrets() {
     "TF_VAR_matrix_registration_shared_secret=" + (.matrix.registration_shared_secret // "" | @sh) + "\n" +
     "SYNAPSE_DB_PASSWORD=" + (.matrix.synapse_password // "" | @sh) + "\n" +
     "SYNAPSE_OIDC_CLIENT_SECRET=" + (.oidc.synapse_client_secret // "" | @sh) + "\n" +
+    "MAS_DB_PASSWORD=" + (.mas.database_password // "" | @sh) + "\n" +
+    "MAS_OIDC_CLIENT_SECRET=" + (.oidc.mas_client_secret // "" | @sh) + "\n" +
+    "MAS_ENCRYPTION_KEY=" + (.mas.encryption_key // "" | @sh) + "\n" +
+    "MAS_SYNAPSE_SHARED_SECRET=" + (.mas.synapse_shared_secret // "" | @sh) + "\n" +
     "TF_VAR_turn_shared_secret=" + (.turn.shared_secret // "" | @sh) + "\n" +
     "TF_VAR_linode_object_storage_access_key=" + (.s3_matrix.access_key // "" | @sh) + "\n" +
     "TF_VAR_linode_object_storage_secret_key=" + (.s3_matrix.secret_key // "" | @sh) + "\n" +
@@ -584,6 +597,9 @@ _mt_load_tenant_secrets() {
   export TF_VAR_docs_db_password TF_VAR_oidc_rp_client_secret_docs
   export TF_VAR_nextcloud_oidc_client_secret TF_VAR_matrix_registration_shared_secret
   export SYNAPSE_DB_PASSWORD SYNAPSE_OIDC_CLIENT_SECRET
+  # MAS secrets are optional here: deploy-mas.sh falls back to the live
+  # K8s Secret, then generates (same precedence as the portal secrets).
+  export MAS_DB_PASSWORD MAS_OIDC_CLIENT_SECRET MAS_ENCRYPTION_KEY MAS_SYNAPSE_SHARED_SECRET
   export TF_VAR_turn_shared_secret
   export TF_VAR_linode_object_storage_access_key TF_VAR_linode_object_storage_secret_key
   export S3_MATRIX_ACCESS_KEY S3_MATRIX_SECRET_KEY
@@ -646,7 +662,7 @@ _mt_export_all() {
   export S3_CLUSTER S3_BUCKET_PREFIX S3_DOCS_BUCKET S3_MATRIX_BUCKET S3_FILES_BUCKET S3_MAIL_BUCKET
   export S3_ENDPOINT S3_INTERNAL_ENDPOINT S3_ADDRESSING_STYLE S3_USE_SSL
   export S3_INTERNAL_HOST S3_INTERNAL_PORT S3_INTERNAL_SSL S3_USE_PATH_STYLE
-  export DOCS_DB_NAME NEXTCLOUD_DB_NAME SYNAPSE_DB_NAME SYNAPSE_DB_USER
+  export DOCS_DB_NAME NEXTCLOUD_DB_NAME SYNAPSE_DB_NAME SYNAPSE_DB_USER MAS_DB_NAME MAS_DB_USER
   export STALWART_DB_NAME STALWART_DB_USER ROUNDCUBE_DB_NAME ROUNDCUBE_DB_USER
   export INFRA_DOMAIN MAIL_SUBDOMAIN DNS_EXTERNAL
   export BUCKET_NAME BASE_DOMAIN COOKIE_DOMAIN KEYCLOAK_REALM
@@ -661,7 +677,7 @@ _mt_export_all() {
   export LLM_MIN_REPLICAS LLM_MAX_REPLICAS
   export LLM_MEMORY_REQUEST LLM_MEMORY_LIMIT LLM_CPU_REQUEST
   export LLM_STORAGE_SIZE
-  export MATRIX_HOST SYNAPSE_HOST SYNAPSE_ADMIN_HOST ADMIN_HOST ACCOUNT_HOST
+  export MATRIX_HOST SYNAPSE_HOST MAS_HOST SYNAPSE_ADMIN_HOST ADMIN_HOST ACCOUNT_HOST
   export KEYCLOAK_INTERNAL_URL="http://keycloak-keycloakx-http.infra-auth.svc.cluster.local"
 
   # Rate limiting: 1-minute sliding window for both envs, higher limit for dev

@@ -49,6 +49,7 @@ database:
   stalwart_db: stalwart_example
   roundcube_db: roundcube_example
   synapse_db: synapse_example
+  mas_db: mas_example  # Matrix Authentication Service (#824)
 
 # S3 bucket naming
 s3:
