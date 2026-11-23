@@ -47,10 +47,9 @@ database:
   max_connections: 5
 
 matrix:
-  # synapse_read_only: MAS never writes to Synapse. Synapse does not delegate
-  # auth to MAS yet (PR 1 of #824 deploys MAS inert); the cutover switches
-  # this to `synapse` together with Synapse's matrix_authentication_service.
-  kind: synapse_read_only
+  # Synapse delegates auth to MAS (matrix_authentication_service in the
+  # Synapse values); MAS provisions users and devices on Synapse.
+  kind: synapse
   homeserver: "${MATRIX_HOST}"
   endpoint: "http://matrix-synapse.${NS_MATRIX}.svc.cluster.local:8008"
   secret_file: /config/synapse-shared-secret
@@ -67,6 +66,13 @@ secrets:
 # Keycloak is the only way in: no local passwords, no self-registration.
 passwords:
   enabled: false
+  # Unused while passwords are disabled, but `mas-cli syn2mas` refuses to run
+  # unless scheme version 1 is bcrypt (the Synapse hash format; Synapse has no
+  # password pepper here). MAS's own default would be argon2id.
+  schemes:
+    - version: 1
+      algorithm: bcrypt
+      unicode_normalization: true
 
 account:
   # Email and account lifecycle are owned by Keycloak and the admin portal.

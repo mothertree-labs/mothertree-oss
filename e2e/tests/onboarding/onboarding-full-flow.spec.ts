@@ -2,7 +2,7 @@ import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { selectors } from '../../helpers/selectors';
 import { TEST_USERS } from '../../helpers/test-users';
-import { keycloakLogin } from '../../helpers/auth';
+import { keycloakLogin, completeMatrixSignIn } from '../../helpers/auth';
 import { e2ePrefix } from '../../helpers/e2e-prefix';
 import { isImapConfigured, waitForEmailBody, countInboxBySubject, appendCalendarEmail } from '../../helpers/imap';
 import { handleNextcloudLogin, waitForNextcloudReady } from '../../helpers/nextcloud';
@@ -558,9 +558,11 @@ test.describe('Onboarding — Full User Flow', () => {
 
         try {
           await userPage.goto(urls.element);
-          await userPage.waitForLoadState('networkidle');
 
-          // Element should auto-login via SSO (Keycloak session from registration)
+          // Element should sign in through MAS on the Keycloak session from
+          // registration (no credentials: a Keycloak form here is a failure),
+          // passing MAS's consent page on the way back.
+          await completeMatrixSignIn(userPage);
           const notStuckOnAuth = !new URL(userPage.url()).hostname.startsWith('auth.');
 
           if (notStuckOnAuth) {

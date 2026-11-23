@@ -47,34 +47,17 @@ extraConfig:
   # SMTP password lives in a K8s Secret (not a ConfigMap). The chart
   # concatenates extraSecrets into /synapse/config/conf.d/secrets.yaml at
   # pod start, which Synapse loads alongside homeserver.yaml.
-  # Disable password login - all auth goes through Keycloak OIDC
+  # Authentication is delegated to the Matrix Authentication Service (MAS,
+  # #824): MAS signs users in through Keycloak and Synapse validates MAS
+  # tokens. Under delegation Synapse refuses to start with password login,
+  # registration or any SSO provider (oidc_providers) configured. The
+  # matrix_authentication_service block itself is in extraSecrets below
+  # (it carries the MAS shared secret).
   password_config:
     enabled: false
-  # OIDC provider configuration for Keycloak (prod environment)
-  # Uses explicit endpoints instead of discover: true to avoid PROXY protocol issues.
-  # Browser-facing endpoint (authorization) uses the external URL; server-to-server
-  # endpoints (token, userinfo, jwks) use the internal K8s service URL (HTTP).
-  # skip_verification bypasses RFC 8414 HTTPS requirement for internal endpoints.
-  oidc_providers:
-    - idp_id: keycloak
-      idp_name: "Sign in with MotherTree"
-      discover: false
-      skip_verification: true
-      issuer: 'https://{{ env "AUTH_HOST" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}'
-      authorization_endpoint: 'https://{{ env "AUTH_HOST" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/auth'
-      token_endpoint: '{{ env "KEYCLOAK_INTERNAL_URL" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/token'
-      userinfo_endpoint: '{{ env "KEYCLOAK_INTERNAL_URL" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/userinfo'
-      jwks_uri: '{{ env "KEYCLOAK_INTERNAL_URL" }}/realms/{{ env "TENANT_KEYCLOAK_REALM" }}/protocol/openid-connect/certs'
-      client_id: "matrix-synapse"
-      client_secret: {{ env "SYNAPSE_OIDC_CLIENT_SECRET" | quote }}
-      scopes: ["openid", "profile", "email"]
-      user_mapping_provider:
-        config:
-          # Use email directly for stable user identification across deployments
-          # Note: These are Synapse Jinja2 templates, not Go templates
-          localpart_template: "{{ "{{" }} user.email {{ "}}" }}"
-          display_name_template: "{{ "{{" }} user.name {{ "}}" }}"
-          email_template: "{{ "{{" }} user.email {{ "}}" }}"
+  experimental_features:
+    # Sign in with QR code (MSC4108); requires MAS delegation.
+    msc4108_enabled: true
   rc_message:
     per_second: 2
     burst_count: 50
@@ -113,6 +96,11 @@ synapse:
 # deploy-matrix.sh before calling helmfile (the Secret is provisioned by
 # scripts/provision-smtp-service-accounts before Matrix deploys in create_env).
 extraSecrets:
+  matrix_authentication_service:
+    enabled: true
+    endpoint: 'http://mas.{{ requiredEnv "NS_MATRIX" }}.svc.cluster.local:8080/'
+    # Set by deploy-matrix.sh from the mas-config Secret (written by deploy-mas.sh).
+    secret: {{ requiredEnv "MAS_SYNAPSE_SHARED_SECRET" | quote }}
   email:
     smtp_host: '{{ env "SMTP_RELAY_HOST" }}'
     smtp_port: {{ env "SMTP_RELAY_PORT" | default 588 }}

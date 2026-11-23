@@ -6,16 +6,17 @@
 # and QR-code login needs it). Keycloak stays the identity provider: MAS uses
 # the tenant realm as its only upstream and has local passwords disabled.
 #
-# This script deploys MAS INERT (issue #824, PR 1): `matrix.kind:
-# synapse_read_only` and Synapse does not delegate auth to it yet. The cutover
-# (Synapse `matrix_authentication_service`, compat-path routing, syn2mas)
-# is a separate change.
+# Synapse delegates authentication to MAS (#824): deploy-matrix.sh runs this
+# BEFORE syncing the Synapse chart, which reads the shared secret from the
+# mas-config Secret written here.
 #
 # Steps:
 #   1. Resolve MAS secrets (tenant secrets YAML → live K8s Secret → generate)
-#   2. Create the MAS database + role on the shared PostgreSQL VM (via PgBouncer)
-#   3. Create/update the `matrix-mas` confidential client in the tenant realm
-#   4. Apply the `mas-config` Secret, Service, Deployment and Ingress
+#   2. Apply the `mas-config` Secret (config.yaml + secret files)
+#   3. Create the MAS database + role on the shared PostgreSQL VM (via PgBouncer)
+#   4. Create/update the `matrix-mas` confidential client in the tenant realm
+#   5. One-time Synapse → MAS migration (syn2mas) when Synapse has users
+#   6. Apply the Service, Deployment, MAS Ingress and the compat-layer Ingress
 #
 # Called from apps/deploy-matrix.sh; also runnable on its own:
 #   ./apps/deploy-mas.sh -e dev -t example
@@ -63,6 +64,8 @@ fi
 : "${PG_HOST:?PG_HOST not set — run deploy_infra first}"
 : "${MAS_DB_NAME:?MAS_DB_NAME not set (database.mas_db in tenant config)}"
 : "${MAS_DB_USER:?MAS_DB_USER not set}"
+: "${SYNAPSE_DB_NAME:?SYNAPSE_DB_NAME not set (database.synapse_db in tenant config)}"
+: "${SYNAPSE_DB_USER:?SYNAPSE_DB_USER not set}"
 
 # Upstream provider ID (a ULID). It is part of the Keycloak redirect URI
 # (/upstream/callback/<id>) and the key MAS stores user links under, so it is
@@ -169,7 +172,7 @@ kubectl create secret generic postgres-credentials \
 if kubectl get job mas-db-init -n "$NS_MATRIX" >/dev/null 2>&1; then
     kubectl delete job mas-db-init -n "$NS_MATRIX" --wait=true --timeout=60s >/dev/null
 fi
-envsubst '${NS_MATRIX} ${MAS_DB_NAME} ${MAS_DB_USER} ${PG_HOST}' \
+envsubst '${NS_MATRIX} ${MAS_DB_NAME} ${MAS_DB_USER} ${PG_HOST} ${SYNAPSE_DB_NAME}' \
     < "$REPO_ROOT/apps/manifests/mas/db-init-job.yaml.tpl" | kubectl create -f -
 
 # Wait for either outcome; a timeout is a failure too (never start MAS on a
@@ -190,7 +193,15 @@ if [ "$db_init_ok" != "true" ]; then
     kubectl logs -n "$NS_MATRIX" job/mas-db-init --tail=50 || true
     exit 1
 fi
-print_success "MAS database ready"
+probe=$(kubectl logs -n "$NS_MATRIX" job/mas-db-init 2>/dev/null | grep -E '^MAS_PROBE ' | tail -1 || true)
+if ! [[ "$probe" =~ ^MAS_PROBE\ synapse_users=([0-9]+)\ mas_rows=([0-9]+)$ ]]; then
+    print_error "MAS db-init did not report the migration probe (got: '${probe}')"
+    kubectl logs -n "$NS_MATRIX" job/mas-db-init --tail=30 || true
+    exit 1
+fi
+MAS_PROBE_SYNAPSE_USERS="${BASH_REMATCH[1]}"
+MAS_PROBE_MAS_ROWS="${BASH_REMATCH[2]}"
+print_success "MAS database ready (Synapse users: $MAS_PROBE_SYNAPSE_USERS, MAS user/session rows: $MAS_PROBE_MAS_ROWS)"
 
 # =============================================================================
 # 4. Keycloak client `matrix-mas`
@@ -212,7 +223,8 @@ PF_PID=$!
 KC_RESP=$(mktemp)
 # mt_deploy_start owns the EXIT trap (deploy notification); a second trap
 # would replace it, so chain: clean up, restore the exit code, then notify.
-trap '_mas_rc=$?; kill $PF_PID 2>/dev/null || true; rm -f "$PF_LOG" "$KC_RESP"; (exit $_mas_rc); _mt_deploy_exit_handler' EXIT
+# The temporary syn2mas Secret (Synapse DB password) is removed on every exit.
+trap '_mas_rc=$?; kill $PF_PID 2>/dev/null || true; rm -f "$PF_LOG" "$KC_RESP"; [ -n "${SYN2MAS_SECRET_CREATED:-}" ] && kubectl delete secret mas-syn2mas-synapse -n "$NS_MATRIX" --ignore-not-found >/dev/null 2>&1; (exit $_mas_rc); _mt_deploy_exit_handler' EXIT
 KEYCLOAK_URL="http://localhost:${LOCAL_PORT}"
 for _ in $(seq 1 30); do
     curl -s -o /dev/null "$KEYCLOAK_URL/realms/master" && break
@@ -280,10 +292,148 @@ kill $PF_PID 2>/dev/null || true
 print_success "Keycloak client $MAS_KC_CLIENT_ID configured (redirect https://${MAS_HOST}/upstream/callback/${MAS_UPSTREAM_PROVIDER_ID})"
 
 # =============================================================================
-# 5. Service, Deployment, Ingress
+# 5. One-time Synapse → MAS migration (syn2mas)
 # =============================================================================
-print_status "Applying MAS Service, Deployment and Ingress..."
-mt_apply kubectl apply -f <(envsubst '${NS_MATRIX} ${TENANT_NAME} ${MAS_HOST}' < "$REPO_ROOT/apps/manifests/mas/mas.yaml.tpl")
+# Synapse delegates auth to MAS from this deploy on, so existing Synapse users,
+# devices, access tokens and Keycloak links must be in MAS before Synapse
+# restarts delegated. A `mas-migration` ConfigMap records that this happened.
+#
+#   marker present                           → nothing to do
+#   Synapse has no users (new tenant)        → nothing to migrate; set marker
+#   Synapse has users, MAS DB empty          → migrate (below); set marker
+#   Synapse has users, MAS DB not empty      → refuse: MAS was used before the
+#                                              migration; recreate its DB
+#
+# Prod needs MAS_MIGRATE_CONFIRM=yes (it means a short Matrix outage and should
+# follow a fresh Synapse DB backup — see the #824 runbook).
+
+_run_syn2mas() {
+    # _run_syn2mas <job-name> <allowed exit codes, space separated> <args...>
+    local job="$1" allowed="$2" rc="" args=""
+    shift 2
+    local a
+    for a in "$@"; do args+="${args:+, }\"$a\""; done
+    kubectl delete job "$job" -n "$NS_MATRIX" --ignore-not-found --wait=true >/dev/null
+    SYN2MAS_JOB_NAME="$job" SYN2MAS_ARGS="$args" \
+        envsubst '${NS_MATRIX} ${SYN2MAS_JOB_NAME} ${SYN2MAS_ARGS}' \
+        < "$REPO_ROOT/apps/manifests/mas/syn2mas-job.yaml.tpl" | kubectl create -f - >/dev/null
+    print_status "syn2mas $*: running (job $job)..."
+    for _ in $(seq 1 300); do
+        rc=$(kubectl get pods -n "$NS_MATRIX" -l "job-name=$job" \
+            -o jsonpath='{.items[0].status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null || true)
+        [ -n "$rc" ] && break
+        sleep 2
+    done
+    kubectl logs -n "$NS_MATRIX" "job/$job" --tail=200 2>&1 | sed 's/^/  [syn2mas] /' || true
+    if [ -z "$rc" ]; then
+        print_error "syn2mas $* did not finish within 10 minutes"
+        exit 1
+    fi
+    if [[ " $allowed " != *" $rc "* ]]; then
+        print_error "syn2mas $* failed (exit $rc)"
+        exit 1
+    fi
+    print_success "syn2mas $*: ok (exit $rc)"
+}
+
+_mas_mark_migrated() {
+    kubectl create configmap mas-migration -n "$NS_MATRIX" \
+        --from-literal=status=done \
+        --from-literal=reason="$1" \
+        --from-literal=at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+}
+
+if [ "$(kubectl get configmap mas-migration -n "$NS_MATRIX" -o jsonpath='{.data.status}' 2>/dev/null || true)" = "done" ]; then
+    print_status "Synapse → MAS migration already done (configmap mas-migration)"
+else
+    # Counts come from the db-init Job above (Job logs are reliable; an empty
+    # answer from `kubectl run --rm -i` is not a zero).
+    SYNAPSE_USERS="${MAS_PROBE_SYNAPSE_USERS:?db-init probe missing}"
+    if [ "$SYNAPSE_USERS" = "0" ]; then
+        print_status "Synapse has no users yet — nothing to migrate to MAS"
+        _mas_mark_migrated "no synapse users"
+    else
+        MAS_ROWS="${MAS_PROBE_MAS_ROWS:?db-init probe missing}"
+        if [ "$MAS_ROWS" != "0" ]; then
+            print_error "Synapse has $SYNAPSE_USERS users to migrate, but the MAS database $MAS_DB_NAME is not empty ($MAS_ROWS user/session rows)."
+            print_error "MAS was used before the migration. Drop and recreate $MAS_DB_NAME, then deploy again (#824 runbook)."
+            exit 1
+        fi
+        if [ "$MT_ENV" = "prod" ] && [ "${MAS_MIGRATE_CONFIRM:-}" != "yes" ]; then
+            print_error "Synapse → MAS migration needed on prod ($SYNAPSE_USERS Synapse users). It stops Matrix for a few minutes."
+            print_error "Back up $SYNAPSE_DB_NAME, then re-run with MAS_MIGRATE_CONFIRM=yes (#824 runbook)."
+            exit 1
+        fi
+        : "${SYNAPSE_DB_PASSWORD:?SYNAPSE_DB_PASSWORD not set (matrix.synapse_password in tenant secrets)}"
+        export SYNAPSE_DB_NAME SYNAPSE_DB_USER SYNAPSE_DB_PASSWORD
+        print_status "Migrating $SYNAPSE_USERS Synapse users to MAS (syn2mas)..."
+        if [ -n "$(kubectl get pods -n "$NS_MATRIX" -l app.kubernetes.io/component=syn2mas \
+                --field-selector=status.phase=Running -o name 2>/dev/null)" ]; then
+            print_error "A syn2mas Job from an earlier run is still running in $NS_MATRIX; wait for it (kubectl get jobs -n $NS_MATRIX)"
+            exit 1
+        fi
+        # Values go in through yq strenv(), so no password character can break the YAML.
+        SYN2MAS_SECRET_CREATED=1
+        kubectl create secret generic mas-syn2mas-synapse -n "$NS_MATRIX" \
+            --from-file=homeserver.yaml=<(yq '
+                .server_name = strenv(MATRIX_HOST) |
+                .database.args.user = strenv(SYNAPSE_DB_USER) |
+                .database.args.password = strenv(SYNAPSE_DB_PASSWORD) |
+                .database.args.dbname = strenv(SYNAPSE_DB_NAME) |
+                .database.args.host = strenv(PG_HOST) |
+                .oidc_providers[0].issuer = "https://" + strenv(AUTH_HOST) + "/realms/" + strenv(TENANT_KEYCLOAK_REALM)
+              ' "$REPO_ROOT/apps/manifests/mas/syn2mas-synapse.yaml.tpl") \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+        # MAS must not run during the dry run or the migration.
+        if kubectl get deployment mas -n "$NS_MATRIX" >/dev/null 2>&1; then
+            kubectl scale deployment mas -n "$NS_MATRIX" --replicas=0 >/dev/null
+            kubectl wait pod -n "$NS_MATRIX" -l app.kubernetes.io/name=mas,app.kubernetes.io/component=server \
+                --for=delete --timeout=120s >/dev/null 2>&1 || true
+        fi
+
+        # Exit 11 = warnings only (e.g. non-email threepids). Synapse keeps running.
+        _run_syn2mas mas-syn2mas-check "0 11" check
+        _run_syn2mas mas-syn2mas-dry-run "0" migrate --dry-run
+
+        # The real run locks Synapse's tables: Synapse must be stopped. It comes
+        # back delegated when deploy-matrix.sh syncs the chart right after this.
+        # If anything below fails, Synapse is scaled back up on its current,
+        # NOT yet delegated config (the chart sync has not run), so Matrix
+        # keeps working with the old Keycloak SSO.
+        SYNAPSE_REPLICAS=$(kubectl get deployment matrix-synapse -n "$NS_MATRIX" -o jsonpath='{.spec.replicas}')
+        _restore_synapse() {
+            print_warning "Scaling Synapse back to ${SYNAPSE_REPLICAS} replica(s) on its previous (non-delegated) config"
+            kubectl scale deployment matrix-synapse -n "$NS_MATRIX" --replicas="${SYNAPSE_REPLICAS:-1}" >/dev/null || true
+        }
+        print_status "Stopping Synapse for the migration..."
+        kubectl scale deployment matrix-synapse -n "$NS_MATRIX" --replicas=0 >/dev/null
+        if ! kubectl wait pod -n "$NS_MATRIX" \
+                -l app.kubernetes.io/name=matrix-synapse,app.kubernetes.io/component=synapse \
+                --for=delete --timeout=180s >/dev/null 2>&1; then
+            print_error "Synapse pods did not stop; not migrating"
+            _restore_synapse
+            exit 1
+        fi
+        # Subshell: _run_syn2mas exits on failure, and Synapse must come back.
+        if ! ( _run_syn2mas mas-syn2mas-migrate "0" migrate ); then
+            _restore_synapse
+            print_error "syn2mas migrate failed. Synapse is back on its old config (Keycloak SSO), MAS holds partial data."
+            print_error "To retry: drop and recreate the $MAS_DB_NAME database (nothing else is lost), then deploy again."
+            exit 1
+        fi
+
+        _mas_mark_migrated "syn2mas: ${SYNAPSE_USERS} users"
+        print_success "Synapse → MAS migration complete; Synapse stays stopped until the chart sync"
+    fi
+fi
+
+# =============================================================================
+# 6. Service, Deployment, Ingresses (MAS host + compat routes on the homeserver)
+# =============================================================================
+print_status "Applying MAS Service, Deployment and Ingresses..."
+mt_apply kubectl apply -f <(envsubst '${NS_MATRIX} ${TENANT_NAME} ${MAS_HOST} ${MATRIX_HOST}' < "$REPO_ROOT/apps/manifests/mas/mas.yaml.tpl")
 mt_restart_if_changed deployment/mas -n "$NS_MATRIX"
 
 if ! kubectl -n "$NS_MATRIX" rollout status deployment/mas --timeout=300s; then
@@ -293,4 +443,4 @@ if ! kubectl -n "$NS_MATRIX" rollout status deployment/mas --timeout=300s; then
     exit 1
 fi
 
-print_success "Matrix Authentication Service deployed: https://$MAS_HOST (inert until the Synapse cutover, #824)"
+print_success "Matrix Authentication Service deployed: https://$MAS_HOST"

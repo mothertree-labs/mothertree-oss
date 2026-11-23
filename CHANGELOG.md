@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Matrix sign-in goes through the Matrix Authentication Service** (#824,
+  step 2 of 3), so Element X can sign in and QR-code login works. Synapse
+  now delegates authentication to MAS (`matrix_authentication_service`; its
+  Keycloak `oidc_providers` are gone) and advertises MSC4108. MAS serves the
+  legacy `/login`, `/logout` and `/refresh` endpoints on the homeserver host.
+  On the first deploy `deploy-mas.sh` migrates existing users, devices,
+  access tokens and Keycloak links with `mas-cli syn2mas` (check, dry run,
+  then the real run with Synapse stopped), recorded in a `mas-migration`
+  ConfigMap. Prod refuses to migrate without `MAS_MIGRATE_CONFIRM=yes`.
+  Users see a MAS "Continue" consent page when Element signs in.
+- **The admin portal no longer pre-creates Matrix accounts**: MAS creates
+  the account on the user's first sign-in. Pre-creation made `@<prefix>`
+  accounts that never matched the `@<email>=40...` ID real sign-ins get.
+- `apps/scripts/create-alertbot-user.sh` uses `mas-cli`. Synapse-era bot
+  tokens were puppet tokens, which syn2mas does not migrate, so bots need a
+  new token after the cutover.
+
+### Fixed
+- `mt_apply` works under macOS's bash 3.2 (empty-array expansion under
+  `set -u`), so deploy scripts that call other deploy scripts run locally.
+
 ### Added
 - **Matrix Authentication Service (MAS), deployed inert** (#824, step 1 of 3).
   Element X can only sign in with a password or native OAuth 2.0, and Synapse

@@ -7,6 +7,7 @@
 #   MAS_DB_NAME - Database name (e.g., mas_example)
 #   MAS_DB_USER - Database role (e.g., mas_example)
 #   PG_HOST     - PostgreSQL host (e.g., pgbouncer.infra-db.svc.cluster.local)
+#   SYNAPSE_DB_NAME - Synapse database (read-only probe for the syn2mas decision)
 
 apiVersion: batch/v1
 kind: Job
@@ -61,6 +62,8 @@ spec:
               value: "${MAS_DB_NAME}"
             - name: DB_USER
               value: "${MAS_DB_USER}"
+            - name: SYNAPSE_DB_NAME
+              value: "${SYNAPSE_DB_NAME}"
           command:
             - /bin/bash
             - -lc
@@ -99,3 +102,34 @@ spec:
               psql -v ON_ERROR_STOP=1 -d "$DB_NAME" -c "ALTER SCHEMA public OWNER TO \"$DB_USER\""
 
               echo "=== MAS database initialization complete ==="
+
+              # Migration probe for apps/deploy-mas.sh (Synapse → MAS, #824):
+              # Synapse user count, and MAS rows that syn2mas requires empty.
+              # Every query is checked explicitly: `set -e` does not reach into
+              # $(...), and a failed query must never read as "0 users" (that
+              # would mark the tenant migrated with nobody in MAS).
+              count_rows() {
+                local db="$1" t="$2" e n
+                e=$(psql -v ON_ERROR_STOP=1 -d "$db" -Atc "SELECT to_regclass('public.$t') IS NOT NULL") || return 1
+                case "$e" in
+                  t) n=$(psql -v ON_ERROR_STOP=1 -d "$db" -Atc "SELECT count(*) FROM public.$t") || return 1 ;;
+                  f) n=0 ;;
+                  *) return 1 ;;
+                esac
+                case "$n" in ''|*[!0-9]*) return 1 ;; esac
+                echo "$n"
+              }
+              SYN_EXISTS=$(psql -v ON_ERROR_STOP=1 -Atc "SELECT count(*) FROM pg_database WHERE datname='$SYNAPSE_DB_NAME'") || exit 1
+              SYNAPSE_USERS=0
+              case "$SYN_EXISTS" in
+                1) SYNAPSE_USERS=$(count_rows "$SYNAPSE_DB_NAME" users) || { echo "probe failed: $SYNAPSE_DB_NAME.users"; exit 1; } ;;
+                0) ;;
+                *) echo "probe failed: pg_database lookup returned '$SYN_EXISTS'"; exit 1 ;;
+              esac
+              MAS_ROWS=0
+              for t in users user_passwords user_emails user_unsupported_third_party_ids \
+                       upstream_oauth_links compat_sessions compat_access_tokens compat_refresh_tokens; do
+                n=$(count_rows "$DB_NAME" "$t") || { echo "probe failed: $DB_NAME.$t"; exit 1; }
+                MAS_ROWS=$((MAS_ROWS + n))
+              done
+              echo "MAS_PROBE synapse_users=${SYNAPSE_USERS} mas_rows=${MAS_ROWS}"
