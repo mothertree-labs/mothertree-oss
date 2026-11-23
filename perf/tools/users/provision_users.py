@@ -7,7 +7,6 @@ import json
 import urllib.request
 import urllib.parse
 import urllib.error
-import subprocess
 from typing import Optional, Tuple
 
 
@@ -107,29 +106,8 @@ def kc_set_password(base_url: str, realm: str, token: str, user_id: str, passwor
     return status in (204, 200)
 
 
-def create_matrix_user(repo_root: str, env_name: str, username: str, password: str) -> bool:
-    script = os.path.join(repo_root, "create-matrix-user.sh")
-    if not os.path.isfile(script):
-        eprint("create-matrix-user.sh not found")
-        return False
-    cmd = [script, "--env", env_name, "-p", password, username]
-    try:
-        # Ensure absolute kubeconfig path is available to the child process
-        kubeconfig_path = os.path.join(repo_root, f"kubeconfig.{env_name}.yaml")
-        child_env = os.environ.copy()
-        child_env["KUBECONFIG"] = kubeconfig_path
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=child_env)
-        if res.returncode != 0:
-            eprint(f"Matrix user creation failed for {username}: {res.stderr.strip()}")
-            return False
-        return True
-    except Exception as e:
-        eprint(f"Failed to run matrix create script: {e}")
-        return False
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Provision users in Keycloak and Matrix (Synapse) from CSV")
+    parser = argparse.ArgumentParser(description="Provision perf-test users in Keycloak from CSV")
     parser.add_argument("--env", default="dev", choices=["dev", "prod"], help="Target environment (refuses prod)")
     parser.add_argument("--csv", required=True, help="Path to CSV file (username,password)")
     parser.add_argument("--kc-base-url", required=True, help="Keycloak base URL, e.g., https://auth.example.org")
@@ -141,9 +119,6 @@ def main():
     args = parser.parse_args()
 
     require_env_not_prod(args.env)
-
-    # Resolve repo root (two levels up from this script)
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
     token = get_kc_admin_token(
         args.kc_base_url,
@@ -159,7 +134,6 @@ def main():
 
     created_kc = 0
     updated_pw = 0
-    created_mx = 0
     failures = 0
 
     with open(args.csv, newline="", encoding="utf-8") as f:
@@ -187,16 +161,9 @@ def main():
                 continue
             updated_pw += 1
 
-            if create_matrix_user(repo_root, args.env, username, password):
-                created_mx += 1
-                eprint(f"Created Matrix user {username}")
-            else:
-                failures += 1
-
     print("Provisioning summary:")
     print(f"- Keycloak users created: {created_kc}")
     print(f"- Keycloak passwords set: {updated_pw}")
-    print(f"- Matrix users created:   {created_mx}")
     print(f"- Failures:               {failures}")
 
     sys.exit(0 if failures == 0 else 5)

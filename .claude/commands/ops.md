@@ -556,13 +556,13 @@ Assets from `apps/assets/nextcloud/` (logo, header, favicon SVGs).
 - `store_local: true` + `store_remote: true` + `store_synchronous: true`
 - Bucket: `<env>-<tenant>-matrix`
 
-### OIDC Authentication
+### Authentication (MAS, #824)
 
-- Client: `matrix-synapse` in Keycloak
-- OIDC provider ID: `keycloak`
-- Display: "Sign in with MotherTree"
-- User mapping: email → localpart, name → display_name
-- **Password login disabled**: `password_config.enabled: false`
+- Synapse delegates sign-in to the Matrix Authentication Service (`deploy/mas`, `mas.<domain>`, config `apps/manifests/mas/config.yaml.tpl`)
+- MAS signs in through Keycloak client `matrix-mas`; upstream provider ULID is fixed in `apps/deploy-mas.sh`
+- New users: MAS creates the Matrix account at first sign-in (localpart = email with `@` → `=40`)
+- Bot tokens: `mas-cli manage issue-compatibility-token <user> <device>` (alertbot: `apps/scripts/create-alertbot-user.sh`)
+- **Password login disabled**; legacy `/login`, `/logout` and `/refresh` are served by MAS
 
 ### Federation
 
@@ -636,7 +636,7 @@ Per-tenant realm (deployed via `docs/import-keycloak-realm.sh`):
 | Client | App | Auth Type | Service Account |
 |--------|-----|-----------|-----------------|
 | `docs-app` | LaSuite Docs | Standard flow | No |
-| `matrix-synapse` | Synapse | Standard flow | No |
+| `matrix-mas` | Matrix Authentication Service | Standard flow + PKCE | No |
 | `stalwart` | Mail server | Standard + Direct access | No |
 | `roundcube` | Webmail | Standard + Direct access | No |
 | `admin-portal` | Admin dashboard | Standard flow | Yes |

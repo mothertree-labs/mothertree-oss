@@ -5,7 +5,7 @@ set -euo pipefail
 if [ $# -lt 3 ]; then
   echo "Usage: $0 <env> <suite> <scenario> [OPTIONS]" >&2
   echo "  env: dev or prod" >&2
-  echo "  suite: matrix or docs" >&2
+  echo "  suite: docs" >&2
   echo "  scenario: load or smoke" >&2
   echo "" >&2
   echo "Options:" >&2
@@ -74,8 +74,10 @@ if [[ "$MT_ENV" == "prod" && "$ASSUME_YES" != "true" ]]; then
 fi
 
 # Validate suite and scenario
-if [[ "$SUITE" != "matrix" && "$SUITE" != "docs" ]]; then
-  echo "[ERROR] Suite must be 'matrix' or 'docs'" >&2
+# The Matrix suite logged in with m.login.password, which Synapse has not
+# offered since it moved to SSO (and now MAS, #824); it was removed.
+if [[ "$SUITE" != "docs" ]]; then
+  echo "[ERROR] Suite must be 'docs'" >&2
   exit 1
 fi
 

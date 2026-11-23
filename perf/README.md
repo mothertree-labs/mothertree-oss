@@ -20,7 +20,6 @@ KUBECONFIG=./kubeconfig.dev.yaml kubectl -n perf create secret generic perf-user
   --from-file=users.csv=perf/users/users.csv \
   --dry-run=client -o yaml | kubectl apply -f -
 
-KUBECONFIG=./kubeconfig.dev.yaml kubectl -n perf apply -f apps/manifests/perf/prod/k6-matrix-load.yaml
 KUBECONFIG=./kubeconfig.dev.yaml kubectl -n perf apply -f apps/manifests/perf/prod/k6-docs-smoke.yaml
 ```
 
@@ -35,13 +34,11 @@ kubectl -n perf create secret generic perf-users \
 
 Run
 ```
-kubectl -n perf apply -f apps/manifests/perf/prod/k6-matrix-load.yaml
 kubectl -n perf apply -f apps/manifests/perf/prod/k6-docs-smoke.yaml
 ```
 
 logs:
 ```
-kubectl -n perf logs job/k6-matrix-load -f
 kubectl -n perf logs job/k6-docs-smoke -f
 ```
 
@@ -55,5 +52,5 @@ KUBECONFIG=./kubeconfig.dev.yaml kubectl -n perf delete job --all
 
 to run, use script
 ```
-./scripts/run_perf dev matrix load   
+./scripts/run_perf dev docs load   
 ```
