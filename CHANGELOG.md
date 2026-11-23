@@ -7,6 +7,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Matrix Authentication Service (MAS), deployed inert** (#824, step 1 of 3).
+  Element X can only sign in with a password or native OAuth 2.0, and Synapse
+  offers neither (only the legacy Keycloak SSO redirect), so Element X login
+  and QR-code login fail. `apps/deploy-mas.sh` (run by `deploy-matrix.sh`)
+  now deploys MAS per tenant at `mas.<domain>`: its own `mas_<tenant>`
+  database on the shared PostgreSQL VM via PgBouncer (new required tenant key
+  `database.mas_db`), a `matrix-mas` Keycloak client as its only upstream (no
+  local passwords), and a `mas-config` Secret whose generated secrets persist
+  across deploys (or pin them under `mas:` in tenant secrets). MAS runs with
+  `matrix.kind: synapse_read_only` and Synapse does not delegate to it yet, so
+  nothing changes for users until the cutover.
 - `manage_infra --ansible --limit=<vm>[,<vm>]` (`headscale`, `postgres`, `turn`)
   configures only the named VMs. It fails if a named VM has no IP in the
   terraform outputs (an empty inventory would "succeed" without doing anything)

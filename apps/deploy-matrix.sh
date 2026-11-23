@@ -177,6 +177,17 @@ source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
 mt_export_smtp_relay_env "$NS_MATRIX"
 
 # =============================================================================
+# Matrix Authentication Service (MAS)
+# =============================================================================
+# Deployed before Synapse: once Synapse delegates auth to MAS (#824 cutover),
+# Synapse must not start without it. Until then MAS runs inert.
+print_status "Deploying Matrix Authentication Service..."
+if ! "$REPO_ROOT/apps/deploy-mas.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
+  print_error "deploy-mas.sh failed"
+  exit 1
+fi
+
+# =============================================================================
 # Deploy Synapse and Element via helmfile
 # =============================================================================
 print_status "Apps: helmfile sync (Synapse, Element)"

@@ -280,6 +280,7 @@ elif [ "${DNS_EXTERNAL:-false}" = "true" ]; then
   # Candidate SANs: the enabled, publicly served service hosts.
   CERT_CANDIDATE_HOSTS=""
   [ "$MATRIX_ENABLED" = "true" ]         && CERT_CANDIDATE_HOSTS+=" ${MATRIX_HOST}"
+  [ "$MATRIX_ENABLED" = "true" ]         && CERT_CANDIDATE_HOSTS+=" ${MAS_HOST}"
   CERT_CANDIDATE_HOSTS+=" ${AUTH_HOST}"
   [ "$JITSI_ENABLED" = "true" ]          && CERT_CANDIDATE_HOSTS+=" ${JITSI_HOST}"
   [ "$DOCS_ENABLED" = "true" ]           && CERT_CANDIDATE_HOSTS+=" ${DOCS_HOST}"
@@ -518,7 +519,8 @@ else
 
   # Create CNAME records for all tenant subdomains pointing to the tenant LB record
   # Note: 'mail' is excluded — its A record is created above alongside the MX record
-  PROXIED_SUBDOMAINS="matrix synapse element docs files auth home admin account webmail calendar jitsi office"
+  # mas = Matrix Authentication Service (native OAuth login for Matrix clients, #824)
+  PROXIED_SUBDOMAINS="matrix mas synapse element docs files auth home admin account webmail calendar jitsi office"
   # Only advertise the LLM (Open WebUI) subdomain when the feature is enabled for this
   # tenant. Otherwise the CNAME dangles to an origin with no ingress route, and
   # Cloudflare returns 526 (invalid origin cert) to anyone who visits it.
