@@ -6,6 +6,7 @@
 #   NS_MATRIX     - Tenant matrix namespace (e.g., tn-example-matrix)
 #   TENANT_NAME   - Tenant name (wildcard TLS secret name)
 #   MAS_HOST      - Public MAS hostname (e.g., mas.example.com)
+#   MATRIX_HOST   - Homeserver host (compat-layer routes, e.g., matrix.example.com)
 apiVersion: v1
 kind: Service
 metadata:
@@ -138,3 +139,40 @@ spec:
                 name: mas
                 port:
                   name: web
+---
+# Matrix C-S API compatibility layer: legacy login/logout/refresh on the
+# homeserver host are served by MAS (Synapse no longer registers them under
+# delegation). Prefix paths cover the sub-paths too (logout/all,
+# login/sso/redirect[/<idp>]). Literal Prefix paths on purpose: a use-regex
+# annotation would switch every path on this host — Element's included — to
+# regex matching.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mas-compat
+  namespace: ${NS_MATRIX}
+  labels:
+    app.kubernetes.io/name: mas
+    tenant: ${TENANT_NAME}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+    # Same as the Synapse ingress on this host: these responses carry tokens.
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header Cache-Control "no-store" always;
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - ${MATRIX_HOST}
+      secretName: wildcard-tls-${TENANT_NAME}
+  rules:
+    - host: ${MATRIX_HOST}
+      http:
+        paths:
+          - { path: /_matrix/client/v3/login, pathType: Prefix, backend: { service: { name: mas, port: { name: web } } } }
+          - { path: /_matrix/client/v3/logout, pathType: Prefix, backend: { service: { name: mas, port: { name: web } } } }
+          - { path: /_matrix/client/v3/refresh, pathType: Prefix, backend: { service: { name: mas, port: { name: web } } } }
+          - { path: /_matrix/client/r0/login, pathType: Prefix, backend: { service: { name: mas, port: { name: web } } } }
+          - { path: /_matrix/client/r0/logout, pathType: Prefix, backend: { service: { name: mas, port: { name: web } } } }
+          - { path: /_matrix/client/r0/refresh, pathType: Prefix, backend: { service: { name: mas, port: { name: web } } } }

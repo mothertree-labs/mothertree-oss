@@ -10,4 +10,3 @@ stringData:
   stalwart-admin-password: "${STALWART_ADMIN_PASSWORD}"
   REDIS_PASSWORD: "${REDIS_SESSION_PASSWORD}"
   beginsetup-secret: "${BEGINSETUP_SECRET}"
-  synapse-shared-secret: "${SYNAPSE_REGISTRATION_SHARED_SECRET}"

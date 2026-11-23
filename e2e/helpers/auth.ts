@@ -210,3 +210,84 @@ export async function ssoLogin(
 ): Promise<void> {
   await loginToApp(page, urls.accountPortal, username, password);
 }
+
+/**
+ * Drive Element's sign-in through the Matrix Authentication Service (#824)
+ * until the browser is back on Element:
+ *
+ *   Element → MAS → Keycloak (login form, or straight through when a
+ *   Keycloak session exists) → MAS consent page ("Continue") → Element
+ *
+ * MAS always shows its consent page before handing a session to a client;
+ * there is no setting to skip it. Call this right after navigating to
+ * Element. Without credentials, a Keycloak login form is an error (use for
+ * flows that must ride an existing Keycloak session).
+ *
+ * "Back on Element" means: on the Element host and no further redirect
+ * within a few seconds (Element's immediate SSO redirect fires only after
+ * the SPA has loaded, so a fresh load must not be mistaken for the end).
+ */
+export async function completeMatrixSignIn(
+  page: Page,
+  credentials?: { username: string; password: string },
+  timeoutMs = 90_000,
+): Promise<void> {
+  const elementHost = new URL(urls.element).hostname;
+  const deadline = Date.now() + timeoutMs;
+  let keycloakLoginDone = false;
+
+  while (Date.now() < deadline) {
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    const host = new URL(page.url()).hostname;
+
+    if (host === elementHost) {
+      const left = await page
+        .waitForURL((u) => u.hostname !== elementHost, { timeout: 8_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!left) return;
+      continue;
+    }
+
+    if (host.startsWith('mas.')) {
+      const consent = page.getByRole('button', { name: 'Continue' });
+      if (await consent.isVisible({ timeout: 5_000 }).catch(() => false)) {
+        await Promise.all([
+          page.waitForURL((u) => !u.hostname.startsWith('mas.'), { timeout: 30_000 }),
+          consent.click(),
+        ]);
+      } else {
+        // MAS mid-redirect (to Keycloak, or back to Element).
+        await page
+          .waitForURL((u) => u.toString() !== page.url(), { timeout: 10_000 })
+          .catch(() => {});
+      }
+      continue;
+    }
+
+    if (host.startsWith('auth.')) {
+      const form = page.locator(
+        [selectors.keycloak.passKeyLoginBtn, `${selectors.keycloak.usernameInput}:visible`, selectors.keycloak.passwordInput].join(', '),
+      );
+      if (await form.first().isVisible({ timeout: 5_000 }).catch(() => false)) {
+        if (!credentials) {
+          throw new Error(`Matrix sign-in needs a Keycloak login but no credentials were given (URL: ${page.url()})`);
+        }
+        if (keycloakLoginDone) {
+          throw new Error(`Keycloak asked for a login twice during Matrix sign-in (URL: ${page.url()})`);
+        }
+        await keycloakLogin(page, credentials.username, credentials.password);
+        keycloakLoginDone = true;
+      } else {
+        // Keycloak SSO session: it redirects back to MAS on its own.
+        await page
+          .waitForURL((u) => !u.hostname.startsWith('auth.'), { timeout: 15_000 })
+          .catch(() => {});
+      }
+      continue;
+    }
+
+    throw new Error(`Matrix sign-in left the expected hosts: ${page.url()}`);
+  }
+  throw new Error(`Matrix sign-in did not return to Element within ${timeoutMs / 1000}s (URL: ${page.url()})`);
+}

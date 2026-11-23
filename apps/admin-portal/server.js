@@ -370,7 +370,6 @@ app.get('/dashboard', requireAuth, requireTenantAdmin, (req, res) => {
 // API Routes
 const keycloakApi = require('./api/keycloak');
 const stalwartApi = require('./api/stalwart');
-const synapseApi = require('./api/synapse');
 
 app.post('/api/invite', verifyOrigin, requireAuth, requireTenantAdmin, async (req, res) => {
   try {
@@ -403,12 +402,9 @@ app.post('/api/invite', verifyOrigin, requireAuth, requireTenantAdmin, async (re
     // Step 3: Send invitation email
     await keycloakApi.sendInvitationEmail(result.userId);
 
-    // Respond immediately — critical path (Keycloak + Stalwart + email) done.
+    // No Matrix step: the Matrix Authentication Service creates the Matrix
+    // account on the user's first sign-in through Keycloak (#824).
     res.json({ success: true, userId: result.userId });
-
-    // Step 4: Provision Matrix/Synapse account (non-fatal, background)
-    synapseApi.ensureMatrixUser(email, displayName)
-      .catch(err => console.error('Synapse provisioning failed (non-fatal):', err.message));
   } catch (error) {
     console.error('Invite error:', error.message);
     res.status(500).json({ error: error.message });
