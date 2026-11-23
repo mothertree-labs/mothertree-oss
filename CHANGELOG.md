@@ -25,6 +25,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   new token after the cutover.
 
 ### Fixed
+- **account-portal crash-loop in prod (0.11.64)**: the Dependabot batch #831
+  bumped `connect-redis` 10.0.0 → 11.0.0, which is ESM-only, so the portals'
+  `require('connect-redis')` failed with `ERR_PACKAGE_PATH_NOT_EXPORTED`. The
+  old pod kept serving, so users were unaffected (and #831's CI passed). Pinned
+  back to 10.0.0 in both portals (account-portal 0.11.65, admin-portal 0.9.56;
+  admin-portal never shipped 11.0.0), Dependabot now ignores `>=11` (#834,
+  re-evaluate by 2027-02-23), and a new `__tests__/deps-require.test.js` in
+  each portal requires every runtime dependency in a real `node` process, so
+  an ESM-only bump fails the portal unit tests instead of prod.
 - `mt_apply` works under macOS's bash 3.2 (empty-array expansion under
   `set -u`), so deploy scripts that call other deploy scripts run locally.
 
