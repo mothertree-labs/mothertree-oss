@@ -24,7 +24,46 @@ clone:
       recursive: false
 
 steps:
+  # Re-run the deploy health gate (scripts/infra-health-gate, see
+  # deploy-dev-finalize.yaml) now that e2e has run for 15+ minutes: a pod that
+  # crashes only later, or under e2e load, is caught here, and a rollout still
+  # stuck by now is not "settling". Settle 200s: longer than the gate's 3m
+  # crash-loop lookback, so a pod that crash-looped briefly during e2e and has
+  # since recovered clears instead of failing the build; anything still
+  # crashing or stuck after that fails it. Must run BEFORE release-tenant (the gate resolves the leased
+  # tenant from the lease), and release-tenant runs whatever this step's
+  # outcome so a failing gate never strands the lease (a cancelled or killed
+  # pipeline still can, as before; the lease then expires on its TTL). The gate result is what
+  # fails mothertree-build, which depends on this workflow.
+  - name: workload-health-recheck
+    image: bash
+    environment:
+      CI: "true"
+      CI_VALKEY_PASSWORD:
+        from_secret: ci_valkey_password
+      DEPLOY_VAULT_PASSWORD:
+        from_secret: deploy_vault_password
+      GITHUB_PAT:
+        from_secret: github_pat
+      LINODE_CLI_TOKEN:
+        from_secret: linode_token
+      E2E_POOL1_TENANT:
+        from_secret: e2e_pool1_tenant
+      E2E_POOL2_TENANT:
+        from_secret: e2e_pool2_tenant
+      E2E_POOL1_BASE_DOMAIN:
+        from_secret: e2e_pool1_base_domain
+      E2E_POOL2_BASE_DOMAIN:
+        from_secret: e2e_pool2_base_domain
+      # keep in step with deploy-dev-finalize.yaml's infra-health-gate
+      INFRA_GATE_IGNORE: "^pg-metrics-bridge(-|$$)"
+      INFRA_GATE_SETTLE_SECONDS: "200"
+    commands:
+      - ci/scripts/ci-deploy-app.sh "$${MT_CI_DEV_ENV:-dev}" infra-gate
+
   - name: release-tenant
+    when:
+      - status: [ success, failure ]
     image: bash
     environment:
       CI: "true"
