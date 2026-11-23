@@ -15,7 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   can arrive. `__tests__/deps-require.test.js` now loads ESM-only packages
   (listed in `ESM_ONLY`) with `import()` and fails if portal source still
   `require()`s one. The Dependabot hold on `connect-redis >=11` is lifted
-  (account-portal 0.11.66, admin-portal 0.9.57).
+  (account-portal 0.11.67, admin-portal 0.9.58).
 - **Matrix sign-in goes through the Matrix Authentication Service** (#824,
   step 2 of 3), so Element X can sign in and QR-code login works. Synapse
   now delegates authentication to MAS (`matrix_authentication_service`; its

@@ -128,24 +128,11 @@ const cookieDomain = (() => {
 
 // Session - must be configured correctly for OIDC callback to work
 // sameSite: 'lax' permits GET navigations from cross-origin (OIDC redirects are GET)
-// The middleware itself is built in start() because the Redis store is
+// The middleware and its options live in start() because the Redis store is
 // created asynchronously (see createSessionStore). Its position in the
 // chain is fixed here, and start() sets it before app.listen, so no request
 // is ever handled without it.
 let sessionMiddleware;
-const sessionOptions = {
-  name: 'admin.sid',        // Unique cookie name (account portal uses 'account.sid')
-  secret: process.env.SESSION_SECRET,
-  resave: false,            // Don't save session if unmodified (Redis handles expiry)
-  saveUninitialized: false, // Don't create session until something is stored
-  cookie: {
-    domain: cookieDomain,   // Shared parent domain so logout clears both portals
-    secure: process.env.NODE_ENV !== 'development',
-    httpOnly: true,
-    sameSite: process.env.NODE_ENV === 'development' ? false : 'lax',
-    maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days (matches Remember Me / offline token lifespan)
-  }
-};
 app.use((req, res, next) => sessionMiddleware(req, res, next));
 
 // Passport
@@ -544,8 +531,20 @@ app.use((err, req, res, next) => {
 // Start server
 async function start() {
   try {
-    // store: undefined falls back to express-session's MemoryStore
-    sessionMiddleware = session({ ...sessionOptions, store: await createSessionStore() });
+    sessionMiddleware = session({
+      name: 'admin.sid',        // Unique cookie name (account portal uses 'account.sid')
+      store: await createSessionStore(), // undefined falls back to express-session's MemoryStore
+      secret: process.env.SESSION_SECRET,
+      resave: false,            // Don't save session if unmodified (Redis handles expiry)
+      saveUninitialized: false, // Don't create session until something is stored
+      cookie: {
+        domain: cookieDomain,   // Shared parent domain so logout clears both portals
+        secure: process.env.NODE_ENV !== 'development',
+        httpOnly: true,
+        sameSite: process.env.NODE_ENV === 'development' ? false : 'lax',
+        maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days (matches Remember Me / offline token lifespan)
+      }
+    });
     await initializeOIDC();
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Admin Portal running on port ${PORT}`);
