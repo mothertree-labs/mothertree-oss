@@ -34,6 +34,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   re-evaluate by 2027-02-23), and a new `__tests__/deps-require.test.js` in
   each portal requires every runtime dependency in a real `node` process, so
   an ESM-only bump fails the portal unit tests instead of prod.
+- **CI health gate now covers tenant apps and runs again after e2e.** A tenant
+  app whose new pod crash-loops while the old pod keeps serving passed both
+  the dev deploy and e2e (account-portal 0.11.64 reached prod this way, #835).
+  `scripts/infra-health-gate`:
+  - takes `INFRA_GATE_TENANT`, and CI passes the leased tenant, so its app
+    namespaces (`tn-<tenant>-<app>`, all but `llm`, which is excluded like
+    `infra-llm`) are gated, not only `infra-*`. It exits 2 if that tenant has
+    none, rather than checking infra only;
+  - fails a Deployment that still has more pods than wanted (old pods left
+    because the new ones never became available), plus StatefulSets that
+    aren't ready or haven't finished updating;
+  - runs once more as `workload-health-recheck` in `ci-release.yaml`, after
+    e2e and before the lease is released, to catch pods that only fail later.
+
+  The re-check adds one short step before `mothertree-build`; neither gate
+  re-samples (up to 3 minutes) unless something is failing.
 - `mt_apply` works under macOS's bash 3.2 (empty-array expansion under
   `set -u`), so deploy scripts that call other deploy scripts run locally.
 

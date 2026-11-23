@@ -29,8 +29,10 @@ set -euo pipefail
 #                          EXTERNAL Stalwart endpoint the e2e tests use is
 #                          establishable before e2e runs (cold-start gap #20)
 #   infra-gate      — FATAL gate: scripts/infra-health-gate — no crash-looping
-#                          pods, unconverged DaemonSets or Deployments in
-#                          infra-* after the deploy (#612)
+#                          pods, unconverged DaemonSets, Deployments or
+#                          StatefulSets in infra-* and the leased tenant's
+#                          tn-<tenant>-* namespaces (#612, #835). Runs after the
+#                          deploys and again after e2e (ci-release)
 #
 # Required environment variables:
 #   DEPLOY_VAULT_PASSWORD — Ansible Vault password
@@ -457,9 +459,12 @@ case "$MODE" in
 
   infra-gate)
     echo "=== Infra health gate (scripts/infra-health-gate) ==="
-    # INFRA_GATE_IGNORE (known, tracked breakage) is passed through from the
-    # pipeline step so the exception is declared next to its issue reference.
-    "$REPO_ROOT/scripts/infra-health-gate" -e "$MT_ENV"
+    # INFRA_GATE_IGNORE (known, tracked breakage) and INFRA_GATE_SETTLE_SECONDS
+    # are passed through from the pipeline step so the exception is declared
+    # next to its issue reference. The leased tenant's tn-<tenant>-* namespaces
+    # are gated too: a tenant app whose new pod crash-loops while the old pod
+    # keeps serving otherwise passes deploy AND e2e (#835).
+    INFRA_GATE_TENANT="$E2E_TENANT" "$REPO_ROOT/scripts/infra-health-gate" -e "$MT_ENV"
     ;;
 
   imaps-readiness)
