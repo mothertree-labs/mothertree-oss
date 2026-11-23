@@ -944,6 +944,12 @@
           delay: 5
           changed_when: false
 
+    # ── Unattended security upgrades ───────────────────────────────
+    # Shared with the other devhome machines. No reboot: devhome-ci is a
+    # container on the box's kernel, which host-base.yml reboots for kernel fixes.
+    - name: Unattended security upgrades
+      ansible.builtin.import_tasks: ../../devhome/ansible/tasks/unattended-upgrades.yml
+
   handlers:
     - name: Restart Docker
       ansible.builtin.systemd:

@@ -169,6 +169,17 @@
         state: started
         daemon_reload: "{{ _pf_dropin.changed }}"
 
+    # Security updates, plus Tailscale (its repo is not a security pocket and
+    # tailscaled is this public host's path into the box), with a reboot so a
+    # patched kernel is loaded. Times are the host clock (UTC on Linode
+    # images): 11:45 UTC is early US morning, 7 h from the box's 04:30 UTC
+    # reboot (host-base.yml). Public dev ingress drops for a reboot, and
+    # briefly when needrestart restarts haproxy/postfix after a library fix.
+    - name: Unattended security upgrades
+      ansible.builtin.import_tasks: tasks/unattended-upgrades.yml
+      vars:
+        unattended_reboot_time: "11:45"
+        unattended_extra_origins: ["origin=Tailscale"]
 
   handlers:
     - name: restart postfix

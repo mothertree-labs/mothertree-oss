@@ -116,3 +116,9 @@
     - name: Report tailnet address (pgbouncer.pg_vm_tailscale_ip / POSTGRES_SERVER_IP)
       ansible.builtin.debug:
         msg: "devhome-pg tailnet IP: {{ _ts_ip_now.stdout | trim }}"
+
+    # Safe to re-run on a prepared container: everything above is idempotent.
+    # No reboot: devhome-pg shares the box's kernel (host-base.yml reboots it).
+    # PostgreSQL itself comes from PGDG, which these security-only origins skip.
+    - name: Unattended security upgrades
+      ansible.builtin.import_tasks: tasks/unattended-upgrades.yml

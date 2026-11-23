@@ -1,0 +1,78 @@
+---
+# Daily unattended security upgrades, shared by the devhome machines that the
+# box's host-base.yml does not cover: the periscope (periscope.yml) and the
+# VM-like containers devhome-pg (pg-prepare.yml) and devhome-ci
+# (ci/ansible/playbook.yml).
+#
+# Origins are the Ubuntu default from the package's 50unattended-upgrades:
+# security pockets only. Third-party repos (Docker, Woodpecker, PGDG,
+# Tailscale, NodeSource) are NOT upgraded unless listed in
+# unattended_extra_origins, so the CI server, Docker and PostgreSQL are not
+# restarted by these upgrades; they move when their playbook pins move.
+#
+# unattended_extra_origins (Origins-Pattern entries) adds third-party repos a
+# host should still follow, e.g. Tailscale on the public periscope.
+#
+# Reboot is opt-in via unattended_reboot_time (empty = never). The containers
+# leave it empty: they share the box's kernel, which host-base.yml reboots for.
+# That covers the KERNEL only: a long-running process in a container (e.g.
+# PostgreSQL) keeps an old libssl/libc mapped until it or the container
+# restarts. A real VM (the periscope) sets it, or a patched kernel would never
+# be loaded.
+- name: unattended-upgrades installed
+  ansible.builtin.apt:
+    name: unattended-upgrades
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Daily unattended security upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+    mode: "0644"
+
+- name: Reboot policy after upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52devhome-reboot
+    content: |
+      // Managed by devhome/ansible/tasks/unattended-upgrades.yml
+      {% if unattended_reboot_time | default('') | length > 0 %}
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "{{ unattended_reboot_time }}";
+      {% else %}
+      Unattended-Upgrade::Automatic-Reboot "false";
+      {% endif %}
+    mode: "0644"
+
+- name: Extra origins to follow
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/51devhome-origins
+    content: |
+      // Managed by devhome/ansible/tasks/unattended-upgrades.yml
+      Unattended-Upgrade::Origins-Pattern {
+      {% for o in unattended_extra_origins | default([]) %}
+          "{{ o }}";
+      {% endfor %}
+      };
+    mode: "0644"
+  when: unattended_extra_origins | default([]) | length > 0
+
+- name: No extra origins on hosts that list none
+  ansible.builtin.file:
+    path: /etc/apt/apt.conf.d/51devhome-origins
+    state: absent
+  when: unattended_extra_origins | default([]) | length == 0
+
+- name: apt timers enabled
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
