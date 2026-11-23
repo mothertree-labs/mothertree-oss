@@ -21,7 +21,7 @@
 import { test, expect } from '../../fixtures/authenticated';
 import { urls } from '../../helpers/urls';
 import { TEST_USERS } from '../../helpers/test-users';
-import { keycloakLogin } from '../../helpers/auth';
+import { completeMatrixSignIn } from '../../helpers/auth';
 import {
   isImapConfigured,
   waitForEmailBody,
@@ -40,14 +40,7 @@ async function getMatrixAccessToken(
   user: { username: string; password: string },
 ): Promise<string> {
   await page.goto(MATRIX_BASE);
-  if (new URL(page.url()).hostname.startsWith('auth.')) {
-    const continueLink = page.getByRole('link', { name: 'Continue' });
-    if (await continueLink.isVisible({ timeout: 5_000 }).catch(() => false)) {
-      await continueLink.click();
-    } else {
-      await keycloakLogin(page, user.username, user.password);
-    }
-  }
+  await completeMatrixSignIn(page, user);
   // Element persists the access token in localStorage once the SPA initialises.
   await page.waitForFunction(
     () => !!window.localStorage.getItem('mx_access_token'),

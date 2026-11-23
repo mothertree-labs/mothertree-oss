@@ -179,13 +179,21 @@ mt_export_smtp_relay_env "$NS_MATRIX"
 # =============================================================================
 # Matrix Authentication Service (MAS)
 # =============================================================================
-# Deployed before Synapse: once Synapse delegates auth to MAS (#824 cutover),
-# Synapse must not start without it. Until then MAS runs inert.
+# Synapse delegates authentication to MAS (#824), so MAS — and, on the first
+# deploy, the one-time syn2mas migration — must be in place before the
+# Synapse chart sync below.
 print_status "Deploying Matrix Authentication Service..."
 if ! "$REPO_ROOT/apps/deploy-mas.sh" -e "$MT_ENV" -t "$MT_TENANT" --nesting-level=$((MT_NESTING_LEVEL+1)); then
   print_error "deploy-mas.sh failed"
   exit 1
 fi
+# Synapse ↔ MAS shared secret, rendered into Synapse's extraSecrets.
+MAS_SYNAPSE_SHARED_SECRET=$(read_k8s_secret "$NS_MATRIX" "mas-config" "synapse-shared-secret")
+if [ -z "$MAS_SYNAPSE_SHARED_SECRET" ]; then
+  print_error "mas-config Secret in $NS_MATRIX has no synapse-shared-secret (deploy-mas.sh should have written it)"
+  exit 1
+fi
+export MAS_SYNAPSE_SHARED_SECRET
 
 # =============================================================================
 # Deploy Synapse and Element via helmfile

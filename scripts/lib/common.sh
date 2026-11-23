@@ -408,9 +408,9 @@ mt_apply() {
     # KUBECTL_EXTERNAL_DIFF is unset so an inherited env var can never route
     # the LIVE/MERGED objects (Secret data included) through an arbitrary program.
     diff_rc=0
-    diff_err=$(printf '%s\n' "$manifest" | env -u KUBECTL_EXTERNAL_DIFF "${diffcmd[@]}" -f - "${post[@]}" 2>&1 >/dev/null) || diff_rc=$?
+    diff_err=$(printf '%s\n' "$manifest" | env -u KUBECTL_EXTERNAL_DIFF "${diffcmd[@]}" -f - ${post[@]+"${post[@]}"} 2>&1 >/dev/null) || diff_rc=$?
 
-    output=$(printf '%s\n' "$manifest" | "${pre[@]}" -f - "${post[@]}" 2>&1) || rc=$?
+    output=$(printf '%s\n' "$manifest" | "${pre[@]}" -f - ${post[@]+"${post[@]}"} 2>&1) || rc=$?
     printf '%s\n' "$output"
 
     case "$diff_rc" in
