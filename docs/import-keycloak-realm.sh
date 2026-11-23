@@ -608,47 +608,40 @@ else
     exit 1
 fi
 
-# Update matrix-synapse client redirect URIs to match environment (realm import doesn't always update existing clients)
-print_status "Updating matrix-synapse client redirect URIs for environment..."
-refresh_token
-MATRIX_CLIENT_ID=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients?clientId=matrix-synapse" \
-  -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.[0].id // empty')
-
-if [ -z "$MATRIX_CLIENT_ID" ] || [ "$MATRIX_CLIENT_ID" = "null" ]; then
-    print_error "matrix-synapse client not found in Keycloak realm '$TENANT_KEYCLOAK_REALM'. The realm template should have created it."
-    exit 1
+# Remove the retired matrix-synapse client. Synapse delegates authentication
+# to the Matrix Authentication Service since #824 (MAS signs in through its own
+# matrix-mas client, managed by apps/deploy-mas.sh). The realm update above
+# never deletes clients, so existing realms are cleaned up here; idempotent.
+#
+# Only once the tenant is migrated (the mas-migration marker written by
+# deploy-mas.sh): until then, a failed syn2mas run falls back to Synapse's old
+# Keycloak SSO, which still signs in through this client.
+: "${NS_MATRIX:?NS_MATRIX must be set (run via create_env / mt_load_tenant_config)}"
+if ! kubectl -n "$NS_MATRIX" get configmap mas-migration >/dev/null 2>&1; then
+    print_status "Keeping matrix-synapse client: $NS_MATRIX has no mas-migration marker yet (deploy-mas.sh removes the need for it)"
 else
-    # Get current client configuration
-    MATRIX_CLIENT_CONFIG=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$MATRIX_CLIENT_ID")
-
-    # Update client with correct secret, redirect URIs and web origins
-    # Include secret from SYNAPSE_OIDC_CLIENT_SECRET env var if set
-    if [ -n "${SYNAPSE_OIDC_CLIENT_SECRET:-}" ]; then
-        MATRIX_CLIENT_UPDATE=$(echo "$MATRIX_CLIENT_CONFIG" | jq ". + {
-          secret: \"${SYNAPSE_OIDC_CLIENT_SECRET}\",
-          redirectUris: [\"https://${MATRIX_HOST}/_synapse/client/oidc/callback\"],
-          webOrigins: [\"https://${MATRIX_HOST}\"]
-        }")
-    else
-        MATRIX_CLIENT_UPDATE=$(echo "$MATRIX_CLIENT_CONFIG" | jq ". + {
-          redirectUris: [\"https://${MATRIX_HOST}/_synapse/client/oidc/callback\"],
-          webOrigins: [\"https://${MATRIX_HOST}\"]
-        }")
-    fi
-    MATRIX_CLIENT_UPDATE_RESPONSE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /tmp/matrix_client_update.json -X PUT \
-      "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$MATRIX_CLIENT_ID" \
-      -H "Authorization: Bearer $ACCESS_TOKEN" \
-      -H "Content-Type: application/json" \
-      -d "$MATRIX_CLIENT_UPDATE")
-
-    if [ "$MATRIX_CLIENT_UPDATE_RESPONSE" = "204" ]; then
-        print_success "matrix-synapse client redirect URIs updated to https://${MATRIX_HOST}/_synapse/client/oidc/callback"
-    else
-        print_error "Failed to update matrix-synapse client redirect URIs (HTTP $MATRIX_CLIENT_UPDATE_RESPONSE)"
-        if [ -f /tmp/matrix_client_update.json ]; then
-            print_error "Error details: $(cat /tmp/matrix_client_update.json)"
-        fi
+    print_status "Removing retired matrix-synapse client (replaced by matrix-mas, #824)..."
+    refresh_token
+    if ! MATRIX_CLIENTS=$(keycloak_get "/admin/realms/$TENANT_KEYCLOAK_REALM/clients?clientId=matrix-synapse"); then
+        print_error "Could not look up the matrix-synapse client in realm '$TENANT_KEYCLOAK_REALM'"
         exit 1
+    fi
+    MATRIX_CLIENT_IDS=$(printf '%s' "$MATRIX_CLIENTS" | jq -r '[.[] | select(.clientId == "matrix-synapse") | .id] | join(" ")')
+    if [ -z "$MATRIX_CLIENT_IDS" ]; then
+        print_status "matrix-synapse client not present, nothing to remove"
+    elif [ "$(wc -w <<<"$MATRIX_CLIENT_IDS")" -ne 1 ]; then
+        print_error "Expected one matrix-synapse client in realm '$TENANT_KEYCLOAK_REALM', found: $MATRIX_CLIENT_IDS"
+        exit 1
+    else
+        MATRIX_CLIENT_DELETE=$(curl -s ${KEYCLOAK_SKIP_SSL_VERIFY} -w "%{http_code}" -o /dev/null -X DELETE \
+          "$KEYCLOAK_URL/admin/realms/$TENANT_KEYCLOAK_REALM/clients/$MATRIX_CLIENT_IDS" \
+          -H "Authorization: Bearer $ACCESS_TOKEN")
+        if [ "$MATRIX_CLIENT_DELETE" = "204" ]; then
+            print_success "Removed matrix-synapse client"
+        else
+            print_error "Failed to remove matrix-synapse client (HTTP $MATRIX_CLIENT_DELETE)"
+            exit 1
+        fi
     fi
 fi
 

@@ -193,6 +193,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   firing after later hourly runs succeed.
 
 ### Removed
+- **Leftovers of the pre-MAS Matrix sign-in** (#824, step 3 of 3).
+  - **Keycloak:** the `matrix-synapse` client is gone from the realm template, and `import-keycloak-realm.sh` now deletes it from existing realms. MAS signs in through its own `matrix-mas` client. `oidc.synapse_client_secret` is no longer read.
+  - **Network policy:** `deploy-network-policies.sh` deletes the admin namespace's `allow-egress-to-matrix` policy instead of applying it, since the admin portal no longer calls the Synapse Admin API.
+  - **Scripts:** removed `create-matrix-user.sh`, `test-matrix-oidc.sh` and the unreferenced rate-limit helpers under `apps/scripts/`. These assumed the Synapse shared-secret registration API or `oidc_providers`.
+  - **Perf:** removed the k6 Matrix perf suite (`perf/k6/matrix`, `k6-matrix-load` Jobs, `test_matrix_login.sh`). It logged in with `m.login.password`, which Synapse hasn't offered since it moved to SSO. `provision_users.py` now only provisions Keycloak users, and `run_perf` accepts the `docs` suite only.
+  - **Docs:** the secrets examples now point to `create-alertbot-user.sh` for the alertbot token.
 - **The on-demand dev LKE cluster and the Linode CI VM.** Gone with them:
   `phase1-dev/` (cluster, VPC, heartbeat bucket), the idle reaper
   (`scripts/dev-reaper.sh`, its cron and env template), `dev-bringup.sh`,

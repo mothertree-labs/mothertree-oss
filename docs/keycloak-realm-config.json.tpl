@@ -63,40 +63,6 @@
       ]
     },
     {
-      "clientId": "matrix-synapse",
-      "name": "Matrix Synapse",
-      "enabled": true,
-      "clientAuthenticatorType": "client-secret",
-      "secret": "${SYNAPSE_OIDC_CLIENT_SECRET}",
-      "redirectUris": [
-        "https://${MATRIX_HOST}/_synapse/client/oidc/callback"
-      ],
-      "webOrigins": [
-        "https://${MATRIX_HOST}"
-      ],
-      "protocol": "openid-connect",
-      "publicClient": false,
-      "standardFlowEnabled": true,
-      "implicitFlowEnabled": false,
-      "directAccessGrantsEnabled": false,
-      "serviceAccountsEnabled": false,
-      "authorizationServicesEnabled": false,
-      "fullScopeAllowed": true,
-      "defaultClientScopes": [
-        "web-origins",
-        "role_list",
-        "profile",
-        "roles",
-        "email"
-      ],
-      "optionalClientScopes": [
-        "address",
-        "phone",
-        "offline_access",
-        "microprofile-jwt"
-      ]
-    },
-    {
       "clientId": "stalwart",
       "name": "Stalwart Mail Server",
       "description": "OIDC client for Stalwart mail server authentication",

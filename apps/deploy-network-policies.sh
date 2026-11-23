@@ -216,15 +216,16 @@ for caller_ns in "$NS_DOCS" "$NS_MATRIX" "$NS_FILES"; do
 done
 
 # =============================================================================
-# Apply admin-to-matrix egress (admin portal → Synapse Admin API for user provisioning)
+# Remove the retired admin-to-matrix egress policy. The admin portal used it to
+# pre-provision Matrix accounts through the Synapse Admin API; under MAS (#824)
+# that API is gone and MAS creates the account at first sign-in, so nothing in
+# the admin namespace talks to Synapse any more.
 # =============================================================================
-if kubectl get namespace "$NS_ADMIN" &>/dev/null && kubectl get namespace "$NS_MATRIX" &>/dev/null; then
-    export NAMESPACE="$NS_ADMIN"
-    print_status "[$NS_ADMIN] Applying allow-admin-to-matrix-egress (Admin Portal → Synapse API)..."
-    envsubst '${NAMESPACE} ${TENANT_NAME}' < "$MANIFEST_DIR/allow-admin-to-matrix-egress.yaml.tpl" | kubectl apply -f -
-    print_success "[$NS_ADMIN] Admin-to-matrix egress policy applied"
-else
-    print_warning "Admin or matrix namespace does not exist, skipping admin-to-matrix egress policy"
+if kubectl get namespace "$NS_ADMIN" &>/dev/null; then
+    _deleted=$(kubectl delete networkpolicy allow-egress-to-matrix -n "$NS_ADMIN" --ignore-not-found)
+    if [ -n "$_deleted" ]; then
+        print_status "[$NS_ADMIN] Removed retired policy: allow-egress-to-matrix"
+    fi
 fi
 
 # =============================================================================

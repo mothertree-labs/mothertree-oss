@@ -512,7 +512,6 @@ _mt_load_tenant_secrets() {
     "TF_VAR_nextcloud_oidc_client_secret=" + (.oidc.nextcloud_client_secret // "" | @sh) + "\n" +
     "TF_VAR_matrix_registration_shared_secret=" + (.matrix.registration_shared_secret // "" | @sh) + "\n" +
     "SYNAPSE_DB_PASSWORD=" + (.matrix.synapse_password // "" | @sh) + "\n" +
-    "SYNAPSE_OIDC_CLIENT_SECRET=" + (.oidc.synapse_client_secret // "" | @sh) + "\n" +
     "MAS_DB_PASSWORD=" + (.mas.database_password // "" | @sh) + "\n" +
     "MAS_OIDC_CLIENT_SECRET=" + (.oidc.mas_client_secret // "" | @sh) + "\n" +
     "MAS_ENCRYPTION_KEY=" + (.mas.encryption_key // "" | @sh) + "\n" +
@@ -596,7 +595,7 @@ _mt_load_tenant_secrets() {
   export TF_VAR_tls_email TF_VAR_postgres_password TF_VAR_redis_password
   export TF_VAR_docs_db_password TF_VAR_oidc_rp_client_secret_docs
   export TF_VAR_nextcloud_oidc_client_secret TF_VAR_matrix_registration_shared_secret
-  export SYNAPSE_DB_PASSWORD SYNAPSE_OIDC_CLIENT_SECRET
+  export SYNAPSE_DB_PASSWORD
   # MAS secrets are optional here: deploy-mas.sh falls back to the live
   # K8s Secret, then generates (same precedence as the portal secrets).
   export MAS_DB_PASSWORD MAS_OIDC_CLIENT_SECRET MAS_ENCRYPTION_KEY MAS_SYNAPSE_SHARED_SECRET
