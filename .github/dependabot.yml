@@ -101,6 +101,12 @@ updates:
       # inert there. openid-client >=6 is held deliberately -- see #404.
       - dependency-name: "openid-client"
         versions: [">=6"]
+      # connect-redis 11 is ESM-only (exports has only an `import` condition);
+      # both portals require() it, so 11.0.0 crash-looped account-portal in prod
+      # after #831. Held until the portals load it via import() -- tracking
+      # #834, re-evaluate by 2027-02-23.
+      - dependency-name: "connect-redis"
+        versions: [">=11"]
 
   # Terraform provider constraints: every ROOT config, and only roots.
   #
