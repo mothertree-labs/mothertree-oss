@@ -69,6 +69,11 @@ if [ -z "$STALWART_DB_NAME" ] || [ "$STALWART_DB_NAME" = "null" ]; then
     exit 1
 fi
 print_status "Database: $STALWART_DB_NAME (user: $STALWART_DB_USER)"
+: "${STALWART_V1_DB_NAME:?STALWART_V1_DB_NAME not set by config.sh}"
+if [ "$STALWART_V1_DB_NAME" = "$STALWART_DB_NAME" ]; then
+    print_error "STALWART_V1_DB_NAME must differ from STALWART_DB_NAME (the live 0.15 store)"
+    exit 1
+fi
 
 # Validate PG_HOST
 if [ -z "${PG_HOST:-}" ]; then
@@ -470,7 +475,7 @@ print_status "Running database initialization job..."
 print_status "DB_NAME=$STALWART_DB_NAME, DB_USER=$STALWART_DB_USER"
 
 # Use explicit variable list for envsubst to ensure all variables are substituted
-envsubst '${NS_MAIL} ${STALWART_DB_NAME} ${STALWART_DB_USER} ${PG_HOST}' \
+envsubst '${NS_MAIL} ${STALWART_DB_NAME} ${STALWART_V1_DB_NAME} ${STALWART_DB_USER} ${PG_HOST}' \
     < "$REPO_ROOT/apps/manifests/stalwart/db-init-job.yaml.tpl" | kubectl create -f -
 
 # Wait for the job to complete
@@ -490,6 +495,50 @@ else
         print_status "Check job status: kubectl get job stalwart-db-init -n $NS_MAIL"
     fi
 fi
+
+# =============================================================================
+# Redis for Stalwart v1 clustering (#715)
+# =============================================================================
+# Deployed ahead of the v1 cutover so it can bake; nothing uses it until then.
+# Its own password (not the admin-portal Redis's): Stalwart v1 keeps the Redis
+# URL in clear in its settings registry. Reused from the cluster when present,
+# otherwise generated; it never needs to leave the cluster.
+# Isolation depends on the mail namespace's ingress allow-list (which never
+# opens 6379) plus the Stalwart-only Redis rule. create_env treats a failed
+# deploy-network-policies.sh as non-fatal, so check here: without these, the
+# Redis would be reachable from any pod in the cluster.
+for _np in allow-mail-ingress allow-stalwart-redis-ingress; do
+    if ! kubectl get networkpolicy "$_np" -n "$NS_MAIL" >/dev/null; then
+        print_error "NetworkPolicy $_np missing in $NS_MAIL; run apps/deploy-network-policies.sh -e $MT_ENV -t $MT_TENANT first"
+        exit 1
+    fi
+done
+# Tell "no Secret yet" apart from an API error: regenerating on a transient
+# read failure would leave Stalwart v1's stored Redis URL with a stale password.
+if ! _redis_secret=$(kubectl get secret stalwart-redis -n "$NS_MAIL" -o name --ignore-not-found); then
+    print_error "Could not read Secret stalwart-redis in $NS_MAIL"
+    exit 1
+fi
+STALWART_REDIS_PASSWORD=""
+if [ -n "$_redis_secret" ]; then
+    STALWART_REDIS_PASSWORD=$(kubectl get secret stalwart-redis -n "$NS_MAIL" -o jsonpath='{.data.REDIS_PASSWORD}' | base64 -d)
+    : "${STALWART_REDIS_PASSWORD:?Secret stalwart-redis in $NS_MAIL has no REDIS_PASSWORD}"
+fi
+if [ -z "$STALWART_REDIS_PASSWORD" ]; then
+    print_status "Generating Stalwart Redis password..."
+    # hex: safe inside a redis:// URL without percent-encoding
+    STALWART_REDIS_PASSWORD=$(openssl rand -hex 24)
+fi
+mt_reset_change_tracker
+mt_apply kubectl apply -f <(kubectl create secret generic stalwart-redis -n "$NS_MAIL" \
+    --from-literal=REDIS_PASSWORD="$STALWART_REDIS_PASSWORD" --dry-run=client -o yaml)
+mt_apply kubectl apply -f <(envsubst '${NS_MAIL}' < "$REPO_ROOT/apps/manifests/stalwart/redis.yaml.tpl")
+mt_restart_if_changed deployment/stalwart-redis -n "$NS_MAIL"
+if ! kubectl rollout status deployment/stalwart-redis -n "$NS_MAIL" --timeout=120s; then
+    print_error "stalwart-redis did not become ready"
+    exit 1
+fi
+print_success "Stalwart Redis ready"
 
 # Apply Stalwart manifests
 print_status "Applying Stalwart manifests..."
