@@ -524,19 +524,28 @@ if ! _redis_secret=$(kubectl get secret stalwart-redis -n "$NS_MAIL" -o name --i
     print_error "Could not read Secret stalwart-redis in $NS_MAIL"
     exit 1
 fi
+# Two passwords: REDIS_PASSWORD (Redis `default` user: probes, operators) and
+# STALWART_PASSWORD (the restricted `stalwart` ACL user Stalwart connects as).
 STALWART_REDIS_PASSWORD=""
+STALWART_REDIS_USER_PASSWORD=""
 if [ -n "$_redis_secret" ]; then
     STALWART_REDIS_PASSWORD=$(kubectl get secret stalwart-redis -n "$NS_MAIL" -o jsonpath='{.data.REDIS_PASSWORD}' | base64 -d)
     : "${STALWART_REDIS_PASSWORD:?Secret stalwart-redis in $NS_MAIL has no REDIS_PASSWORD}"
+    STALWART_REDIS_USER_PASSWORD=$(kubectl get secret stalwart-redis -n "$NS_MAIL" -o jsonpath='{.data.STALWART_PASSWORD}' | base64 -d)
 fi
+# hex: safe inside a redis:// URL without percent-encoding
 if [ -z "$STALWART_REDIS_PASSWORD" ]; then
     print_status "Generating Stalwart Redis password..."
-    # hex: safe inside a redis:// URL without percent-encoding
     STALWART_REDIS_PASSWORD=$(openssl rand -hex 24)
+fi
+if [ -z "$STALWART_REDIS_USER_PASSWORD" ]; then
+    print_status "Generating the Stalwart Redis ACL user's password..."
+    STALWART_REDIS_USER_PASSWORD=$(openssl rand -hex 24)
 fi
 mt_reset_change_tracker
 mt_apply kubectl apply -f <(kubectl create secret generic stalwart-redis -n "$NS_MAIL" \
-    --from-literal=REDIS_PASSWORD="$STALWART_REDIS_PASSWORD" --dry-run=client -o yaml)
+    --from-literal=REDIS_PASSWORD="$STALWART_REDIS_PASSWORD" \
+    --from-literal=STALWART_PASSWORD="$STALWART_REDIS_USER_PASSWORD" --dry-run=client -o yaml)
 mt_apply kubectl apply -f <(envsubst '${NS_MAIL}' < "$REPO_ROOT/apps/manifests/stalwart/redis.yaml.tpl")
 mt_restart_if_changed deployment/stalwart-redis -n "$NS_MAIL"
 if ! kubectl rollout status deployment/stalwart-redis -n "$NS_MAIL" --timeout=120s; then

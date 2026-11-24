@@ -229,7 +229,7 @@ spec:
     secretName: wildcard-tls-${MT_TENANT}
 EOF
 
-    export STALWART_REDIS_URL="redis://:${STALWART_REDIS_PASSWORD:?}@stalwart-redis.${NS_MAIL}.svc.cluster.local:6379/0"
+    export STALWART_REDIS_URL="redis://stalwart:${STALWART_REDIS_USER_PASSWORD:?}@stalwart-redis.${NS_MAIL}.svc.cluster.local:6379/0"
     # info everywhere: v1 has no "curated subset" like 0.15's legacy
     # [tracing] block, and dev's e2e diagnostics need delivery events.
     export STALWART_V1_TRACE_LEVEL=info
@@ -272,9 +272,47 @@ EOF
     fi
     kubectl rollout status deployment/stalwart -n "$NS_MAIL" --timeout=300s || return 1
 
+    mt_stalwart_v1_oidc_gate || return 1
+
     if [ "$STALWART_MIN_REPLICAS" != "$STALWART_MAX_REPLICAS" ]; then
         envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-hpa.yaml.tpl" | kubectl apply -f - >/dev/null
     else
         kubectl delete hpa stalwart-hpa -n "$NS_MAIL" --ignore-not-found >/dev/null
     fi
+}
+
+# v1 runs OIDC discovery once, at startup. If it failed, the pod is still
+# Ready (health stays 200) but every Roundcube/OAUTHBEARER login fails with
+# "Directory is unavailable" until a reload or restart. Check every pod:
+#   1. it can fetch the PUBLIC issuer's discovery document (hostAliases →
+#      internal ingress) and the issuer matches exactly;
+#   2. its startup did not log a failed metadata fetch (else restart it once).
+mt_stalwart_v1_oidc_gate() {
+    local issuer="https://${AUTH_HOST}/realms/${TENANT_KEYCLOAK_REALM}" pod got attempt
+    for attempt in 1 2; do
+        local failed=0
+        for pod in $(kubectl get pods -n "$NS_MAIL" -l app=stalwart \
+                --field-selector=status.phase=Running -o name); do
+            got=$(kubectl exec -n "$NS_MAIL" "$pod" -c stalwart -- \
+                curl -sf --max-time 10 "$issuer/.well-known/openid-configuration" 2>/dev/null \
+                | jq -r '.issuer // empty' 2>/dev/null || true)
+            if [ "$got" != "$issuer" ]; then
+                print_error "OIDC gate: $pod cannot fetch discovery for $issuer (got '${got}')"
+                return 1
+            fi
+            # Only the count of matching lines leaves the pod.
+            if [ "$(kubectl logs -n "$NS_MAIL" "$pod" -c stalwart 2>/dev/null \
+                    | grep -c 'Metadata fetch from' || true)" != "0" ]; then
+                print_warning "OIDC gate: $pod logged a failed discovery at startup"
+                failed=1
+            fi
+        done
+        [ "$failed" = 0 ] && { print_success "OIDC gate: discovery OK on every Stalwart pod"; return 0; }
+        [ "$attempt" = 2 ] && break
+        print_status "Restarting Stalwart once so discovery runs again"
+        kubectl rollout restart deployment/stalwart -n "$NS_MAIL" >/dev/null
+        kubectl rollout status deployment/stalwart -n "$NS_MAIL" --timeout=300s || return 1
+    done
+    print_error "OIDC gate: discovery still failing after a restart; Roundcube logins would fail"
+    return 1
 }
