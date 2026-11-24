@@ -74,8 +74,20 @@ src_tables=$(q -d "$SRC_DB" -c "SELECT count(*) FROM information_schema.tables W
 # whose hop1/ is 0700).
 umask 077
 mkdir -p /work/copy
-pg_dump -Fc --no-owner -d "$SRC_DB" 2> /work/copy/pg_dump.err \
-    | pg_restore --no-owner --role="$DB_OWNER" --exit-on-error -d "$SCRATCH_DB" 2> /work/copy/pg_restore.err
+pg_dump -Fc --no-owner -d "$SRC_DB" -f /work/copy/live.dump 2> /work/copy/pg_dump.err
+# Extensions (pg_trgm, created by db-init) belong to the superuser: create_db
+# already made them, and restoring them or their COMMENT as the tenant role
+# is refused. Restore everything else.
+pg_restore -l /work/copy/live.dump | grep -v -E ' EXTENSION |COMMENT - EXTENSION' > /work/copy/restore.list
+if ! pg_restore --no-owner --role="$DB_OWNER" --exit-on-error -L /work/copy/restore.list \
+        -d "$SCRATCH_DB" /work/copy/live.dump 2> /work/copy/pg_restore.err; then
+    # The ERROR line is the failed statement's message; DETAIL/CONTEXT lines
+    # (which can quote row data) are not reported.
+    err=$(grep -m1 -o 'ERROR: .*' /work/copy/pg_restore.err | cut -c1-200 || true)
+    STEP="copy (${err:-pg_restore failed})"
+    exit 1
+fi
+rm -f /work/copy/live.dump
 dst_tables=$(q -d "$SCRATCH_DB" -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")
 [ "$src_tables" = "$dst_tables" ] || { echo "table count mismatch: $src_tables vs $dst_tables" >&2; exit 1; }
 size=$(q -c "SELECT pg_size_pretty(pg_database_size('$SCRATCH_DB'))")

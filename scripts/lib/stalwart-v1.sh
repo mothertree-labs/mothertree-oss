@@ -2,6 +2,10 @@
 # Stalwart v1 deployment and the one-time 0.15 → v1 migration (#715).
 # Sourced by apps/deploy-stalwart.sh after config.sh / common.sh.
 #
+# These functions are called from `if !` conditions, where bash IGNORES
+# `set -e` for everything inside them: every step that matters is checked
+# explicitly (`|| return 1`). Do not rely on errexit here.
+#
 # Migration invariants (see apps/manifests/stalwart/migrate/):
 #   * The live 0.15 database (STALWART_DB_NAME) is only ever read. Hop 1 runs
 #     on a scratch copy; v1 writes only STALWART_V1_DB_NAME. Until v1 has
@@ -53,8 +57,8 @@ _mt_stalwart_job_status() {
 # it to finish, prints its status lines. Returns non-zero on failure/timeout.
 _mt_stalwart_run_job() {
     local job="$1" tpl="$2" timeout="$3" i state=""
-    kubectl delete job "$job" -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null
-    envsubst < "$tpl" | kubectl create -f - >/dev/null
+    kubectl delete job "$job" -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null || return 1
+    envsubst < "$tpl" | kubectl create -f - >/dev/null || return 1
     print_status "Job $job started (timeout ${timeout}s)"
     for ((i = 0; i < timeout; i += 5)); do
         state=$(kubectl get job "$job" -n "$NS_MAIL" -o json | jq -r '
@@ -82,8 +86,11 @@ _mt_stalwart_scripts_configmap() {
 
 _mt_stalwart_wait_no_pods() {
     local i
+    local pods
     for i in $(seq 1 120); do
-        if [ -z "$(kubectl get pods -n "$NS_MAIL" -l app=stalwart -o name 2>/dev/null)" ]; then
+        # An API error is not "no pods": a 0.15 pod still accepting mail
+        # while the copy runs would lose that mail after cutover.
+        if pods=$(kubectl get pods -n "$NS_MAIL" -l app=stalwart -o name) && [ -z "$pods" ]; then
             return 0
         fi
         sleep 2
@@ -115,8 +122,14 @@ _mt_stalwart_migration_sc() {
 _mt_stalwart_migration_cleanup() {
     local pv
     pv=$(kubectl get pvc stalwart-migration -n "$NS_MAIL" -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)
-    kubectl delete job stalwart-migrate-dump stalwart-migrate -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null
-    kubectl delete pvc stalwart-migration -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null
+    kubectl delete job stalwart-migrate-dump stalwart-migrate -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null || return 1
+    kubectl delete pvc stalwart-migration -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null || return 1
+    # Confirm the claim is gone whatever the earlier lookup returned (a
+    # transient API error there must not skip the check).
+    if [ -n "$(kubectl get pvc stalwart-migration -n "$NS_MAIL" -o name --ignore-not-found)" ]; then
+        print_error "PVC stalwart-migration still exists in $NS_MAIL; it holds key material. Delete it by hand."
+        return 1
+    fi
     if [ -n "$pv" ]; then
         local i
         for i in $(seq 1 60); do
@@ -132,9 +145,15 @@ _mt_stalwart_migration_cleanup() {
 # database was never written.
 _mt_stalwart_restore_v015() {
     print_warning "Restoring Stalwart 0.15 (its database was not modified)"
-    kubectl scale deployment stalwart -n "$NS_MAIL" --replicas="$STALWART_MIN_REPLICAS" >/dev/null
+    # rollout status on a 0-replica Deployment succeeds at once, so a failed
+    # scale must not be mistaken for a restore.
+    if ! kubectl scale deployment stalwart -n "$NS_MAIL" --replicas="$STALWART_MIN_REPLICAS" >/dev/null; then
+        print_error "!!! Could not scale Stalwart 0.15 back up: MAIL IS DOWN for $MT_TENANT !!!"
+        return 1
+    fi
     if [ "$STALWART_MIN_REPLICAS" != "$STALWART_MAX_REPLICAS" ]; then
-        envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-hpa.yaml.tpl" | kubectl apply -f - >/dev/null
+        envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-hpa.yaml.tpl" | kubectl apply -f - >/dev/null \
+            || print_warning "Could not re-apply stalwart-hpa; 0.15 runs at its minimum replicas"
     fi
     if ! kubectl rollout status deployment/stalwart -n "$NS_MAIL" --timeout=300s; then
         print_error "!!! Stalwart 0.15 did NOT come back after the failed migration: MAIL IS DOWN for $MT_TENANT !!!"
@@ -161,8 +180,11 @@ mt_stalwart_v1_migrate() {
     fi
 
     print_status "Stalwart 0.15 → v1 migration for $MT_TENANT (#715)"
-    _mt_stalwart_scripts_configmap
-    kubectl apply -f - >/dev/null <<EOF
+    # Leftovers from an earlier, interrupted attempt (the PVC spec is
+    # immutable, and an old volume would still hold its export).
+    _mt_stalwart_migration_cleanup || return 1
+    _mt_stalwart_scripts_configmap || return 1
+    kubectl apply -f - >/dev/null <<EOF || return 1
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -190,9 +212,13 @@ EOF
     # Mail outage starts: inbound waits in Postfix's queue (connect failures
     # are temporary errors there), clients see connection refused.
     print_status "Stopping Stalwart 0.15 (mail outage begins; Postfix queues inbound mail)"
-    kubectl delete hpa stalwart-hpa -n "$NS_MAIL" --ignore-not-found >/dev/null
-    kubectl scale deployment stalwart -n "$NS_MAIL" --replicas=0 >/dev/null
     # On failure: mail first (restore 0.15), then the volume.
+    if ! kubectl delete hpa stalwart-hpa -n "$NS_MAIL" --ignore-not-found >/dev/null \
+            || ! kubectl scale deployment stalwart -n "$NS_MAIL" --replicas=0 >/dev/null; then
+        _mt_stalwart_restore_v015 || true
+        _mt_stalwart_migration_cleanup || true
+        return 1
+    fi
     if ! _mt_stalwart_wait_no_pods; then
         _mt_stalwart_restore_v015 || true
         _mt_stalwart_migration_cleanup || true
@@ -210,11 +236,13 @@ EOF
     kubectl create configmap stalwart-v1-migration -n "$NS_MAIL" \
         --from-literal=state=done --from-literal=at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --from-literal=summary="$(_mt_stalwart_job_status stalwart-migrate | tail -1)" \
-        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null \
+        || print_warning "Could not write the stalwart-v1-migration marker ConfigMap"
     # 0.15 app passwords do not survive the migration. mailer@ is re-issued
     # by provision-smtp (its stored password fails the login check); the
     # email probe only provisions when its Secret is missing, so drop it.
-    kubectl delete secret email-probe-secrets -n "$NS_MAIL" --ignore-not-found >/dev/null
+    kubectl delete secret email-probe-secrets -n "$NS_MAIL" --ignore-not-found >/dev/null \
+        || print_warning "Could not delete email-probe-secrets; re-run scripts/create-email-probe-user after the deploy"
     # The volume held the converted export (OAuth signing key, DKIM keys).
     # The migration itself succeeded and 0.15 is stopped, so a stuck volume
     # must not stop v1 from starting: warn loudly instead (the cleanup
@@ -253,7 +281,7 @@ mt_stalwart_v1_deploy() {
         -o jsonpath='{.spec.clusterIP}')
     : "${INTERNAL_INGRESS_IP:?internal ingress controller has no ClusterIP}"
     export INTERNAL_INGRESS_IP
-    kubectl apply -f - >/dev/null <<EOF
+    kubectl apply -f - >/dev/null <<EOF || return 1
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -294,7 +322,8 @@ EOF
     local plan_sum
     plan_sum=$(printf '%s' "$plan" | sha256sum | cut -c1-16)
     kubectl create secret generic stalwart-v1-plan -n "$NS_MAIL" \
-        --from-file=plan.ndjson=<(printf '%s\n' "$plan") --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        --from-file=plan.ndjson=<(printf '%s\n' "$plan") --dry-run=client -o yaml | kubectl apply -f - >/dev/null \
+        || return 1
 
     # Keep the running pods' checksum while the plan goes in, so applying
     # the manifest does not roll pods that would load the old settings.
@@ -305,7 +334,7 @@ EOF
         live_sum=bootstrap
     fi
     export STALWART_PLAN_CHECKSUM="${live_sum:-bootstrap}"
-    envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-v1.yaml.tpl" | kubectl apply -f - >/dev/null
+    envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-v1.yaml.tpl" | kubectl apply -f - >/dev/null || return 1
     _mt_stalwart_wait_started || return 1
 
     if ! _mt_stalwart_run_job stalwart-v1-plan "$REPO_ROOT/apps/manifests/stalwart/plan-job.yaml.tpl" 300; then
@@ -316,24 +345,24 @@ EOF
     # Listener, store and coordinator changes need a restart: roll when the
     # plan changed (first boot always does: "bootstrap" never matches).
     export STALWART_PLAN_CHECKSUM="$plan_sum"
-    envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-v1.yaml.tpl" | kubectl apply -f - >/dev/null
+    envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-v1.yaml.tpl" | kubectl apply -f - >/dev/null || return 1
 
     if [ "$after_migration" = first-boot-after-migration ]; then
         # Default roles created by 0.16 lack the v1.1/v1.2 permissions. One
         # boot with this flag adds them (and makes upstream's rollback tool
         # unusable from here on; rollback = restore the 0.15 database).
-        kubectl set env deployment/stalwart -n "$NS_MAIL" STALWART_UPDATE_ROLE_PERMISSIONS=true >/dev/null
+        kubectl set env deployment/stalwart -n "$NS_MAIL" STALWART_UPDATE_ROLE_PERMISSIONS=true >/dev/null || return 1
         kubectl rollout status deployment/stalwart -n "$NS_MAIL" --timeout=300s || return 1
-        kubectl set env deployment/stalwart -n "$NS_MAIL" STALWART_UPDATE_ROLE_PERMISSIONS- >/dev/null
+        kubectl set env deployment/stalwart -n "$NS_MAIL" STALWART_UPDATE_ROLE_PERMISSIONS- >/dev/null || return 1
     fi
     kubectl rollout status deployment/stalwart -n "$NS_MAIL" --timeout=300s || return 1
 
     mt_stalwart_v1_oidc_gate || return 1
 
     if [ "$STALWART_MIN_REPLICAS" != "$STALWART_MAX_REPLICAS" ]; then
-        envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-hpa.yaml.tpl" | kubectl apply -f - >/dev/null
+        envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-hpa.yaml.tpl" | kubectl apply -f - >/dev/null || return 1
     else
-        kubectl delete hpa stalwart-hpa -n "$NS_MAIL" --ignore-not-found >/dev/null
+        kubectl delete hpa stalwart-hpa -n "$NS_MAIL" --ignore-not-found >/dev/null || return 1
     fi
 }
 
