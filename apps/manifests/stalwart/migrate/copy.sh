@@ -1,0 +1,67 @@
+#!/bin/bash
+# Stalwart 0.15 → v1 migration, Job 2 step 1 (#715): copy the (stopped) 0.15
+# database into a scratch database for hop 1. 0.16.27 recovery mode rewrites
+# its tables in place, so it must never touch the live 0.15 database: that
+# one stays byte-identical, and rolling back before cutover is just scaling
+# 0.15 up again.
+#
+# Also checks the v1 target is empty (stalwart-migrate needs an empty store).
+# With RESET_V1=yes (dev only, decided by deploy-stalwart.sh) a non-empty v1
+# database is dropped and recreated first.
+#
+# Runs in postgres:18 as the postgres superuser via PgBouncer.
+# Env: PGHOST PGPORT PGUSER PGPASSWORD SRC_DB SCRATCH_DB V1_DB DB_OWNER RESET_V1
+set -euo pipefail
+status() { { printf '%s' "$1" > /dev/termination-log; } 2>/dev/null || true; echo "$1"; }
+trap 'rc=$?; [ $rc -eq 0 ] || status "copy: FAILED at step ${STEP:-?} (exit $rc)"' EXIT
+
+for v in SRC_DB SCRATCH_DB V1_DB DB_OWNER; do
+    [ -n "${!v:-}" ] || { echo "$v is not set" >&2; exit 1; }
+done
+[ "$SCRATCH_DB" != "$SRC_DB" ] && [ "$V1_DB" != "$SRC_DB" ] && [ "$SCRATCH_DB" != "$V1_DB" ] \
+    || { STEP=names; echo "database names must all differ" >&2; exit 1; }
+
+q() { psql -v ON_ERROR_STOP=1 -Atq "$@"; }
+
+# Same isolation as db-init-job.yaml.tpl: owned by the tenant role, no
+# PUBLIC connect, PgBouncer may connect for auth_query.
+create_db() {
+    local db="$1"
+    q -c "CREATE DATABASE \"$db\" OWNER \"$DB_OWNER\""
+    q -c "REVOKE CONNECT ON DATABASE \"$db\" FROM PUBLIC"
+    q -c "GRANT CONNECT ON DATABASE \"$db\" TO \"$DB_OWNER\""
+    q -c "GRANT CONNECT ON DATABASE \"$db\" TO \"pgbouncer\""
+    q -d "$db" -c "REVOKE ALL ON SCHEMA public FROM PUBLIC"
+    q -d "$db" -c "GRANT ALL PRIVILEGES ON SCHEMA public TO \"$DB_OWNER\""
+    q -d "$db" -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+}
+drop_db() {
+    q -c "DROP DATABASE IF EXISTS \"$1\" WITH (FORCE)"
+}
+
+STEP=v1-empty
+v1_tables=$(q -d "$V1_DB" -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")
+if [ "$v1_tables" != "0" ]; then
+    if [ "${RESET_V1:-}" = "yes" ]; then
+        drop_db "$V1_DB"
+        create_db "$V1_DB"
+    else
+        echo "$V1_DB is not empty ($v1_tables tables); refusing (an earlier migration?)" >&2
+        exit 1
+    fi
+fi
+
+STEP=scratch
+drop_db "$SCRATCH_DB"
+create_db "$SCRATCH_DB"
+
+STEP=copy
+src_tables=$(q -d "$SRC_DB" -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")
+# --no-owner/--role: objects end up owned by the tenant role, as Stalwart made them.
+pg_dump -Fc --no-owner -d "$SRC_DB" \
+    | pg_restore --no-owner --role="$DB_OWNER" --exit-on-error -d "$SCRATCH_DB"
+dst_tables=$(q -d "$SCRATCH_DB" -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")
+[ "$src_tables" = "$dst_tables" ] || { echo "table count mismatch: $src_tables vs $dst_tables" >&2; exit 1; }
+size=$(q -c "SELECT pg_size_pretty(pg_database_size('$SCRATCH_DB'))")
+
+status "copy: OK tables=$dst_tables size=$size v1_reset=${RESET_V1:-no}"

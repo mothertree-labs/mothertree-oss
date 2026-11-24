@@ -1,0 +1,16 @@
+# stalwart-migrate answers for the 0.15 → 0.16.27 → v1 migration (#715).
+# Static because hop 1 creates no OIDC Directory (v1's own plan creates it
+# afterwards), so `prepare` asks only these global questions. If upstream adds
+# a question, `prepare --non-interactive` exits 1 and the migration stops
+# before copying anything.
+version = 1
+
+# Message bodies stay in the tenant's S3 bucket; v1 reads them with the same keys.
+[global.blob_store]
+mode = "reuse"
+
+[global.categories]
+include = ["settings", "principals", "mail", "calendars", "contacts", "files", "sieve", "identities", "push_subscriptions", "spam_samples", "reports", "archive", "spam_model", "queue", "tasks", "telemetry"]
+
+[global.changed_defaults]
+policy = "recommended"
