@@ -33,10 +33,11 @@ open("migrate_v016.py", "wb").write(data)
 EOF
 
 STEP=deps
-# migrate_v016.py imports requests (+ urllib3). Pinned; installed into the
-# pod's scratch dir only.
+# migrate_v016.py imports requests (+ urllib3). Every package and wheel hash
+# is pinned in requirements.txt; installed into the scratch dir only.
 python3 -m pip install --quiet --disable-pip-version-check --no-cache-dir \
-    --target /work/hop1/pydeps "requests==2.34.2" > pip.log 2>&1
+    --require-hashes --no-deps --only-binary=:all: \
+    --target /work/hop1/pydeps -r /scripts/requirements.txt > pip.log 2>&1
 export PYTHONPATH=/work/hop1/pydeps
 
 STEP=dump
@@ -74,6 +75,30 @@ for k in ("database", "url", "dbName"):
     if c.get(k) == live:
         sys.exit(f"{k} still names the live database after retargeting")
 open(dst, "w").write(json.dumps(c))
+EOF
+
+STEP=export-check
+# The import runs against the scratch copy; nothing in it may point a store
+# back at the live database. Only a count is reported.
+python3 -I - export.patched.ndjson "$SRC_DB" <<'EOF'
+import json, sys
+path, live = sys.argv[1:3]
+hits = 0
+def walk(o):
+    global hits
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k in ("database", "dbName", "url") and v == live:
+                hits += 1
+            walk(v)
+    elif isinstance(o, list):
+        for x in o:
+            walk(x)
+for line in open(path):
+    if line.strip():
+        walk(json.loads(line))
+if hits:
+    sys.exit(f"export names the live database in {hits} field(s)")
 EOF
 
 STEP=summary

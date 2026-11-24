@@ -77,7 +77,7 @@ _mt_stalwart_scripts_configmap() {
     kubectl create configmap stalwart-migrate-scripts -n "$NS_MAIL" \
         --from-file="$d/dump.sh" --from-file="$d/copy.sh" --from-file="$d/v016-recovery.sh" \
         --from-file="$d/stop-v016.sh" --from-file="$d/migrate.sh" --from-file="$d/answers.toml" \
-        --from-file="$d/patch_v016_secrets.py" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        --from-file="$d/patch_v016_secrets.py" --from-file="$d/requirements.txt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 }
 
 _mt_stalwart_wait_no_pods() {
@@ -92,15 +92,56 @@ _mt_stalwart_wait_no_pods() {
     return 1
 }
 
+# The migration volume holds the converted export (OAuth signing key, DKIM
+# keys), so it must be on a storage class that deletes the disk with the PVC.
+# LKE's DEFAULT class retains volumes, so never rely on the default there.
+_mt_stalwart_migration_sc() {
+    local sc
+    if kubectl get storageclass linode-block-storage >/dev/null 2>&1; then
+        echo linode-block-storage
+        return
+    fi
+    sc=$(kubectl get storageclass -o json | jq -r '.items[]
+        | select(.metadata.annotations["storageclass.kubernetes.io/is-default-class"] == "true")
+        | select(.reclaimPolicy == "Delete") | .metadata.name' | head -1)
+    if [ -z "$sc" ]; then
+        print_error "No storage class with reclaimPolicy Delete for the migration volume" >&2
+        return 1
+    fi
+    echo "$sc"
+}
+
+# Delete the migration Jobs and volume and make sure the disk is gone.
+_mt_stalwart_migration_cleanup() {
+    local pv
+    pv=$(kubectl get pvc stalwart-migration -n "$NS_MAIL" -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)
+    kubectl delete job stalwart-migrate-dump stalwart-migrate -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null
+    kubectl delete pvc stalwart-migration -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null
+    if [ -n "$pv" ]; then
+        local i
+        for i in $(seq 1 60); do
+            kubectl get pv "$pv" >/dev/null 2>&1 || return 0
+            sleep 2
+        done
+        print_error "Migration volume $pv still exists after its PVC was deleted; it holds key material. Delete it (and the cloud disk) by hand."
+        return 1
+    fi
+}
+
 # Restore 0.15 after a failed migration step. Safe because the live 0.15
 # database was never written.
 _mt_stalwart_restore_v015() {
     print_warning "Restoring Stalwart 0.15 (its database was not modified)"
-    kubectl scale deployment stalwart -n "$NS_MAIL" --replicas="$STALWART_MIN_REPLICAS" >/dev/null || true
+    kubectl scale deployment stalwart -n "$NS_MAIL" --replicas="$STALWART_MIN_REPLICAS" >/dev/null
     if [ "$STALWART_MIN_REPLICAS" != "$STALWART_MAX_REPLICAS" ]; then
-        envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-hpa.yaml.tpl" | kubectl apply -f - >/dev/null || true
+        envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-hpa.yaml.tpl" | kubectl apply -f - >/dev/null
     fi
-    kubectl rollout status deployment/stalwart -n "$NS_MAIL" --timeout=300s || true
+    if ! kubectl rollout status deployment/stalwart -n "$NS_MAIL" --timeout=300s; then
+        print_error "!!! Stalwart 0.15 did NOT come back after the failed migration: MAIL IS DOWN for $MT_TENANT !!!"
+        dump_pod_diagnostics "$NS_MAIL" "app=stalwart" || true
+        return 1
+    fi
+    print_success "Stalwart 0.15 is serving again"
 }
 
 # The one-time migration. Returns 0 when the v1 database holds the migrated
@@ -109,6 +150,8 @@ mt_stalwart_v1_migrate() {
     : "${STALWART_SCRATCH_DB_NAME:?}" "${STALWART_V1_DB_NAME:?}" "${STALWART_DB_NAME:?}"
     export STALWART_SCRATCH_DB_NAME
     export MIGRATE_V016_URL="$STALWART_MIGRATE_V016_URL" MIGRATE_V016_SHA256="$STALWART_MIGRATE_V016_SHA256"
+    local sc
+    sc=$(_mt_stalwart_migration_sc) || return 1
     # dev-class data is disposable: a half-written v1 DB from an earlier
     # attempt is recreated. prod refuses instead (copy.sh).
     if mt_is_dev_class; then
@@ -129,6 +172,7 @@ metadata:
     app.kubernetes.io/name: stalwart
     app.kubernetes.io/component: migrate
 spec:
+  storageClassName: ${sc}
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
@@ -139,6 +183,7 @@ EOF
     if ! _mt_stalwart_run_job stalwart-migrate-dump \
             "$REPO_ROOT/apps/manifests/stalwart/migrate/dump-job.yaml.tpl" 900; then
         print_error "Export from Stalwart 0.15 failed; 0.15 keeps running, nothing changed"
+        _mt_stalwart_migration_cleanup || true
         return 1
     fi
 
@@ -147,15 +192,18 @@ EOF
     print_status "Stopping Stalwart 0.15 (mail outage begins; Postfix queues inbound mail)"
     kubectl delete hpa stalwart-hpa -n "$NS_MAIL" --ignore-not-found >/dev/null
     kubectl scale deployment stalwart -n "$NS_MAIL" --replicas=0 >/dev/null
+    # On failure: mail first (restore 0.15), then the volume.
     if ! _mt_stalwart_wait_no_pods; then
-        _mt_stalwart_restore_v015
+        _mt_stalwart_restore_v015 || true
+        _mt_stalwart_migration_cleanup || true
         return 1
     fi
 
     if ! _mt_stalwart_run_job stalwart-migrate \
             "$REPO_ROOT/apps/manifests/stalwart/migrate/migrate-job.yaml.tpl" 2700; then
         print_error "Migration failed; see the status lines above"
-        _mt_stalwart_restore_v015
+        _mt_stalwart_restore_v015 || true
+        _mt_stalwart_migration_cleanup || true
         return 1
     fi
 
@@ -167,9 +215,13 @@ EOF
     # by provision-smtp (its stored password fails the login check); the
     # email probe only provisions when its Secret is missing, so drop it.
     kubectl delete secret email-probe-secrets -n "$NS_MAIL" --ignore-not-found >/dev/null
-    # The volume holds the converted export (OAuth signing key, DKIM keys).
-    kubectl delete job stalwart-migrate-dump stalwart-migrate -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null
-    kubectl delete pvc stalwart-migration -n "$NS_MAIL" --ignore-not-found >/dev/null
+    # The volume held the converted export (OAuth signing key, DKIM keys).
+    # The migration itself succeeded and 0.15 is stopped, so a stuck volume
+    # must not stop v1 from starting: warn loudly instead (the cleanup
+    # function names the volume to delete by hand).
+    if ! _mt_stalwart_migration_cleanup; then
+        print_warning "!!! Continuing with v1; the leftover migration volume above must be deleted by hand !!!"
+    fi
     print_success "Migration complete; v1 store is in $STALWART_V1_DB_NAME"
 }
 

@@ -279,6 +279,11 @@ fi
 # SES creds separately because they are mounted as env vars and would
 # otherwise roll silently on Secret-only changes.
 RENDERED_CONFIG=$(envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" 2>/dev/null || echo "")
+# v1 pods read these at start; rotating any of them must roll the pods
+# (stalwart-secrets is applied with plain kubectl apply, so the change
+# tracker would not see it). The master secret is excluded: it is re-salted
+# on every run and only the retired 0.15 Deployment uses it.
+export STALWART_SECRETS_CHECKSUM=$(printf '%s' "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$STALWART_OIDC_SECRET$S3_MAIL_ACCESS_KEY$S3_MAIL_SECRET_KEY${SES_SMTP_ENDPOINT:-}${SES_SMTP_USERNAME:-}${SES_SMTP_PASSWORD:-}" | sha256sum | cut -c1-16)
 export CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$S3_MAIL_ACCESS_KEY${SES_SMTP_ENDPOINT:-}${SES_SMTP_USERNAME:-}${SES_SMTP_PASSWORD:-}$RENDERED_CONFIG" | sha256sum | cut -d' ' -f1 | head -c 12)
 print_status "Config checksum: $CONFIG_CHECKSUM"
 
@@ -448,6 +453,9 @@ stringData:
   STALWART_ADMIN_PASSWORD: "$STALWART_ADMIN_PASSWORD"
   STALWART_DB_PASSWORD: "$STALWART_DB_PASSWORD"
   STALWART_OIDC_SECRET: "$STALWART_OIDC_SECRET"
+  # Only the 0.15 Deployment reads it (master-user login). Kept until the 0.15
+  # manifest is retired, so a failed migration can still restore 0.15.
+  STALWART_MASTER_SECRET: "$STALWART_MASTER_SECRET"
   S3_ACCESS_KEY: "$S3_MAIL_ACCESS_KEY"
   S3_SECRET_KEY: "$S3_MAIL_SECRET_KEY"
 EOF
@@ -576,7 +584,7 @@ case "$STALWART_GENERATION" in
         # Mail is down for the length of Job 2 (minutes); prod needs an
         # explicit go-ahead, a fresh pg_dump on the PG VM and a bucket
         # snapshot first (see the #715 runbook).
-        if [ "$MT_ENV" = "prod" ] && [ "${STALWART_MIGRATE_CONFIRM:-}" != "yes" ]; then
+        if ! mt_is_dev_class && [ "${STALWART_MIGRATE_CONFIRM:-}" != "yes" ]; then
             print_error "Stalwart for $MT_TENANT is still 0.15 and must be migrated to v1 (#715)."
             print_error "This stops mail for a few minutes. Take a pg_dump of $STALWART_DB_NAME and an S3 snapshot,"
             print_error "then re-run with STALWART_MIGRATE_CONFIRM=yes."

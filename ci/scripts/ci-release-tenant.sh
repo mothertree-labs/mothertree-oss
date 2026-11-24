@@ -177,15 +177,16 @@ fi
 # deleted, bloating calendar-automation scan cycles (each account = one IMAP
 # connection per poll). Stalwart v1 JMAP via scripts/lib/stalwart-jmap.py.
 if [[ -n "$E2E_STALWART_ADMIN_PASSWORD" && -n "$E2E_BASE_DOMAIN" ]]; then
-  SW_ENV=(env STALWART_URL="https://mail.${E2E_BASE_DOMAIN}" STALWART_TIMEOUT=30
-          STALWART_ADMIN_PASSWORD="$E2E_STALWART_ADMIN_PASSWORD")
+  # Exported (not passed through `env` argv) so the password never shows in ps.
+  export STALWART_URL="https://mail.${E2E_BASE_DOMAIN}" STALWART_TIMEOUT=30
+  export STALWART_ADMIN_PASSWORD="$E2E_STALWART_ADMIN_PASSWORD"
   SW_JMAP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/stalwart-jmap.py"
 
   echo ""
   echo "Cleaning up Stalwart accounts with prefix: ${PREFIX}"
 
   # Account names are local parts; print the full addresses to delete.
-  STALWART_USERS=$("${SW_ENV[@]}" python3 "$SW_JMAP" accounts --prefix "$PREFIX" 2>/dev/null \
+  STALWART_USERS=$(python3 "$SW_JMAP" accounts --prefix "$PREFIX" 2>/dev/null \
     | cut -f1 || true)
 
   if [[ -z "$STALWART_USERS" ]]; then
@@ -198,7 +199,7 @@ if [[ -n "$E2E_STALWART_ADMIN_PASSWORD" && -n "$E2E_BASE_DOMAIN" ]]; then
         deleted|missing) SW_DELETED=$(( SW_DELETED + 1 )) ;;
         *) echo "  Failed: ${address} ${rest}"; SW_FAILED=$(( SW_FAILED + 1 )) ;;
       esac
-    done < <(printf '%s\n' "$STALWART_USERS" | "${SW_ENV[@]}" python3 "$SW_JMAP" delete-accounts 2>&1 || true)
+    done < <(printf '%s\n' "$STALWART_USERS" | python3 "$SW_JMAP" delete-accounts 2>&1 || true)
     echo "Stalwart cleanup: ${SW_DELETED} deleted, ${SW_FAILED} failed."
   fi
 else

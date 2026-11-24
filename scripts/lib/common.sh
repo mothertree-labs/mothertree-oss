@@ -674,31 +674,18 @@ mt_wait_for_stalwart() {
         print_warning "mt_wait_for_stalwart: MAIL_HOST not set, skipping"
         return 0
     fi
+    # Anonymous on purpose: this URL goes through the public ingress, so no
+    # credential is sent. v1 answers an unauthenticated /jmap/session with 200
+    # once the HTTP stack is up; admin credentials are exercised in-cluster
+    # (provision-smtp, CI user setup) through port-forwards instead.
     local url="https://${mail_host}/jmap/session"
-    local auth_header=""
-    if [ -n "${STALWART_ADMIN_PASSWORD:-}" ]; then
-        auth_header="Authorization: Basic $(printf 'admin:%s' "$STALWART_ADMIN_PASSWORD" | base64 | tr -d '\n')"
-    fi
-    print_status "Waiting for Stalwart JMAP API: $url${auth_header:+ (as admin)}"
+    print_status "Waiting for Stalwart JMAP API: $url"
     local code="000" i
     for i in $(seq 1 30); do
-        if [ -n "$auth_header" ]; then
-            # Header fed on stdin so the credential never appears in argv.
-            code=$(printf '%s\n' "$auth_header" | curl -s -o /dev/null -w '%{http_code}' -m 5 -H @- "$url" 2>/dev/null || echo "000")
-            if [ "$code" = "200" ]; then
-                print_success "Stalwart JMAP API responsive after $((i*5))s (HTTP 200, admin accepted)"
-                return 0
-            fi
-            if [[ "$code" =~ ^(401|403)$ ]]; then
-                print_warning "Stalwart is up but rejected the admin credentials (HTTP $code) — check stalwart.admin_password; proceeding"
-                return 0
-            fi
-        else
-            code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$url" 2>/dev/null || echo "000")
-            if [[ "$code" =~ ^(200|401|403)$ ]]; then
-                print_success "Stalwart JMAP API responsive after $((i*5))s (HTTP $code)"
-                return 0
-            fi
+        code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$url" 2>/dev/null || echo "000")
+        if [[ "$code" =~ ^(200|401|403)$ ]]; then
+            print_success "Stalwart JMAP API responsive after $((i*5))s (HTTP $code)"
+            return 0
         fi
         # 5xx or "000" (timeout/refused) mean keep waiting.
         sleep 5

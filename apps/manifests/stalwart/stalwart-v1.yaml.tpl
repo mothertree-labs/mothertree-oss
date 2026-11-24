@@ -12,7 +12,7 @@
 # Required environment variables:
 #   NS_MAIL TENANT_NAME PG_HOST STALWART_V1_DB_NAME STALWART_DB_USER
 #   STALWART_MIN_REPLICAS STALWART_MEMORY_REQUEST STALWART_CPU_REQUEST
-#   STALWART_MEMORY_LIMIT STALWART_PLAN_CHECKSUM
+#   STALWART_MEMORY_LIMIT STALWART_PLAN_CHECKSUM STALWART_SECRETS_CHECKSUM
 #   AUTH_HOST INTERNAL_INGRESS_IP
 ---
 apiVersion: v1
@@ -50,6 +50,8 @@ spec:
         # Listener, store and coordinator changes only take effect on restart,
         # so any change to the applied plan rolls the pods.
         checksum/plan: "${STALWART_PLAN_CHECKSUM}"
+        # Secret rotation (admin, DB, S3, SES) rolls the pods too.
+        checksum/secrets: "${STALWART_SECRETS_CHECKSUM}"
     spec:
       automountServiceAccountToken: false
       securityContext:

@@ -23,6 +23,9 @@ spec:
   template:
     metadata:
       labels:
+        # Keep this pod's output out of Loki: it handles the converted
+        # export (OAuth signing key, DKIM/TLS keys) and the admin password.
+        vector.dev/exclude: "true"
         app.kubernetes.io/name: stalwart
         app.kubernetes.io/component: config-plan
         # allow-stalwart-mgmt-ingress: may reach Stalwart :8080
@@ -39,10 +42,10 @@ spec:
       - name: apply
         image: stalwartlabs/cli:2.0.0
         args: ["apply", "--file", "/plan/plan.ndjson", "--quiet", "--no-color"]
-        # Distroless, so no status file: --quiet prints the summary only, and
-        # on failure the per-operation errors (object ids and properties,
-        # never values).
-        terminationMessagePolicy: FallbackToLogsOnError
+        # Distroless, so no status file: only the exit code is reported. The
+        # plan holds the Redis ACL password; nothing from the logs is copied
+        # into pod status, and the logs are excluded from Loki.
+        terminationMessagePolicy: File
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

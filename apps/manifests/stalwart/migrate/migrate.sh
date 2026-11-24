@@ -48,4 +48,7 @@ if [ "${failed:-0}" != "0" ] || [ "${mismatches:-x}" != "0" ]; then
     STEP="verify (accounts_failed=${failed:-?} mismatches=${mismatches:-?})"
     exit 1
 fi
+# The converted export and logs hold the OAuth signing key and DKIM keys;
+# the volume is deleted too, this is belt and braces.
+rm -rf /work/hop1 /work/hop2 /work/copy 2>/dev/null || true
 status "migrate: OK accounts=${accounts:-?} emails=${emails:-?} accounts_failed=0 mismatches=0"

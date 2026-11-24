@@ -32,6 +32,9 @@ spec:
   template:
     metadata:
       labels:
+        # Keep this pod's output out of Loki: it handles the converted
+        # export (OAuth signing key, DKIM/TLS keys) and the admin password.
+        vector.dev/exclude: "true"
         app.kubernetes.io/name: stalwart
         app.kubernetes.io/component: migrate
     spec:
@@ -46,7 +49,7 @@ spec:
           type: RuntimeDefault
       initContainers:
       - name: copy
-        image: postgres:18
+        image: postgres:18.7
         command: ["bash", "/scripts/copy.sh"]
         securityContext:
           runAsUser: 999
@@ -77,6 +80,8 @@ spec:
         - name: RESET_V1
           value: "${STALWART_RESET_V1}"
         volumeMounts:
+        - name: work
+          mountPath: /work
         - name: scripts
           mountPath: /scripts
           readOnly: true
@@ -177,10 +182,10 @@ spec:
       - name: apply-export
         image: stalwartlabs/cli:1.0.14
         args: ["apply", "--file", "/work/hop1/export.patched.ndjson", "--quiet", "--no-color"]
-        # Distroless: no shell to write a status line. --quiet prints only
-        # the summary; on failure the last log lines are the per-operation
-        # errors (object ids/properties, no values).
-        terminationMessagePolicy: FallbackToLogsOnError
+        # Distroless, no shell: the termination message stays empty and only
+        # the exit code is reported (copying log lines into pod status could
+        # carry values from the export). Logs are excluded from Loki.
+        terminationMessagePolicy: File
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

@@ -24,6 +24,9 @@ spec:
   template:
     metadata:
       labels:
+        # Keep this pod's output out of Loki: it handles the converted
+        # export (OAuth signing key, DKIM/TLS keys) and the admin password.
+        vector.dev/exclude: "true"
         app.kubernetes.io/name: stalwart
         app.kubernetes.io/component: migrate
         # allow-stalwart-mgmt-ingress: may reach stalwart:8080

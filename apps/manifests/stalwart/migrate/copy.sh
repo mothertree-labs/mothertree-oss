@@ -18,8 +18,13 @@ trap 'rc=$?; [ $rc -eq 0 ] || status "copy: FAILED at step ${STEP:-?} (exit $rc)
 for v in SRC_DB SCRATCH_DB V1_DB DB_OWNER; do
     [ -n "${!v:-}" ] || { echo "$v is not set" >&2; exit 1; }
 done
-[ "$SCRATCH_DB" != "$SRC_DB" ] && [ "$V1_DB" != "$SRC_DB" ] && [ "$SCRATCH_DB" != "$V1_DB" ] \
-    || { STEP=names; echo "database names must all differ" >&2; exit 1; }
+STEP=names
+for v in SRC_DB SCRATCH_DB V1_DB DB_OWNER; do
+    [[ "${!v}" =~ ^[a-z0-9_]+$ ]] || { echo "$v is not a plain identifier" >&2; exit 1; }
+done
+# This step DROPs databases as superuser: only ever the two derived names.
+[ "$SCRATCH_DB" = "${SRC_DB}_v016" ] && [ "$V1_DB" = "${SRC_DB}_v1" ] \
+    || { echo "scratch/v1 database names must be <live>_v016 / <live>_v1" >&2; exit 1; }
 
 q() { psql -v ON_ERROR_STOP=1 -Atq "$@"; }
 
@@ -36,6 +41,12 @@ create_db() {
     q -d "$db" -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
 }
 drop_db() {
+    local owner
+    owner=$(q -c "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='$1'")
+    if [ -n "$owner" ] && [ "$owner" != "$DB_OWNER" ]; then
+        echo "refusing to drop $1: owned by $owner, not $DB_OWNER" >&2
+        exit 1
+    fi
     q -c "DROP DATABASE IF EXISTS \"$1\" WITH (FORCE)"
 }
 
@@ -58,8 +69,13 @@ create_db "$SCRATCH_DB"
 STEP=copy
 src_tables=$(q -d "$SRC_DB" -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")
 # --no-owner/--role: objects end up owned by the tenant role, as Stalwart made them.
-pg_dump -Fc --no-owner -d "$SRC_DB" \
-    | pg_restore --no-owner --role="$DB_OWNER" --exit-on-error -d "$SCRATCH_DB"
+# stderr (COPY errors quote table rows) stays on the migration volume, in a
+# directory of this step's own (it runs as a different uid than dump.sh,
+# whose hop1/ is 0700).
+umask 077
+mkdir -p /work/copy
+pg_dump -Fc --no-owner -d "$SRC_DB" 2> /work/copy/pg_dump.err \
+    | pg_restore --no-owner --role="$DB_OWNER" --exit-on-error -d "$SCRATCH_DB" 2> /work/copy/pg_restore.err
 dst_tables=$(q -d "$SCRATCH_DB" -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")
 [ "$src_tables" = "$dst_tables" ] || { echo "table count mismatch: $src_tables vs $dst_tables" >&2; exit 1; }
 size=$(q -c "SELECT pg_size_pretty(pg_database_size('$SCRATCH_DB'))")
