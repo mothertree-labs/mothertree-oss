@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Groundwork for Stalwart v1 (#715), step 1 of 3. No change to the running
+  mail server.**
+  - `deploy-stalwart.sh` deploys a small Redis (`stalwart-redis`) in each
+    tenant's mail namespace, for v1's cluster coordinator and shared in-memory
+    store. It has its own password, separate from the admin-portal Redis,
+    because Stalwart v1 stores the Redis URL in clear in its settings. A new
+    NetworkPolicy, `allow-stalwart-redis-ingress`, lets only Stalwart pods
+    reach it on 6379. The image is pinned to `redis:8.12.0-alpine`, and a
+    failed read of its Secret fails the deploy instead of generating a new
+    password.
+  - The db-init Job also creates an empty `stalwart_<tenant>_v1` database. v1
+    can't upgrade a 0.15/0.16 store in place, so the migration copies into this
+    new database and never writes to the live one.
+
 ### Changed
 - **Portals on connect-redis 11 (#834).** 11.0.0 has the same source and API
   as 10.0.0 but ships only an ES module, so both portals now load it with

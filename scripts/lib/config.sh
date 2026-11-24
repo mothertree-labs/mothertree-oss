@@ -219,6 +219,14 @@ _mt_load_tenant_yaml() {
   export SYNAPSE_DB_USER="$SYNAPSE_DB_NAME"
   export MAS_DB_USER="$MAS_DB_NAME"
   export STALWART_DB_USER="stalwart_${MT_TENANT}"
+  # Stalwart v1 store (#715). v1 cannot upgrade a 0.15/0.16 store in place, so
+  # it gets its own database; the live 0.15 database is never written by any
+  # v0.16/v1 process. Derived here only, so every caller agrees on the name.
+  if [ -n "$STALWART_DB_NAME" ]; then
+    export STALWART_V1_DB_NAME="${STALWART_DB_NAME}_v1"
+  else
+    export STALWART_V1_DB_NAME=""
+  fi
   export ROUNDCUBE_DB_USER="roundcube_${MT_TENANT}"
 
   # S3 endpoint. Default: Linode Object Storage in s3.cluster, virtual-host
