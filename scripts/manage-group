@@ -21,7 +21,9 @@
 #   ./scripts/manage-group --tenant=<name> --env=dev --remove team-all user@dev.example.com
 #   ./scripts/manage-group --tenant=<name> --env=dev --delete team-all
 #
-# Members can be Stalwart account names or email addresses of existing accounts.
+# Members are email addresses; a bare name means <name>@<tenant email domain>.
+# Uses the Stalwart v1 JMAP management API (x:MailingList) through
+# scripts/lib/stalwart-jmap.py.
 
 set -euo pipefail
 
@@ -188,25 +190,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
-API_BASE="http://localhost:${LOCAL_PORT}/api"
-AUTH="admin:${STALWART_ADMIN_PASSWORD}"
 
-# Helper: make an API call, return body and set HTTP_CODE
-api_call() {
-    local method="$1"
-    local endpoint="$2"
-    local data="${3:-}"
-
-    local args=(-s -w "\n%{http_code}" --max-time 10 -X "$method" -u "$AUTH")
-    if [ -n "$data" ]; then
-        args+=(-H "Content-Type: application/json" -d "$data")
-    fi
-
-    local result
-    result=$(curl "${args[@]}" "${API_BASE}${endpoint}" 2>/dev/null)
-    HTTP_CODE=$(echo "$result" | tail -n1)
-    RESPONSE_BODY=$(echo "$result" | sed '$d')
+# Stalwart v1 JMAP management API (x:MailingList/*) via the shared helper.
+# Groups are mailing lists whose recipients are email addresses.
+jmap() {
+    STALWART_URL="http://localhost:${LOCAL_PORT}" STALWART_ADMIN_PASSWORD="$STALWART_ADMIN_PASSWORD" \
+        python3 "$REPO_ROOT/scripts/lib/stalwart-jmap.py" "$@"
 }
+
+# A bare name means an address on the tenant's email domain.
+to_address() {
+    case "$1" in
+        *@*) printf '%s\n' "$1" ;;
+        *)   printf '%s@%s\n' "$1" "$EMAIL_DOMAIN" ;;
+    esac
+}
+
+LIST_EMAIL=""
+if [ -n "$LIST_NAME" ]; then
+    LIST_EMAIL=$(to_address "$LIST_NAME")
+fi
+MEMBER_ADDRESSES=()
+for member in "${MEMBERS[@]+"${MEMBERS[@]}"}"; do
+    MEMBER_ADDRESSES+=("$(to_address "$member")")
+done
 
 # ---- Verify SMTP acceptance and flush Postfix cache ----
 verify_and_flush_cache() {
@@ -268,19 +275,18 @@ except Exception as e:
     print_success "Postfix cache flushed for <$email>"
 }
 
+
 # ---- Action: list all groups ----
 do_list() {
     print_status "Listing groups for $TENANT ($MT_ENV)..."
-    api_call GET "/principal?type=list&limit=100"
-
-    if [ "$HTTP_CODE" != "200" ]; then
-        print_error "Failed to list groups (HTTP $HTTP_CODE)"
-        echo "$RESPONSE_BODY"
+    local lists
+    if ! lists=$(jmap lists); then
+        print_error "Failed to list groups"
         exit 1
     fi
 
     local total
-    total=$(echo "$RESPONSE_BODY" | jq -r '.data.total // 0')
+    total=$(echo "$lists" | jq 'length')
 
     if [ "$total" = "0" ]; then
         print_status "No groups found"
@@ -288,39 +294,37 @@ do_list() {
     fi
 
     echo ""
-    echo "$RESPONSE_BODY" | jq -r '.data.items[] | "  \(.name)\t\(.emails // [] | join(", "))\t(\(.members // [] | length) members)"'
+    echo "$lists" | jq -r '.[] | "  \(.name)\t\(.emailAddress)\t(\(.recipients | length) members)"'
     echo ""
     print_status "$total group(s) found"
 }
 
 # ---- Action: show group details ----
 do_show() {
-    print_status "Fetching group '$LIST_NAME'..."
-    api_call GET "/principal/$LIST_NAME"
-
-    if [ "$HTTP_CODE" != "200" ]; then
-        if echo "$RESPONSE_BODY" | grep -q "notFound"; then
-            print_error "Group '$LIST_NAME' does not exist"
-        else
-            print_error "Failed to fetch group (HTTP $HTTP_CODE)"
-            echo "$RESPONSE_BODY"
-        fi
+    print_status "Fetching group '$LIST_EMAIL'..."
+    local group rc=0
+    group=$(jmap list-get "$LIST_EMAIL") || rc=$?
+    if [ "$rc" = "4" ]; then
+        print_error "Group '$LIST_EMAIL' does not exist"
+        exit 1
+    elif [ "$rc" != "0" ]; then
+        print_error "Failed to fetch group"
         exit 1
     fi
 
     echo ""
-    echo "  Name:    $(echo "$RESPONSE_BODY" | jq -r '.data.name // "N/A"')"
-    echo "  Emails:  $(echo "$RESPONSE_BODY" | jq -r '.data.emails // [] | join(", ")')"
+    echo "  Name:    $(echo "$group" | jq -r '.name // "N/A"')"
+    echo "  Email:   $(echo "$group" | jq -r '.emailAddress // "N/A"')"
     echo ""
 
     local member_count
-    member_count=$(echo "$RESPONSE_BODY" | jq -r '.data.members // [] | length')
+    member_count=$(echo "$group" | jq -r '.recipients | length')
 
     if [ "$member_count" = "0" ]; then
         echo "  No members"
     else
         echo "  Members ($member_count):"
-        echo "$RESPONSE_BODY" | jq -r '.data.members // [] | .[]' | while read -r m; do
+        echo "$group" | jq -r '.recipients[]' | while read -r m; do
             echo "    - $m"
         done
     fi
@@ -329,131 +333,86 @@ do_show() {
 
 # ---- Action: create group or add members ----
 do_create_or_add() {
-    # Check if group already exists
-    api_call GET "/principal/$LIST_NAME"
+    local rc=0
+    jmap list-get "$LIST_EMAIL" > /dev/null || rc=$?
 
-    if [ "$HTTP_CODE" = "200" ] && ! echo "$RESPONSE_BODY" | grep -q "notFound"; then
+    if [ "$rc" = "0" ]; then
         # Group exists — add members
-        if [ ${#MEMBERS[@]} -eq 0 ]; then
+        if [ ${#MEMBER_ADDRESSES[@]} -eq 0 ]; then
             # No members specified, just show the group
             do_show
             return
         fi
 
-        print_status "Group '$LIST_NAME' exists, adding ${#MEMBERS[@]} member(s)..."
-
-        local patches="["
-        local first=true
-        for member in "${MEMBERS[@]}"; do
-            if [ "$first" = true ]; then
-                first=false
-            else
-                patches+=","
-            fi
-            patches+="{\"action\":\"addItem\",\"field\":\"members\",\"value\":\"$member\"}"
-        done
-        patches+="]"
-
-        api_call PATCH "/principal/$LIST_NAME" "$patches"
-
-        if [ "$HTTP_CODE" = "200" ]; then
-            print_success "Members added to '$LIST_NAME'"
-            for member in "${MEMBERS[@]}"; do
+        print_status "Group '$LIST_EMAIL' exists, adding ${#MEMBER_ADDRESSES[@]} member(s)..."
+        if jmap list-members "$LIST_EMAIL" --add "${MEMBER_ADDRESSES[@]}"; then
+            print_success "Members added to '$LIST_EMAIL'"
+            for member in "${MEMBER_ADDRESSES[@]}"; do
                 echo "  + $member"
             done
         else
-            print_error "Failed to add members (HTTP $HTTP_CODE)"
-            echo "$RESPONSE_BODY"
+            print_error "Failed to add members"
             exit 1
+        fi
+    elif [ "$rc" = "4" ]; then
+        # Group does not exist — create it
+        print_status "Creating group <$LIST_EMAIL>..."
+        local result
+        if ! result=$(jmap list-create "$LIST_EMAIL" "Mailing list ${LIST_EMAIL%%@*} for $TENANT" \
+                "${MEMBER_ADDRESSES[@]+"${MEMBER_ADDRESSES[@]}"}"); then
+            print_error "Failed to create group"
+            exit 1
+        fi
+        if [ "$result" = "exists" ]; then
+            print_warning "Group '$LIST_EMAIL' already exists (race condition). Try again to add members."
+        else
+            print_success "Group '$LIST_EMAIL' created"
+            if [ ${#MEMBER_ADDRESSES[@]} -gt 0 ]; then
+                echo "  Members:"
+                for member in "${MEMBER_ADDRESSES[@]}"; do
+                    echo "    - $member"
+                done
+            fi
+            jmap reload > /dev/null || print_warning "Stalwart settings reload failed"
+            verify_and_flush_cache "$LIST_EMAIL"
         fi
     else
-        # Group does not exist — create it
-        LIST_EMAIL="${LIST_NAME}@${EMAIL_DOMAIN}"
-        print_status "Creating group '$LIST_NAME' <$LIST_EMAIL>..."
-
-        local members_json="[]"
-        if [ ${#MEMBERS[@]} -gt 0 ]; then
-            members_json=$(printf '%s\n' "${MEMBERS[@]}" | jq -R . | jq -s .)
-        fi
-
-        local payload
-        payload=$(jq -n \
-            --arg name "$LIST_NAME" \
-            --arg email "$LIST_EMAIL" \
-            --arg desc "Mailing list $LIST_NAME for $TENANT" \
-            --argjson members "$members_json" \
-            '{type: "list", name: $name, emails: [$email], description: $desc, members: $members}')
-
-        api_call POST "/principal" "$payload"
-
-        if [ "$HTTP_CODE" = "200" ]; then
-            if echo "$RESPONSE_BODY" | grep -q "fieldAlreadyExists"; then
-                print_warning "Group '$LIST_NAME' already exists (race condition). Try again to add members."
-            else
-                print_success "Group '$LIST_NAME' created <$LIST_EMAIL>"
-                if [ ${#MEMBERS[@]} -gt 0 ]; then
-                    echo "  Members:"
-                    for member in "${MEMBERS[@]}"; do
-                        echo "    - $member"
-                    done
-                fi
-                verify_and_flush_cache "$LIST_EMAIL"
-            fi
-        else
-            print_error "Failed to create group (HTTP $HTTP_CODE)"
-            echo "$RESPONSE_BODY"
-            exit 1
-        fi
+        print_error "Failed to look up group '$LIST_EMAIL'"
+        exit 1
     fi
 }
 
 # ---- Action: remove members ----
 do_remove() {
-    print_status "Removing ${#MEMBERS[@]} member(s) from '$LIST_NAME'..."
-
-    local patches="["
-    local first=true
-    for member in "${MEMBERS[@]}"; do
-        if [ "$first" = true ]; then
-            first=false
-        else
-            patches+=","
-        fi
-        patches+="{\"action\":\"removeItem\",\"field\":\"members\",\"value\":\"$member\"}"
-    done
-    patches+="]"
-
-    api_call PATCH "/principal/$LIST_NAME" "$patches"
-
-    if [ "$HTTP_CODE" = "200" ]; then
-        print_success "Members removed from '$LIST_NAME'"
-        for member in "${MEMBERS[@]}"; do
+    print_status "Removing ${#MEMBER_ADDRESSES[@]} member(s) from '$LIST_EMAIL'..."
+    local rc=0
+    jmap list-members "$LIST_EMAIL" --remove "${MEMBER_ADDRESSES[@]}" || rc=$?
+    if [ "$rc" = "0" ]; then
+        print_success "Members removed from '$LIST_EMAIL'"
+        for member in "${MEMBER_ADDRESSES[@]}"; do
             echo "  - $member"
         done
-    elif echo "$RESPONSE_BODY" | grep -q "notFound"; then
-        print_error "Group '$LIST_NAME' does not exist"
+    elif [ "$rc" = "4" ]; then
+        print_error "Group '$LIST_EMAIL' does not exist"
         exit 1
     else
-        print_error "Failed to remove members (HTTP $HTTP_CODE)"
-        echo "$RESPONSE_BODY"
+        print_error "Failed to remove members"
         exit 1
     fi
 }
 
 # ---- Action: delete group ----
 do_delete() {
-    print_status "Deleting group '$LIST_NAME'..."
-
-    api_call DELETE "/principal/$LIST_NAME"
-
-    if [ "$HTTP_CODE" = "200" ]; then
-        print_success "Group '$LIST_NAME' deleted"
-    elif echo "$RESPONSE_BODY" | grep -q "notFound"; then
-        print_error "Group '$LIST_NAME' does not exist"
+    print_status "Deleting group '$LIST_EMAIL'..."
+    local rc=0
+    jmap list-delete "$LIST_EMAIL" || rc=$?
+    if [ "$rc" = "0" ]; then
+        print_success "Group '$LIST_EMAIL' deleted"
+    elif [ "$rc" = "4" ]; then
+        print_error "Group '$LIST_EMAIL' does not exist"
         exit 1
     else
-        print_error "Failed to delete group (HTTP $HTTP_CODE)"
-        echo "$RESPONSE_BODY"
+        print_error "Failed to delete group"
         exit 1
     fi
 }

@@ -762,10 +762,10 @@ if [ "$MAIL_ENABLED" = "true" ]; then
     exit 1
   fi
 
-  # Cold-start gate: Stalwart's REST API can return 5xx for ~30-60s after
-  # pod-Ready on a fresh deploy (negative-RCPT cache + OIDC directory warm-up).
-  # provision-smtp-service-accounts (next step) hits /api/principal/deploy, so
-  # we wait until the REST layer responds. Non-fatal: caller retries on 5xx.
+  # Cold-start gate: Stalwart's management API can return 5xx for ~30-60s
+  # after pod-Ready on a fresh deploy (directory warm-up).
+  # provision-smtp-service-accounts (next step) makes JMAP x:Account calls, so
+  # we wait until /jmap/session answers. Non-fatal: caller retries on 5xx.
   mt_wait_for_stalwart
 else
   print_status "Stalwart: skipping (features.mail_enabled is not true)"
@@ -826,7 +826,7 @@ if [ "$MAIL_ENABLED" = "true" ]; then
 
   # Cold-start gap #19: prove the Keycloak→Stalwart SMTP *submission* path is
   # actually deliverable before anything downstream (e2e onboarding/magic-link
-  # tests) depends on it. mt_wait_for_stalwart above only probes REST and is
+  # tests) depends on it. mt_wait_for_stalwart above only probes JMAP and is
   # warning-only; the submission listener can be bound while SASL still 5xxs on
   # a fresh/just-restarted Stalwart. FATAL — turns a silent shard-6 flake (that
   # also blocks deploy-prod on main) into a loud, correctly-attributed failure,

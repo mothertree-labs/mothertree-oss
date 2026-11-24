@@ -109,10 +109,9 @@ else
 
     # create-email-probe-user handles:
     #   - Creating Keycloak user (for OIDC directory resolution)
-    #   - Temporarily switching Stalwart to internal directory
-    #   - Creating the bot user with $app$ password and roles: ["user"]
-    #   - Reverting Stalwart to oidc directory
-    #   - Creating the K8s secret with the bot password
+    #   - Creating the Stalwart account + a `probe` app password (v1 JMAP;
+    #     the secret is server-generated)
+    #   - Creating the K8s secret with that app password
     "$REPO_ROOT/scripts/create-email-probe-user" -e "$MT_ENV" -t "$MT_TENANT"
 
     # Read the password that create-email-probe-user generated

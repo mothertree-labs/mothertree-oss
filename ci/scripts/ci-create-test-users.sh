@@ -338,8 +338,8 @@ done
 # login, so inbound mail (e.g. the echoed reply in the email round-trip test)
 # bounces 550 "undeliverable" until then. The round-trip test sends *before* the
 # receiver has logged in, so on a freshly leased tenant it loses that race and
-# times out. Deploy-provisioning the mailbox here (the same /api/principal/deploy
-# call dev-test-users.sh / provision-smtp.js use) removes the race.
+# times out. Provisioning the mailbox here (Stalwart v1 JMAP x:Account/set via
+# scripts/lib/stalwart-jmap.py, as dev-test-users.sh does) removes the race.
 # See memory: e2e-roundtrip-missing-principals. NOTE: this fixes the *delivery*
 # (550) cause of the shard-5 flake only — the bare networkidle login in
 # email-roundtrip.spec.ts is a separate, still-open cause.
@@ -352,83 +352,66 @@ if [[ -z "${E2E_STALWART_ADMIN_PASSWORD:-}" ]]; then
 else
   STALWART_NS="tn-${E2E_TENANT}-mail"
   STALWART_URL="http://localhost:18090"
-  STALWART_AUTH="Basic $(printf 'admin:%s' "$E2E_STALWART_ADMIN_PASSWORD" | base64 | tr -d '\n')"
+  STALWART_JMAP=(python3 "$REPO_ROOT/scripts/lib/stalwart-jmap.py")
   echo ""
   echo "--- Provisioning Stalwart mailbox principals in ${STALWART_NS}"
 
-  # Port-forward to the tenant's Stalwart REST API (8080). KUBECONFIG is the live
-  # dev kubeconfig fetched above; tear the forward down on exit with the kubeconfig.
+  # Port-forward to the tenant's Stalwart management API (8080). KUBECONFIG is the
+  # live dev kubeconfig fetched above; tear the forward down on exit with the kubeconfig.
   kubectl -n "$STALWART_NS" port-forward svc/stalwart 18090:8080 \
     > /tmp/ci-stalwart-pf.log 2>&1 &
   STALWART_PF_PID=$!
   trap 'rm -f "$KCFG_PATH"; kill "${STALWART_PF_PID:-}" 2>/dev/null || true' EXIT
 
-  # Wait for the forward + REST API to actually answer before provisioning — a
-  # fixed sleep races the forward coming up, which would time out every call.
+  # Wait for the forward to actually answer before provisioning — a fixed sleep
+  # races the forward coming up, which would time out every call.
   STALWART_READY=0
   for _ in $(seq 1 20); do
-    if curl -s --max-time 3 -o /dev/null "${STALWART_URL}/api/principal/__probe__" \
-         -H "Authorization: ${STALWART_AUTH}" 2>/dev/null; then
+    if [[ "$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "${STALWART_URL}/healthz/ready" 2>/dev/null)" == 200 ]]; then
       STALWART_READY=1; break
     fi
     sleep 1
   done
 
   if [[ "$STALWART_READY" == 0 ]]; then
-    echo "  WARNING: Stalwart REST API not reachable via port-forward within 20s —"
+    echo "  WARNING: Stalwart management API not reachable via port-forward within 20s —"
     echo "           skipping mailbox provisioning (round-trip may bounce until first login)."
   else
     for user_spec in "${FIXED_USERS[@]}"; do
       IFS=: read -r username _password _is_admin <<< "$user_spec"
       email="${username}@${EMAIL_DOMAIN}"
-      # Principal name = username (no domain), matching Stalwart's OIDC
-      # auto-provisioner (which names principals from the token preferred_username).
-      payload=$(CI_NAME="$username" CI_EMAIL="$email" python3 -c "
-import json, os
-print(json.dumps({
-  'type': 'individual',
-  'name': os.environ['CI_NAME'],
-  'emails': [os.environ['CI_EMAIL']],
-  'description': os.environ['CI_NAME'],
-  'roles': ['user'],
-  'secrets': []
-}))")
 
       echo -n "  ${username}: "
       provisioned=0
-      verdict=""
       for attempt in 1 2 3; do
-        # /api/principal/deploy has been observed to hang (17/30 calls >120s in a
-        # prior run); cap each attempt and retry instead of blocking the pipeline.
-        resp=$(curl -s --max-time 30 -X POST "${STALWART_URL}/api/principal/deploy" \
-          -H "Authorization: ${STALWART_AUTH}" \
-          -H "Content-Type: application/json" \
-          -d "$payload" 2>/dev/null || true)
-        verdict=$(STALW_RESP="${resp}" python3 -c "
-import json, os
-raw = os.environ.get('STALW_RESP', '')
-try:
-    d = json.loads(raw)
-except Exception:
-    print('timeout'); raise SystemExit
-err = d.get('error') if isinstance(d, dict) else None
-print('ok' if err in (None, 'fieldAlreadyExists') else 'apierror:' + str(err))" 2>/dev/null || echo timeout)
-        case "$verdict" in
-          ok) echo "ok"; provisioned=1; break ;;
-          apierror:*) echo "Stalwart rejected (${verdict#apierror:})"; break ;;
-          *) echo -n "timeout(${attempt}) "; sleep 3 ;;
-        esac
+        # Account creation has been observed to hang under load (17/30 calls
+        # >120s in a prior run); cap each attempt and retry instead of blocking.
+        # The helper prints "created"/"exists"; a duplicate from a timed-out
+        # attempt that landed comes back as "exists" (primaryKeyViolation).
+        verdict_rc=0
+        verdict=$(STALWART_URL="$STALWART_URL" STALWART_TIMEOUT=30 \
+          STALWART_ADMIN_PASSWORD="$E2E_STALWART_ADMIN_PASSWORD" \
+          "${STALWART_JMAP[@]}" ensure-account "$email" --description "$username" 2>&1) || verdict_rc=$?
+        if [[ "$verdict_rc" == 0 ]]; then
+          echo "ok (${verdict})"; provisioned=1; break
+        fi
+        if [[ "$verdict_rc" == 3 ]]; then
+          echo "Stalwart rejected the admin credentials — check the pool's stalwart_admin_password"
+          break
+        fi
+        echo -n "error(${attempt}: ${verdict}) "; sleep 3
       done
-      if [[ "$provisioned" == 0 && "$verdict" == "timeout" ]]; then
-        echo "FAILED after retries — round-trip will bounce until first login"
+      if [[ "$provisioned" == 0 ]]; then
+        echo "FAILED — round-trip will bounce until first login"
       fi
     done
 
     # Clear Stalwart's negative-RCPT cache so the new mailboxes accept mail now.
-    # (dev-test-users.sh uses GET /api/reload; the e2e shards also start minutes
-    # later, after any short negative-cache TTL would have lapsed anyway.)
-    curl -s --max-time 15 "${STALWART_URL}/api/reload" \
-      -H "Authorization: ${STALWART_AUTH}" > /dev/null 2>&1 || true
+    # (The e2e shards also start minutes later, after any short negative-cache
+    # TTL would have lapsed anyway.)
+    STALWART_URL="$STALWART_URL" STALWART_TIMEOUT=15 \
+      STALWART_ADMIN_PASSWORD="$E2E_STALWART_ADMIN_PASSWORD" \
+      "${STALWART_JMAP[@]}" reload > /dev/null 2>&1 || true
   fi
 
   kill "${STALWART_PF_PID:-}" 2>/dev/null || true

@@ -152,8 +152,8 @@ test.describe('Docs — Invitation Email', () => {
         source.includes('multipart/encrypted'),
         `${invitee.email}'s mailbox has Stalwart encryption-at-rest enabled, ` +
           'so email content cannot be inspected. Disable it via the Stalwart ' +
-          'API: POST /api/account/crypto {"type":"disabled"} authenticated as ' +
-          `${invitee.username}%master.`,
+          'JMAP management API as the recovery admin: x:Account/set update ' +
+          `{"<account id of ${invitee.email}>": {"encryptionAtRest": {"@type": "Disabled"}}}.`,
       ).toBe(false);
 
       // ── Phase 5: Verify the guest-landing link ──────────────────────────

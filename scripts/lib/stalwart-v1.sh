@@ -163,6 +163,10 @@ EOF
         --from-literal=state=done --from-literal=at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --from-literal=summary="$(_mt_stalwart_job_status stalwart-migrate | tail -1)" \
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    # 0.15 app passwords do not survive the migration. mailer@ is re-issued
+    # by provision-smtp (its stored password fails the login check); the
+    # email probe only provisions when its Secret is missing, so drop it.
+    kubectl delete secret email-probe-secrets -n "$NS_MAIL" --ignore-not-found >/dev/null
     # The volume holds the converted export (OAuth signing key, DKIM keys).
     kubectl delete job stalwart-migrate-dump stalwart-migrate -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null
     kubectl delete pvc stalwart-migration -n "$NS_MAIL" --ignore-not-found >/dev/null

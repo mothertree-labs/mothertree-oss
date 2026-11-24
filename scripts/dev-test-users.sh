@@ -194,7 +194,7 @@ assign_role() {
 
 # ============================================================================
 # Helper: ensure Stalwart mail principal exists for a user
-# Uses /api/principal/deploy (works with OIDC directory mode).
+# Uses the Stalwart v1 JMAP management API (scripts/lib/stalwart-jmap.py).
 # ============================================================================
 ensure_stalwart_principal() {
     local email="$1"
@@ -219,57 +219,27 @@ ensure_stalwart_principal() {
         sleep 3
     fi
 
-    local stalwart_url="http://localhost:8090"
-    local admin_auth
-    admin_auth="Basic $(printf 'admin:%s' "$STALWART_ADMIN_PASSWORD" | base64)"
-
-    # Use username (without domain) as the principal name to match what Stalwart's
-    # OIDC auto-provisioner creates (uses preferred_username from the token).
-    local principal_name="${email%%@*}"
-
-    # Check if principal already exists (by username, not full email)
-    local check_body
-    check_body=$(curl -s "$stalwart_url/api/principal/$principal_name" \
-      -H "Authorization: $admin_auth")
-
-    if echo "$check_body" | jq -e '.error' > /dev/null 2>&1; then
-        # Principal doesn't exist (error = "notFound") or other error — try to create
-        :
-    else
-        print_status "Stalwart principal already exists for $principal_name"
+    # Stalwart v1 JMAP (x:Account/set) via the shared helper. The account is
+    # named by the local part on the email domain — the same identity the OIDC
+    # login maps to (preferred_username on usernameDomain).
+    local result rc=0
+    result=$(STALWART_URL="http://localhost:8090" STALWART_ADMIN_PASSWORD="$STALWART_ADMIN_PASSWORD" \
+        python3 "$REPO_ROOT/scripts/lib/stalwart-jmap.py" ensure-account "$email" \
+        --description "$display_name" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        print_warning "Stalwart account creation for $email failed: $result"
+        return 0
+    fi
+    if [ "$result" = "exists" ]; then
+        print_status "Stalwart account already exists for $email"
         return 0
     fi
 
-    # Create principal via /api/principal/deploy
-    local deploy_body
-    deploy_body=$(jq -n \
-      --arg name "$principal_name" \
-      --arg email "$email" \
-      --arg desc "$display_name" \
-      '{type: "individual", name: $name, emails: [$email], description: $desc, roles: ["user"], secrets: []}')
+    # Reload settings so RCPT TO picks up the new account immediately
+    STALWART_URL="http://localhost:8090" STALWART_ADMIN_PASSWORD="$STALWART_ADMIN_PASSWORD" \
+        python3 "$REPO_ROOT/scripts/lib/stalwart-jmap.py" reload > /dev/null 2>&1 || true
 
-    local response
-    response=$(curl -s -X POST "$stalwart_url/api/principal/deploy" \
-      -H "Authorization: $admin_auth" \
-      -H "Content-Type: application/json" \
-      -d "$deploy_body")
-
-    local error
-    error=$(echo "$response" | jq -r '.error // empty')
-    if [ -n "$error" ]; then
-        if [ "$error" = "fieldAlreadyExists" ]; then
-            print_status "Stalwart principal already exists for $email"
-            return 0
-        fi
-        print_warning "Stalwart principal creation returned: $error"
-        return 0
-    fi
-
-    # Reload config so RCPT TO picks up the new principal immediately
-    curl -s -X GET "$stalwart_url/api/reload" \
-      -H "Authorization: $admin_auth" > /dev/null 2>&1
-
-    print_success "Created Stalwart mail principal for $email"
+    print_success "Created Stalwart mail account for $email"
 }
 
 # ============================================================================

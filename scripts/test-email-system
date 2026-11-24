@@ -170,7 +170,9 @@ test_domain_validation() {
         return
     fi
 
-    DOMAINS=$(curl -s -u "admin:${STALWART_ADMIN_PASSWORD}" "http://localhost:18090/api/principal?type=domain" 2>/dev/null)
+    # Stalwart v1 JMAP x:Domain/query + get (one name per line).
+    DOMAINS=$(STALWART_URL="http://localhost:18090" STALWART_ADMIN_PASSWORD="$STALWART_ADMIN_PASSWORD" \
+        python3 "$REPO_ROOT/scripts/lib/stalwart-jmap.py" domains 2>/dev/null || true)
     kill_quiet $PF_PID
 
     if [ -z "$DOMAINS" ]; then
@@ -178,20 +180,20 @@ test_domain_validation() {
         return
     fi
 
-    DOMAIN_COUNT=$(echo "$DOMAINS" | jq -r '.data.total // 0')
-    DOMAIN_NAMES=$(echo "$DOMAINS" | jq -r '.data.items[].name // empty' | tr '\n' ', ' | sed 's/,$//')
+    DOMAIN_COUNT=$(echo "$DOMAINS" | grep -c .)
+    DOMAIN_NAMES=$(echo "$DOMAINS" | tr '\n' ',' | sed 's/,$//; s/,/, /g')
 
     info "Found $DOMAIN_COUNT domain(s): $DOMAIN_NAMES"
 
     # Check that EMAIL_DOMAIN is registered
-    if echo "$DOMAINS" | jq -r '.data.items[].name' | grep -q "^${EMAIL_DOMAIN}$"; then
+    if echo "$DOMAINS" | grep -qx "${EMAIL_DOMAIN}"; then
         pass "Local domain $EMAIL_DOMAIN is registered"
     else
         fail "Local domain $EMAIL_DOMAIN is NOT registered"
     fi
 
     # Check for unexpected domains (like gmail.com)
-    UNEXPECTED=$(echo "$DOMAINS" | jq -r '.data.items[].name' | grep -v "^${EMAIL_DOMAIN}$" | grep -v "^${TENANT_DOMAIN}$" || true)
+    UNEXPECTED=$(echo "$DOMAINS" | grep -vx "${EMAIL_DOMAIN}" | grep -vx "${TENANT_DOMAIN}" || true)
     if [ -n "$UNEXPECTED" ]; then
         fail "Unexpected domains registered: $UNEXPECTED"
     else
@@ -310,10 +312,12 @@ test_local_recipient() {
     PF_PID=$!
     sleep 3
 
-    USERS=$(curl -s -u "admin:${STALWART_ADMIN_PASSWORD}" "http://localhost:18091/api/principal?type=individual" 2>/dev/null)
+    # Stalwart v1 JMAP account list ("<email>\t<name>\t<id>", admin excluded).
+    USERS=$(STALWART_URL="http://localhost:18091" STALWART_ADMIN_PASSWORD="$STALWART_ADMIN_PASSWORD" \
+        python3 "$REPO_ROOT/scripts/lib/stalwart-jmap.py" accounts 2>/dev/null || true)
     kill_quiet $PF_PID
 
-    LOCAL_USER=$(echo "$USERS" | jq -r '.data.items[0].emails[0] // empty')
+    LOCAL_USER=$(echo "$USERS" | head -n1 | cut -f1)
 
     if [ -z "$LOCAL_USER" ]; then
         skip "No local users found to test"
