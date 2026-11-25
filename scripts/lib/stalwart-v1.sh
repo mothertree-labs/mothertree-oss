@@ -62,13 +62,13 @@ _mt_stalwart_restarts() {
          | .restartCount] | add // 0'
 }
 
-# _mt_stalwart_run_job <job-name> <template> <timeout-seconds>
+# _mt_stalwart_run_job <job-name> <template> <timeout-seconds> [keep-failed]
 # Recreates the Job from the template (envsubst on the current env), waits for
 # it to finish, prints its status lines. Returns non-zero on failure/timeout.
 # Fails early when a container restarts. Status lines are snapshotted while
 # the pod exists: on DeadlineExceeded the Job controller deletes it.
 _mt_stalwart_run_job() {
-    local job="$1" tpl="$2" timeout="$3" i state="" snap="" now
+    local job="$1" tpl="$2" timeout="$3" keep="${4:-}" i state="" snap="" now
     kubectl delete job "$job" -n "$NS_MAIL" --ignore-not-found --cascade=foreground --wait=true >/dev/null || return 1
     envsubst < "$tpl" | kubectl create -f - >/dev/null || return 1
     print_status "Job $job started (timeout ${timeout}s)"
@@ -92,12 +92,12 @@ _mt_stalwart_run_job() {
     if [ "$state" = complete ]; then
         return 0
     fi
-    # Anything still running (timeout, restart, unknown state) is stopped now,
-    # pods included (foreground cascade): the caller restores 0.15, and no
-    # v0.16 pod may still be running by then. A Failed Job has nothing
-    # running and is kept for `kubectl logs` (the cli is distroless: its log
-    # is the only diagnostic); the migration cleanup deletes the migrate Jobs.
-    if [ "$state" != failed ]; then
+    # Stopped now, pods included (foreground cascade): the caller restores
+    # 0.15, and no v0.16 pod may still be running by then. keep-failed (the
+    # plan Job only: the cli is distroless, its log is the only diagnostic)
+    # keeps a Failed Job for `kubectl logs`. Never for the migrate Jobs:
+    # their output holds key material.
+    if [ "$state" != failed ] || [ "$keep" != keep-failed ]; then
         kubectl delete job "$job" -n "$NS_MAIL" --ignore-not-found --cascade=foreground --wait=true \
             >/dev/null 2>&1 || print_warning "could not delete Job $job"
     else
@@ -368,7 +368,7 @@ EOF
     envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-v1.yaml.tpl" | kubectl apply -f - >/dev/null || return 1
     _mt_stalwart_wait_started || return 1
 
-    if ! _mt_stalwart_run_job stalwart-v1-plan "$REPO_ROOT/apps/manifests/stalwart/plan-job.yaml.tpl" 300; then
+    if ! _mt_stalwart_run_job stalwart-v1-plan "$REPO_ROOT/apps/manifests/stalwart/plan-job.yaml.tpl" 300 keep-failed; then
         print_error "Applying the Stalwart v1 configuration plan failed"
         return 1
     fi
