@@ -69,7 +69,7 @@ _mt_stalwart_restarts() {
 # the pod exists: on DeadlineExceeded the Job controller deletes it.
 _mt_stalwart_run_job() {
     local job="$1" tpl="$2" timeout="$3" i state="" snap="" now
-    kubectl delete job "$job" -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null || return 1
+    kubectl delete job "$job" -n "$NS_MAIL" --ignore-not-found --cascade=foreground --wait=true >/dev/null || return 1
     envsubst < "$tpl" | kubectl create -f - >/dev/null || return 1
     print_status "Job $job started (timeout ${timeout}s)"
     for ((i = 0; i < timeout; i += 5)); do
