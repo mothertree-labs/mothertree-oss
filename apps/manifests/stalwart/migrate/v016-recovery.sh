@@ -10,25 +10,36 @@
 #   * never starts again once that file exists (a restart after an OOM or a
 #     node blip must not bring recovery mode back during the final copy),
 #   * then idles (sleep), because exiting would restart a native sidecar.
+# If stalwart dies before the stop file, the container writes a status line
+# and exits non-zero: the deploy script treats a sidecar restart as failure
+# and prints that line (it used to idle, and the Job sat until its deadline).
 # No liveness probe; a startupProbe on 8080 gates the next init container.
 #
 # Runs in stalwartlabs/stalwart:v0.16.27. Env: STALWART_RECOVERY_ADMIN and
 # the secrets config.v016.json / the export reference (DB password, S3 keys).
 STOP=/work/hop1/stop-v016
+LOG=/work/hop1/v016.log
 idle() { while :; do sleep 3600; done; }
+status() { { printf '%s' "$1" > /dev/termination-log; } 2>/dev/null || true; echo "$1"; }
 
 if [ -e "$STOP" ]; then
     idle
 fi
 
 STALWART_RECOVERY_MODE=1 /usr/local/bin/stalwart --config /work/hop1/config.v016.json \
-    > /work/hop1/v016.log 2>&1 &
+    > "$LOG" 2>&1 &
 pid=$!
 
 while [ ! -e "$STOP" ]; do
     if ! kill -0 "$pid" 2>/dev/null; then
-        # Died on its own: leave it down (the cli steps fail and report).
-        idle
+        wait "$pid"; rc=$?
+        # Last log line as the reason, unless it might quote a credential.
+        why=$(tail -n 1 "$LOG" 2>/dev/null | tr -d '\r' | cut -c1-200)
+        if printf '%s' "$why" | grep -qiE 'pass|secret|token|key|auth'; then
+            why="(last log line withheld)"
+        fi
+        status "v016: FAILED stalwart exited rc=$rc: ${why:-no output}"
+        exit 1
     fi
     sleep 1
 done

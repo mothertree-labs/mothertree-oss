@@ -77,6 +77,10 @@ spec:
           readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
+            # The binary carries the file capability cap_net_bind_service=ep
+            # (0.15.5 did not): with NET_BIND_SERVICE outside the bounding
+            # set, exec fails with "Operation not permitted" (pipeline 137).
+            add: ["NET_BIND_SERVICE"]
         ports:
         - containerPort: 25
           name: smtp

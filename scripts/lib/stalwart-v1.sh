@@ -52,11 +52,23 @@ _mt_stalwart_job_status() {
               else "waiting: \(.state.waiting.reason // "?")" end)'
 }
 
+# _mt_stalwart_restarts <job-name>: total container restarts in the Job's pod.
+# Every step is run-once, so any restart (a crashed or probe-killed sidecar)
+# means the Job is failing.
+_mt_stalwart_restarts() {
+    kubectl get pods -n "$NS_MAIL" -l "job-name=$1" -o json 2>/dev/null | jq -r '
+        [.items[0] // empty
+         | ((.status.initContainerStatuses // []) + (.status.containerStatuses // []))[]
+         | .restartCount] | add // 0'
+}
+
 # _mt_stalwart_run_job <job-name> <template> <timeout-seconds>
 # Recreates the Job from the template (envsubst on the current env), waits for
 # it to finish, prints its status lines. Returns non-zero on failure/timeout.
+# Fails early when a container restarts. Status lines are snapshotted while
+# the pod exists: on DeadlineExceeded the Job controller deletes it.
 _mt_stalwart_run_job() {
-    local job="$1" tpl="$2" timeout="$3" i state=""
+    local job="$1" tpl="$2" timeout="$3" i state="" snap="" now
     kubectl delete job "$job" -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null || return 1
     envsubst < "$tpl" | kubectl create -f - >/dev/null || return 1
     print_status "Job $job started (timeout ${timeout}s)"
@@ -65,12 +77,24 @@ _mt_stalwart_run_job() {
             [.status.conditions[]? | select(.status == "True") | .type] as $c
             | if ($c | index("Complete")) then "complete"
               elif ($c | index("Failed")) then "failed" else "running" end')
+        now=$(_mt_stalwart_job_status "$job")
+        [ -n "$now" ] && snap="$now"
         [ "$state" != running ] && break
+        if [ "$(_mt_stalwart_restarts "$job")" -gt 0 ]; then
+            state="restarted"
+            break
+        fi
         sleep 5
     done
-    _mt_stalwart_job_status "$job"
+    [ -n "$snap" ] && printf '%s\n' "$snap"
     if [ "$state" = complete ]; then
         return 0
+    fi
+    if [ "$state" = restarted ] || [ "$state" = running ]; then
+        # Stop it now: the caller restores 0.15, and a still-running v0.16
+        # sidecar must not be left behind.
+        kubectl delete job "$job" -n "$NS_MAIL" --wait=true >/dev/null 2>&1 \
+            || print_warning "could not delete Job $job"
     fi
     print_error "Job $job did not complete (state: ${state:-unknown})"
     return 1
