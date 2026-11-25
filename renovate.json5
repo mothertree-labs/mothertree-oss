@@ -90,6 +90,7 @@
         // files were outside every pattern, so their pins drifted to 15
         // and 16 while the dashboard showed a single "postgres 17 -> 18" item.
         "/^scripts/lib/common\\.sh$/",
+        "/^scripts/lib/provision-smtp\\.js$/",
         // scripts/devbox: the developer box's PostgreSQL container (DEVBOX_PG_IMAGE).
         "/^scripts/devbox$/",
         "/^ci/scripts/ci-e2e-diagnostics\\.sh$/",
@@ -124,6 +125,10 @@
         // overlap with the `image:` matchString above (different separator, no
         // leading `--`). RE2-safe: no lookaround, no backreferences.
         "--image=[\"']?(?<depName>postgres):(?<currentValue>[0-9]+(?:\\.[0-9]+)*-alpine)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?[\"']?",
+        // The other throwaway `--image=` pods (busybox, python, alpine) in
+        // scripts/lib/common.sh and scripts/lib/provision-smtp.js. An explicit
+        // name list, so it never matches the postgres pins above twice.
+        "--image=[\"']?(?<depName>busybox|python|alpine):(?<currentValue>[0-9][A-Za-z0-9._\\-]*)[\"']?",
       ],
       "datasourceTemplate": "docker",
     },

@@ -20,7 +20,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: oidc-config
-          image: bitnami/kubectl:latest
+          image: alpine/k8s:1.37.2
           imagePullPolicy: IfNotPresent
           env:
             - name: FILES_HOST
