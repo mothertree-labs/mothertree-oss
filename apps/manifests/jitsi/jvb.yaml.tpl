@@ -147,7 +147,7 @@ spec:
           mountPath: /shared
       containers:
       - name: jvb
-        image: ghcr.io/jitsi/jvb:stable-11509
+        image: ghcr.io/jitsi/jvb:stable-11509-1
         # Rootless since stable-11146: the image runs as user s6 (uid/gid 1000).
         # Numeric ids are required, runAsNonRoot cannot verify a named USER.
         securityContext:

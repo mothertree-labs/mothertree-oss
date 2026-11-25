@@ -44,7 +44,7 @@ spec:
       # 139: all three cli attempts failed instantly). The cli is distroless
       # and connects at once, so wait here until the management API answers.
       - name: wait-mgmt
-        image: python:3.13.18-slim
+        image: python:3.15.2-slim
         command: ["python", "-I", "-c"]
         args:
         - |

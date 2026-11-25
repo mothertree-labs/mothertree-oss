@@ -61,7 +61,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: mas
-          image: ghcr.io/element-hq/matrix-authentication-service:1.29.0
+          image: ghcr.io/element-hq/matrix-authentication-service:1.30.0
           imagePullPolicy: IfNotPresent
           # `server` applies pending DB migrations and syncs the upstream
           # provider from the config on every start.
