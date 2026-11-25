@@ -341,14 +341,12 @@
     // permissions), so read the release notes on every Stalwart bump.
     //
     // The one-time 0.15 -> v1 migration needs EXACT versions: stalwart-migrate reads
-    // only a v0.16.27 store, and the hop-1 import is done with the 0.16-era cli. The
-    // 0.15 manifest is kept only until every tenant is migrated (then deleted). None
+    // only a v0.16.27 store, and the hop-1 import is done with the 0.16-era cli. None
     // of those may move.
     {
-      "description": "Stalwart 0.15 -> v1 migration images and the retired 0.15 manifest are pinned on purpose (#715)",
+      "description": "Stalwart 0.15 -> v1 migration images are pinned on purpose (#715)",
       "matchFileNames": [
         "apps/manifests/stalwart/migrate/**",
-        "apps/manifests/stalwart/stalwart.yaml.tpl",
       ],
       "enabled": false,
     },
@@ -423,10 +421,10 @@
     // Trade-off: one bad bump holds the whole batch. Do NOT push a revert of it
     // to the PR (Renovate stops updating a branch someone else committed to);
     // add a temporary allowedVersions rule for that package instead, like the
-    // Stalwart freeze, and Renovate rebuilds the batch without it — Renovate
+    // keycloak-magic-link hold, and Renovate rebuilds the batch without it — Renovate
     // rebuilds an existing batch branch mid-week, so the Wednesday schedule does
     // not delay the unblock. Give every such hold a re-eval date and a tracking
-    // issue, as the Stalwart rule does: allowedVersions ALSO hides the package
+    // issue, as the magic-link rule does: allowedVersions ALSO hides the package
     // from the Dependency Dashboard, so an undated hold silently suppresses that
     // package's security updates for good.
     {
