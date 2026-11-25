@@ -78,8 +78,12 @@ pg_dump -Fc --no-owner -d "$SRC_DB" -f /work/copy/live.dump 2> /work/copy/pg_dum
 # Extensions (pg_trgm, created by db-init) belong to the superuser: create_db
 # already made them, and restoring them or their COMMENT as the tenant role
 # is refused. Restore everything else.
+# --no-acl: db-init's ALTER DEFAULT PRIVILEGES (run as the superuser) and the
+# schema grants cannot be replayed as the tenant role. They are not needed:
+# the tenant role owns every restored object, and create_db set the schema
+# grants.
 pg_restore -l /work/copy/live.dump | grep -v -E ' EXTENSION |COMMENT - EXTENSION' > /work/copy/restore.list
-if ! pg_restore --no-owner --role="$DB_OWNER" --exit-on-error -L /work/copy/restore.list \
+if ! pg_restore --no-owner --no-acl --role="$DB_OWNER" --exit-on-error -L /work/copy/restore.list \
         -d "$SCRATCH_DB" /work/copy/live.dump 2> /work/copy/pg_restore.err; then
     # The ERROR line is the failed statement's message; DETAIL/CONTEXT lines
     # (which can quote row data) are not reported.
