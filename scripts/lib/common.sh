@@ -277,7 +277,7 @@ wait_for_dns() {
     while [ $elapsed -lt $timeout ]; do
         # Unique pod name per attempt so we never hit "AlreadyExists" on retries
         local pod_name="dns-check-$$-${elapsed}"
-        if kubectl run "$pod_name" --image=busybox --rm --attach --restart=Never -n "$namespace" \
+        if kubectl run "$pod_name" --image=busybox:1.38 --rm --attach --restart=Never -n "$namespace" \
             --command -- nslookup "$hostname" >/dev/null 2>&1; then
             return 0
         fi
@@ -787,7 +787,7 @@ sys.exit(1)
     local rc=0
     printf '%s' "$SMTP_RELAY_PASSWORD" | kubectl --kubeconfig="$KUBECONFIG" \
         run "$pod" -i --rm --restart=Never \
-        --image=python:3.13-alpine \
+        --image=python:3.14.10-alpine3.24 \
         -n "$NS_AUTH" \
         --env "PHOST=${SMTP_RELAY_HOST}" \
         --env "PPORT=${port}" \
@@ -1866,7 +1866,7 @@ exit 0
 PROBE
     local rc=0
     mt_kubectl_probe "coredns rewrite $host" "$attempts" \
-        mt_probe_job "$namespace" "dns-probe" "busybox:1.36" \
+        mt_probe_job "$namespace" "dns-probe" "busybox:1.38" \
             --env "PROBE_POD_IPS=$pod_ips" --env "PROBE_HOST=$host" --env "PROBE_WANT=$want" --timeout 180 \
             -- sh -c "$script" || rc=$?
     case "$rc" in

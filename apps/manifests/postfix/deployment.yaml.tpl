@@ -25,9 +25,8 @@ spec:
         # Outbound DKIM signing is delegated to AWS SES Easy DKIM at tenant
         # Stalwarts; this pod no longer signs or accepts submission.
         - name: postfix
-          # boky/postfix:v5.1.0 - SMTP relay image
-          # Source: https://github.com/bokysan/docker-postfix
-          # v5.1.0 released Jan 2025, supports /docker-init.d/ scripts
+          # boky/postfix (https://github.com/bokysan/docker-postfix): SMTP
+          # relay image with /docker-init.d/ scripts (5.x). Renovate bumps it.
           image: boky/postfix:5.2.1
           ports:
             - containerPort: 25

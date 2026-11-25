@@ -140,7 +140,7 @@ out=$(mt_coredns_rewrite_verify tn-x-mail mail.example.com 10.128.0.7); rc=$?
 check "coredns verify rc" 0 "$rc"
 check "coredns pod ips exclude Terminating" "10.2.0.5 " "$(jq -r '.spec.template.spec.containers[0].env[] | select(.name=="PROBE_POD_IPS") | .value' "$MT_TEST_MANIFEST")"
 check "coredns want ip" 10.128.0.7 "$(jq -r '.spec.template.spec.containers[0].env[] | select(.name=="PROBE_WANT") | .value' "$MT_TEST_MANIFEST")"
-check "coredns image pinned" busybox:1.36 "$(jq -r '.spec.template.spec.containers[0].image' "$MT_TEST_MANIFEST")"
+check "coredns image pinned" busybox:1.38 "$(jq -r '.spec.template.spec.containers[0].image' "$MT_TEST_MANIFEST")"
 case "$(jq -r '.spec.template.spec.containers[0].command[2]' "$MT_TEST_MANIFEST")" in *"MT_PROBE_VERDICT=FAIL"*) check "coredns script carries sentinels" y y ;; *) check "coredns script carries sentinels" y n ;; esac
 
 scenario coredns-none

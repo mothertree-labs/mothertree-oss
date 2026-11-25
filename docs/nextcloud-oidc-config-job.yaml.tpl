@@ -18,11 +18,25 @@ spec:
         app.kubernetes.io/part-of: mother-tree
     spec:
       restartPolicy: Never
+      # alpine/k8s runs as root by default (bitnami/kubectl was uid 1001);
+      # the script only needs kubectl get/exec, as the other alpine/k8s Jobs.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: oidc-config
-          image: bitnami/kubectl:latest
+          image: alpine/k8s:1.37.2
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           env:
+            # As uid 1000 HOME is / (not writable); kubectl caches discovery there.
+            - name: HOME
+              value: /tmp
             - name: FILES_HOST
               value: "${FILES_HOST}"
             - name: AUTH_HOST

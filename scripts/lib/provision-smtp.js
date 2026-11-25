@@ -324,7 +324,7 @@ function smtpSmokeAttempt() {
       'run', podName,
       '-n', NS_ADMIN,
       '--rm', '-i', '--restart=Never',
-      '--image=alpine:3.20',
+      '--image=alpine:3.24.4',
       '--quiet',
       '--command', '--',
       'sh', '-c', shellScript,
