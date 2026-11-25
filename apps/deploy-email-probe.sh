@@ -48,7 +48,7 @@ mt_load_tenant_config
 source "${REPO_ROOT}/scripts/lib/notify.sh"
 mt_deploy_start "deploy-email-probe"
 
-mt_require_commands kubectl envsubst
+mt_require_commands kubectl envsubst curl openssl python3
 
 # Use NS_STALWART as the mail namespace for the email probe
 export NS_MAIL="$NS_STALWART"
@@ -122,6 +122,71 @@ else
     fi
     print_success "Bot user provisioned and password loaded"
 fi
+
+# =============================================================================
+# Synthetic OIDC login (Keycloak side)
+# =============================================================================
+# Besides the app-password round trip, the probe logs in to Stalwart's IMAP
+# the way Roundcube does: a Keycloak token (aud=stalwart) over XOAUTH2 on
+# :993. Stalwart's health stays green when OIDC discovery or the directory is
+# broken, so only a real login catches that. The probe uses its own
+# confidential client limited to the password grant, and a password on the
+# bot's Keycloak user. Both values live only in email-probe-secrets
+# (generated on first deploy, reused after).
+: "${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD not set by config.sh}"
+: "${TENANT_KEYCLOAK_REALM:?TENANT_KEYCLOAK_REALM not set by config.sh}"
+: "${KEYCLOAK_INTERNAL_URL:?KEYCLOAK_INTERNAL_URL not set by config.sh}"
+export OIDC_CLIENT_ID="email-probe-login"
+OIDC_CLIENT_SECRET=$(kubectl get secret email-probe-secrets -n "$NS_MAIL" -o jsonpath='{.data.OIDC_CLIENT_SECRET}' | base64 -d)
+OIDC_USER_PASSWORD=$(kubectl get secret email-probe-secrets -n "$NS_MAIL" -o jsonpath='{.data.OIDC_USER_PASSWORD}' | base64 -d)
+if [ -z "$OIDC_CLIENT_SECRET" ]; then
+    print_status "Generating the probe's Keycloak client secret..."
+    OIDC_CLIENT_SECRET=$(openssl rand -hex 32)
+fi
+if [ -z "$OIDC_USER_PASSWORD" ]; then
+    print_status "Generating the probe user's Keycloak password..."
+    OIDC_USER_PASSWORD=$(openssl rand -hex 32)
+fi
+export OIDC_CLIENT_SECRET OIDC_USER_PASSWORD
+
+if ! kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=keycloakx -n "$NS_AUTH" --timeout=120s >/dev/null; then
+    print_error "Keycloak is not ready in $NS_AUTH"
+    exit 1
+fi
+KC_PF_PORT=$((RANDOM % 10000 + 30000))
+kubectl -n "$NS_AUTH" port-forward svc/keycloak-keycloakx-http "${KC_PF_PORT}:80" >/dev/null 2>&1 &
+KC_PF_PID=$!
+_kc_pf_ready=0
+for _ in $(seq 1 30); do
+    if curl -s -o /dev/null --max-time 2 "http://localhost:${KC_PF_PORT}/realms/master"; then
+        _kc_pf_ready=1; break
+    fi
+    sleep 1
+done
+if [ "$_kc_pf_ready" != 1 ]; then
+    kill "$KC_PF_PID" 2>/dev/null || true
+    print_error "Port-forward to Keycloak did not come up"
+    exit 1
+fi
+print_status "Ensuring the probe's Keycloak client and login..."
+# Secrets reach the helper through its environment only, never argv.
+if ! KC_URL="http://localhost:${KC_PF_PORT}" KC_ADMIN_PASSWORD="$KEYCLOAK_ADMIN_PASSWORD" \
+        KC_REALM="$TENANT_KEYCLOAK_REALM" PROBE_CLIENT_ID="$OIDC_CLIENT_ID" \
+        PROBE_CLIENT_SECRET="$OIDC_CLIENT_SECRET" PROBE_USERNAME="email-probe" \
+        PROBE_PASSWORD="$OIDC_USER_PASSWORD" PROBE_EMAIL="$BOT_EMAIL" \
+        python3 -I "$REPO_ROOT/apps/scripts/ensure-email-probe-oidc.py"; then
+    kill "$KC_PF_PID" 2>/dev/null || true
+    print_error "The probe cannot log in through Keycloak (see above)"
+    exit 1
+fi
+kill "$KC_PF_PID" 2>/dev/null || true
+print_success "Probe OIDC login ready (client $OIDC_CLIENT_ID)"
+export OIDC_TOKEN_URL="${KEYCLOAK_INTERNAL_URL}/realms/${TENANT_KEYCLOAK_REALM}/protocol/openid-connect/token"
+
+# Roll the probe when its script or any secret it reads changes (a ConfigMap
+# or Secret update alone never restarts it).
+EMAIL_PROBE_CHECKSUM=$(cat "$REPO_ROOT/apps/email-probe/email-probe.py" <(printf '%s' "$BOT_PASSWORD$OIDC_CLIENT_SECRET$OIDC_USER_PASSWORD$OIDC_TOKEN_URL") | sha256sum | cut -c1-16)
+export EMAIL_PROBE_CHECKSUM
 
 # =============================================================================
 # Deploy K8s resources

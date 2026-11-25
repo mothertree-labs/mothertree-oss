@@ -8,9 +8,15 @@ auto-reply delivery. Exposes Prometheus metrics for alerting.
 Email path tested (full E2E):
   Outbound: Stalwart (port 588) -> K8s Postfix (DKIM) -> VPN Postfix -> Internet
   Inbound:  Internet -> VPN Postfix -> K8s Postfix -> Stalwart -> bot inbox
+
+Separately, every OIDC_LOGIN_INTERVAL seconds, a synthetic OIDC login: a
+Keycloak token (password grant, aud=stalwart) used for IMAP XOAUTH2 on 993,
+the way Roundcube logs in. Stalwart stays healthy (and app passwords keep
+working) when its OIDC discovery or directory is broken; only this catches it.
 """
 
 import imaplib
+import json
 import logging
 import os
 import re
@@ -23,6 +29,9 @@ from email.mime.text import MIMEText
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import urllib.error
+import urllib.parse
+import urllib.request
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,6 +55,13 @@ PROBE_TIMEOUT = int(os.environ.get("PROBE_TIMEOUT", "300"))
 TENANT_NAME = os.environ.get("TENANT_NAME", "unknown")
 METRICS_PORT = int(os.environ.get("METRICS_PORT", "9090"))
 INFRA_DOMAIN = os.environ.get("INFRA_DOMAIN", "")
+OIDC_TOKEN_URL = os.environ["OIDC_TOKEN_URL"]
+OIDC_CLIENT_ID = os.environ["OIDC_CLIENT_ID"]
+OIDC_CLIENT_SECRET = os.environ["OIDC_CLIENT_SECRET"]
+OIDC_USERNAME = os.environ["OIDC_USERNAME"]
+OIDC_USER_PASSWORD = os.environ["OIDC_USER_PASSWORD"]
+OIDC_IMAP_PORT = int(os.environ.get("OIDC_IMAP_PORT", "993"))
+OIDC_LOGIN_INTERVAL = int(os.environ.get("OIDC_LOGIN_INTERVAL", "300"))
 
 # Domains used to identify MT infrastructure in Received headers.
 # Includes both the infra domain (VPN/K8s Postfix) and email domain (Stalwart).
@@ -72,6 +88,12 @@ _metrics = {
     "roundtrip_errors_total": 0,
     "inbound_total_seconds": 0.0,
     "inbound_infra_seconds": 0.0,
+    "oidc_login_success": 0,
+    "oidc_login_seconds": 0.0,
+    "oidc_login_consecutive_failures": 0,
+    "oidc_login_last_success_timestamp": 0.0,
+    "oidc_login_total": 0,
+    "oidc_login_errors_total": 0,
 }
 
 
@@ -102,6 +124,12 @@ def _render_metrics():
         f'email_probe_roundtrip_errors_total{{tenant="{t}"}} {m["roundtrip_errors_total"]}',
         f'email_probe_inbound_total_seconds{{tenant="{t}"}} {m["inbound_total_seconds"]:.3f}',
         f'email_probe_inbound_infra_seconds{{tenant="{t}"}} {m["inbound_infra_seconds"]:.3f}',
+        f'email_probe_oidc_login_success{{tenant="{t}"}} {m["oidc_login_success"]}',
+        f'email_probe_oidc_login_seconds{{tenant="{t}"}} {m["oidc_login_seconds"]:.3f}',
+        f'email_probe_oidc_login_consecutive_failures{{tenant="{t}"}} {m["oidc_login_consecutive_failures"]}',
+        f'email_probe_oidc_login_last_success_timestamp{{tenant="{t}"}} {m["oidc_login_last_success_timestamp"]:.0f}',
+        f'email_probe_oidc_login_total{{tenant="{t}"}} {m["oidc_login_total"]}',
+        f'email_probe_oidc_login_errors_total{{tenant="{t}"}} {m["oidc_login_errors_total"]}',
     ]
     return "\n".join(lines) + "\n"
 
@@ -271,6 +299,120 @@ def _cleanup_inbox():
 
 
 # ---------------------------------------------------------------------------
+# Synthetic OIDC login (Keycloak token -> IMAP XOAUTH2, as Roundcube)
+# ---------------------------------------------------------------------------
+class _LoginError(Exception):
+    """Failure with the stage it happened in; never carries a secret."""
+
+
+def _oidc_token():
+    body = urllib.parse.urlencode({
+        "grant_type": "password",
+        "client_id": OIDC_CLIENT_ID,
+        "client_secret": OIDC_CLIENT_SECRET,
+        "username": OIDC_USERNAME,
+        "password": OIDC_USER_PASSWORD,
+        "scope": "openid",
+    }).encode()
+    req = urllib.request.Request(
+        OIDC_TOKEN_URL, data=body, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read()).get("error", "?")
+        except ValueError:
+            err = "?"
+        raise _LoginError(f"token: HTTP {e.code} {err}") from None
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise _LoginError(f"token: {type(e).__name__}: {e}") from None
+    token = data.get("access_token")
+    if not token:
+        raise _LoginError("token: no access_token in the response")
+    return token, data.get("refresh_token")
+
+
+def _oidc_logout(refresh_token):
+    """End the Keycloak session the password grant opened (it would otherwise
+    live for the realm's SSO lifespan; one per check adds up). Best effort."""
+    if not refresh_token:
+        return
+    body = urllib.parse.urlencode({
+        "client_id": OIDC_CLIENT_ID,
+        "client_secret": OIDC_CLIENT_SECRET,
+        "refresh_token": refresh_token,
+    }).encode()
+    url = OIDC_TOKEN_URL.rsplit("/", 1)[0] + "/logout"
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=20):
+            pass
+    except Exception as e:  # a lingering session is not a login failure
+        log.warning("OIDC logout failed: %s", type(e).__name__)
+
+
+def _oidc_login_once():
+    """One synthetic login. Returns elapsed seconds; raises _LoginError."""
+    t0 = time.monotonic()
+    token, refresh_token = _oidc_token()
+    try:
+        return _imap_xoauth2(token, t0)
+    finally:
+        _oidc_logout(refresh_token)
+
+
+def _imap_xoauth2(token, t0):
+    # The bot's Stalwart account is its email; Stalwart maps the token's
+    # preferred_username to it.
+    xoauth2 = f"user={BOT_EMAIL}\x01auth=Bearer {token}\x01\x01".encode()
+    try:
+        imap = imaplib.IMAP4_SSL(IMAP_HOST, OIDC_IMAP_PORT, ssl_context=_insecure_ssl_ctx(), timeout=30)
+    except OSError as e:
+        raise _LoginError(f"imap connect: {type(e).__name__}: {e}") from None
+    try:
+        try:
+            imap.authenticate("XOAUTH2", lambda _: xoauth2)
+        except imaplib.IMAP4.error as e:
+            raise _LoginError(f"imap XOAUTH2 rejected: {e}") from None
+        typ, _ = imap.select("INBOX", readonly=True)
+        if typ != "OK":
+            raise _LoginError(f"imap select INBOX: {typ}")
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+    return time.monotonic() - t0
+
+
+def _oidc_login_loop():
+    log.info("OIDC login check starting: token=%s client=%s user=%s imap=%s:%d interval=%ds",
+             OIDC_TOKEN_URL, OIDC_CLIENT_ID, OIDC_USERNAME, IMAP_HOST, OIDC_IMAP_PORT,
+             OIDC_LOGIN_INTERVAL)
+    while True:
+        try:
+            elapsed = _oidc_login_once()
+            _set(oidc_login_success=1, oidc_login_seconds=elapsed,
+                 oidc_login_consecutive_failures=0, oidc_login_last_success_timestamp=time.time())
+            _inc(oidc_login_total=1)
+            log.info("OIDC login OK in %.2fs", elapsed)
+        except Exception as e:  # keep the thread alive whatever happens
+            reason = str(e) if isinstance(e, _LoginError) else f"{type(e).__name__}: {e}"
+            _set(oidc_login_success=0)
+            _inc(oidc_login_total=1, oidc_login_errors_total=1, oidc_login_consecutive_failures=1)
+            log.error("OIDC login FAILED: %s", reason)
+        time.sleep(OIDC_LOGIN_INTERVAL)
+
+
+def _start_oidc_login_thread():
+    threading.Thread(target=_oidc_login_loop, name="oidc-login", daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
 # Main probe loop
 # ---------------------------------------------------------------------------
 def _probe_loop():
@@ -340,4 +482,5 @@ def _probe_loop():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     _start_http_server()
+    _start_oidc_login_thread()
     _probe_loop()

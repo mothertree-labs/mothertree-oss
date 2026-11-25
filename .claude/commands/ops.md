@@ -774,7 +774,7 @@ Email Probe → End-to-end email delivery monitoring
 - SynapseDown, DocsBackendDown, NextcloudDown, StalwartDown
 - JitsiProsodyDown, JitsiJVBDown, JitsiNoBridgesAvailable
 - LokiDown, VectorSinkErrors, VectorNoLogsIngested
-- EndpointDown, EmailProbeConsecutiveFailures (>=5), EmailProbeNoRecentSuccess (30m)
+- EndpointDown, EmailProbeConsecutiveFailures (>=5), EmailProbeNoRecentSuccess (30m), EmailProbeOidcLoginFailing (3 failed synthetic Keycloak→IMAP logins, 5 min apart), EmailProbeOidcLoginStale
 
 **Warning alerts** (Matrix only):
 - CertificateExpiringSoon (<7d), IngressHighErrorRate (>10% 5xx)

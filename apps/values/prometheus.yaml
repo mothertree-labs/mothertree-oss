@@ -839,6 +839,29 @@ additionalPrometheusRulesMap:
             for: 5m
             labels:
               severity: critical
+          # Synthetic OIDC login (Keycloak token -> IMAP XOAUTH2 on 993), every
+          # 5 min. Stalwart stays healthy and app passwords keep working when
+          # its OIDC discovery or directory is broken, while every Roundcube
+          # login fails; this is the only signal for that.
+          - alert: EmailProbeOidcLoginFailing
+            annotations:
+              summary: 'Webmail/OIDC mail login failing (tenant={{ $labels.tenant }})'
+              description: 'The email probe could not log in to Stalwart with a Keycloak token {{ $value }} times in a row (tenant {{ $labels.tenant }}). Roundcube logins are probably failing too. The probe log names the stage (token, imap connect, XOAUTH2).'
+            expr: |-
+              email_probe_oidc_login_consecutive_failures >= 3
+            for: 1m
+            labels:
+              severity: critical
+          - alert: EmailProbeOidcLoginStale
+            annotations:
+              summary: 'No synthetic OIDC mail login in 30m (tenant={{ $labels.tenant }})'
+              description: 'The email probe has not completed an OIDC login for tenant {{ $labels.tenant }} in over 30 minutes, although it succeeded before. Its login thread may be stuck.'
+            expr: |-
+              email_probe_oidc_login_last_success_timestamp > 0
+                and (time() - email_probe_oidc_login_last_success_timestamp) > 1800
+            for: 5m
+            labels:
+              severity: warning
       - name: hpa-alerts
         rules:
           - alert: HPAMaxedOut

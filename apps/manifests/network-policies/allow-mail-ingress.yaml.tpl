@@ -5,7 +5,8 @@
 #   - Roundcube (tn-<tenant>-webmail) to connect to Stalwart for IMAP/SMTP/Sieve
 #   - NGINX ingress (infra-ingress) to proxy external mail client connections (IMAP/SMTPS/Submission)
 #   - Admin/Account portals (tn-<tenant>-admin) to reach Stalwart HTTP API (user provisioning, quotas)
-#   - Email probe (same namespace) to connect to Stalwart for SMTP/IMAP on app-password ports
+#   - Email probe (same namespace) to connect to Stalwart for SMTP/IMAP on app-password ports,
+#     and IMAP 993 for its synthetic OIDC login
 #   - Prometheus (infra-monitoring) to scrape email-probe metrics on port 9090
 #
 # Required environment variables:
@@ -104,7 +105,8 @@ spec:
           port: 993
         - protocol: TCP
           port: 8080
-    # Email probe (same namespace) connecting to Stalwart for SMTP submission and IMAP
+    # Email probe (same namespace) connecting to Stalwart for SMTP submission and
+    # IMAP (994 app password; 993 the synthetic OIDC login, as Roundcube)
     - from:
         - podSelector:
             matchLabels:
@@ -114,6 +116,8 @@ spec:
           port: 588
         - protocol: TCP
           port: 994
+        - protocol: TCP
+          port: 993
     # Prometheus (infra-monitoring) scraping email-probe metrics
     - from:
         - namespaceSelector:
