@@ -11,13 +11,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - The Nextcloud OIDC config Job ran `bitnami/kubectl:latest` (unpinned, and
     Bitnami no longer publishes versioned free images). It now uses
     `alpine/k8s:1.37.2`, like the other kubectl Jobs, which Renovate keeps
-    current.
+    current, and runs as uid 1000 with no capabilities (alpine/k8s defaults
+    to root).
   - Throwaway `kubectl run` pods: untagged `busybox` → `busybox:1.38`,
     `python:3.13-alpine` → `python:3.14.10-alpine3.24`, end-of-life
     `alpine:3.20` → `alpine:3.24.4` (`provision-smtp.js`); the CoreDNS probe
     `busybox:1.36` → `1.38`. A narrow Renovate pattern now covers these
     `--image=` pins too. `build-linkeditor.sh` moves off end-of-life
-    `node:20-alpine` to `node:24-alpine`.
+    `node:20-alpine` to `node:24.22.3-alpine`.
   - Own images rebuilt so their base layers pick up OS patches (the build
     skips tags that already exist): admin-portal 0.9.61, account-portal
     0.11.69, roundcube 0.3.10, perf 0.2.6. No code changes.

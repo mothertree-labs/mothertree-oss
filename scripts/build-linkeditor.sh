@@ -34,7 +34,7 @@ echo "Building files_linkeditor..."
 docker run --rm \
     -v "$APP_DIR:/app" \
     -w /app \
-    node:24-alpine \
+    node:24.22.3-alpine \
     sh -c "npm ci && npm run build"
 
 echo "Build complete."
