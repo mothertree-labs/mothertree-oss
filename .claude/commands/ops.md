@@ -1036,5 +1036,5 @@ curl -H "Authorization: Bearer $TOKEN" \
 | **Monitoring** | `apps/values/prometheus.yaml`, `apps/values/vector.yaml` |
 | **Email probe** | `apps/manifests/email-probe/email-probe.yaml.tpl` |
 | **Jitsi manifests** | `apps/manifests/jitsi/` |
-| **Stalwart config** | `apps/manifests/stalwart/stalwart.yaml.tpl` |
+| **Stalwart config** | `apps/manifests/stalwart/stalwart-v1.yaml.tpl`, `scripts/lib/stalwart-v1-plan.sh` (settings as code) |
 | **Health checks** | `scripts/check-health`, `scripts/verify-endpoints`, `scripts/test-email-system` |

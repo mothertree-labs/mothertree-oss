@@ -123,12 +123,6 @@ if [ -z "$S3_MAIL_BUCKET" ] || [ "$S3_MAIL_BUCKET" = "null" ]; then
     exit 1
 fi
 
-# Generate SHA-512 crypt hash of admin password for master-user authentication
-# Stalwart master.secret requires a hashed password (not plaintext)
-export STALWART_MASTER_SECRET
-STALWART_MASTER_SECRET=$(openssl passwd -6 -salt "$(openssl rand -hex 8)" "$STALWART_ADMIN_PASSWORD")
-print_status "Master-user secret hash generated"
-
 # =============================================================================
 # Outbound mail path: SES relay (prod) or direct MX (dev)
 # =============================================================================
@@ -164,128 +158,56 @@ if [ -n "${SMTP_RELAY_HOST:-}" ] && [ -n "${SES_SMTP_ENDPOINT:-}" ]; then
 fi
 
 if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "${SES_SMTP_PASSWORD:-}" ]; then
-    # Reject endpoints containing characters that could inject TOML directives
-    # via newlines. Operator-controlled input; defense-in-depth.
+    # Reject endpoints with characters that could break out of the route
+    # settings (newlines, quotes, ':'). Operator-controlled input; defense-in-depth.
     if ! [[ "$SES_SMTP_ENDPOINT" =~ ^[A-Za-z0-9.-]+$ ]]; then
         print_error "SES_SMTP_ENDPOINT '$SES_SMTP_ENDPOINT' contains invalid characters (allowed: A-Za-z0-9.-)"
         exit 1
     fi
     STALWART_SES_ENABLED=true
     export STALWART_V1_ROUTE="ses"
-    export STALWART_OUTBOUND_ROUTE_NAME="relay"
-    export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - AWS SES via SASL-authenticated SMTP submission.
-    [queue.route.\"relay\"]
-    type = \"relay\"
-    address = \"%{env:SES_SMTP_ENDPOINT}%\"
-    port = 587
-    protocol = \"smtp\"
-
-    [queue.route.\"relay\".tls]
-    implicit = false
-    allow-invalid-certs = false
-
-    [queue.route.\"relay\".auth]
-    username = \"%{env:SES_SMTP_USER}%\"
-    secret = \"%{env:SES_SMTP_PASSWORD}%\""
     print_status "Outbound relay: AWS SES ($SES_SMTP_ENDPOINT)"
 elif [[ "${SMTP_RELAY_HOST:-}" == *.svc.cluster.local. ]] && mt_is_local_edge; then
     # Local-edge developer box only: mt_load_infra_config accepts a
     # cluster-local Service name solely on cluster.edge: local (the devbox's
-    # Mailpit catch-all). Name and port are validated there, so inlining them
-    # cannot inject TOML. Plain SMTP inside the cluster; nothing leaves it.
+    # Mailpit catch-all). Name and port are validated there, so they are
+    # safe in the route spec. Plain SMTP inside the cluster; nothing leaves it.
     STALWART_SES_ENABLED=false
     SMTP_RELAY_NAMESPACE=$(cut -d. -f2 <<<"$SMTP_RELAY_HOST")
     # Already an absolute Service name: the route uses it as is.
     SMTP_RELAY_SVC_HOST="$SMTP_RELAY_HOST"
     export STALWART_V1_ROUTE="relay:${SMTP_RELAY_SVC_HOST}:${SMTP_RELAY_PORT}:false"
-    export STALWART_OUTBOUND_ROUTE_NAME="relay"
-    export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - in-cluster catch-all (devbox Mailpit, mail.smtp_relay).
-    [queue.route.\"relay\"]
-    type = \"relay\"
-    address = \"${SMTP_RELAY_SVC_HOST}\"
-    port = ${SMTP_RELAY_PORT}
-    protocol = \"smtp\"
-
-    [queue.route.\"relay\".tls]
-    implicit = false
-    allow-invalid-certs = false"
     print_status "Outbound relay: in-cluster catch-all ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}"
 elif [ -n "${SMTP_RELAY_HOST:-}" ]; then
     # Host/port were validated by mt_load_infra_config (mesh IP, numeric port),
-    # so inlining them cannot inject TOML.
+    # so they are safe in the route spec.
     STALWART_SES_ENABLED=false
-    # Stalwart always resolves a relay route's address through DNS (v0.15
-    # ip_lookup has no IP-literal path), so a bare mesh IP fails every delivery
-    # with "record not found" and bounces it. Give it a cluster-local name: a
+    # Stalwart 0.15 resolved a relay route's address only through DNS (no
+    # IP-literal path), so a bare mesh IP failed every delivery with "record
+    # not found"; v1 keeps the same cluster-local name. Give it a cluster-local name: a
     # selector-less Service whose only endpoint is the validated mesh IP
     # (applied below). The trailing dot makes the name absolute, so the pod's
     # DNS search list (ndots:5, node-inherited domains) can never resolve it
     # upstream; only cluster DNS answers, so the name maps to that IP alone.
     SMTP_RELAY_SVC_HOST="smtp-relay.${NS_MAIL}.svc.cluster.local."
+    # The trailing `true` allows invalid certs: the hop is WireGuard-encrypted
+    # and the relay's STARTTLS uses a self-signed cert. Safe ONLY because
+    # mt_require_mesh_ip pins the host to 100.64.0.0/10 and the route name is
+    # an absolute cluster-local name whose only endpoint is that IP: never
+    # relax either (hostnames, a relative name) without turning it back off.
     export STALWART_V1_ROUTE="relay:${SMTP_RELAY_SVC_HOST}:${SMTP_RELAY_PORT}:true"
-    export STALWART_OUTBOUND_ROUTE_NAME="relay"
-    export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - unauthenticated smart host on the tailnet (mail.smtp_relay).
-    # ${SMTP_RELAY_SVC_HOST} -> ${SMTP_RELAY_HOST} (Service + EndpointSlice).
-    [queue.route.\"relay\"]
-    type = \"relay\"
-    address = \"${SMTP_RELAY_SVC_HOST}\"
-    port = ${SMTP_RELAY_PORT}
-    protocol = \"smtp\"
-
-    # The hop is WireGuard-encrypted; the relay's STARTTLS uses a self-signed cert.
-    # Safe ONLY because mt_require_mesh_ip pins the host to 100.64.0.0/10 and the
-    # route name is an absolute cluster-local name whose only endpoint is that
-    # IP: never relax either (hostnames, a relative name) without turning this
-    # back on.
-    [queue.route.\"relay\".tls]
-    implicit = false
-    allow-invalid-certs = true"
     print_status "Outbound relay: tailnet smart host ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}"
 else
     STALWART_SES_ENABLED=false
     export STALWART_V1_ROUTE="mx"
-    export STALWART_OUTBOUND_ROUTE_NAME="mx"
-    export STALWART_OUTBOUND_ROUTE_TOML="    # Direct MX delivery - no smart host configured for this env.
-    [queue.route.\"mx\"]
-    type = \"mx\"
-    ip-lookup = \"ipv4_then_ipv6\""
     print_status "Outbound relay: direct MX (no SES configured for this env)"
 fi
 
-# Logging tracer config (env-gated, baked into ${STALWART_TRACING_TOML} in the
-# ConfigMap template). Stalwart's legacy [tracing] block only surfaces a curated
-# event subset (auth + warn/error) — NOT smtp/queue/delivery/dsn events (verified
-# empty across the full 15m Stalwart capture in CI pipeline #1628). Dev needs the
-# full info-level delivery stream so ci-e2e-diagnostics.sh can name which leg of
-# the email round-trip (shard-5) broke. Prod keeps the quieter legacy block to
-# bound log volume — flip an env here if prod delivery debugging is ever needed.
-if mt_is_dev_class; then
-    export STALWART_TRACING_TOML="    [tracer.\"stdout\"]
-    type = \"stdout\"
-    level = \"info\"
-    ansi = false
-    enable = true"
-    print_status "Tracing: full info-level event stream (dev — incl. smtp/queue/delivery)"
-else
-    export STALWART_TRACING_TOML="    [tracing]
-    level = \"info\"
-    method = \"stdout\""
-    print_status "Tracing: legacy curated subset (prod)"
-fi
-
-# Generate config checksum for pod annotations. Include every value the pod
-# reads from a Secret/ConfigMap so rotating any of them forces a rollout.
-# STALWART_OUTBOUND_ROUTE_TOML is baked into RENDERED_CONFIG below, but we hash
-# SES creds separately because they are mounted as env vars and would
-# otherwise roll silently on Secret-only changes.
-RENDERED_CONFIG=$(envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" 2>/dev/null || echo "")
 # v1 pods read these at start; rotating any of them must roll the pods
 # (stalwart-secrets is applied with plain kubectl apply, so the change
-# tracker would not see it). The master secret is excluded: it is re-salted
-# on every run and only the retired 0.15 Deployment uses it.
+# tracker would not see it). The SES credentials are mounted as env vars and
+# would otherwise roll silently on Secret-only changes.
 export STALWART_SECRETS_CHECKSUM=$(printf '%s' "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$STALWART_OIDC_SECRET$S3_MAIL_ACCESS_KEY$S3_MAIL_SECRET_KEY${SES_SMTP_ENDPOINT:-}${SES_SMTP_USERNAME:-}${SES_SMTP_PASSWORD:-}" | sha256sum | cut -c1-16)
-export CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$S3_MAIL_ACCESS_KEY${SES_SMTP_ENDPOINT:-}${SES_SMTP_USERNAME:-}${SES_SMTP_PASSWORD:-}$RENDERED_CONFIG" | sha256sum | cut -d' ' -f1 | head -c 12)
-print_status "Config checksum: $CONFIG_CHECKSUM"
 
 # Ensure namespace exists
 print_status "Ensuring $NS_MAIL namespace exists..."
@@ -387,7 +309,7 @@ fi
 # =============================================================================
 # PR #353 created a dkim-key Secret here for Stalwart-side DKIM signing. That
 # approach was abandoned — SES Easy DKIM handles outbound signing now (see the
-# comment above, and the [auth.dkim] block in stalwart.yaml.tpl). The Secret
+# comment above). The Secret
 # in the tenant namespace is no longer mounted by Stalwart. Delete any stale
 # copy left over from a prior deploy. --ignore-not-found handles the benign
 # "already gone" case; real failures (auth, connectivity) still surface.
@@ -441,6 +363,24 @@ kubectl create secret generic postgres-credentials \
     --dry-run=client -o yaml | kubectl apply -f -
 print_success "PostgreSQL credentials copied"
 
+# Which Stalwart the tenant runs now (v1 | v015 | none); decides below
+# whether the 0.15 → v1 migration runs.
+: "${S3_INTERNAL_ENDPOINT:?S3_INTERNAL_ENDPOINT not set by config.sh}"
+source "${REPO_ROOT}/scripts/lib/stalwart-v1.sh"
+STALWART_GENERATION=$(mt_stalwart_generation)
+
+# A tenant still on 0.15 keeps the master-user secret its Deployment reads
+# (secretKeyRef): a failed migration scales that 0.15 back up, and its pods
+# would not start without the key. v1 has no master user, so v1 tenants
+# drop it (removed explicitly below: client-side apply does not delete a key
+# that disappears from stringData).
+STALWART_MASTER_SECRET_LINE=""
+if [ "$STALWART_GENERATION" = v015 ]; then
+    # Password on stdin, never in argv (ps on a shared CI host).
+    _master_hash=$(printf '%s\n' "$STALWART_ADMIN_PASSWORD" | openssl passwd -6 -salt "$(openssl rand -hex 8)" -stdin)
+    STALWART_MASTER_SECRET_LINE="  STALWART_MASTER_SECRET: \"${_master_hash}\""
+fi
+
 # Apply Stalwart secrets for db-init job
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -453,12 +393,18 @@ stringData:
   STALWART_ADMIN_PASSWORD: "$STALWART_ADMIN_PASSWORD"
   STALWART_DB_PASSWORD: "$STALWART_DB_PASSWORD"
   STALWART_OIDC_SECRET: "$STALWART_OIDC_SECRET"
-  # Only the 0.15 Deployment reads it (master-user login). Kept until the 0.15
-  # manifest is retired, so a failed migration can still restore 0.15.
-  STALWART_MASTER_SECRET: "$STALWART_MASTER_SECRET"
+${STALWART_MASTER_SECRET_LINE}
   S3_ACCESS_KEY: "$S3_MAIL_ACCESS_KEY"
   S3_SECRET_KEY: "$S3_MAIL_SECRET_KEY"
 EOF
+# Read first, outside a test, so a failed read stops the deploy (set -e).
+_stale_master=$(kubectl get secret stalwart-secrets -n "$NS_MAIL" -o jsonpath='{.data.STALWART_MASTER_SECRET}')
+if [ "$STALWART_GENERATION" != v015 ] && [ -n "$_stale_master" ]; then
+    kubectl patch secret stalwart-secrets -n "$NS_MAIL" --type=json \
+        -p '[{"op":"remove","path":"/data/STALWART_MASTER_SECRET"}]' >/dev/null
+    print_status "Removed the 0.15 master-user secret from stalwart-secrets"
+fi
+unset _stale_master
 print_success "Stalwart secrets applied"
 
 # Delete any previous db-init job (jobs are not updated, they need to be recreated)
@@ -520,7 +466,10 @@ fi
 # opens 6379) plus the Stalwart-only Redis rule. create_env treats a failed
 # deploy-network-policies.sh as non-fatal, so check here: without these, the
 # Redis would be reachable from any pod in the cluster.
-for _np in allow-mail-ingress allow-stalwart-redis-ingress; do
+# allow-stalwart-mgmt-ingress is how the config plan Job (and the 0.15 dump
+# Job) reach Stalwart's management port; without it they wait out their
+# timeouts and the deploy fails late. prod was missing it before #715.
+for _np in allow-mail-ingress allow-stalwart-redis-ingress allow-stalwart-mgmt-ingress; do
     if ! kubectl get networkpolicy "$_np" -n "$NS_MAIL" >/dev/null; then
         print_error "NetworkPolicy $_np missing in $NS_MAIL; run apps/deploy-network-policies.sh -e $MT_ENV -t $MT_TENANT first"
         exit 1
@@ -569,9 +518,7 @@ print_success "Stalwart Redis ready"
 # (scripts/lib/stalwart-v1.sh): export from the running 0.15, stop it, copy
 # and convert into STALWART_V1_DB_NAME, verify. The 0.15 database is only
 # read, and any failure before v1 starts brings 0.15 back.
-: "${S3_INTERNAL_ENDPOINT:?S3_INTERNAL_ENDPOINT not set by config.sh}"
-source "${REPO_ROOT}/scripts/lib/stalwart-v1.sh"
-STALWART_GENERATION=$(mt_stalwart_generation)
+# STALWART_GENERATION was read before the stalwart-secrets apply above.
 STALWART_FIRST_BOOT=""
 case "$STALWART_GENERATION" in
     v1)
