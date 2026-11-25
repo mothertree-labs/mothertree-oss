@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Synthetic webmail login in the email probe.** Every 5 minutes the probe
+  gets a Keycloak token (aud=stalwart) and logs in to Stalwart's IMAP on 993
+  with XOAUTH2, exactly as Roundcube does, and exports
+  `email_probe_oidc_login_*` metrics. New alerts: `EmailProbeOidcLoginFailing`
+  (3 failures in a row, critical) and `EmailProbeOidcLoginStale`. Stalwart's
+  health check and app-password logins stay green when OIDC discovery or the
+  directory breaks, so nothing caught that before. The probe gets its own
+  confidential Keycloak client (`email-probe-login`, password grant only, no
+  browser flow, no service account) and a generated password on its Keycloak
+  user; both live only in the `email-probe-secrets` Secret.
+  `deploy-email-probe.sh` sets them up, verifies a token, and now rolls the
+  probe whenever its script or secrets change.
+
 ### Changed
 - **Stalwart mail server 0.15.5 → v1.2.0 (#715), step 2 of 3.** 0.15 stopped
   getting fixes when 0.16 came out, and v1 changed the store layout again.

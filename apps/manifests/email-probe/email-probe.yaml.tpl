@@ -9,6 +9,9 @@
 #   TENANT_NAME - Tenant name (e.g., example)
 #   BOT_EMAIL - Probe bot email address (e.g., email-probe@dev.example.com)
 #   BOT_PASSWORD - Probe bot app password
+#   OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_USER_PASSWORD, OIDC_TOKEN_URL -
+#     the synthetic Keycloak login (apps/scripts/ensure-email-probe-oidc.py)
+#   EMAIL_PROBE_CHECKSUM - hash of the script and secrets (rolls the pod)
 #   TARGET_EMAIL - External auto-reply address
 #   EMAIL_PROBE_MEMORY_REQUEST, EMAIL_PROBE_MEMORY_LIMIT
 #   EMAIL_PROBE_CPU_REQUEST
@@ -22,6 +25,8 @@ metadata:
 type: Opaque
 stringData:
   BOT_PASSWORD: "${BOT_PASSWORD}"
+  OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET}"
+  OIDC_USER_PASSWORD: "${OIDC_USER_PASSWORD}"
 
 ---
 apiVersion: apps/v1
@@ -42,6 +47,8 @@ spec:
       labels:
         app: email-probe
         tenant: ${TENANT_NAME}
+      annotations:
+        checksum/config: "${EMAIL_PROBE_CHECKSUM}"
     spec:
       securityContext:
         runAsNonRoot: true
@@ -75,6 +82,28 @@ spec:
             secretKeyRef:
               name: email-probe-secrets
               key: BOT_PASSWORD
+        # Synthetic OIDC login: Keycloak token (aud=stalwart), then IMAP
+        # XOAUTH2 on 993, as Roundcube does.
+        - name: OIDC_IMAP_PORT
+          value: "993"
+        - name: OIDC_TOKEN_URL
+          value: "${OIDC_TOKEN_URL}"
+        - name: OIDC_CLIENT_ID
+          value: "${OIDC_CLIENT_ID}"
+        - name: OIDC_USERNAME
+          value: "email-probe"
+        - name: OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: email-probe-secrets
+              key: OIDC_CLIENT_SECRET
+        - name: OIDC_USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: email-probe-secrets
+              key: OIDC_USER_PASSWORD
+        - name: OIDC_LOGIN_INTERVAL
+          value: "300"
         - name: TARGET_EMAIL
           value: "${TARGET_EMAIL}"
         - name: PROBE_INTERVAL
