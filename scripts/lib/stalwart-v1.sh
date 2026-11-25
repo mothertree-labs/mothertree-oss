@@ -92,10 +92,17 @@ _mt_stalwart_run_job() {
     if [ "$state" = complete ]; then
         return 0
     fi
-    # Stop it now, pods included (foreground cascade): the caller restores
-    # 0.15, and no v0.16 pod may still be running by then.
-    kubectl delete job "$job" -n "$NS_MAIL" --ignore-not-found --cascade=foreground --wait=true \
-        >/dev/null 2>&1 || print_warning "could not delete Job $job"
+    # Anything still running (timeout, restart, unknown state) is stopped now,
+    # pods included (foreground cascade): the caller restores 0.15, and no
+    # v0.16 pod may still be running by then. A Failed Job has nothing
+    # running and is kept for `kubectl logs` (the cli is distroless: its log
+    # is the only diagnostic); the migration cleanup deletes the migrate Jobs.
+    if [ "$state" != failed ]; then
+        kubectl delete job "$job" -n "$NS_MAIL" --ignore-not-found --cascade=foreground --wait=true \
+            >/dev/null 2>&1 || print_warning "could not delete Job $job"
+    else
+        print_status "Failed Job kept for diagnosis: kubectl logs -n $NS_MAIL job/$job --all-containers"
+    fi
     print_error "Job $job did not complete (state: ${state:-unknown})"
     return 1
 }

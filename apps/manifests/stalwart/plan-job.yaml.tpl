@@ -38,6 +38,37 @@ spec:
         runAsUser: 65532
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+      # A new pod's first connections are refused until the k3s/kube-router
+      # NetworkPolicy controller has added its IP (about a second; pipeline
+      # 139: all three cli attempts failed instantly). The cli is distroless
+      # and connects at once, so wait here until the management API answers.
+      - name: wait-mgmt
+        image: python:3.13.18-slim
+        command: ["python", "-I", "-c"]
+        args:
+        - |
+          import time, urllib.request, urllib.error
+          url = "http://stalwart-mgmt.${NS_MAIL}.svc.cluster.local:8080/healthz/live"
+          for i in range(90):
+              try:
+                  urllib.request.urlopen(url, timeout=3)
+                  print("mgmt API reachable after %ds" % (i * 2))
+                  raise SystemExit(0)
+              except (urllib.error.URLError, OSError):
+                  time.sleep(2)
+          raise SystemExit("stalwart-mgmt not reachable after 180s")
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            memory: 64Mi
       containers:
       - name: apply
         image: stalwartlabs/cli:2.0.0
