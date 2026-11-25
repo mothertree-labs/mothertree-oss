@@ -33,6 +33,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **0.95 is held back** (#845): it is signed by a new PGP key that is not yet
   verified. Renovate now holds magic-link below 0.95 until it is (re-evaluate
   by 2026-12-09).
+- **CI host toolchain brought current and actually pinned** (`ci/ansible/playbook.yml`).
+  - Node.js 20 (end of life) → 24, kubectl 1.31.4 → 1.36.7, Terraform
+    1.13.3 → 1.17.2, Helm 3 (unpinned `get-helm-3`) → 4.3.2, helmfile
+    0.169.2 → 1.8.5, kustomize 5.6.0 → 5.8.3, yq 4.44.6 → 4.54.3, plugin-git
+    2.9.3 → 2.12.1. Helm 4 and helmfile 1.8 match what operators already
+    deploy prod with locally.
+  - Every binary is now pinned by version and SHA-256. Before, `creates:` and
+    `get_url` never replaced an existing file, so bumping a version in the
+    playbook did nothing (kubectl sat at 1.31). Node uses `state: latest` on
+    the switched repository, and the play asserts the resulting versions.
+  - Takes effect when the playbook is next applied to the CI host (while CI
+    is idle), not on merge.
 
 ### Added
 - **Synthetic webmail login in the email probe.** Every 5 minutes the probe

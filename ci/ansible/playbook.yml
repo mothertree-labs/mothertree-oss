@@ -21,7 +21,28 @@
 
   vars:
     woodpecker_version: "{{ woodpecker_version_override | default('3.20.1') }}"
-    plugin_git_version: "{{ plugin_git_version_override | default('2.9.3') }}"
+    plugin_git_version: "{{ plugin_git_version_override | default('2.12.1') }}"
+    plugin_git_sha256: "356060a76a8eebecc65cdfd51e0e583a9aad17564030f64672dc4c5af8ed45c0"
+    # CI toolchain. Each binary is pinned by version AND sha256: get_url only
+    # replaces an existing file when its checksum differs, so without the
+    # checksum a version bump here never reached the host (kubectl sat at
+    # 1.31 and helm at whatever get-helm-3 installed first).
+    # Keep helm/helmfile in step with what operators run locally (prod
+    # deploys run from there too).
+    node_major: "24"
+    terraform_version: "1.17.2"
+    terraform_sha256: "e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b"
+    helm_version: "4.3.2"
+    helm_sha256: "d1c0278d46beab79582d7e50f5b3dc206944ba8e577cde618513fd07daa53983"
+    helmfile_version: "1.8.5"
+    helmfile_sha256: "e10344a4e6121689265c8fbe8ce96977b4722a9f953db862014a08b99938c333"
+    kustomize_version: "5.8.3"
+    kustomize_sha256: "cb9e31198d3f63b44848bd0afc4c8efc56e6cfef9c93a4a39a211940e6decd61"
+    yq_version: "4.54.3"
+    yq_sha256: "129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973"
+    # Within one minor of every cluster CI talks to (prod LKE 1.35, devhome k3s 1.36).
+    kubectl_version: "1.36.7"
+    kubectl_sha256: "b08f96b43904747897fe569b3c51056b00ddfc67847f6db1bf9fe0c9583a2d26"
     # Path to tenant config submodule (relative to playbook)
     _tenants_dir: "{{ playbook_dir }}/../../config/tenants"
 
@@ -271,6 +292,7 @@
     - name: Download plugin-git binary
       ansible.builtin.get_url:
         url: "https://github.com/woodpecker-ci/plugin-git/releases/download/{{ plugin_git_version }}/linux-amd64_plugin-git"
+        checksum: "sha256:{{ plugin_git_sha256 }}"
         dest: /usr/local/bin/plugin-git
         mode: "0755"
 
@@ -494,23 +516,37 @@
           - git-lfs
         state: present
 
-    - name: Install Node.js 20 apt key
+    - name: Install NodeSource apt key
       ansible.builtin.shell: |
         curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
           | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg
       args:
         creates: /usr/share/keyrings/nodesource.gpg
 
-    - name: Add Node.js 20 apt repository
+    - name: Drop the Node.js 20 apt repository (end of life)
       ansible.builtin.apt_repository:
         repo: "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main"
         filename: nodesource
+        state: absent
 
+    - name: Add the Node.js {{ node_major }} apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_{{ node_major }}.x nodistro main"
+        filename: nodesource
+
+    # state: latest, so switching the repository above actually moves the
+    # installed major (state: present kept Node 20 forever).
     - name: Install Node.js
       ansible.builtin.apt:
         name: nodejs
-        state: present
+        state: latest
         update_cache: true
+
+    - name: Check the Node.js major
+      ansible.builtin.command: node --version
+      register: node_version_out
+      changed_when: false
+      failed_when: not node_version_out.stdout.startswith('v' ~ node_major ~ '.')
 
     - name: Install Playwright Chromium system dependencies
       ansible.builtin.shell: npx --yes playwright install-deps chromium
@@ -519,42 +555,62 @@
       environment:
         HOME: /tmp
 
-    - name: Install Terraform
-      ansible.builtin.unarchive:
-        src: https://releases.hashicorp.com/terraform/1.13.3/terraform_1.13.3_linux_amd64.zip
-        dest: /usr/local/bin
-        remote_src: true
-        mode: "0755"
-
-    - name: Install Helm
-      ansible.builtin.shell: |
-        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-      args:
-        creates: /usr/local/bin/helm
-
-    - name: Install helmfile
+    - name: Download Terraform
       ansible.builtin.get_url:
-        url: https://github.com/helmfile/helmfile/releases/download/v0.169.2/helmfile_0.169.2_linux_amd64.tar.gz
-        dest: /tmp/helmfile.tar.gz
+        url: "https://releases.hashicorp.com/terraform/{{ terraform_version }}/terraform_{{ terraform_version }}_linux_amd64.zip"
+        checksum: "sha256:{{ terraform_sha256 }}"
+        dest: "/tmp/terraform_{{ terraform_version }}.zip"
         mode: "0644"
 
-    - name: Extract helmfile
+    - name: Install Terraform
       ansible.builtin.unarchive:
-        src: /tmp/helmfile.tar.gz
+        src: "/tmp/terraform_{{ terraform_version }}.zip"
+        dest: /usr/local/bin
+        remote_src: true
+        include: [terraform]
+        mode: "0755"
+
+    - name: Download Helm
+      ansible.builtin.get_url:
+        url: "https://get.helm.sh/helm-v{{ helm_version }}-linux-amd64.tar.gz"
+        checksum: "sha256:{{ helm_sha256 }}"
+        dest: "/tmp/helm-v{{ helm_version }}.tar.gz"
+        mode: "0644"
+
+    - name: Install Helm
+      ansible.builtin.unarchive:
+        src: "/tmp/helm-v{{ helm_version }}.tar.gz"
+        dest: /usr/local/bin
+        remote_src: true
+        include: [linux-amd64/helm]
+        extra_opts: [--strip-components=1]
+        mode: "0755"
+
+    - name: Download helmfile
+      ansible.builtin.get_url:
+        url: "https://github.com/helmfile/helmfile/releases/download/v{{ helmfile_version }}/helmfile_{{ helmfile_version }}_linux_amd64.tar.gz"
+        checksum: "sha256:{{ helmfile_sha256 }}"
+        dest: "/tmp/helmfile_{{ helmfile_version }}.tar.gz"
+        mode: "0644"
+
+    - name: Install helmfile
+      ansible.builtin.unarchive:
+        src: "/tmp/helmfile_{{ helmfile_version }}.tar.gz"
         dest: /usr/local/bin
         remote_src: true
         include: [helmfile]
         mode: "0755"
 
-    - name: Install kustomize (required by helmfile jsonPatches/strategicMergePatches)
+    - name: Download kustomize (required by helmfile jsonPatches/strategicMergePatches)
       ansible.builtin.get_url:
-        url: https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz
-        dest: /tmp/kustomize.tar.gz
+        url: "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv{{ kustomize_version }}/kustomize_v{{ kustomize_version }}_linux_amd64.tar.gz"
+        checksum: "sha256:{{ kustomize_sha256 }}"
+        dest: "/tmp/kustomize_{{ kustomize_version }}.tar.gz"
         mode: "0644"
 
-    - name: Extract kustomize
+    - name: Install kustomize
       ansible.builtin.unarchive:
-        src: /tmp/kustomize.tar.gz
+        src: "/tmp/kustomize_{{ kustomize_version }}.tar.gz"
         dest: /usr/local/bin
         remote_src: true
         include: [kustomize]
@@ -562,15 +618,28 @@
 
     - name: Install yq
       ansible.builtin.get_url:
-        url: https://github.com/mikefarah/yq/releases/download/v4.44.6/yq_linux_amd64
+        url: "https://github.com/mikefarah/yq/releases/download/v{{ yq_version }}/yq_linux_amd64"
+        checksum: "sha256:{{ yq_sha256 }}"
         dest: /usr/local/bin/yq
         mode: "0755"
 
     - name: Install kubectl
       ansible.builtin.get_url:
-        url: https://dl.k8s.io/release/v1.31.4/bin/linux/amd64/kubectl
+        url: "https://dl.k8s.io/release/v{{ kubectl_version }}/bin/linux/amd64/kubectl"
+        checksum: "sha256:{{ kubectl_sha256 }}"
         dest: /usr/local/bin/kubectl
         mode: "0755"
+
+    - name: Check the toolchain versions
+      ansible.builtin.shell: |
+        set -e
+        terraform version | head -1 | grep -qF "v{{ terraform_version }}"
+        helm version --short | grep -qF "v{{ helm_version }}"
+        helmfile --version | grep -qF "{{ helmfile_version }}"
+        kustomize version | grep -qF "{{ kustomize_version }}"
+        yq --version | grep -qF "{{ yq_version }}"
+        kubectl version --client | grep -qF "v{{ kubectl_version }}"
+      changed_when: false
 
     # The scheduled devbox drift check (.woodpecker/devbox-drift.yaml) runs
     # scripts/devbox in this host's Docker. Same k3d as scripts/devbox
