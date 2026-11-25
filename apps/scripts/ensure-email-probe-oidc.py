@@ -161,6 +161,9 @@ def ensure_flow(tok, client_uuid):
         status, _ = request("DELETE", f"{flows}/{fid}", tok)
         if status != 204:
             sys.exit(f"Could not delete the old flow '{FLOW}' (HTTP {status})")
+    else:
+        # Building from nothing: same rule, the grant stays off until bound.
+        set_client(tok, client_uuid, directAccessGrantsEnabled=False)
     q = urllib.parse.quote
     steps = [
         ("POST", flows, {"alias": FLOW, "providerId": "basic-flow", "topLevel": True, "builtIn": False,
@@ -348,12 +351,21 @@ def gate_check(tok, uid, cid):
     if status != 204:
         set_client(tok, cid, directAccessGrantsEnabled=False)
         sys.exit(f"Gate check: could not remove role {ROLE} (HTTP {status}); password grant left off")
-    ok, _ = probe_login()
-    ensure_user_role(tok, uid, cid)
-    if ok:
+    status, data = request("POST", f"/realms/{REALM}/protocol/openid-connect/token", form={
+        "grant_type": "password", "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
+        "username": USERNAME, "password": PASSWORD, "scope": "openid",
+    })
+    issued = bool((data or {}).get("access_token"))
+    if issued or status != 401:
+        # Any token is a bypass; anything but the flow's denial (401) proves
+        # nothing. Switch the grant off before touching the role again.
         set_client(tok, cid, directAccessGrantsEnabled=False)
-        sys.exit(f"Gate check FAILED: a user without role {ROLE} got a token; password grant switched off")
-    say(f"Gate check: a user without role {ROLE} is refused")
+        ensure_user_role(tok, uid, cid)
+        if issued:
+            sys.exit(f"Gate check FAILED: a user without role {ROLE} got a token; password grant switched off")
+        sys.exit(f"Gate check inconclusive (HTTP {status}, expected 401); password grant switched off")
+    ensure_user_role(tok, uid, cid)
+    say(f"Gate check: a user without role {ROLE} is refused (HTTP 401)")
 
 
 def main():
