@@ -20,6 +20,50 @@ WP_REPO_ID=1
 # issues with passwords containing ", $, `, etc.
 source /etc/mothertree/e2e-cleanup-pools.env
 
+{% raw %}
+# Stalwart v1 JMAP cleanup (issue #715): list every account, destroy the
+# e2e-<pipeline>-* ones whose pipeline is no longer running. Reads the admin
+# password from stdin; env: STALWART_URL, RUNNING_PIPELINES. Prints the count.
+# Mirrors scripts/lib/stalwart-jmap.py (not available on the CI host path).
+STALWART_CLEANUP_PY='
+import base64, json, os, re, sys, urllib.request
+url = os.environ["STALWART_URL"].rstrip("/") + "/jmap/"
+auth = "Basic " + base64.b64encode(("admin:" + sys.stdin.readline().rstrip("\n")).encode()).decode()
+running = set(l.strip() for l in os.environ.get("RUNNING_PIPELINES", "").split("\n") if l.strip())
+def jmap(calls):
+    body = json.dumps({"using": ["urn:ietf:params:jmap:core", "urn:stalwart:jmap"], "methodCalls": calls}).encode()
+    req = urllib.request.Request(url, data=body, headers={"Authorization": auth, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        out = {}
+        for name, args, cid in json.load(r)["methodResponses"]:
+            if name == "error":
+                raise SystemExit("jmap error: %s" % args.get("type"))
+            out[cid] = args
+        return out
+stale, pos = [], 0
+while True:
+    res = jmap([["x:Account/query", {"position": pos, "limit": 500, "calculateTotal": True}, "q"],
+                ["x:Account/get", {"#ids": {"resultOf": "q", "name": "x:Account/query", "path": "/ids"},
+                                   "properties": ["name"]}, "g"]])
+    ids = res["q"].get("ids") or []
+    for a in res["g"].get("list") or []:
+        name = a.get("name", "")
+        if name.startswith(("e2e-mail", "e2e-local-", "e2e-member", "e2e-admin")):
+            continue
+        m = re.match(r"^e2e-(\d+)-", name)
+        if m and m.group(1) not in running:
+            stale.append(a["id"])
+    pos += len(ids)
+    if not ids or pos >= res["q"].get("total", pos):
+        break
+deleted = 0
+for i in range(0, len(stale), 500):
+    res = jmap([["x:Account/set", {"destroy": stale[i:i + 500]}, "x"]])
+    deleted += len(res["x"].get("destroyed") or [])
+print(deleted)
+'
+{% endraw %}
+
 # --- Get running pipeline numbers from Woodpecker ---
 # Writes running pipeline numbers to a temp file (one per line).
 # Uses a marker file to distinguish "API reachable, zero running" from "API down".
@@ -111,43 +155,15 @@ for u in users:
   fi
   total_deleted=$((total_deleted + pool_deleted))
 
-  # Clean matching Stalwart principals (OIDC auto-provisioned, persist after KC deletion)
+  # Clean matching Stalwart accounts (OIDC auto-provisioned, persist after KC
+  # deletion) through the Stalwart v1 JMAP management API. The admin password
+  # is fed on stdin, never argv/env. Prints the number of accounts destroyed.
   if [ -n "$stalwart_admin_password" ]; then
-    stalwart_url="https://mail.${base_domain}"
-    stalwart_auth=$(echo -n "admin:${stalwart_admin_password}" | base64)
-
-    stalwart_principals=$(curl -sf --connect-timeout 10 --max-time 30 \
-      -H "Authorization: Basic $stalwart_auth" \
-      "$stalwart_url/api/principal?types=individual&limit=0" 2>/dev/null \
-      | RUNNING_PIPELINES="$running" python3 -c "
-import json, sys, re, os
-
-running = set(line.strip() for line in os.environ['RUNNING_PIPELINES'].strip().split('\n') if line.strip())
-body = json.load(sys.stdin)
-items = body.get('data', {}).get('items', body.get('data', []))
-
-for u in items:
-    name = u.get('name', '')
-    if name.startswith('e2e-mail') or name.startswith('e2e-local-') or name.startswith('e2e-member') or name.startswith('e2e-admin'):
-        continue
-    m = re.match(r'^e2e-(\d+)-', name)
-    if m and m.group(1) not in running:
-        print(name)
-" 2>/dev/null || true)
-
-    if [ -n "$stalwart_principals" ]; then
-      sw_deleted=0
-      while IFS= read -r principal; do
-        encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$principal', safe=''))" 2>/dev/null)
-        if curl -sf --connect-timeout 10 --max-time 10 -X DELETE \
-          -H "Authorization: Basic $stalwart_auth" \
-          "$stalwart_url/api/principal/${encoded}" > /dev/null 2>&1; then
-          sw_deleted=$((sw_deleted + 1))
-        fi
-      done <<< "$stalwart_principals"
-      if [ "$sw_deleted" -gt 0 ]; then
-        echo "$LOG_PREFIX Deleted $sw_deleted stale Stalwart principal(s) from $base_domain"
-      fi
+    sw_deleted=$(printf '%s\n' "$stalwart_admin_password" \
+      | STALWART_URL="https://mail.${base_domain}" RUNNING_PIPELINES="$running" \
+        python3 -c "$STALWART_CLEANUP_PY" 2>/dev/null || echo 0)
+    if [ "${sw_deleted:-0}" -gt 0 ] 2>/dev/null; then
+      echo "$LOG_PREFIX Deleted $sw_deleted stale Stalwart account(s) from $base_domain"
       total_deleted=$((total_deleted + sw_deleted))
     fi
   fi

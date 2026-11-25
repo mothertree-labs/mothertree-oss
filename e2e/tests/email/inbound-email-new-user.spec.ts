@@ -9,7 +9,7 @@
  * Flow:
  *   1. Admin portal invites a new user → creates Keycloak + Stalwart principal
  *   2. Sender (e2e-mailrt) sends email to the new user via Roundcube
- *   3. IMAP master-user checks the new user's inbox for delivery
+ *   3. IMAP admin impersonation checks the new user's inbox for delivery
  *   4. Cleanup: delete the user via admin portal API
  */
 

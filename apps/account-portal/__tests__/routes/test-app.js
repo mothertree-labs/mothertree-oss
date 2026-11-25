@@ -181,8 +181,7 @@ function createTestApp(options = {}) {
       const defaultQuotaMb = parseInt(process.env.DEFAULT_EMAIL_QUOTA_MB || '5120', 10);
       const defaultQuotaBytes = defaultQuotaMb * 1024 * 1024;
       await stalwartApi.ensureUserExists(req.user.email, req.user.name, defaultQuotaBytes);
-      const password = crypto.randomBytes(16).toString('base64url');
-      await stalwartApi.createAppPassword(req.user.email, deviceName, password);
+      const { password } = await stalwartApi.createAppPassword(req.user.email, deviceName);
       res.json({ success: true, password });
     } catch (error) {
       res.status(500).json({ error: error.message });

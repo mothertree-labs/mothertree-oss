@@ -335,23 +335,22 @@
     },
 
     // ---- Stalwart --------------------------------------------------------------------
-    // v0.16 is a configuration/management rewrite, not a tag bump: TOML config and the
-    // /api REST endpoints are gone, and the upstream migration drops every app password.
-    // Renovate labels 0.15 -> 0.16 "minor", so the global major gate does not catch it.
+    // The live server is v1 (#715; apps/manifests/stalwart/stalwart-v1.yaml.tpl) and
+    // takes normal updates: minors/patches in the weekly batch, majors via the
+    // dashboard. v1 releases have carried upgrade steps (e.g. 1.2.0 needed new role
+    // permissions), so read the release notes on every Stalwart bump.
     //
-    // This is an accepted-risk FREEZE, not a patched hold: v0.15.5 (2026-02-14) is the
-    // last 0.15 release and upstream fixes ship only in 0.16.x. allowedVersions also
-    // hides 0.16.x from the Dependency Dashboard, and nothing automated flags a Stalwart
-    // CVE, so watch github.com/stalwartlabs/stalwart/security/advisories. Re-evaluate by
-    // 2026-12-01 even if the migration (#715) has not landed; remove this rule with it.
-    //
-    // allowedVersions (not dependencyDashboardApproval) on purpose: approval only blocks
-    // creating a NEW branch, so the already-open Renovate PR would keep being updated;
-    // taking 0.16 out of the allowed range lets Renovate autoclose it.
+    // The one-time 0.15 -> v1 migration needs EXACT versions: stalwart-migrate reads
+    // only a v0.16.27 store, and the hop-1 import is done with the 0.16-era cli. The
+    // 0.15 manifest is kept only until every tenant is migrated (then deleted). None
+    // of those may move.
     {
-      "description": "Stalwart: frozen on 0.15.x until the v0.16 migration (#715)",
-      "matchPackageNames": ["stalwartlabs/stalwart"],
-      "allowedVersions": "/^v?0\\.15\\./",
+      "description": "Stalwart 0.15 -> v1 migration images and the retired 0.15 manifest are pinned on purpose (#715)",
+      "matchFileNames": [
+        "apps/manifests/stalwart/migrate/**",
+        "apps/manifests/stalwart/stalwart.yaml.tpl",
+      ],
+      "enabled": false,
     },
 
     // ---- Keycloak magic-link hold ------------------------------------------------------

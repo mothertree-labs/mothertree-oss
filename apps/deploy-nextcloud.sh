@@ -827,6 +827,16 @@ fi
 source "${REPO_ROOT}/scripts/lib/smtp-credentials.sh"
 mt_export_smtp_relay_env "$NS_FILES"
 
+# The chart wires SMTP_* from nextcloud-credentials as env (existingSecret), and
+# env is read only at pod start: when provision-smtp rotates the app password
+# (the Stalwart v1 migration always does, #715), the pods kept the old one and
+# every calendar invitation failed SMTP AUTH. Hash the settings into a pod
+# annotation (values/nextcloud.yaml.gotmpl) so helmfile rolls Nextcloud exactly
+# when they change. A truncated sha256 of a server-generated app password.
+NEXTCLOUD_SMTP_CREDS_HASH=$(printf '%s\n' "$SMTP_RELAY_HOST" "$SMTP_RELAY_PORT" \
+    "$SMTP_RELAY_USERNAME" "$SMTP_RELAY_PASSWORD" | shasum -a 256 | cut -c1-16)
+export NEXTCLOUD_SMTP_CREDS_HASH
+
 print_status "Deploying Nextcloud via helmfile..."
 pushd "$REPO_ROOT/apps" >/dev/null
   # Use sync instead of apply to skip slow diff operation

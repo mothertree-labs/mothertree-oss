@@ -1,7 +1,8 @@
 /**
  * IMAP helper for E2E calendar tests.
- * Uses imapflow (same library as calendar-automation) with Stalwart
- * master-user authentication to plant iTIP emails in user inboxes.
+ * Uses imapflow (same library as calendar-automation) with Stalwart v1
+ * admin impersonation ("<email>%admin" + the recovery admin password) to
+ * plant iTIP emails in user inboxes.
  */
 
 // @ts-expect-error — imapflow has no bundled types
@@ -119,11 +120,12 @@ function createClient(authUser: string, config: ImapConfig): typeof ImapFlow {
 }
 
 /**
- * Connect to IMAP as master on behalf of a user.
+ * Connect to IMAP as the admin on behalf of a user.
  *
- * Stalwart master-user auth uses the principal name (not email).
- * Some principals use "user@domain" as name, others use just "user".
- * We try email first, then fall back to short username.
+ * Stalwart v1 impersonation logs in as "<full-email>%admin" with the recovery
+ * admin password. The bare local part is rejected (0.15's "<name>%master"
+ * accepted it), so the full address is the only candidate — trying a known-bad
+ * form would only add auth failures toward Stalwart's ban threshold.
  *
  * Retries the full candidate list with capped-exponential backoff (~180s
  * sleep-only budget) to ride out the cold-start external IMAPS connect
@@ -134,8 +136,7 @@ async function connectAsMaster(
   userEmail: string,
   config: ImapConfig,
 ): Promise<typeof ImapFlow> {
-  const username = userEmail.split('@')[0];
-  const candidates = [userEmail, username];
+  const candidates = [userEmail.toLowerCase()];
   // Belt-and-suspenders FALLBACK for the pinned root cause: on cold-start the
   // external IMAPS edge (CI box → NodeBalancer/:993/cert) can take ~110s to
   // accept a session, even though a cold Stalwart delivers mail in ~48ms (no
@@ -150,7 +151,7 @@ async function connectAsMaster(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     for (const name of candidates) {
-      const client = createClient(`${name}%master`, config);
+      const client = createClient(`${name}%admin`, config);
       try {
         await client.connect();
         return client;
@@ -188,7 +189,7 @@ async function connectAsMaster(
   }
 
   throw new Error(
-    `IMAP master-user auth failed for ${userEmail} (tried: ${candidates.map((c) => c + '%master').join(', ')}, ${maxAttempts} attempts)`,
+    `IMAP admin impersonation failed for ${userEmail} (tried: ${candidates.map((c) => c + '%admin').join(', ')}, ${maxAttempts} attempts)`,
   );
 }
 

@@ -650,14 +650,20 @@ mt_wait_for_keycloak_oidc() {
     return 1
 }
 
-# Wait for Stalwart's REST API to respond without 5xx.
-# Use this before any script triggers /api/principal/* calls (admin-portal,
+# Wait for Stalwart's JMAP management API (v1) to answer a session request.
+# Use this before any script makes `x:Account/*` calls (admin-portal,
 # account-portal, provision-smtp-service-accounts). Pod-Ready isn't enough —
-# the REST API can return 5xx for ~30-60s after pod-Ready on first deploy
-# (negative-RCPT cache warm-up + OIDC directory lookups).
+# the API can return 5xx for ~30-60s after pod-Ready on first deploy
+# (directory warm-up).
 #
 # Usage: mt_wait_for_stalwart [mail_host]
 # Required env: MAIL_HOST (or pass mail_host as $1)
+# Optional env: STALWART_ADMIN_PASSWORD — when set (create_env loads it), the
+#   probe is GET /jmap/session as the recovery admin and only HTTP 200 counts,
+#   so it also proves the admin credentials the deploy is about to use. A 401
+#   ends the wait at once: repeating a rejected login could trip Stalwart's
+#   auth-failure ban. Without it, any 200/401/403 means "responding" (v1
+#   answers an anonymous /jmap/session with 200).
 #
 # This is intentionally a *warning*, not an error: admin-portal retries on
 # 5xx, and a slow Stalwart shouldn't block the entire deploy. The warning
@@ -668,20 +674,23 @@ mt_wait_for_stalwart() {
         print_warning "mt_wait_for_stalwart: MAIL_HOST not set, skipping"
         return 0
     fi
-    local url="https://${mail_host}/api/principal"
-    print_status "Waiting for Stalwart REST API: $url"
+    # Anonymous on purpose: this URL goes through the public ingress, so no
+    # credential is sent. v1 answers an unauthenticated /jmap/session with 200
+    # once the HTTP stack is up; admin credentials are exercised in-cluster
+    # (provision-smtp, CI user setup) through port-forwards instead.
+    local url="https://${mail_host}/jmap/session"
+    print_status "Waiting for Stalwart JMAP API: $url"
     local code="000" i
     for i in $(seq 1 30); do
         code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$url" 2>/dev/null || echo "000")
-        # 200 / 401 / 403 all mean the REST layer is responding (auth-required
-        # responses count). 5xx or "000" (timeout/refused) mean keep waiting.
         if [[ "$code" =~ ^(200|401|403)$ ]]; then
-            print_success "Stalwart REST API responsive after $((i*5))s (HTTP $code)"
+            print_success "Stalwart JMAP API responsive after $((i*5))s (HTTP $code)"
             return 0
         fi
+        # 5xx or "000" (timeout/refused) mean keep waiting.
         sleep 5
     done
-    print_warning "Stalwart REST API never became responsive (last code: $code) — proceeding"
+    print_warning "Stalwart JMAP API never became responsive (last code: $code) — proceeding"
     return 0
 }
 
@@ -699,7 +708,7 @@ mt_wait_for_stalwart() {
 # forever and blocks every deploy, strictly worse than the flake it guards.
 #
 # This is the cold-start gap #19 gate. mt_wait_for_stalwart (above) only probes
-# the REST API and is warning-only; it does NOT prove the path Keycloak uses to
+# the management API and is warning-only; it does NOT prove the path Keycloak uses to
 # send invitation / magic-link / "execute actions" emails. On every on-demand-dev
 # cold-start (and around any Stalwart restart) the submission listener can be
 # bound while SASL still 5xxs (OIDC directory not warmed) or the connect is

@@ -1,0 +1,14 @@
+# Dependencies of migrate_v016.py (v0.16.27) for the Stalwart 0.15 -> v1
+# migration's dump Job (#715). Installed with --require-hashes --no-deps
+# --only-binary=:all: into python:3.13.18-slim (amd64 and arm64 wheels).
+requests==2.34.2 \
+    --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+urllib3==2.8.0 \
+    --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3
+idna==3.20 \
+    --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+certifi==2026.11.20 \
+    --hash=sha256:7422df25243767b9877031a2248cb14d09ddac9beee846f4cef3d5c9191d488f
+charset-normalizer==3.5.3 \
+    --hash=sha256:656b9744bac4493561d28b56d7d646afd7a8471254ef7004d849aa8368020037 \
+    --hash=sha256:fd0341b9dea133d187d7c5a2cd7e21ae6449a7b68ea8c2454f9cf77def11ec1b

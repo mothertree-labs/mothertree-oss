@@ -235,7 +235,9 @@ case "$MODE" in
       # The monolithic create_env rollout-restarts the backend after
       # provisioning; this split path must do the same. Portals don't need
       # this — deploy-dev-portals serialises behind this step (see its
-      # depends_on comment); Synapse/Nextcloud read the Secret at deploy time.
+      # depends_on comment); Synapse/Nextcloud read the Secret at deploy time
+      # and roll on a change (Synapse's chart checksums its config; Nextcloud
+      # via the smtp-credentials-hash pod annotation).
       if kubectl -n "$NS_DOCS" get deployment backend >/dev/null 2>&1; then
         docs_needs_restart=false
         if [ "$rc" -eq 0 ]; then
@@ -515,21 +517,20 @@ case "$MODE" in
     : "${E2E_STALWART_IMAP_HOST:?FATAL: E2E_STALWART_IMAP_HOST required (pool secret e2e_poolN_stalwart_imap_host)}"
     : "${E2E_STALWART_IMAP_PORT:?FATAL: E2E_STALWART_IMAP_PORT required (pool secret e2e_poolN_stalwart_imap_port)}"
     : "${E2E_STALWART_ADMIN_PASSWORD:?FATAL: E2E_STALWART_ADMIN_PASSWORD required (pool secret e2e_poolN_stalwart_admin_password)}"
-    : "${E2E_BASE_DOMAIN:?FATAL: E2E_BASE_DOMAIN required to build the e2e-mailrt master username}"
+    : "${E2E_BASE_DOMAIN:?FATAL: E2E_BASE_DOMAIN required to build the e2e-mailrt impersonation username}"
 
-    # Master-user auth username form, copied EXACTLY from
-    # e2e/helpers/imap.ts :: connectAsMaster: it tries "<localpart>%master"
-    # first (and "<email>%master" as a fallback). e2e-mailrt is the fixed
-    # mail-roundtrip user created by ci-create-test-users.sh as
-    # e2e-mailrt@${E2E_BASE_DOMAIN}; the calendar-external-invite shards
-    # authenticate as exactly this principal.
-    MASTER_USER="e2e-mailrt"
-    MASTER_USER_EMAIL="e2e-mailrt@${E2E_BASE_DOMAIN}"
+    # Impersonation username form, copied EXACTLY from
+    # e2e/helpers/imap.ts :: connectAsMaster: Stalwart v1 logs in as
+    # "<full-email>%admin" with the recovery admin password (the bare local
+    # part is rejected). e2e-mailrt is the fixed mail-roundtrip user created by
+    # ci-create-test-users.sh as e2e-mailrt@${E2E_BASE_DOMAIN}; the
+    # calendar-external-invite shards authenticate as exactly this account.
+    IMPERSONATE_EMAIL="e2e-mailrt@${E2E_BASE_DOMAIN}"
 
     GATE_DEADLINE="${MT_IMAPS_GATE_DEADLINE:-240}"
     echo "Cold-start gate #20: verifying authenticated IMAPS session"
     echo "  from CI box → ${E2E_STALWART_IMAP_HOST}:${E2E_STALWART_IMAP_PORT}"
-    echo "  (TLS connect + LOGIN as ${MASTER_USER}%master + SELECT INBOX + LOGOUT), deadline ${GATE_DEADLINE}s"
+    echo "  (TLS connect + LOGIN as ${IMPERSONATE_EMAIL}%admin + SELECT INBOX + LOGOUT), deadline ${GATE_DEADLINE}s"
 
     # Dependency-light: python3 stdlib imaplib (no npm ci needed here — this
     # workflow may not have run it; sibling CI scripts already shell out to
@@ -540,18 +541,16 @@ case "$MODE" in
 import os, sys, ssl, time, imaplib
 host = os.environ["IHOST"]
 port = int(os.environ["IPORT"])
-ulocal = os.environ["IUSER_LOCAL"]
-uemail = os.environ["IUSER_EMAIL"]
+uemail = os.environ["IUSER_EMAIL"].lower()
 deadline = time.time() + float(os.environ["IDEADLINE"])
 pw = sys.stdin.readline().rstrip("\n")
 # Dev/CI uses self-signed certs; mirror imap.ts rejectUnauthorized:false.
 # Cert validity is a separate gap with its own gate — do not couple this
 # connect-readiness probe to cert-manager convergence.
 ctx = ssl._create_unverified_context()
-# Same candidate order as e2e/helpers/imap.ts connectAsMaster
-# (candidates = [userEmail, username]): full email first, then localpart,
-# each as "<name>%master".
-candidates = [uemail + "%master", ulocal + "%master"]
+# Same single candidate as e2e/helpers/imap.ts connectAsMaster: Stalwart v1
+# impersonation "<full-email>%admin" (the bare local part is rejected).
+candidates = [uemail + "%admin"]
 attempt = 0
 last = "(no attempt)"
 while time.time() < deadline:
@@ -585,15 +584,14 @@ sys.exit(1)
     printf '%s' "$E2E_STALWART_ADMIN_PASSWORD" | \
       IHOST="$E2E_STALWART_IMAP_HOST" \
       IPORT="$E2E_STALWART_IMAP_PORT" \
-      IUSER_LOCAL="$MASTER_USER" \
-      IUSER_EMAIL="$MASTER_USER_EMAIL" \
+      IUSER_EMAIL="$IMPERSONATE_EMAIL" \
       IDEADLINE="$GATE_DEADLINE" \
       python3 -c "$_imaps_py" || _gate_rc=$?
 
     if [ "$_gate_rc" -ne 0 ]; then
       echo "FATAL: cold-start gate #20 — external IMAPS session to" \
            "${E2E_STALWART_IMAP_HOST}:${E2E_STALWART_IMAP_PORT} not establishable" \
-           "within ${GATE_DEADLINE}s as ${MASTER_USER}%master."
+           "within ${GATE_DEADLINE}s as ${IMPERSONATE_EMAIL}%admin."
       echo "       This is the external edge (NodeBalancer/:993/cert) NOT having"
       echo "       converged — it is the exact ~110s cold-connect stall the e2e"
       echo "       calendar-external-invite shards would otherwise hit silently."

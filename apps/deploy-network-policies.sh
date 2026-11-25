@@ -17,6 +17,7 @@
 #   7. allow-admin-to-mail-egress   — Admin/Account Portal → Stalwart API (admin namespace only)
 #   8. allow-mail-ingress    — Postfix + Roundcube + Admin → Stalwart (mail namespace only)
 #      allow-stalwart-redis-ingress — Stalwart → stalwart-redis on 6379 (mail namespace only)
+#      allow-stalwart-mgmt-ingress — config/migration Jobs → Stalwart :8080 (mail namespace only)
 #
 # Targeted ingress restrictions:
 #   9. protect-redis         — Restrict Redis to admin/account portal pods (admin namespace only)
@@ -152,6 +153,8 @@ if kubectl get namespace "$NS_STALWART" &>/dev/null; then
     print_success "[$NS_STALWART] Mail ingress policy applied"
     print_status "[$NS_STALWART] Applying allow-stalwart-redis-ingress (Stalwart → stalwart-redis only)..."
     envsubst '${NAMESPACE}' < "$MANIFEST_DIR/allow-stalwart-redis-ingress.yaml.tpl" | kubectl apply -f -
+    print_status "[$NS_STALWART] Applying allow-stalwart-mgmt-ingress (config/migration Jobs → Stalwart :8080)..."
+    envsubst '${NAMESPACE}' < "$MANIFEST_DIR/allow-stalwart-mgmt-ingress.yaml.tpl" | kubectl apply -f -
 else
     print_warning "Mail namespace $NS_STALWART does not exist, skipping mail ingress policy"
 fi

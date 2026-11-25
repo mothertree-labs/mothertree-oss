@@ -100,6 +100,9 @@ persistence:
 podAnnotations:
   mothertree.org/custom-apps-hash: {{ requiredEnv "NEXTCLOUD_CUSTOM_APPS_HASH" | quote }}
   mothertree.org/app-versions-hash: {{ requiredEnv "NEXTCLOUD_APP_VERSIONS_HASH" | quote }}
+  # SMTP_* env comes from nextcloud-credentials and is read only at pod start:
+  # roll the pods when the SMTP settings change (deploy-nextcloud.sh, #715).
+  mothertree.org/smtp-credentials-hash: {{ requiredEnv "NEXTCLOUD_SMTP_CREDS_HASH" | quote }}
 
 # Deployment strategy: RollingUpdate for zero-downtime deploys
 # (Only possible because we no longer use a ReadWriteOnce PVC)

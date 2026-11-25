@@ -137,14 +137,15 @@ function createTestApp({ authenticated = false, roles = [], user = null } = {}) 
   app.put('/api/users/:email/quota', verifyOrigin, requireAuth, requireTenantAdmin, async (req, res) => {
     try {
       const { quotaMb } = req.body;
-      if (quotaMb === undefined || quotaMb === null || quotaMb < 0) {
-        return res.status(400).json({ error: 'quotaMb is required and must be >= 0' });
+      const quotaNum = Number(quotaMb);
+      if (quotaMb === undefined || quotaMb === null || quotaMb === '' || !Number.isFinite(quotaNum) || quotaNum < 0) {
+        return res.status(400).json({ error: 'quotaMb is required and must be a number >= 0' });
       }
-      const quotaBytes = Math.round(quotaMb) * 1024 * 1024;
-      await stalwartApi.setUserQuota(req.params.email, quotaBytes);
+      const quotaBytes = Math.round(quotaNum) * 1024 * 1024;
+      await stalwartApi.setUserQuota(req.params.email, quotaBytes, { lookupUser: keycloakApi.findUserByEmail });
       res.json({ success: true });
     } catch (error) {
-      res.status(500).json({ error: error.message });
+      res.status(error.status || 500).json({ error: error.message });
     }
   });
 
@@ -402,7 +403,7 @@ describe('PUT /api/users/:email/quota', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(stalwartApi.setUserQuota).toHaveBeenCalledWith('alice@example.com', 10240 * 1024 * 1024);
+    expect(stalwartApi.setUserQuota).toHaveBeenCalledWith('alice@example.com', 10240 * 1024 * 1024, { lookupUser: keycloakApi.findUserByEmail });
   });
 
   test('returns 400 when quotaMb is missing', async () => {
@@ -415,6 +416,30 @@ describe('PUT /api/users/:email/quota', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('quotaMb is required');
+  });
+
+  test('returns 400 when quotaMb is not a number', async () => {
+    const app = createTestApp({ authenticated: true, roles: ['tenant-admin'] });
+
+    const res = await request(app)
+      .put('/api/users/alice@example.com/quota')
+      .set('Origin', 'https://admin.example.com')
+      .send({ quotaMb: 'abc' });
+
+    expect(res.status).toBe(400);
+    expect(stalwartApi.setUserQuota).not.toHaveBeenCalled();
+  });
+
+  test('passes through a 404 for an address with no mailbox and no user', async () => {
+    const app = createTestApp({ authenticated: true, roles: ['tenant-admin'] });
+    stalwartApi.setUserQuota.mockRejectedValue(Object.assign(new Error('No mailbox and no user with the address x@example.com'), { status: 404 }));
+
+    const res = await request(app)
+      .put('/api/users/x@example.com/quota')
+      .set('Origin', 'https://admin.example.com')
+      .send({ quotaMb: 100 });
+
+    expect(res.status).toBe(404);
   });
 
   test('returns 400 when quotaMb is negative', async () => {
@@ -439,7 +464,7 @@ describe('PUT /api/users/:email/quota', () => {
       .send({ quotaMb: 0 });
 
     expect(res.status).toBe(200);
-    expect(stalwartApi.setUserQuota).toHaveBeenCalledWith('alice@example.com', 0);
+    expect(stalwartApi.setUserQuota).toHaveBeenCalledWith('alice@example.com', 0, { lookupUser: keycloakApi.findUserByEmail });
   });
 
   test('returns 403 without Origin header', async () => {

@@ -511,10 +511,8 @@ app.post('/api/app-passwords', verifyOrigin, requireAuth, async (req, res) => {
     const defaultQuotaBytes = defaultQuotaMb * 1024 * 1024;
     await stalwartApi.ensureUserExists(req.user.email, req.user.name, defaultQuotaBytes);
 
-    // Generate a cryptographically random password
-    const password = crypto.randomBytes(16).toString('base64url');
-
-    await stalwartApi.createAppPassword(req.user.email, deviceName, password);
+    // Stalwart v1 generates the secret server-side and returns it once.
+    const { password } = await stalwartApi.createAppPassword(req.user.email, deviceName);
 
     res.json({ success: true, password });
   } catch (error) {

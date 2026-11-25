@@ -70,8 +70,9 @@ if [ -z "$STALWART_DB_NAME" ] || [ "$STALWART_DB_NAME" = "null" ]; then
 fi
 print_status "Database: $STALWART_DB_NAME (user: $STALWART_DB_USER)"
 : "${STALWART_V1_DB_NAME:?STALWART_V1_DB_NAME not set by config.sh}"
-if [ "$STALWART_V1_DB_NAME" = "$STALWART_DB_NAME" ]; then
-    print_error "STALWART_V1_DB_NAME must differ from STALWART_DB_NAME (the live 0.15 store)"
+: "${STALWART_SCRATCH_DB_NAME:?STALWART_SCRATCH_DB_NAME not set by config.sh}"
+if [ "$STALWART_V1_DB_NAME" = "$STALWART_DB_NAME" ] || [ "$STALWART_SCRATCH_DB_NAME" = "$STALWART_DB_NAME" ]; then
+    print_error "STALWART_V1_DB_NAME and STALWART_SCRATCH_DB_NAME must differ from STALWART_DB_NAME (the live 0.15 store)"
     exit 1
 fi
 
@@ -170,6 +171,7 @@ if [ -n "${SES_SMTP_ENDPOINT:-}" ] && [ -n "${SES_SMTP_USERNAME:-}" ] && [ -n "$
         exit 1
     fi
     STALWART_SES_ENABLED=true
+    export STALWART_V1_ROUTE="ses"
     export STALWART_OUTBOUND_ROUTE_NAME="relay"
     export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - AWS SES via SASL-authenticated SMTP submission.
     [queue.route.\"relay\"]
@@ -195,6 +197,7 @@ elif [[ "${SMTP_RELAY_HOST:-}" == *.svc.cluster.local. ]] && mt_is_local_edge; t
     SMTP_RELAY_NAMESPACE=$(cut -d. -f2 <<<"$SMTP_RELAY_HOST")
     # Already an absolute Service name: the route uses it as is.
     SMTP_RELAY_SVC_HOST="$SMTP_RELAY_HOST"
+    export STALWART_V1_ROUTE="relay:${SMTP_RELAY_SVC_HOST}:${SMTP_RELAY_PORT}:false"
     export STALWART_OUTBOUND_ROUTE_NAME="relay"
     export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - in-cluster catch-all (devbox Mailpit, mail.smtp_relay).
     [queue.route.\"relay\"]
@@ -219,6 +222,7 @@ elif [ -n "${SMTP_RELAY_HOST:-}" ]; then
     # DNS search list (ndots:5, node-inherited domains) can never resolve it
     # upstream; only cluster DNS answers, so the name maps to that IP alone.
     SMTP_RELAY_SVC_HOST="smtp-relay.${NS_MAIL}.svc.cluster.local."
+    export STALWART_V1_ROUTE="relay:${SMTP_RELAY_SVC_HOST}:${SMTP_RELAY_PORT}:true"
     export STALWART_OUTBOUND_ROUTE_NAME="relay"
     export STALWART_OUTBOUND_ROUTE_TOML="    # Relay route - unauthenticated smart host on the tailnet (mail.smtp_relay).
     # ${SMTP_RELAY_SVC_HOST} -> ${SMTP_RELAY_HOST} (Service + EndpointSlice).
@@ -239,6 +243,7 @@ elif [ -n "${SMTP_RELAY_HOST:-}" ]; then
     print_status "Outbound relay: tailnet smart host ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT}"
 else
     STALWART_SES_ENABLED=false
+    export STALWART_V1_ROUTE="mx"
     export STALWART_OUTBOUND_ROUTE_NAME="mx"
     export STALWART_OUTBOUND_ROUTE_TOML="    # Direct MX delivery - no smart host configured for this env.
     [queue.route.\"mx\"]
@@ -274,6 +279,11 @@ fi
 # SES creds separately because they are mounted as env vars and would
 # otherwise roll silently on Secret-only changes.
 RENDERED_CONFIG=$(envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" 2>/dev/null || echo "")
+# v1 pods read these at start; rotating any of them must roll the pods
+# (stalwart-secrets is applied with plain kubectl apply, so the change
+# tracker would not see it). The master secret is excluded: it is re-salted
+# on every run and only the retired 0.15 Deployment uses it.
+export STALWART_SECRETS_CHECKSUM=$(printf '%s' "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$STALWART_OIDC_SECRET$S3_MAIL_ACCESS_KEY$S3_MAIL_SECRET_KEY${SES_SMTP_ENDPOINT:-}${SES_SMTP_USERNAME:-}${SES_SMTP_PASSWORD:-}" | sha256sum | cut -c1-16)
 export CONFIG_CHECKSUM=$(echo -n "$STALWART_ADMIN_PASSWORD$STALWART_DB_PASSWORD$S3_MAIL_ACCESS_KEY${SES_SMTP_ENDPOINT:-}${SES_SMTP_USERNAME:-}${SES_SMTP_PASSWORD:-}$RENDERED_CONFIG" | sha256sum | cut -d' ' -f1 | head -c 12)
 print_status "Config checksum: $CONFIG_CHECKSUM"
 
@@ -443,6 +453,9 @@ stringData:
   STALWART_ADMIN_PASSWORD: "$STALWART_ADMIN_PASSWORD"
   STALWART_DB_PASSWORD: "$STALWART_DB_PASSWORD"
   STALWART_OIDC_SECRET: "$STALWART_OIDC_SECRET"
+  # Only the 0.15 Deployment reads it (master-user login). Kept until the 0.15
+  # manifest is retired, so a failed migration can still restore 0.15.
+  STALWART_MASTER_SECRET: "$STALWART_MASTER_SECRET"
   S3_ACCESS_KEY: "$S3_MAIL_ACCESS_KEY"
   S3_SECRET_KEY: "$S3_MAIL_SECRET_KEY"
 EOF
@@ -519,19 +532,28 @@ if ! _redis_secret=$(kubectl get secret stalwart-redis -n "$NS_MAIL" -o name --i
     print_error "Could not read Secret stalwart-redis in $NS_MAIL"
     exit 1
 fi
+# Two passwords: REDIS_PASSWORD (Redis `default` user: probes, operators) and
+# STALWART_PASSWORD (the restricted `stalwart` ACL user Stalwart connects as).
 STALWART_REDIS_PASSWORD=""
+STALWART_REDIS_USER_PASSWORD=""
 if [ -n "$_redis_secret" ]; then
     STALWART_REDIS_PASSWORD=$(kubectl get secret stalwart-redis -n "$NS_MAIL" -o jsonpath='{.data.REDIS_PASSWORD}' | base64 -d)
     : "${STALWART_REDIS_PASSWORD:?Secret stalwart-redis in $NS_MAIL has no REDIS_PASSWORD}"
+    STALWART_REDIS_USER_PASSWORD=$(kubectl get secret stalwart-redis -n "$NS_MAIL" -o jsonpath='{.data.STALWART_PASSWORD}' | base64 -d)
 fi
+# hex: safe inside a redis:// URL without percent-encoding
 if [ -z "$STALWART_REDIS_PASSWORD" ]; then
     print_status "Generating Stalwart Redis password..."
-    # hex: safe inside a redis:// URL without percent-encoding
     STALWART_REDIS_PASSWORD=$(openssl rand -hex 24)
+fi
+if [ -z "$STALWART_REDIS_USER_PASSWORD" ]; then
+    print_status "Generating the Stalwart Redis ACL user's password..."
+    STALWART_REDIS_USER_PASSWORD=$(openssl rand -hex 24)
 fi
 mt_reset_change_tracker
 mt_apply kubectl apply -f <(kubectl create secret generic stalwart-redis -n "$NS_MAIL" \
-    --from-literal=REDIS_PASSWORD="$STALWART_REDIS_PASSWORD" --dry-run=client -o yaml)
+    --from-literal=REDIS_PASSWORD="$STALWART_REDIS_PASSWORD" \
+    --from-literal=STALWART_PASSWORD="$STALWART_REDIS_USER_PASSWORD" --dry-run=client -o yaml)
 mt_apply kubectl apply -f <(envsubst '${NS_MAIL}' < "$REPO_ROOT/apps/manifests/stalwart/redis.yaml.tpl")
 mt_restart_if_changed deployment/stalwart-redis -n "$NS_MAIL"
 if ! kubectl rollout status deployment/stalwart-redis -n "$NS_MAIL" --timeout=120s; then
@@ -540,29 +562,46 @@ if ! kubectl rollout status deployment/stalwart-redis -n "$NS_MAIL" --timeout=12
 fi
 print_success "Stalwart Redis ready"
 
-# Apply Stalwart manifests
-print_status "Applying Stalwart manifests..."
-
-# Apply main Stalwart manifest (Secret, ConfigMap, Deployment, Service)
-# The template is rendered with a bare envsubst: an unset S3 endpoint would
-# silently become an empty string, so require it (config.sh sets it). The
-# store's endpoint is s3.internal_endpoint (default
-# https://<s3.cluster>.linodeobjects.com, the value it had hardcoded);
-# Stalwart's S3 client always uses path-style requests. (Kept here, not in the
-# template, so the rendered config stays byte-identical.)
+# =============================================================================
+# Stalwart v1 (#715)
+# =============================================================================
+# v1 cannot open the 0.15 store, so a tenant still on 0.15 is migrated once
+# (scripts/lib/stalwart-v1.sh): export from the running 0.15, stop it, copy
+# and convert into STALWART_V1_DB_NAME, verify. The 0.15 database is only
+# read, and any failure before v1 starts brings 0.15 back.
 : "${S3_INTERNAL_ENDPOINT:?S3_INTERNAL_ENDPOINT not set by config.sh}"
-envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart.yaml.tpl" | kubectl apply -f -
-print_success "Stalwart Deployment and Service applied"
-
-# Deploy HorizontalPodAutoscaler (HPA) for auto-scaling (only if min != max replicas)
-if [ "$STALWART_MIN_REPLICAS" != "$STALWART_MAX_REPLICAS" ]; then
-  print_status "Deploying HPA for Stalwart..."
-  envsubst < "$REPO_ROOT/apps/manifests/stalwart/stalwart-hpa.yaml.tpl" | kubectl apply -f -
-  print_success "Stalwart HPA deployed (CPU 80% threshold)"
-else
-  kubectl delete hpa stalwart-hpa -n "$NS_MAIL" --ignore-not-found >/dev/null 2>&1
-  print_status "Stalwart: fixed replicas ($STALWART_MIN_REPLICAS), HPA removed"
+source "${REPO_ROOT}/scripts/lib/stalwart-v1.sh"
+STALWART_GENERATION=$(mt_stalwart_generation)
+STALWART_FIRST_BOOT=""
+case "$STALWART_GENERATION" in
+    v1)
+        print_status "Stalwart v1 already running; applying configuration"
+        ;;
+    none)
+        print_status "No Stalwart yet; deploying v1 on an empty store"
+        ;;
+    v015)
+        # Mail is down for the length of Job 2 (minutes); prod needs an
+        # explicit go-ahead, a fresh pg_dump on the PG VM and a bucket
+        # snapshot first (see the #715 runbook).
+        if ! mt_is_dev_class && [ "${STALWART_MIGRATE_CONFIRM:-}" != "yes" ]; then
+            print_error "Stalwart for $MT_TENANT is still 0.15 and must be migrated to v1 (#715)."
+            print_error "This stops mail for a few minutes. Take a pg_dump of $STALWART_DB_NAME and an S3 snapshot,"
+            print_error "then re-run with STALWART_MIGRATE_CONFIRM=yes."
+            exit 1
+        fi
+        if ! mt_stalwart_v1_migrate; then
+            exit 1
+        fi
+        STALWART_FIRST_BOOT=first-boot-after-migration
+        ;;
+esac
+if ! mt_stalwart_v1_deploy $STALWART_FIRST_BOOT; then
+    print_error "Stalwart v1 deployment failed"
+    dump_pod_diagnostics "$NS_MAIL" "app=stalwart" || true
+    exit 1
 fi
+print_success "Stalwart v1 deployed and configured"
 
 # Apply public ingress for webmail
 envsubst < "$REPO_ROOT/apps/manifests/stalwart/ingress.yaml.tpl" | kubectl apply -f -
@@ -828,56 +867,7 @@ else
     exit 1
 fi
 
-# =============================================================================
-# Register local domain in Stalwart
-# =============================================================================
-# Domain principals tell Stalwart which domains are local. Without this,
-# Stalwart treats all domains as external and recipient validation fails —
-# all inbound mail is rejected. Essential for is_local_domain() to work.
-print_status "Registering local domain $EMAIL_DOMAIN in Stalwart..."
-
-# Use port-forward to call the API (Stalwart container doesn't have curl).
-# API is on port 8080 (health listener, no TLS required).
-LOCAL_PORT=$((RANDOM + 10000))
-kubectl port-forward -n "$NS_MAIL" deployment/stalwart ${LOCAL_PORT}:8080 &>/dev/null &
-PF_PID=$!
-sleep 3
-
-# Verify port-forward is working
-if ! kill -0 $PF_PID 2>/dev/null; then
-    print_error "Port-forward to Stalwart failed"
-    print_error "Check if Stalwart pod is running: kubectl get pods -n $NS_MAIL"
-    exit 1
-fi
-
-DOMAIN_RESULT=$(curl -s -w "\n%{http_code}" --max-time 10 -X POST "http://localhost:${LOCAL_PORT}/api/principal" \
-    -u "admin:${STALWART_ADMIN_PASSWORD}" \
-    -H "Content-Type: application/json" \
-    -d '{"type": "domain", "name": "'"${EMAIL_DOMAIN}"'", "description": "Local email domain for '"${TENANT}"'"}' 2>/dev/null)
-
-kill $PF_PID 2>/dev/null || true
-
-HTTP_CODE=$(echo "$DOMAIN_RESULT" | tail -n1)
-RESPONSE_BODY=$(echo "$DOMAIN_RESULT" | sed '$d')
-
-if [ "$HTTP_CODE" = "200" ]; then
-    if echo "$RESPONSE_BODY" | grep -q '"data"'; then
-        print_success "Domain $EMAIL_DOMAIN registered (id: $(echo "$RESPONSE_BODY" | jq -r '.data // "N/A"'))"
-    elif echo "$RESPONSE_BODY" | grep -q "fieldAlreadyExists"; then
-        print_status "Domain $EMAIL_DOMAIN already registered"
-    else
-        print_success "Domain $EMAIL_DOMAIN registration response: $RESPONSE_BODY"
-    fi
-elif [ -z "$HTTP_CODE" ]; then
-    print_error "Domain registration failed: no response from Stalwart API"
-    print_error "Check if Stalwart is running: kubectl get pods -n $NS_MAIL"
-    exit 1
-else
-    print_error "Domain registration failed with HTTP $HTTP_CODE: $RESPONSE_BODY"
-    print_error "This is required for inbound mail to work correctly"
-    exit 1
-fi
-
+# The local domain is part of the v1 configuration plan (Domain object).
 
 print_success "Stalwart Mail Server deployed successfully for $MT_ENV environment"
 echo ""

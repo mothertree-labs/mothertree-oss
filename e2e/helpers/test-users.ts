@@ -7,7 +7,7 @@
  *
  * Email users (emailTest, emailRecv) are FIXED across pipelines because:
  * - Echo group membership requires known, pre-existing addresses
- * - IMAP master-user auth requires pre-existing Stalwart mail principals
+ * - IMAP admin impersonation requires pre-existing Stalwart mail principals
  * - The pool lease system ensures single-tenancy, so fixed users are safe
  */
 

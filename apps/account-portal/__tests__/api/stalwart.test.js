@@ -1,14 +1,14 @@
 /**
- * Tests for api/stalwart.js
+ * Tests for api/stalwart.js — Stalwart v1 JMAP management API client
  *
- * Mocks global fetch() to simulate Stalwart Admin API responses.
+ * Mocks global fetch(); each mocked response is a JMAP response envelope
+ * ({ methodResponses: [[name, args, callId], ...] }) in request order.
  */
 
 process.env.STALWART_API_URL = 'http://stalwart.test:8080';
 process.env.STALWART_ADMIN_PASSWORD = 'test-admin-pass';
 
-// Helper to create a mock fetch response
-function mockResponse(status, body) {
+function httpResponse(status, body) {
   return {
     ok: status >= 200 && status < 300,
     status,
@@ -17,254 +17,282 @@ function mockResponse(status, body) {
   };
 }
 
+function jmapResponse(...methodResponses) {
+  return httpResponse(200, { methodResponses, sessionState: 's1' });
+}
+
+/** Mock response for the account lookup (query by name + back-referenced get). */
+function lookupResponse(accounts) {
+  return jmapResponse(
+    ['x:Account/query', { ids: accounts.map((a) => a.id) }, 'q'],
+    ['x:Account/get', { list: accounts, notFound: [] }, 'g'],
+  );
+}
+
+const ALICE = { id: 'c', name: 'alice', emailAddress: 'alice@example.com' };
+
 describe('stalwart.js', () => {
   let stalwart;
   let originalFetch;
 
+  function sentCalls(n) {
+    return JSON.parse(global.fetch.mock.calls[n][1].body).methodCalls;
+  }
+
   beforeEach(() => {
     originalFetch = global.fetch;
     global.fetch = jest.fn();
-    delete require.cache[require.resolve('../../api/stalwart')];
+    jest.resetModules();
     stalwart = require('../../api/stalwart');
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
     global.fetch = originalFetch;
+    jest.restoreAllMocks();
+  });
+
+  describe('JMAP transport', () => {
+    it('POSTs to /jmap/ with admin Basic auth and the stalwart capability', async () => {
+      global.fetch.mockResolvedValueOnce(lookupResponse([]));
+
+      await stalwart.listAppPasswords('alice@example.com');
+
+      const [url, opts] = global.fetch.mock.calls[0];
+      expect(url).toBe('http://stalwart.test:8080/jmap/');
+      expect(opts.method).toBe('POST');
+      expect(opts.headers.Authorization).toBe('Basic ' + Buffer.from('admin:test-admin-pass').toString('base64'));
+      expect(JSON.parse(opts.body).using).toEqual(['urn:ietf:params:jmap:core', 'urn:stalwart:jmap']);
+    });
+
+    it('throws on non-2xx HTTP status', async () => {
+      global.fetch.mockResolvedValueOnce(httpResponse(401, 'Unauthorized'));
+
+      await expect(stalwart.listAppPasswords('alice@example.com'))
+        .rejects.toThrow('Stalwart JMAP request failed: 401');
+    });
+
+    it('throws a meaningful error on a method-level error response', async () => {
+      global.fetch.mockResolvedValueOnce(jmapResponse(['error', { type: 'unknownMethod', description: 'x:Account/query' }, 'q']));
+
+      await expect(stalwart.listAppPasswords('alice@example.com'))
+        .rejects.toThrow('Stalwart x:Account/query failed: unknownMethod - x:Account/query');
+    });
   });
 
   describe('ensureUserExists', () => {
     it('returns { created: false } when user already exists', async () => {
-      global.fetch.mockResolvedValueOnce(mockResponse(200, { data: { name: 'alice@example.com' } }));
+      global.fetch.mockResolvedValueOnce(lookupResponse([ALICE]));
 
-      const result = await stalwart.ensureUserExists('alice@example.com', 'Alice', 5368709120);
+      const result = await stalwart.ensureUserExists('Alice@Example.com', 'Alice', 5368709120);
+
       expect(result).toEqual({ created: false });
-
-      // Check the auth header is Basic encoded
-      const call = global.fetch.mock.calls[0];
-      expect(call[0]).toContain('/api/principal/alice%40example.com');
-      expect(call[1].headers['Authorization']).toMatch(/^Basic /);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(sentCalls(0)[0]).toEqual(['x:Account/query', { filter: { name: 'alice' } }, 'q']);
     });
 
     it('creates user when they do not exist', async () => {
       global.fetch
-        // Check user - 200 with {"error":"notFound"} (Stalwart returns 200 for all responses)
-        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'bob@example.com' }))
-        // Create user - 200 (no error in body)
-        .mockResolvedValueOnce(mockResponse(200, { data: { id: 1 } }))
-        // Reload config (cache clear)
-        .mockResolvedValueOnce(mockResponse(200, { data: {} }));
+        .mockResolvedValueOnce(lookupResponse([]))
+        .mockResolvedValueOnce(jmapResponse(['x:Domain/query', { ids: ['b'] }, 'd']))
+        .mockResolvedValueOnce(jmapResponse(['x:Account/set', { created: { n: { id: 'c' } } }, 'c']))
+        .mockResolvedValueOnce(jmapResponse(['x:Action/set', { created: { r: { id: 'r1' } } }, 'r']));
 
-      const result = await stalwart.ensureUserExists('bob@example.com', 'Bob', 1073741824);
+      const result = await stalwart.ensureUserExists('alice@example.com', 'Alice Smith', 5368709120);
+
       expect(result).toEqual({ created: true });
-
-      // Verify the POST body
-      const createCall = global.fetch.mock.calls[1];
-      expect(createCall[0]).toContain('/api/principal/deploy');
-      expect(createCall[1].method).toBe('POST');
-      const body = JSON.parse(createCall[1].body);
-      expect(body.type).toBe('individual');
-      expect(body.name).toBe('bob@example.com');
-      expect(body.emails).toEqual(['bob@example.com']);
-      expect(body.roles).toEqual(['user']);
-      expect(body.quota).toBe(1073741824);
+      expect(global.fetch).toHaveBeenCalledTimes(4);
+      expect(sentCalls(1)).toEqual([['x:Domain/query', { filter: { name: 'example.com' } }, 'd']]);
+      expect(sentCalls(2)[0][1].create.n).toEqual({
+        '@type': 'User',
+        name: 'alice',
+        domainId: 'b',
+        description: 'Alice Smith',
+        quotas: { maxDiskQuota: 5368709120 },
+      });
+      expect(sentCalls(3)).toEqual([['x:Action/set', { create: { r: { '@type': 'ReloadSettings' } } }, 'r']]);
     });
 
-    it('creates user without quota when not specified', async () => {
+    it('creates user without quota when not specified, with empty description', async () => {
       global.fetch
-        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'user@example.com' }))
-        .mockResolvedValueOnce(mockResponse(200, { data: { id: 2 } }))
-        .mockResolvedValueOnce(mockResponse(200, { data: {} })); // reload
+        .mockResolvedValueOnce(lookupResponse([]))
+        .mockResolvedValueOnce(jmapResponse(['x:Domain/query', { ids: ['b'] }, 'd']))
+        .mockResolvedValueOnce(jmapResponse(['x:Account/set', { created: { n: { id: 'c' } } }, 'c']))
+        .mockResolvedValueOnce(jmapResponse(['x:Action/set', { created: { r: { id: 'r1' } } }, 'r']));
 
-      await stalwart.ensureUserExists('user@example.com', 'User');
+      await stalwart.ensureUserExists('alice@example.com', undefined);
 
-      const body = JSON.parse(global.fetch.mock.calls[1][1].body);
-      expect(body.quota).toBeUndefined();
+      const created = sentCalls(2)[0][1].create.n;
+      expect(created.quotas).toBeUndefined();
+      expect(created.description).toBe('');
     });
 
-    it('returns { created: false } on 409 conflict during creation', async () => {
+    it('returns { created: false } on primaryKeyViolation', async () => {
       global.fetch
-        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'user@example.com' }))
-        .mockResolvedValueOnce(mockResponse(409, 'Conflict'));
+        .mockResolvedValueOnce(lookupResponse([]))
+        .mockResolvedValueOnce(jmapResponse(['x:Domain/query', { ids: ['b'] }, 'd']))
+        .mockResolvedValueOnce(jmapResponse(['x:Account/set', {
+          notCreated: { n: { type: 'primaryKeyViolation', properties: ['email'] } },
+        }, 'c']));
 
-      const result = await stalwart.ensureUserExists('user@example.com', 'User');
+      const result = await stalwart.ensureUserExists('alice@example.com', 'Alice');
       expect(result).toEqual({ created: false });
     });
 
-    it('returns { created: false } when deploy endpoint returns fieldAlreadyExists', async () => {
+    it('throws on any other notCreated error', async () => {
       global.fetch
-        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'exists@example.com' }))
-        .mockResolvedValueOnce(mockResponse(200, { error: 'fieldAlreadyExists' }));
+        .mockResolvedValueOnce(lookupResponse([]))
+        .mockResolvedValueOnce(jmapResponse(['x:Domain/query', { ids: ['b'] }, 'd']))
+        .mockResolvedValueOnce(jmapResponse(['x:Account/set', {
+          notCreated: { n: { type: 'invalidProperties', description: 'Invalid server hostname' } },
+        }, 'c']));
 
-      const result = await stalwart.ensureUserExists('exists@example.com', 'Existing User');
-      expect(result).toEqual({ created: false });
+      await expect(stalwart.ensureUserExists('alice@example.com', 'Alice'))
+        .rejects.toThrow('Stalwart account creation failed for alice@example.com: invalidProperties - Invalid server hostname');
     });
 
-    it('throws on non-409 creation failure', async () => {
+    it('throws when the domain is not configured', async () => {
       global.fetch
-        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'user@example.com' }))
-        .mockResolvedValueOnce(mockResponse(500, 'Internal Server Error'));
+        .mockResolvedValueOnce(lookupResponse([]))
+        .mockResolvedValueOnce(jmapResponse(['x:Domain/query', { ids: [] }, 'd']));
 
-      await expect(stalwart.ensureUserExists('user@example.com', 'User'))
-        .rejects.toThrow('Failed to create Stalwart principal: 500');
+      await expect(stalwart.ensureUserExists('alice@example.com', 'Alice'))
+        .rejects.toThrow('Stalwart domain "example.com" not configured');
     });
 
-    it('uses empty string for description when name is not provided', async () => {
+    it('does not fail when the reload fails', async () => {
       global.fetch
-        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'user@example.com' }))
-        .mockResolvedValueOnce(mockResponse(200, { data: { id: 3 } }))
-        .mockResolvedValueOnce(mockResponse(200, { data: {} })); // reload
+        .mockResolvedValueOnce(lookupResponse([]))
+        .mockResolvedValueOnce(jmapResponse(['x:Domain/query', { ids: ['b'] }, 'd']))
+        .mockResolvedValueOnce(jmapResponse(['x:Account/set', { created: { n: { id: 'c' } } }, 'c']))
+        .mockResolvedValueOnce(jmapResponse(['error', { type: 'forbidden' }, 'r']));
 
-      await stalwart.ensureUserExists('user@example.com');
-
-      const body = JSON.parse(global.fetch.mock.calls[1][1].body);
-      expect(body.description).toBe('');
-    });
-
-    it('throws when API returns unsupported error (OIDC directory mode)', async () => {
-      global.fetch
-        .mockResolvedValueOnce(mockResponse(200, { error: 'notFound', item: 'oidc@example.com' }))
-        .mockResolvedValueOnce(mockResponse(200, {
-          error: 'unsupported',
-          details: 'OpenID directory cannot be managed.',
-        }));
-
-      await expect(stalwart.ensureUserExists('oidc@example.com', 'OIDC User', 0))
-        .rejects.toThrow('Stalwart principal creation failed: unsupported');
+      const result = await stalwart.ensureUserExists('alice@example.com', 'Alice');
+      expect(result).toEqual({ created: true });
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('config reload failed (non-fatal)'));
     });
   });
 
   describe('listAppPasswords', () => {
-    it('returns parsed app password names from secrets array', async () => {
-      global.fetch.mockResolvedValueOnce(mockResponse(200, {
-        data: {
-          secrets: [
-            '$app$iPhone$randompassword123',
-            '$app$Thunderbird$anotherpassword456',
-            'some-other-secret',
+    it('returns app password names (descriptions) without secrets', async () => {
+      global.fetch
+        .mockResolvedValueOnce(lookupResponse([ALICE]))
+        .mockResolvedValueOnce(jmapResponse(['x:AppPassword/get', {
+          accountId: 'c',
+          list: [
+            { id: 'p1', description: 'iPhone', secret: '****' },
+            { id: 'p2', description: 'Thunderbird', secret: '****' },
           ],
-        },
-      }));
+        }, 'a']));
 
       const result = await stalwart.listAppPasswords('alice@example.com');
-      expect(result).toEqual([
-        { name: 'iPhone' },
-        { name: 'Thunderbird' },
-      ]);
+
+      expect(result).toEqual([{ name: 'iPhone' }, { name: 'Thunderbird' }]);
+      expect(sentCalls(1)).toEqual([['x:AppPassword/get', { accountId: 'c' }, 'a']]);
     });
 
-    it('returns empty array when user not found (404)', async () => {
-      global.fetch.mockResolvedValueOnce(mockResponse(404, 'Not Found'));
+    it('returns empty array when the account does not exist', async () => {
+      global.fetch.mockResolvedValueOnce(lookupResponse([]));
 
-      const result = await stalwart.listAppPasswords('nobody@example.com');
-      expect(result).toEqual([]);
+      expect(await stalwart.listAppPasswords('alice@example.com')).toEqual([]);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
     });
 
-    it('returns empty array when no secrets exist', async () => {
-      global.fetch.mockResolvedValueOnce(mockResponse(200, {
-        data: { secrets: [] },
-      }));
+    it('ignores a same-name account in another domain', async () => {
+      global.fetch.mockResolvedValueOnce(lookupResponse([{ ...ALICE, emailAddress: 'alice@other.org' }]));
 
-      const result = await stalwart.listAppPasswords('alice@example.com');
-      expect(result).toEqual([]);
+      expect(await stalwart.listAppPasswords('alice@example.com')).toEqual([]);
     });
 
-    it('returns empty array when data.secrets is undefined', async () => {
-      global.fetch.mockResolvedValueOnce(mockResponse(200, { data: {} }));
+    it('returns empty array when no app passwords exist', async () => {
+      global.fetch
+        .mockResolvedValueOnce(lookupResponse([ALICE]))
+        .mockResolvedValueOnce(jmapResponse(['x:AppPassword/get', { list: [] }, 'a']));
 
-      const result = await stalwart.listAppPasswords('alice@example.com');
-      expect(result).toEqual([]);
-    });
-
-    it('throws on non-404 error', async () => {
-      global.fetch.mockResolvedValueOnce(mockResponse(500, 'Server Error'));
-
-      await expect(stalwart.listAppPasswords('alice@example.com'))
-        .rejects.toThrow('Failed to get principal: 500');
+      expect(await stalwart.listAppPasswords('alice@example.com')).toEqual([]);
     });
   });
 
   describe('createAppPassword', () => {
-    it('sends PATCH with addItem action for app password', async () => {
-      global.fetch.mockResolvedValueOnce(mockResponse(200, ''));
+    it('creates via x:AppPassword/set and returns the server-generated secret', async () => {
+      global.fetch
+        .mockResolvedValueOnce(lookupResponse([ALICE]))
+        .mockResolvedValueOnce(jmapResponse(['x:AppPassword/set', {
+          accountId: 'c', created: { a: { id: 'p1', secret: 'app_abc123' } },
+        }, 'p']));
 
-      const result = await stalwart.createAppPassword(
-        'alice@example.com', 'iPhone', 'securepassword123'
-      );
+      const result = await stalwart.createAppPassword('alice@example.com', 'iPhone');
 
-      expect(result).toEqual({ success: true });
-
-      const call = global.fetch.mock.calls[0];
-      expect(call[1].method).toBe('PATCH');
-      const body = JSON.parse(call[1].body);
-      expect(body).toEqual([{
-        action: 'addItem',
-        field: 'secrets',
-        value: '$app$iPhone$securepassword123',
-      }]);
+      expect(result).toEqual({ success: true, password: 'app_abc123' });
+      expect(sentCalls(1)).toEqual([['x:AppPassword/set', { accountId: 'c', create: { a: { description: 'iPhone' } } }, 'p']]);
     });
 
-    it('throws on failure', async () => {
-      global.fetch.mockResolvedValueOnce(mockResponse(500, 'Server Error'));
+    it('throws on notCreated', async () => {
+      global.fetch
+        .mockResolvedValueOnce(lookupResponse([ALICE]))
+        .mockResolvedValueOnce(jmapResponse(['x:AppPassword/set', { notCreated: { a: { type: 'invalidProperties', properties: ['description'] } } }, 'p']));
 
-      await expect(stalwart.createAppPassword('alice@example.com', 'Device', 'pass'))
-        .rejects.toThrow('Failed to create app password: 500');
+      await expect(stalwart.createAppPassword('alice@example.com', 'iPhone'))
+        .rejects.toThrow('Stalwart app password creation for alice@example.com failed (a): invalidProperties [description]');
+    });
+
+    it('throws when the server returns no secret', async () => {
+      global.fetch
+        .mockResolvedValueOnce(lookupResponse([ALICE]))
+        .mockResolvedValueOnce(jmapResponse(['x:AppPassword/set', { created: { a: { id: 'p1' } } }, 'p']));
+
+      await expect(stalwart.createAppPassword('alice@example.com', 'iPhone'))
+        .rejects.toThrow('returned no secret');
+    });
+
+    it('throws when the account does not exist', async () => {
+      global.fetch.mockResolvedValueOnce(lookupResponse([]));
+
+      await expect(stalwart.createAppPassword('alice@example.com', 'iPhone'))
+        .rejects.toThrow('Stalwart account for alice@example.com not found');
     });
   });
 
   describe('revokeAppPassword', () => {
-    it('finds the full secret value and sends PATCH with removeItem', async () => {
+    it('destroys the app passwords with the given name', async () => {
       global.fetch
-        // GET principal
-        .mockResolvedValueOnce(mockResponse(200, {
-          data: {
-            secrets: [
-              '$app$iPhone$randompass',
-              '$app$Thunderbird$otherpass',
-            ],
-          },
-        }))
-        // PATCH remove
-        .mockResolvedValueOnce(mockResponse(200, ''));
+        .mockResolvedValueOnce(lookupResponse([ALICE]))
+        .mockResolvedValueOnce(jmapResponse(['x:AppPassword/get', {
+          list: [{ id: 'p1', description: 'iPhone' }, { id: 'p2', description: 'Laptop' }],
+        }, 'a']))
+        .mockResolvedValueOnce(jmapResponse(['x:AppPassword/set', { destroyed: ['p1'] }, 'r']));
 
       const result = await stalwart.revokeAppPassword('alice@example.com', 'iPhone');
-      expect(result).toEqual({ success: true });
 
-      const patchCall = global.fetch.mock.calls[1];
-      const body = JSON.parse(patchCall[1].body);
-      expect(body).toEqual([{
-        action: 'removeItem',
-        field: 'secrets',
-        value: '$app$iPhone$randompass',
-      }]);
+      expect(result).toEqual({ success: true });
+      expect(sentCalls(2)).toEqual([['x:AppPassword/set', { accountId: 'c', destroy: ['p1'] }, 'r']]);
     });
 
     it('throws when app password name is not found', async () => {
-      global.fetch.mockResolvedValueOnce(mockResponse(200, {
-        data: {
-          secrets: ['$app$Other$pass'],
-        },
-      }));
-
-      await expect(stalwart.revokeAppPassword('alice@example.com', 'NonExistent'))
-        .rejects.toThrow('App password "NonExistent" not found');
-    });
-
-    it('throws when GET principal fails', async () => {
-      global.fetch.mockResolvedValueOnce(mockResponse(500, 'Server Error'));
-
-      await expect(stalwart.revokeAppPassword('alice@example.com', 'iPhone'))
-        .rejects.toThrow('Failed to get principal: 500');
-    });
-
-    it('throws when PATCH remove fails', async () => {
       global.fetch
-        .mockResolvedValueOnce(mockResponse(200, {
-          data: { secrets: ['$app$iPhone$pass'] },
-        }))
-        .mockResolvedValueOnce(mockResponse(500, 'Error'));
+        .mockResolvedValueOnce(lookupResponse([ALICE]))
+        .mockResolvedValueOnce(jmapResponse(['x:AppPassword/get', { list: [{ id: 'p2', description: 'Laptop' }] }, 'a']));
 
       await expect(stalwart.revokeAppPassword('alice@example.com', 'iPhone'))
-        .rejects.toThrow('Failed to revoke app password: 500');
+        .rejects.toThrow('App password "iPhone" not found');
+    });
+
+    it('throws when the lookup fails', async () => {
+      global.fetch.mockResolvedValueOnce(httpResponse(500, 'Internal Server Error'));
+
+      await expect(stalwart.revokeAppPassword('alice@example.com', 'iPhone'))
+        .rejects.toThrow('Stalwart JMAP request failed: 500');
+    });
+
+    it('throws on notDestroyed', async () => {
+      global.fetch
+        .mockResolvedValueOnce(lookupResponse([ALICE]))
+        .mockResolvedValueOnce(jmapResponse(['x:AppPassword/get', { list: [{ id: 'p1', description: 'iPhone' }] }, 'a']))
+        .mockResolvedValueOnce(jmapResponse(['x:AppPassword/set', { notDestroyed: { p1: { type: 'forbidden' } } }, 'r']));
+
+      await expect(stalwart.revokeAppPassword('alice@example.com', 'iPhone'))
+        .rejects.toThrow('Stalwart app password revoke for alice@example.com failed (p1): forbidden');
     });
   });
 

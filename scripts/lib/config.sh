@@ -224,8 +224,12 @@ _mt_load_tenant_yaml() {
   # v0.16/v1 process. Derived here only, so every caller agrees on the name.
   if [ -n "$STALWART_DB_NAME" ]; then
     export STALWART_V1_DB_NAME="${STALWART_DB_NAME}_v1"
+    # Hop-1 scratch copy of the 0.15 store, rewritten by 0.16.27 recovery
+    # mode during the one-time migration only.
+    export STALWART_SCRATCH_DB_NAME="${STALWART_DB_NAME}_v016"
   else
     export STALWART_V1_DB_NAME=""
+    export STALWART_SCRATCH_DB_NAME=""
   fi
   export ROUNDCUBE_DB_USER="roundcube_${MT_TENANT}"
 

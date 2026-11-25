@@ -55,7 +55,7 @@ describe('POST /api/app-passwords', () => {
   it('creates app password with valid request', async () => {
     const mockStalwartApi = {
       ensureUserExists: jest.fn().mockResolvedValue({ created: false }),
-      createAppPassword: jest.fn().mockResolvedValue({ success: true }),
+      createAppPassword: jest.fn().mockResolvedValue({ success: true, password: 'app_serversecret' }),
     };
 
     const app = createTestApp({ mockUser, mockStalwartApi });
@@ -66,16 +66,13 @@ describe('POST /api/app-passwords', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.password).toBeDefined();
-    expect(typeof res.body.password).toBe('string');
-    expect(res.body.password.length).toBeGreaterThan(0);
+    // Stalwart v1 generates the secret; the route must pass it through verbatim.
+    expect(res.body.password).toBe('app_serversecret');
 
     expect(mockStalwartApi.ensureUserExists).toHaveBeenCalledWith(
       'alice@example.com', 'Alice', expect.any(Number)
     );
-    expect(mockStalwartApi.createAppPassword).toHaveBeenCalledWith(
-      'alice@example.com', 'iPhone', expect.any(String)
-    );
+    expect(mockStalwartApi.createAppPassword).toHaveBeenCalledWith('alice@example.com', 'iPhone');
   });
 
   it('returns 400 when deviceName is missing', async () => {

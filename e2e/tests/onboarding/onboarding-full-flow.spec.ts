@@ -45,7 +45,7 @@ test.describe('Onboarding — Full User Flow', () => {
     // Use plus-addressed e2e-mailrt as recovery email:
     // - Keycloak treats e2e-mailrt+tag@domain as unique (no 409 conflict with e2e-mailrt@domain)
     // - Stalwart delivers user+tag@domain to the user@domain principal's inbox
-    // - We can read it via IMAP master-user auth on e2e-mailrt
+    // - We can read it via IMAP admin impersonation on e2e-mailrt
     const recoveryEmail = `e2e-mailrt+onboard-${uniqueId}@${baseDomain}`;
 
     let invitedUserId: string | null = null;
@@ -707,7 +707,7 @@ test.describe('Onboarding — Full User Flow', () => {
         try {
           const testSubject = `E2E Onboarding Inbound ${uniqueId}`;
 
-          // Plant a test email directly via IMAP master-user auth.
+          // Plant a test email directly via IMAP admin impersonation.
           // This verifies the Stalwart principal exists and accepts mail.
           const mimeMessage = [
             `From: test-sender@example.com`,

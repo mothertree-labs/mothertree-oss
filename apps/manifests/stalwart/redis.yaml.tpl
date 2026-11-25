@@ -47,10 +47,24 @@ spec:
           image: redis:8.12.0-alpine
           # maxmemory below the container limit, so Redis refuses writes
           # (noeviction) instead of being OOM-killed. No RDB/AOF.
+          # Two users: `default` (requirepass) for the probes and operators,
+          # and `stalwart`, the one Stalwart logs in as: every key and only its
+          # pub/sub channel, no admin or dangerous commands (CONFIG, FLUSHALL,
+          # DEBUG, MODULE, KEYS, ...). Stalwart's settings registry stores
+          # this user's URL in clear, so its password opens nothing more.
           command:
             - redis-server
             - --requirepass
             - $(REDIS_PASSWORD)
+            - --user
+            - stalwart
+            - "on"
+            - ">$(REDIS_STALWART_PASSWORD)"
+            - "~*"
+            - "&stwt.agora"
+            - "+@all"
+            - "-@admin"
+            - "-@dangerous"
             - --maxmemory
             - 96mb
             - --save
@@ -63,6 +77,11 @@ spec:
                 secretKeyRef:
                   name: stalwart-redis
                   key: REDIS_PASSWORD
+            - name: REDIS_STALWART_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: stalwart-redis
+                  key: STALWART_PASSWORD
             # redis-cli in the probes reads this instead of -a (no password in argv)
             - name: REDISCLI_AUTH
               valueFrom:

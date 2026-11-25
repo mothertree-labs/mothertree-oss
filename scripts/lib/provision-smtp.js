@@ -1,31 +1,33 @@
 #!/usr/bin/env node
 /*
- * Provisions the per-tenant shared SMTP service-account principal in Stalwart
- * and writes the `smtp-credentials` K8s Secret into each caller's namespace.
+ * Provisions the per-tenant shared SMTP service account in Stalwart and
+ * writes the `smtp-credentials` K8s Secret into each caller's namespace.
  *
  * Invoked by scripts/provision-smtp-service-accounts (which handles
  * tenant-config loading, port-forward setup, and env export).
  *
  * Design (see commit message of the enclosing PR for the full rationale):
- *   - ONE principal per tenant (`mailer@<email_domain>`) — Stalwart v0.15
- *     enforces MAIL FROM alignment to the authenticated principal's `emails`
- *     array on authenticated submission and rejects adding the same email to
- *     two principals, so each FROM address needed by any caller must live on
- *     this single principal.
+ *   - ONE account per tenant (`mailer@<email_domain>`) — Stalwart enforces
+ *     MAIL FROM alignment to the authenticated account's addresses on
+ *     authenticated submission and rejects giving the same address to two
+ *     accounts, so each FROM address needed by any caller is an alias of this
+ *     single account.
  *   - One app password (`smtp`) and one shared K8s Secret `smtp-credentials`
  *     replicated to every caller namespace that needs to submit mail.
  *
- * Stalwart API quirks handled here:
- *   - HTTP 200 on errors; must parse body.error
- *   - OIDC directory mode: use POST /api/principal/deploy (not /api/principal).
- *   - App passwords stored as "$app$<name>$<password>" in secrets[].
- *   - POST /api/reload after changes clears the negative RCPT TO cache.
+ * Stalwart v1 JMAP management API (issue #715; replaced the 0.15 REST API):
+ *   - POST <base>/jmap/ as the recovery admin; errors are HTTP 200 with
+ *     method-level ["error", ...] or per-id notCreated/notUpdated/notDestroyed.
+ *   - Accounts are named by local part + domainId; aliases are a keyed map.
+ *   - App password secrets are SERVER-GENERATED and returned once on create;
+ *     they are never readable again. So the Secret's stored password is the
+ *     only copy, and idempotency is decided by logging in with it.
+ *   - ReloadSettings after account/alias changes clears the RCPT TO cache.
  */
 
 'use strict';
 
 const { execFileSync } = require('node:child_process');
-const crypto = require('node:crypto');
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -83,96 +85,162 @@ const FROM_ADDRESSES = [
 // Secret is written identically into each caller's namespace.
 const CALLER_NAMESPACES = [NS_ADMIN, NS_DOCS, NS_MATRIX, NS_FILES];
 
-function authHeader() {
-  return 'Basic ' + Buffer.from(`admin:${STALWART_ADMIN_PASSWORD}`).toString('base64');
+const JMAP_USING = ['urn:ietf:params:jmap:core', 'urn:stalwart:jmap'];
+const FETCH_TIMEOUT_MS = 30_000;
+
+function basicAuth(user, password) {
+  return 'Basic ' + Buffer.from(`${user}:${password}`).toString('base64');
 }
 
-async function apiFetch(path, init = {}) {
-  const res = await fetch(`${STALWART_API_URL}${path}`, {
-    ...init,
-    headers: { Authorization: authHeader(), ...(init.headers || {}) },
+/**
+ * Send one JMAP request as the recovery admin and return the method
+ * responses keyed by call id. Throws on non-2xx HTTP and on any method-level
+ * ["error", {...}] response (mirrors apps/admin-portal/api/stalwart.js).
+ */
+async function jmap(methodCalls) {
+  const res = await fetch(`${STALWART_API_URL}/jmap/`, {
+    method: 'POST',
+    headers: {
+      Authorization: basicAuth('admin', STALWART_ADMIN_PASSWORD),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ using: JMAP_USING, methodCalls }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  const text = await res.text();
-  if (!text) return { status: res.status, body: null };
-  try {
-    return { status: res.status, body: JSON.parse(text) };
-  } catch {
-    throw new Error(`Stalwart API ${path}: non-JSON response (${res.status}): ${text.slice(0, 200)}`);
+  if (!res.ok) {
+    throw new Error(`Stalwart JMAP request failed: HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  const results = {};
+  for (const [name, args, callId] of data.methodResponses || []) {
+    if (name === 'error') {
+      const call = methodCalls.find((c) => c[2] === callId);
+      throw new Error(`Stalwart ${call ? call[0] : callId} failed: ${args?.type || 'unknown'}${args?.description ? ` - ${args.description}` : ''}`);
+    }
+    results[callId] = args;
+  }
+  for (const [method, , callId] of methodCalls) {
+    if (!results[callId]) throw new Error(`Stalwart ${method} failed: no response for call "${callId}"`);
+  }
+  return results;
+}
+
+function describeSetError(err) {
+  if (!err) return 'unknown';
+  const props = Array.isArray(err.properties) && err.properties.length ? ` [${err.properties.join(', ')}]` : '';
+  return `${err.type || 'unknown'}${err.description ? ` - ${err.description}` : ''}${props}`;
+}
+
+function assertSetOk(label, result) {
+  for (const key of ['notCreated', 'notUpdated', 'notDestroyed']) {
+    const failures = result?.[key];
+    if (failures && Object.keys(failures).length > 0) {
+      const [id, err] = Object.entries(failures)[0];
+      throw new Error(`${label} failed (${id}): ${describeSetError(err)}`);
+    }
   }
 }
 
-async function getPrincipal(email) {
-  const resp = await apiFetch(`/api/principal/${encodeURIComponent(email)}`);
-  if (!resp.body || resp.body.error) return null;
-  return resp.body.data || resp.body;
+function localPart(address) {
+  return address.slice(0, address.lastIndexOf('@')).toLowerCase();
 }
 
-async function createPrincipal(email, description) {
-  const resp = await apiFetch('/api/principal/deploy', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 'individual',
-      name: email,
-      emails: [email],
-      description,
-      secrets: [],
-      roles: ['user'],
-    }),
-  });
-  if (resp.body && resp.body.error === 'fieldAlreadyExists') return { created: false };
-  if (resp.body && resp.body.error) {
-    throw new Error(`Principal create failed for ${email}: ${resp.body.error} ${resp.body.details || ''}`);
+// Domains are created by deploy-stalwart.sh (v1 config plan), never here.
+async function getDomainId(domain) {
+  const res = await jmap([['x:Domain/query', { filter: { name: domain } }, 'd']]);
+  const id = res.d.ids?.[0];
+  if (!id) {
+    throw new Error(`Stalwart domain "${domain}" is not configured — deploy-stalwart.sh must create it first`);
+  }
+  return id;
+}
+
+async function getAccount(email, domainId) {
+  const res = await jmap([
+    ['x:Account/query', { filter: { name: localPart(email), domainId } }, 'q'],
+    ['x:Account/get', {
+      '#ids': { resultOf: 'q', name: 'x:Account/query', path: '/ids' },
+      properties: ['name', 'emailAddress', 'aliases', 'description'],
+    }, 'g'],
+  ]);
+  return (res.g.list || []).find((a) => (a.emailAddress || '').toLowerCase() === email.toLowerCase()) || null;
+}
+
+async function createAccount(email, domainId, description, aliasLocals) {
+  const aliases = {};
+  aliasLocals.forEach((name, i) => { aliases[String(i)] = { name, domainId, enable: true }; });
+  const res = await jmap([['x:Account/set', {
+    create: { n: { '@type': 'User', name: localPart(email), domainId, description, aliases } },
+  }, 'c']]);
+  const failed = res.c.notCreated?.n;
+  if (failed) {
+    // primaryKeyViolation = already exists (a concurrent deploy won the race).
+    if (failed.type === 'primaryKeyViolation') return { created: false };
+    throw new Error(`Account create failed for ${email}: ${describeSetError(failed)}`);
   }
   return { created: true };
 }
 
-async function addEmailAlias(email, alias) {
-  const resp = await apiFetch(`/api/principal/${encodeURIComponent(email)}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify([{ action: 'addItem', field: 'emails', value: alias }]),
-  });
-  if (resp.body && resp.body.error === 'fieldAlreadyExists') return { added: false };
-  if (resp.body && resp.body.error) {
-    throw new Error(`Add email ${alias} failed: ${resp.body.error} ${resp.body.details || ''}`);
+// Add any alias local parts (on `domainId`) the account is missing. Aliases
+// are a map keyed by small integers; new ones take the next free keys.
+async function addMissingAliases(account, domainId, aliasLocals) {
+  const current = account.aliases || {};
+  const have = new Set(Object.values(current)
+    .filter((a) => a && a.domainId === domainId)
+    .map((a) => String(a.name).toLowerCase()));
+  const missing = aliasLocals.filter((n) => !have.has(n));
+  if (missing.length === 0) return [];
+  const patch = {};
+  let key = 0;
+  for (const name of missing) {
+    while (Object.prototype.hasOwnProperty.call(current, String(key))) key += 1;
+    patch[`aliases/${key}`] = { name, domainId, enable: true };
+    key += 1;
   }
-  return { added: true };
+  const res = await jmap([['x:Account/set', { update: { [account.id]: patch } }, 'u']]);
+  assertSetOk(`Alias update for ${account.emailAddress}`, res.u);
+  return missing;
 }
 
-async function removeAppPassword(email, name) {
-  const principal = await getPrincipal(email);
-  if (!principal) return;
-  const secrets = principal.secrets || [];
-  const target = secrets.find((s) => s.startsWith(`$app$${name}$`));
-  if (!target) return;
-  const resp = await apiFetch(`/api/principal/${encodeURIComponent(email)}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify([{ action: 'removeItem', field: 'secrets', value: target }]),
-  });
-  if (resp.body && resp.body.error) {
-    throw new Error(`Remove app password failed: ${resp.body.error}`);
-  }
+async function listAppPasswordIds(accountId, name) {
+  const res = await jmap([['x:AppPassword/get', { accountId }, 'a']]);
+  return (res.a.list || []).filter((p) => p.description === name).map((p) => p.id);
 }
 
-async function addAppPassword(email, name, password) {
-  const resp = await apiFetch(`/api/principal/${encodeURIComponent(email)}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify([{ action: 'addItem', field: 'secrets', value: `$app$${name}$${password}` }]),
-  });
-  if (resp.body && resp.body.error) {
-    throw new Error(`Add app password failed: ${resp.body.error}`);
+// Revoke every app password called `name` (secrets are masked on read, so the
+// entries cannot be told apart), then create exactly one. Returns the
+// server-generated secret — v1 does not let the client choose it.
+async function recreateAppPassword(accountId, name) {
+  const ids = await listAppPasswordIds(accountId, name);
+  if (ids.length > 0) {
+    const res = await jmap([['x:AppPassword/set', { accountId, destroy: ids }, 'r']]);
+    assertSetOk('App password revoke', res.r);
   }
+  const res = await jmap([['x:AppPassword/set', { accountId, create: { a: { description: name } } }, 'p']]);
+  assertSetOk('App password create', res.p);
+  const secret = res.p.created?.a?.secret;
+  if (!secret) throw new Error('App password create returned no secret');
+  return secret;
+}
+
+// ONE login attempt with the stored password over HTTP Basic (never retried:
+// repeated auth failures from the port-forward source could trip Stalwart's
+// auth-failure ban). 200 = it still works, 401/403 = stale; anything else is
+// an error, not a reason to rotate.
+async function passwordLogsIn(email, password) {
+  const res = await fetch(`${STALWART_API_URL}/jmap/session`, {
+    headers: { Authorization: basicAuth(email, password) },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  await res.arrayBuffer().catch(() => {});
+  if (res.status === 200) return true;
+  if (res.status === 401 || res.status === 403) return false;
+  throw new Error(`Login check for ${email} returned unexpected HTTP ${res.status}`);
 }
 
 async function reload() {
-  await apiFetch('/api/reload');
-}
-
-function generatePassword() {
-  return crypto.randomBytes(32).toString('base64').replace(/[=+/]/g, '').slice(0, 24);
+  const res = await jmap([['x:Action/set', { create: { r: { '@type': 'ReloadSettings' } } }, 'r']]);
+  assertSetOk('Stalwart ReloadSettings', res.r);
 }
 
 function kubectl(args, input) {
@@ -182,31 +250,23 @@ function kubectl(args, input) {
   return execFileSync('kubectl', args, opts).toString();
 }
 
-function secretExists(namespace, name) {
-  try {
-    execFileSync('kubectl', ['get', 'secret', name, '-n', namespace, '--no-headers'], {
-      env: { ...process.env, KUBECONFIG },
-      stdio: ['ignore', 'ignore', 'ignore'],
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 // Read a single key from a Secret as plain text (base64-decoded), or null if
-// either the Secret or the key is absent.
+// either the Secret or the key is absent. Any other kubectl failure throws:
+// mistaking an API hiccup for "no Secret" would revoke a working app password.
 function readSecretField(namespace, name, key) {
+  let b64;
   try {
-    const b64 = execFileSync('kubectl', [
+    b64 = execFileSync('kubectl', [
       'get', 'secret', name, '-n', namespace,
       '-o', `jsonpath={.data.${key}}`,
-    ], { env: { ...process.env, KUBECONFIG }, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
-    if (!b64) return null;
-    return Buffer.from(b64, 'base64').toString('utf8');
-  } catch {
-    return null;
+    ], { env: { ...process.env, KUBECONFIG }, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
+  } catch (err) {
+    const stderr = err.stderr ? err.stderr.toString() : '';
+    if (/NotFound|not found/.test(stderr)) return null;
+    throw new Error(`kubectl get secret ${namespace}/${name} failed: ${stderr.trim().slice(0, 300) || err.message}`);
   }
+  if (!b64) return null;
+  return Buffer.from(b64, 'base64').toString('utf8');
 }
 
 // ---------------------------------------------------------------------------
@@ -376,99 +436,95 @@ function writeSecret({ namespace, name, host, port, username, password }) {
   kubectl(['apply', '-f', '-'], yaml);
 }
 
+function readStoredCredentials(namespace) {
+  return {
+    namespace,
+    host: readSecretField(namespace, SECRET_NAME, 'SMTP_RELAY_HOST'),
+    port: readSecretField(namespace, SECRET_NAME, 'SMTP_RELAY_PORT'),
+    username: readSecretField(namespace, SECRET_NAME, 'SMTP_RELAY_USERNAME'),
+    password: readSecretField(namespace, SECRET_NAME, 'SMTP_RELAY_PASSWORD'),
+  };
+}
+
 async function main() {
   console.log(`[provision-smtp] Tenant ${TENANT} (domain ${EMAIL_DOMAIN}), Stalwart at ${STALWART_API_URL}`);
   let changed = false;
 
-  let principal = await getPrincipal(PRINCIPAL_EMAIL);
-  if (!principal) {
-    await createPrincipal(PRINCIPAL_EMAIL, PRINCIPAL_DESCRIPTION);
-    console.log(`[provision-smtp] Principal created: ${PRINCIPAL_EMAIL}`);
-    principal = await getPrincipal(PRINCIPAL_EMAIL);
+  // ── Account + From aliases ────────────────────────────────────────────────
+  const domainId = await getDomainId(EMAIL_DOMAIN);
+  const aliasLocals = FROM_ADDRESSES.filter((a) => a !== PRINCIPAL_EMAIL).map(localPart);
+
+  let account = await getAccount(PRINCIPAL_EMAIL, domainId);
+  if (!account) {
+    const res = await createAccount(PRINCIPAL_EMAIL, domainId, PRINCIPAL_DESCRIPTION, aliasLocals);
+    console.log(res.created
+      ? `[provision-smtp] Account created: ${PRINCIPAL_EMAIL}`
+      : `[provision-smtp] Account ${PRINCIPAL_EMAIL} appeared concurrently; reusing it`);
+    account = await getAccount(PRINCIPAL_EMAIL, domainId);
+    if (!account) throw new Error(`Account ${PRINCIPAL_EMAIL} not found right after create`);
+    changed = changed || res.created;
+  }
+
+  const added = await addMissingAliases(account, domainId, aliasLocals);
+  for (const name of added) {
+    console.log(`[provision-smtp]   alias added: ${name}@${EMAIL_DOMAIN}`);
     changed = true;
   }
 
-  const currentEmails = new Set(principal?.emails || []);
-  for (const alias of FROM_ADDRESSES) {
-    if (currentEmails.has(alias)) continue;
-    const res = await addEmailAlias(PRINCIPAL_EMAIL, alias);
-    if (res.added) {
-      console.log(`[provision-smtp]   alias added: ${alias}`);
-      changed = true;
-    }
-  }
-  // Re-read principal if we added aliases.
-  if (changed) principal = await getPrincipal(PRINCIPAL_EMAIL);
-
-  const existingPasswords = (principal?.secrets || [])
-    .filter((s) => s.startsWith('$app$'))
-    .map((s) => s.split('$')[2]);
-  const hasPassword = existingPasswords.includes(APP_PASSWORD_NAME);
-
-  const secretsPresent = CALLER_NAMESPACES.map((ns) => secretExists(ns, SECRET_NAME));
-  const allSecretsPresent = secretsPresent.every(Boolean);
+  // ── App password ──────────────────────────────────────────────────────────
+  // v1 secrets are server-generated and unreadable after creation, so the
+  // Secrets in the caller namespaces hold the only copy. Keep it when an
+  // `smtp` app password exists AND the stored password still logs in;
+  // otherwise revoke every `smtp` app password and create a fresh one.
+  const stored = CALLER_NAMESPACES.map(readStoredCredentials);
+  const candidate = (stored.find((s) => s.password) || {}).password || null;
 
   let password = null;
-  if (hasPassword && allSecretsPresent && !ROTATE) {
-    console.log('[provision-smtp] Credentials already provisioned in every caller namespace; skipping password rotation');
+  let reason = null;
+  if (ROTATE) {
+    reason = 'rotation requested';
+  } else if (!candidate) {
+    reason = 'no caller namespace holds a stored password';
+  } else if ((await listAppPasswordIds(account.id, APP_PASSWORD_NAME)).length === 0) {
+    reason = `no "${APP_PASSWORD_NAME}" app password exists in Stalwart`;
+  } else if (!(await passwordLogsIn(PRINCIPAL_EMAIL, candidate))) {
+    reason = 'the stored password no longer logs in';
   } else {
-    if (hasPassword) {
-      const reason = ROTATE ? 'rotation requested' : 'at least one caller namespace missing its Secret';
-      console.log(`[provision-smtp] Rotating app password (${reason})`);
-      await removeAppPassword(PRINCIPAL_EMAIL, APP_PASSWORD_NAME);
-    }
-    password = generatePassword();
-    await addAppPassword(PRINCIPAL_EMAIL, APP_PASSWORD_NAME, password);
-    console.log(`[provision-smtp] App password ${ROTATE || !hasPassword ? 'created' : 'rotated'}`);
+    password = candidate;
+    console.log('[provision-smtp] Stored app password still logs in; keeping it');
+  }
+
+  if (password === null) {
+    console.log(`[provision-smtp] Creating a new app password (${reason})`);
+    password = await recreateAppPassword(account.id, APP_PASSWORD_NAME);
     changed = true;
   }
 
-  if (password !== null) {
-    // We know the new password; (re)write the Secret in every caller namespace.
-    for (const ns of CALLER_NAMESPACES) {
-      writeSecret({
-        namespace: ns,
-        name: SECRET_NAME,
-        host: SMTP_RELAY_HOST,
-        port: SUBMISSION_APP_PORT,
-        username: PRINCIPAL_EMAIL,
-        password,
-      });
-      console.log(`[provision-smtp]   Secret ${SECRET_NAME} written to ${ns}`);
-    }
-  } else {
-    // Password unchanged — but the host we write may have drifted (e.g. this
-    // deploy switched from the in-cluster svc FQDN to MAIL_HOST). Detect drift
-    // on any caller's Secret and rewrite all of them with the current host,
-    // preserving the stored password.
-    const hostMismatch = CALLER_NAMESPACES.some(
-      (ns) => readSecretField(ns, SECRET_NAME, 'SMTP_RELAY_HOST') !== SMTP_RELAY_HOST,
-    );
-    if (hostMismatch) {
-      const existingPassword = readSecretField(NS_ADMIN, SECRET_NAME, 'SMTP_RELAY_PASSWORD');
-      if (!existingPassword) {
-        throw new Error(
-          `[provision-smtp] SMTP_RELAY_HOST drift detected but cannot read existing password from ${NS_ADMIN}/${SECRET_NAME}. Re-run with --rotate to regenerate.`,
-        );
-      }
-      for (const ns of CALLER_NAMESPACES) {
-        writeSecret({
-          namespace: ns,
-          name: SECRET_NAME,
-          host: SMTP_RELAY_HOST,
-          port: SUBMISSION_APP_PORT,
-          username: PRINCIPAL_EMAIL,
-          password: existingPassword,
-        });
-        console.log(`[provision-smtp]   Secret ${SECRET_NAME} host updated in ${ns} (→ ${SMTP_RELAY_HOST})`);
-      }
-      changed = true;
-    }
+  // ── Secrets ───────────────────────────────────────────────────────────────
+  // Rewrite every caller Secret that is missing or differs from the desired
+  // values (new password, host drift such as svc FQDN → MAIL_HOST, port or
+  // username drift). Untouched Secrets keep the conditional-restart invariant.
+  for (const s of stored) {
+    const upToDate = s.host === SMTP_RELAY_HOST
+      && s.port === SUBMISSION_APP_PORT
+      && s.username === PRINCIPAL_EMAIL
+      && s.password === password;
+    if (upToDate) continue;
+    writeSecret({
+      namespace: s.namespace,
+      name: SECRET_NAME,
+      host: SMTP_RELAY_HOST,
+      port: SUBMISSION_APP_PORT,
+      username: PRINCIPAL_EMAIL,
+      password,
+    });
+    console.log(`[provision-smtp]   Secret ${SECRET_NAME} ${s.password === null ? 'written to' : 'updated in'} ${s.namespace}`);
+    changed = true;
   }
 
   if (changed) {
     await reload();
-    console.log('[provision-smtp] Stalwart config reloaded (RCPT TO cache cleared)');
+    console.log('[provision-smtp] Stalwart settings reloaded (RCPT TO cache cleared)');
   } else {
     console.log('[provision-smtp] No changes needed');
   }

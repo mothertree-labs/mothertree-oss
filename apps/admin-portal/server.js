@@ -448,15 +448,16 @@ app.delete('/api/users/:id', verifyOrigin, requireAuth, requireTenantAdmin, asyn
 app.put('/api/users/:email/quota', verifyOrigin, requireAuth, requireTenantAdmin, async (req, res) => {
   try {
     const { quotaMb } = req.body;
-    if (quotaMb === undefined || quotaMb === null || quotaMb < 0) {
-      return res.status(400).json({ error: 'quotaMb is required and must be >= 0' });
+    const quotaNum = Number(quotaMb);
+    if (quotaMb === undefined || quotaMb === null || quotaMb === '' || !Number.isFinite(quotaNum) || quotaNum < 0) {
+      return res.status(400).json({ error: 'quotaMb is required and must be a number >= 0' });
     }
-    const quotaBytes = Math.round(quotaMb) * 1024 * 1024;
-    await stalwartApi.setUserQuota(req.params.email, quotaBytes);
+    const quotaBytes = Math.round(quotaNum) * 1024 * 1024;
+    await stalwartApi.setUserQuota(req.params.email, quotaBytes, { lookupUser: keycloakApi.findUserByEmail });
     res.json({ success: true });
   } catch (error) {
     console.error('Set quota error:', error.message);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 

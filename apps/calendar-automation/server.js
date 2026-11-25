@@ -15,7 +15,7 @@
  *
  * Environment variables:
  *   IMAP_HOST            - Stalwart IMAP hostname (cluster-internal)
- *   IMAP_PORT            - Stalwart IMAP port (default: 993, IMAPS with master-user auth)
+ *   IMAP_PORT            - Stalwart IMAP port (default: 993, IMAPS with "<email>%admin" impersonation)
  *   STALWART_API_URL     - Stalwart management API URL (e.g., http://stalwart:8080)
  *   STALWART_ADMIN_PASSWORD - Admin password for Stalwart API and IMAP
  *   CALDAV_BASE_URL      - Nextcloud CalDAV base URL (e.g., https://files.dev.example.com/remote.php/dav)
@@ -172,44 +172,69 @@ function startHealthServer() {
 // Stalwart user enumeration
 // ---------------------------------------------------------------------------
 
+// Stalwart v1 advertises maxObjectsInGet = 500; page account listings at that.
+const STALWART_PAGE_SIZE = 500;
+
 /**
- * List all user accounts from Stalwart admin API.
- * Returns an array of email addresses (usernames).
+ * Send one Stalwart v1 JMAP management request as the recovery admin and
+ * return the method responses keyed by call id. Errors arrive as HTTP 200
+ * with a method-level ["error", {...}] response, so those are thrown too.
  */
-async function listStalwartUsers() {
+async function stalwartJmap(methodCalls) {
   const auth = Buffer.from(`admin:${config.stalwart.adminPassword}`).toString('base64');
-
-  // List all principals of type "individual" (user accounts)
-  const url = `${config.stalwart.apiUrl}/api/principal?types=individual&limit=0`;
-  const resp = await fetch(url, {
-    headers: { Authorization: `Basic ${auth}` },
+  const resp = await fetch(`${config.stalwart.apiUrl}/jmap/`, {
+    method: 'POST',
+    headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ using: ['urn:ietf:params:jmap:core', 'urn:stalwart:jmap'], methodCalls }),
+    signal: AbortSignal.timeout(30_000),
   });
-
   if (!resp.ok) {
     throw new Error(`Stalwart API error: ${resp.status} ${resp.statusText}`);
   }
-
   const body = await resp.json();
+  const results = {};
+  for (const [name, args, callId] of body.methodResponses || []) {
+    if (name === 'error') {
+      throw new Error(`Stalwart ${callId} failed: ${args?.type || 'unknown'}${args?.description ? ` - ${args.description}` : ''}`);
+    }
+    results[callId] = args;
+  }
+  return results;
+}
 
-  // API returns { data: { items: [...], total: N } }
-  // Each item is { name, emails, type, ... }
-  // Return objects with both name (for IMAP master-user auth) and email (for CalDAV)
-  let items = [];
-  if (body.data && body.data.items) {
-    items = body.data.items;
-  } else if (Array.isArray(body.data)) {
-    items = body.data;
-  } else {
-    log('warn', 'Unexpected Stalwart API response format', { body });
-    return [];
+/**
+ * List all user accounts from the Stalwart v1 JMAP management API.
+ * Returns [{ name, email }] where both are the account's full email address:
+ * `name` is the IMAP login identity (impersonation needs "<email>%admin";
+ * the bare local part fails) and `email` is used for CalDAV.
+ * The bootstrap/recovery admin account is skipped — it is not a mailbox.
+ */
+async function listStalwartUsers() {
+  const accounts = [];
+  let position = 0;
+  for (;;) {
+    const res = await stalwartJmap([
+      ['x:Account/query', { position, limit: STALWART_PAGE_SIZE, calculateTotal: true }, 'q'],
+      ['x:Account/get', {
+        '#ids': { resultOf: 'q', name: 'x:Account/query', path: '/ids' },
+        properties: ['@type', 'name', 'emailAddress', 'roles'],
+      }, 'g'],
+    ]);
+    const ids = (res.q && res.q.ids) || [];
+    accounts.push(...((res.g && res.g.list) || []));
+    position += ids.length;
+    const total = res.q && typeof res.q.total === 'number' ? res.q.total : position;
+    if (ids.length === 0 || position >= total) break;
   }
 
-  // Extract user info: name (Stalwart principal name) and primary email
-  return items
-    .filter((u) => u.emails && u.emails.length > 0)
-    .map((u) => ({
-      name: u.name,
-      email: u.emails[0],
+  return accounts
+    .filter((a) => a.emailAddress
+      && (!a['@type'] || a['@type'] === 'User')
+      && a.name !== 'admin'
+      && !(a.roles && a.roles['@type'] === 'Admin'))
+    .map((a) => ({
+      name: a.emailAddress.toLowerCase(),
+      email: a.emailAddress.toLowerCase(),
     }));
 }
 
@@ -219,8 +244,9 @@ async function listStalwartUsers() {
 
 /**
  * Connect to IMAP as admin on behalf of a user.
- * Stalwart supports master-user authentication: "name%master" with admin password.
- * The name must be the Stalwart principal name (not email), e.g. "e2e-member" not "e2e-member@domain".
+ * Stalwart v1 impersonation: "<full-email>%admin" with the recovery admin
+ * password (0.15's "<name>%master" + master secret is gone). The bare local
+ * part does not work, so stalwartName is the account's full email address.
  */
 function createImapClient(stalwartName) {
   const client = new ImapFlow({
@@ -228,7 +254,7 @@ function createImapClient(stalwartName) {
     port: config.imap.port,
     secure: config.imap.secure,
     auth: {
-      user: `${stalwartName}%master`,
+      user: `${stalwartName}%admin`,
       pass: config.stalwart.adminPassword,
     },
     tls: config.imap.tls,
@@ -264,7 +290,7 @@ function createImapClient(stalwartName) {
 /**
  * Scan a user's INBOX for unprocessed iTIP messages.
  * Returns an array of { uid, calendarData, method, from } objects.
- * @param {string} stalwartName - Stalwart principal name (for IMAP master-user auth)
+ * @param {string} stalwartName - account email address (IMAP "<email>%admin" impersonation)
  */
 async function scanUserInbox(stalwartName) {
   const client = createImapClient(stalwartName);

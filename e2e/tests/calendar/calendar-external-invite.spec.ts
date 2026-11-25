@@ -155,7 +155,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
   });
 
   // Uses emailTest (fixed user with persistent Stalwart principal) as
-  // organizer because IMAP master-user auth requires the principal to exist.
+  // organizer because IMAP admin impersonation requires the principal to exist.
   test('incoming external REPLY updates attendee PARTSTAT in organizer CalDAV', async ({
     emailTestPage,
   }) => {
@@ -316,7 +316,7 @@ test.describe('Calendar — External Invite via Calendar Automation', () => {
   });
 
   // Uses emailTest (fixed user with persistent Stalwart principal) as
-  // organizer because IMAP master-user auth requires the principal to exist.
+  // organizer because IMAP admin impersonation requires the principal to exist.
   test('REPLY updates PARTSTAT even when CalDAV filename differs from event UID', async ({
     emailTestPage,
   }) => {

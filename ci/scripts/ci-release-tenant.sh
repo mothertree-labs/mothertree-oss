@@ -171,47 +171,35 @@ else
   echo "Cleanup: ${DELETED} deleted, ${FAILED} failed."
 fi
 
-# ── Clean up Stalwart principals ─────────────────────────────────
-# Stalwart auto-provisions OIDC principals on first login. These persist
-# even after the Keycloak user is deleted, bloating calendar-automation
-# scan cycles (each principal = one IMAP connection per poll).
+# ── Clean up Stalwart accounts ───────────────────────────────────
+# Stalwart auto-provisions OIDC accounts on first login (and the portals
+# create them on invite). These persist even after the Keycloak user is
+# deleted, bloating calendar-automation scan cycles (each account = one IMAP
+# connection per poll). Stalwart v1 JMAP via scripts/lib/stalwart-jmap.py.
 if [[ -n "$E2E_STALWART_ADMIN_PASSWORD" && -n "$E2E_BASE_DOMAIN" ]]; then
-  STALWART_URL="https://mail.${E2E_BASE_DOMAIN}"
-  STALWART_AUTH=$(echo -n "admin:${E2E_STALWART_ADMIN_PASSWORD}" | base64)
+  # Exported (not passed through `env` argv) so the password never shows in ps.
+  export STALWART_URL="https://mail.${E2E_BASE_DOMAIN}" STALWART_TIMEOUT=30
+  export STALWART_ADMIN_PASSWORD="$E2E_STALWART_ADMIN_PASSWORD"
+  SW_JMAP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/stalwart-jmap.py"
 
   echo ""
-  echo "Cleaning up Stalwart principals with prefix: ${PREFIX}"
+  echo "Cleaning up Stalwart accounts with prefix: ${PREFIX}"
 
-  STALWART_USERS=$(curl -sf --connect-timeout 10 --max-time 30 \
-    -H "Authorization: Basic $STALWART_AUTH" \
-    "${STALWART_URL}/api/principal?types=individual&limit=0" 2>/dev/null \
-    | PREFIX="$PREFIX" python3 -c "
-import json, sys, os
-body = json.load(sys.stdin)
-items = body.get('data', {}).get('items', body.get('data', []))
-prefix = os.environ['PREFIX']
-for u in items:
-    name = u.get('name', '')
-    if name.startswith(prefix):
-        print(name)
-" 2>/dev/null || true)
+  # Account names are local parts; print the full addresses to delete.
+  STALWART_USERS=$(python3 "$SW_JMAP" accounts --prefix "$PREFIX" 2>/dev/null \
+    | cut -f1 || true)
 
   if [[ -z "$STALWART_USERS" ]]; then
-    echo "No Stalwart principals to clean up."
+    echo "No Stalwart accounts to clean up."
   else
     SW_DELETED=0
     SW_FAILED=0
-    while IFS= read -r principal; do
-      encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$principal', safe=''))" 2>/dev/null)
-      if curl -sf --connect-timeout 10 --max-time 10 -X DELETE \
-        -H "Authorization: Basic $STALWART_AUTH" \
-        "${STALWART_URL}/api/principal/${encoded}" > /dev/null 2>&1; then
-        SW_DELETED=$(( SW_DELETED + 1 ))
-      else
-        echo "  Failed: $principal"
-        SW_FAILED=$(( SW_FAILED + 1 ))
-      fi
-    done <<< "$STALWART_USERS"
+    while read -r verdict address rest; do
+      case "$verdict" in
+        deleted|missing) SW_DELETED=$(( SW_DELETED + 1 )) ;;
+        *) echo "  Failed: ${address} ${rest}"; SW_FAILED=$(( SW_FAILED + 1 )) ;;
+      esac
+    done < <(printf '%s\n' "$STALWART_USERS" | python3 "$SW_JMAP" delete-accounts 2>&1 || true)
     echo "Stalwart cleanup: ${SW_DELETED} deleted, ${SW_FAILED} failed."
   fi
 else
