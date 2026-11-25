@@ -21,6 +21,22 @@ STOP=/work/hop1/stop-v016
 LOG=/work/hop1/v016.log
 idle() { while :; do sleep 3600; done; }
 status() { { printf '%s' "$1" > /dev/termination-log; } 2>/dev/null || true; echo "$1"; }
+# The last log line as the failure reason, unless it could quote a credential
+# (config.v016.json holds literal secrets). Checked on the whole line, before
+# truncation: credential-like words, URLs, and the exact secret values.
+reason() {
+    line=$(tail -n 1 "$LOG" 2>/dev/null | tr -d '\r')
+    [ -n "$line" ] || { echo "no output"; return; }
+    if printf '%s' "$line" | grep -qiE 'pass|secret|token|key|auth|://'; then
+        echo "(last log line withheld)"; return
+    fi
+    for v in "${STALWART_ADMIN_PASSWORD:-}" "${STALWART_DB_PASSWORD:-}" "${STALWART_OIDC_SECRET:-}" \
+             "${S3_ACCESS_KEY:-}" "${S3_SECRET_KEY:-}" "${SES_SMTP_PASSWORD:-}"; do
+        [ -n "$v" ] || continue
+        case "$line" in *"$v"*) echo "(last log line withheld)"; return ;; esac
+    done
+    printf '%s\n' "$line" | cut -c1-200
+}
 
 if [ -e "$STOP" ]; then
     idle
@@ -33,12 +49,7 @@ pid=$!
 while [ ! -e "$STOP" ]; do
     if ! kill -0 "$pid" 2>/dev/null; then
         wait "$pid"; rc=$?
-        # Last log line as the reason, unless it might quote a credential.
-        why=$(tail -n 1 "$LOG" 2>/dev/null | tr -d '\r' | cut -c1-200)
-        if printf '%s' "$why" | grep -qiE 'pass|secret|token|key|auth'; then
-            why="(last log line withheld)"
-        fi
-        status "v016: FAILED stalwart exited rc=$rc: ${why:-no output}"
+        status "v016: FAILED stalwart exited rc=$rc: $(reason)"
         exit 1
     fi
     sleep 1

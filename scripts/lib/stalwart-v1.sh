@@ -82,6 +82,8 @@ _mt_stalwart_run_job() {
         [ "$state" != running ] && break
         if [ "$(_mt_stalwart_restarts "$job")" -gt 0 ]; then
             state="restarted"
+            now=$(_mt_stalwart_job_status "$job")
+            [ -n "$now" ] && snap="$now"
             break
         fi
         sleep 5
@@ -90,12 +92,10 @@ _mt_stalwart_run_job() {
     if [ "$state" = complete ]; then
         return 0
     fi
-    if [ "$state" = restarted ] || [ "$state" = running ]; then
-        # Stop it now: the caller restores 0.15, and a still-running v0.16
-        # sidecar must not be left behind.
-        kubectl delete job "$job" -n "$NS_MAIL" --wait=true >/dev/null 2>&1 \
-            || print_warning "could not delete Job $job"
-    fi
+    # Stop it now, pods included (foreground cascade): the caller restores
+    # 0.15, and no v0.16 pod may still be running by then.
+    kubectl delete job "$job" -n "$NS_MAIL" --ignore-not-found --cascade=foreground --wait=true \
+        >/dev/null 2>&1 || print_warning "could not delete Job $job"
     print_error "Job $job did not complete (state: ${state:-unknown})"
     return 1
 }
@@ -146,7 +146,7 @@ _mt_stalwart_migration_sc() {
 _mt_stalwart_migration_cleanup() {
     local pv
     pv=$(kubectl get pvc stalwart-migration -n "$NS_MAIL" -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)
-    kubectl delete job stalwart-migrate-dump stalwart-migrate -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null || return 1
+    kubectl delete job stalwart-migrate-dump stalwart-migrate -n "$NS_MAIL" --ignore-not-found --cascade=foreground --wait=true >/dev/null || return 1
     kubectl delete pvc stalwart-migration -n "$NS_MAIL" --ignore-not-found --wait=true >/dev/null || return 1
     # Confirm the claim is gone whatever the earlier lookup returned (a
     # transient API error there must not skip the check).
