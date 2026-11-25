@@ -376,7 +376,9 @@ STALWART_GENERATION=$(mt_stalwart_generation)
 # that disappears from stringData).
 STALWART_MASTER_SECRET_LINE=""
 if [ "$STALWART_GENERATION" = v015 ]; then
-    STALWART_MASTER_SECRET_LINE="  STALWART_MASTER_SECRET: \"$(openssl passwd -6 -salt "$(openssl rand -hex 8)" "$STALWART_ADMIN_PASSWORD")\""
+    # Password on stdin, never in argv (ps on a shared CI host).
+    _master_hash=$(printf '%s\n' "$STALWART_ADMIN_PASSWORD" | openssl passwd -6 -salt "$(openssl rand -hex 8)" -stdin)
+    STALWART_MASTER_SECRET_LINE="  STALWART_MASTER_SECRET: \"${_master_hash}\""
 fi
 
 # Apply Stalwart secrets for db-init job
@@ -395,12 +397,14 @@ ${STALWART_MASTER_SECRET_LINE}
   S3_ACCESS_KEY: "$S3_MAIL_ACCESS_KEY"
   S3_SECRET_KEY: "$S3_MAIL_SECRET_KEY"
 EOF
-if [ "$STALWART_GENERATION" != v015 ] && \
-        [ -n "$(kubectl get secret stalwart-secrets -n "$NS_MAIL" -o jsonpath='{.data.STALWART_MASTER_SECRET}')" ]; then
+# Read first, outside a test, so a failed read stops the deploy (set -e).
+_stale_master=$(kubectl get secret stalwart-secrets -n "$NS_MAIL" -o jsonpath='{.data.STALWART_MASTER_SECRET}')
+if [ "$STALWART_GENERATION" != v015 ] && [ -n "$_stale_master" ]; then
     kubectl patch secret stalwart-secrets -n "$NS_MAIL" --type=json \
         -p '[{"op":"remove","path":"/data/STALWART_MASTER_SECRET"}]' >/dev/null
     print_status "Removed the 0.15 master-user secret from stalwart-secrets"
 fi
+unset _stale_master
 print_success "Stalwart secrets applied"
 
 # Delete any previous db-init job (jobs are not updated, they need to be recreated)
