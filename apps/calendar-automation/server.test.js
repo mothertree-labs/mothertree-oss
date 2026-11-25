@@ -281,3 +281,49 @@ describe('Polling concurrency', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// $CalendarProcessed keyword — must be matched case-insensitively.
+// Stalwart v1 returns stored keywords lowercased (`$calendarprocessed`); a
+// case-sensitive Set.has() made every iTIP message look unprocessed, so the
+// same invites were re-applied to CalDAV every poll cycle.
+// ---------------------------------------------------------------------------
+
+describe('Processed-keyword detection', () => {
+  const fnSrc = extractFunctionBody(source, 'hasProcessedFlag');
+  // eslint-disable-next-line no-new-func
+  const hasProcessedFlag = new Function(
+    'PROCESSED_KEYWORD',
+    `return function hasProcessedFlag(flags) ${fnSrc};`,
+  )('$CalendarProcessed');
+
+  it('matches the keyword regardless of case', () => {
+    assert.equal(hasProcessedFlag(new Set(['$CalendarProcessed'])), true);
+    assert.equal(hasProcessedFlag(new Set(['$hasnoattachment', '$calendarprocessed'])), true);
+    assert.equal(hasProcessedFlag(new Set(['$CALENDARPROCESSED'])), true);
+  });
+
+  it('does not match other or missing flags', () => {
+    assert.equal(hasProcessedFlag(new Set(['\\Seen', '$hasnoattachment'])), false);
+    assert.equal(hasProcessedFlag(new Set()), false);
+    assert.equal(hasProcessedFlag(undefined), false);
+  });
+
+  it('scanUserInbox never compares flags case-sensitively', () => {
+    const body = extractFunctionBody(source, 'scanUserInbox');
+    assert.ok(body.includes('hasProcessedFlag('), 'scanUserInbox must use hasProcessedFlag()');
+    assert.ok(!/flags\.has\(/.test(body), 'flags.has() is case-sensitive — use hasProcessedFlag()');
+  });
+
+  it('scanUserInbox searches with UNKEYWORD (imapflow has no `flag` search key)', () => {
+    const body = extractFunctionBody(source, 'scanUserInbox');
+    assert.ok(body.includes('unKeyword: PROCESSED_KEYWORD'), 'expected search({ unKeyword: PROCESSED_KEYWORD })');
+    assert.ok(!/flag:\s*'\$CalendarProcessed'/.test(body), 'search key `flag` is rejected by imapflow');
+  });
+
+  it('scanUserInbox yields at most one iTIP per message', () => {
+    const body = extractFunctionBody(source, 'scanUserInbox');
+    const loop = body.slice(body.indexOf('for (const part of candidate.calendarParts)'));
+    assert.ok(/results\.push\([\s\S]*?\);\s*break;/.test(loop), 'expected break after the first parsed calendar part');
+  });
+});

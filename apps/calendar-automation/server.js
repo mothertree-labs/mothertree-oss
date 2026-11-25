@@ -70,6 +70,21 @@ const RETRY_BASE_DELAY_MS = 60_000;       // 1 poll cycle
 const RETRY_MAX_DELAY_MS = 3_600_000;     // 1 hour cap
 const MAX_RETRIES = 5;                     // dead-letter after 5 failures
 const DEAD_LETTER_FOLDER = 'INBOX/iTIP-Failed';
+
+// IMAP keyword marking a message as handled. Keywords are case-insensitive
+// (RFC 9051 §2.3.2) and servers may return them in a different case than
+// stored — Stalwart v1 returns `$calendarprocessed`. Always compare with
+// hasProcessedFlag(), never Set.has().
+const PROCESSED_KEYWORD = '$CalendarProcessed';
+
+function hasProcessedFlag(flags) {
+  if (!flags) return false;
+  const want = PROCESSED_KEYWORD.toLowerCase();
+  for (const f of flags) {
+    if (String(f).toLowerCase() === want) return true;
+  }
+  return false;
+}
 const RETRY_PRUNE_INTERVAL = 100;          // prune stale entries every N cycles
 const RETRY_STALE_MS = 24 * 60 * 60 * 1000; // 24h
 
@@ -315,23 +330,21 @@ async function scanUserInbox(stalwartName) {
       return results;
     }
 
-    // Search for unprocessed messages.
-    // Stalwart may not support keyword flag searches ($CalendarProcessed),
-    // returning undefined instead of throwing. Fall back to all messages
-    // and filter by flags client-side in the fetch loop.
+    // Search for unprocessed messages server-side (UNKEYWORD). IMAP keywords
+    // are case-insensitive (RFC 9051 §2.3.2) and Stalwart v1 matches them
+    // that way. If the search fails, fall back to all messages — the fetch
+    // loop below re-checks the flag client-side, so correctness doesn't
+    // depend on the search.
     const tSearch = Date.now();
     let uids;
     try {
-      uids = await client.search({
-        not: { flag: '$CalendarProcessed' },
-      });
-    } catch {
-      // Keyword flag search not supported
+      uids = await client.search({ unKeyword: PROCESSED_KEYWORD }, { uid: true });
+    } catch (err) {
+      log('warn', 'UNKEYWORD search failed, falling back to all messages', { user: stalwartName, error: err.message });
     }
 
     if (!uids || !Array.isArray(uids)) {
-      log('debug', 'Keyword search not supported, falling back to all messages', { user: stalwartName });
-      uids = await client.search({ all: true });
+      uids = await client.search({ all: true }, { uid: true });
     }
     searchMs = Date.now() - tSearch;
 
@@ -354,8 +367,8 @@ async function scanUserInbox(stalwartName) {
       flags: true,
       bodyStructure: true,
       envelope: true,
-    })) {
-      if (msg.flags && msg.flags.has('$CalendarProcessed')) {
+    }, { uid: true })) {
+      if (hasProcessedFlag(msg.flags)) {
         continue;
       }
 
@@ -382,6 +395,9 @@ async function scanUserInbox(stalwartName) {
     // Phase 2: Download calendar data from each candidate message.
     const tDownload = Date.now();
     for (const candidate of candidates) {
+      // One iTIP per message: clients often attach the same invite twice
+      // (inline text/calendar + an .ics attachment). Take the first part that
+      // parses with a METHOD; processing both would apply it twice.
       for (const part of candidate.calendarParts) {
         try {
           const partData = await client.download(candidate.uid, part.path, { uid: true });
@@ -399,6 +415,7 @@ async function scanUserInbox(stalwartName) {
               method,
               from: candidate.from,
             });
+            break;
           }
         } catch (err) {
           log('warn', 'Failed to download calendar part', {
@@ -455,7 +472,7 @@ async function markAsProcessed(stalwartName, uid) {
   try {
     await client.connect();
     await client.mailboxOpen('INBOX');
-    await client.messageFlagsAdd(uid, ['$CalendarProcessed'], { uid: true });
+    await client.messageFlagsAdd(uid, [PROCESSED_KEYWORD], { uid: true });
     log('debug', 'Marked message as processed', { user: stalwartName, uid });
   } finally {
     try {
@@ -534,7 +551,7 @@ async function moveToDeadLetter(stalwartName, uid) {
     }
 
     // Flag BEFORE move (move changes UID, so flag must come first)
-    await client.messageFlagsAdd(uid, ['$CalendarProcessed'], { uid: true });
+    await client.messageFlagsAdd(uid, [PROCESSED_KEYWORD], { uid: true });
     await client.messageMove(uid, DEAD_LETTER_FOLDER, { uid: true });
 
     // Clean up retry tracker entry
