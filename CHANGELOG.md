@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **Stalwart 0.15 cleanup (#715), step 3 of 3.** Every environment now runs
+  v1, so the 0.15 manifest (`apps/manifests/stalwart/stalwart.yaml.tpl`), its
+  TOML route/tracing rendering and the master-user secret are gone. A tenant
+  still on 0.15 keeps the master secret until its migration succeeds, so a
+  failed migration can still bring 0.15 back. `deploy-stalwart.sh` now also
+  refuses to run without the `allow-stalwart-mgmt-ingress` NetworkPolicy,
+  which the config Job needs (prod lacked it before the cutover). The old
+  databases are kept for now and dropped separately.
+
 ### Changed
 - **Stalwart mail server 0.15.5 → v1.2.0 (#715), step 2 of 3.** 0.15 stopped
   getting fixes when 0.16 came out, and v1 changed the store layout again.
