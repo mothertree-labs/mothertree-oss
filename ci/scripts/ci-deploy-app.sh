@@ -235,7 +235,9 @@ case "$MODE" in
       # The monolithic create_env rollout-restarts the backend after
       # provisioning; this split path must do the same. Portals don't need
       # this — deploy-dev-portals serialises behind this step (see its
-      # depends_on comment); Synapse/Nextcloud read the Secret at deploy time.
+      # depends_on comment); Synapse/Nextcloud read the Secret at deploy time
+      # and roll on a change (Synapse's chart checksums its config; Nextcloud
+      # via the smtp-credentials-hash pod annotation).
       if kubectl -n "$NS_DOCS" get deployment backend >/dev/null 2>&1; then
         docs_needs_restart=false
         if [ "$rc" -eq 0 ]; then

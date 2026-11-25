@@ -341,6 +341,36 @@ describe('sendInvitationEmail', () => {
 
 // --- listUsers ---
 
+describe('findUserByEmail', () => {
+  test('queries an exact email match and returns the user', async () => {
+    const keycloak = getKeycloak();
+    fetchMock.mockResolvedValueOnce(mockResponse({ access_token: 'tok', expires_in: 300 }));
+    fetchMock.mockResolvedValueOnce(mockResponse([{ id: 'u1', email: 'Alice@Example.com', firstName: 'Alice' }]));
+
+    const user = await keycloak.findUserByEmail('alice@example.com');
+
+    expect(user).toMatchObject({ id: 'u1', firstName: 'Alice' });
+    const url = fetchMock.mock.calls[1][0];
+    expect(url).toContain('/users?email=alice%40example.com&exact=true');
+  });
+
+  test('returns null when no user has exactly that email', async () => {
+    const keycloak = getKeycloak();
+    fetchMock.mockResolvedValueOnce(mockResponse({ access_token: 'tok', expires_in: 300 }));
+    fetchMock.mockResolvedValueOnce(mockResponse([{ id: 'u2', email: 'alice.other@example.com' }]));
+
+    expect(await keycloak.findUserByEmail('alice@example.com')).toBeNull();
+  });
+
+  test('throws on a Keycloak error', async () => {
+    const keycloak = getKeycloak();
+    fetchMock.mockResolvedValueOnce(mockResponse({ access_token: 'tok', expires_in: 300 }));
+    fetchMock.mockResolvedValueOnce(mockResponse('boom', { status: 500 }));
+
+    await expect(keycloak.findUserByEmail('alice@example.com')).rejects.toThrow('Failed to look up user by email: 500');
+  });
+});
+
 describe('listUsers', () => {
   test('returns enriched user list with passkey status', async () => {
     const keycloak = getKeycloak();

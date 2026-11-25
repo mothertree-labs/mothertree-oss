@@ -340,9 +340,36 @@ async function getAllQuotas() {
 /**
  * Set the quota for a user account.
  * quotaBytes = 0 means unlimited (the disk quota is removed).
+ *
+ * A user who has never used mail has no account yet (accounts appear on
+ * invite or on first mail login). A quota for them creates the mailbox with
+ * that quota, as an invite does, but only for an existing realm user:
+ * `lookupUser(email)` must return them (otherwise any address in the domain,
+ * a service-account alias included, could be turned into a mailbox).
+ * "Unlimited" needs nothing stored. Stalwart 0.15 answered HTTP 200 with an
+ * error body for a missing principal, so the old code silently dropped the
+ * quota (#715).
  */
-async function setUserQuota(email, quotaBytes) {
-  const account = await requireAccount(email);
+async function setUserQuota(email, quotaBytes, { lookupUser } = {}) {
+  let account = await findAccount(email);
+  if (!account) {
+    if (!(quotaBytes > 0)) {
+      return { success: true };
+    }
+    const user = typeof lookupUser === 'function' ? await lookupUser(email) : null;
+    if (!user) {
+      const err = new Error(`No mailbox and no user with the address ${email}`);
+      err.status = 404;
+      throw err;
+    }
+    const name = [user.firstName, user.lastName].filter(Boolean).join(' ');
+    const { created } = await ensureUserExists(email, name, quotaBytes);
+    if (created) {
+      return { success: true };
+    }
+    // Created concurrently (invite or first login): set the quota on it.
+    account = await requireAccount(email);
+  }
   const res = await jmap([['x:Account/set', {
     update: { [account.id]: { 'quotas/maxDiskQuota': quotaBytes > 0 ? quotaBytes : null } },
   }, 'u']]);

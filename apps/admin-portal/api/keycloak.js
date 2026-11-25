@@ -388,6 +388,24 @@ async function listUsers() {
 }
 
 /**
+ * Find the realm user whose email is exactly `email` (case-insensitive).
+ * Returns the Keycloak user representation, or null when there is none.
+ */
+async function findUserByEmail(email) {
+  const token = await getServiceToken();
+  const url = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?email=${encodeURIComponent(email)}&exact=true&max=2`;
+  const response = await kcFetch(url, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to look up user by email: ${response.status}`);
+  }
+  const want = String(email).toLowerCase();
+  const users = await response.json();
+  return users.find((u) => (u.email || '').toLowerCase() === want) || null;
+}
+
+/**
  * Check if user has magic-link configured as an auth method.
  * This is indicated by the ext-magic-link required action having been
  * completed (the user attribute 'authMethod' is set to 'magic-link')
@@ -623,6 +641,7 @@ module.exports = {
   createUser,
   sendInvitationEmail,
   listUsers,
+  findUserByEmail,
   deleteUser,
   checkUserHasPasskey,
   checkUserHasMagicLink,

@@ -411,12 +411,66 @@ describe('setUserQuota', () => {
       .rejects.toThrow('Stalwart quota update for alice@test.com failed (c): invalidPatch - Invalid value for object property [quotas]');
   });
 
-  test('throws when the account does not exist', async () => {
+  test('creates the mailbox with the quota when the account does not exist yet', async () => {
+    const stalwart = getStalwart();
+    fetchMock.mockResolvedValueOnce(lookupResponse([]));   // setUserQuota lookup
+    fetchMock.mockResolvedValueOnce(lookupResponse([]));   // ensureUserExists lookup
+    fetchMock.mockResolvedValueOnce(jmapResponse(['x:Domain/query', { ids: ['b'] }, 'd']));
+    fetchMock.mockResolvedValueOnce(jmapResponse(['x:Account/set', { created: { n: { id: 'z' } } }, 'c']));
+    fetchMock.mockResolvedValueOnce(jmapResponse(['x:Action/set', { created: { r: { id: 'r1' } } }, 'r']));
+
+    const lookupUser = jest.fn().mockResolvedValue({ email: 'nobody@test.com', firstName: 'No', lastName: 'Body' });
+    const result = await stalwart.setUserQuota('nobody@test.com', 5, { lookupUser });
+
+    expect(result).toEqual({ success: true });
+    expect(lookupUser).toHaveBeenCalledWith('nobody@test.com');
+    const create = sentCalls(3)[0];
+    expect(create[0]).toBe('x:Account/set');
+    expect(create[1].create.n).toMatchObject({
+      '@type': 'User', name: 'nobody', domainId: 'b', description: 'No Body', quotas: { maxDiskQuota: 5 },
+    });
+  });
+
+  test('refuses to create a mailbox for an address with no realm user (404)', async () => {
+    const stalwart = getStalwart();
+    fetchMock.mockResolvedValueOnce(lookupResponse([]));
+    const lookupUser = jest.fn().mockResolvedValue(null);
+
+    await expect(stalwart.setUserQuota('noreply@test.com', 5, { lookupUser }))
+      .rejects.toMatchObject({ status: 404, message: 'No mailbox and no user with the address noreply@test.com' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('refuses to create a mailbox when no user lookup is given', async () => {
     const stalwart = getStalwart();
     fetchMock.mockResolvedValueOnce(lookupResponse([]));
 
-    await expect(stalwart.setUserQuota('nobody@test.com', 5))
-      .rejects.toThrow('Stalwart account for nobody@test.com not found');
+    await expect(stalwart.setUserQuota('nobody@test.com', 5)).rejects.toMatchObject({ status: 404 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('stores nothing for unlimited when the account does not exist yet', async () => {
+    const stalwart = getStalwart();
+    fetchMock.mockResolvedValueOnce(lookupResponse([]));
+
+    const result = await stalwart.setUserQuota('nobody@test.com', 0);
+
+    expect(result).toEqual({ success: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('sets the quota on an account created concurrently', async () => {
+    const stalwart = getStalwart();
+    fetchMock.mockResolvedValueOnce(lookupResponse([]));        // setUserQuota lookup
+    fetchMock.mockResolvedValueOnce(lookupResponse([ALICE]));   // ensureUserExists: appeared
+    fetchMock.mockResolvedValueOnce(lookupResponse([ALICE]));   // requireAccount
+    fetchMock.mockResolvedValueOnce(jmapResponse(['x:Account/set', { updated: { c: null } }, 'u']));
+
+    const lookupUser = jest.fn().mockResolvedValue({ email: 'alice@test.com' });
+    const result = await stalwart.setUserQuota('alice@test.com', 7, { lookupUser });
+
+    expect(result).toEqual({ success: true });
+    expect(sentCalls(3)).toEqual([['x:Account/set', { update: { c: { 'quotas/maxDiskQuota': 7 } } }, 'u']]);
   });
 });
 
