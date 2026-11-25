@@ -36,7 +36,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: syn2mas
-          image: ghcr.io/element-hq/matrix-authentication-service:1.29.0
+          image: ghcr.io/element-hq/matrix-authentication-service:1.30.0
           imagePullPolicy: IfNotPresent
           args: ["syn2mas", "--config", "/config/config.yaml", "--synapse-config", "/synapse/homeserver.yaml", ${SYN2MAS_ARGS}]
           securityContext:
