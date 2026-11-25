@@ -331,13 +331,41 @@ def _oidc_token():
     token = data.get("access_token")
     if not token:
         raise _LoginError("token: no access_token in the response")
-    return token
+    return token, data.get("refresh_token")
+
+
+def _oidc_logout(refresh_token):
+    """End the Keycloak session the password grant opened (it would otherwise
+    live for the realm's SSO lifespan; one per check adds up). Best effort."""
+    if not refresh_token:
+        return
+    body = urllib.parse.urlencode({
+        "client_id": OIDC_CLIENT_ID,
+        "client_secret": OIDC_CLIENT_SECRET,
+        "refresh_token": refresh_token,
+    }).encode()
+    url = OIDC_TOKEN_URL.rsplit("/", 1)[0] + "/logout"
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=20):
+            pass
+    except Exception as e:  # a lingering session is not a login failure
+        log.warning("OIDC logout failed: %s", type(e).__name__)
 
 
 def _oidc_login_once():
     """One synthetic login. Returns elapsed seconds; raises _LoginError."""
     t0 = time.monotonic()
-    token = _oidc_token()
+    token, refresh_token = _oidc_token()
+    try:
+        return _imap_xoauth2(token, t0)
+    finally:
+        _oidc_logout(refresh_token)
+
+
+def _imap_xoauth2(token, t0):
     # The bot's Stalwart account is its email; Stalwart maps the token's
     # preferred_username to it.
     xoauth2 = f"user={BOT_EMAIL}\x01auth=Bearer {token}\x01\x01".encode()

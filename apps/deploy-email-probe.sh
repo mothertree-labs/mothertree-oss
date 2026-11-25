@@ -173,7 +173,7 @@ print_status "Ensuring the probe's Keycloak client and login..."
 if ! KC_URL="http://localhost:${KC_PF_PORT}" KC_ADMIN_PASSWORD="$KEYCLOAK_ADMIN_PASSWORD" \
         KC_REALM="$TENANT_KEYCLOAK_REALM" PROBE_CLIENT_ID="$OIDC_CLIENT_ID" \
         PROBE_CLIENT_SECRET="$OIDC_CLIENT_SECRET" PROBE_USERNAME="email-probe" \
-        PROBE_PASSWORD="$OIDC_USER_PASSWORD" \
+        PROBE_PASSWORD="$OIDC_USER_PASSWORD" PROBE_EMAIL="$BOT_EMAIL" \
         python3 -I "$REPO_ROOT/apps/scripts/ensure-email-probe-oidc.py"; then
     kill "$KC_PF_PID" 2>/dev/null || true
     print_error "The probe cannot log in through Keycloak (see above)"

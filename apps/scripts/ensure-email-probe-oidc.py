@@ -9,9 +9,16 @@ Keycloak side of the probe's synthetic OIDC login (#715 follow-up):
   * the probe's Keycloak user (`email-probe`, created by
     scripts/create-email-probe-user) can get a token with the given password.
 
+The password grant is gated to the probe: the client's direct-grant flow is
+overridden with `email-probe direct grant`, which denies any user without the
+client role `probe` (held only by the probe user) BEFORE the password is
+checked. A leaked client secret therefore cannot be used to log in as anyone
+else, nor as an oracle for other users' passwords.
+
 Then it checks a real token: aud contains `stalwart` and preferred_username is
-the probe user. On a failed login it clears any brute-force lockout and resets
-the user's password to the given value, once, then checks again.
+the probe user, and logs that session out again. On a failed login it clears
+any brute-force lockout and resets the probe user's password to the given
+value (after checking the user's email), once, then checks again.
 
 Everything comes from the environment, never argv (a shared CI host can read
 argv through ps). Nothing secret is printed.
@@ -36,7 +43,19 @@ CLIENT_ID = os.environ["PROBE_CLIENT_ID"]
 CLIENT_SECRET = os.environ["PROBE_CLIENT_SECRET"]
 USERNAME = os.environ["PROBE_USERNAME"]
 PASSWORD = os.environ["PROBE_PASSWORD"]
+PROBE_EMAIL = os.environ["PROBE_EMAIL"]
 AUDIENCE = "stalwart"
+ROLE = "probe"
+FLOW = "email-probe direct grant"
+SUBFLOW = "email-probe deny other users"
+# (level, provider or subflow alias, requirement), in order.
+FLOW_SHAPE = [
+    (0, "direct-grant-validate-username", "REQUIRED"),
+    (0, SUBFLOW, "CONDITIONAL"),
+    (1, "conditional-user-role", "REQUIRED"),
+    (1, "deny-access-authenticator", "REQUIRED"),
+    (0, "direct-grant-validate-password", "REQUIRED"),
+]
 
 
 def say(msg):
@@ -77,6 +96,90 @@ def admin_token():
     if status != 200 or not data or not data.get("access_token"):
         sys.exit(f"Keycloak admin login failed (HTTP {status})")
     return data["access_token"]
+
+
+def _flow_shape(tok):
+    status, ex = request("GET", f"/admin/realms/{REALM}/authentication/flows/"
+                         f"{urllib.parse.quote(FLOW)}/executions", tok)
+    if status != 200:
+        return None, None
+    shape = [(e.get("level"), e.get("providerId") or e.get("displayName"), e.get("requirement"))
+             for e in ex]
+    return shape, ex
+
+
+def _flow_id(tok):
+    status, flows = request("GET", f"/admin/realms/{REALM}/authentication/flows", tok)
+    if status != 200:
+        sys.exit(f"Could not list authentication flows (HTTP {status})")
+    for f in flows:
+        if f.get("alias") == FLOW:
+            return f["id"]
+    return None
+
+
+def _role_config_ok(tok, ex):
+    cond = next((e for e in ex if e.get("providerId") == "conditional-user-role"), None)
+    if not cond or not cond.get("authenticationConfig"):
+        return False
+    status, cfg = request("GET", f"/admin/realms/{REALM}/authentication/config/"
+                          f"{cond['authenticationConfig']}", tok)
+    c = (cfg or {}).get("config", {}) if status == 200 else {}
+    return c.get("condUserRole") == f"{CLIENT_ID}.{ROLE}" and c.get("negate") == "true"
+
+
+def ensure_flow(tok, client_uuid):
+    """The client's own direct-grant flow; returns its id."""
+    flows = f"/admin/realms/{REALM}/authentication/flows"
+    shape, ex = _flow_shape(tok)
+    if shape == FLOW_SHAPE and _role_config_ok(tok, ex):
+        return _flow_id(tok)
+    fid = _flow_id(tok)
+    if fid:
+        # Wrong shape: unbind it from our client, then rebuild from scratch.
+        say(f"Flow '{FLOW}' does not have the expected shape; rebuilding it")
+        status, client = request("GET", f"/admin/realms/{REALM}/clients/{client_uuid}", tok)
+        if status == 200:
+            client["authenticationFlowBindingOverrides"] = {}
+            request("PUT", f"/admin/realms/{REALM}/clients/{client_uuid}", tok, body=client)
+        status, _ = request("DELETE", f"{flows}/{fid}", tok)
+        if status != 204:
+            sys.exit(f"Could not delete the old flow '{FLOW}' (HTTP {status})")
+    q = urllib.parse.quote
+    steps = [
+        ("POST", flows, {"alias": FLOW, "providerId": "basic-flow", "topLevel": True, "builtIn": False,
+                         "description": "Password grant for the email probe only (see ensure-email-probe-oidc.py)"}),
+        ("POST", f"{flows}/{q(FLOW)}/executions/execution", {"provider": "direct-grant-validate-username"}),
+        ("POST", f"{flows}/{q(FLOW)}/executions/flow",
+         {"alias": SUBFLOW, "type": "basic-flow", "provider": "registration-page-form", "description": ""}),
+        ("POST", f"{flows}/{q(SUBFLOW)}/executions/execution", {"provider": "conditional-user-role"}),
+        ("POST", f"{flows}/{q(SUBFLOW)}/executions/execution", {"provider": "deny-access-authenticator"}),
+        ("POST", f"{flows}/{q(FLOW)}/executions/execution", {"provider": "direct-grant-validate-password"}),
+    ]
+    for method, path, body in steps:
+        status, _ = request(method, path, tok, body=body)
+        if status not in (201, 204):
+            sys.exit(f"Could not build flow '{FLOW}': {method} {path.split('/')[-1]} -> HTTP {status}")
+    shape, ex = _flow_shape(tok)
+    if shape is None:
+        sys.exit(f"Flow '{FLOW}' not readable after creating it")
+    for e, (_, _, want) in zip(ex, FLOW_SHAPE):
+        if e.get("requirement") != want:
+            e["requirement"] = want
+            status, _ = request("PUT", f"{flows}/{q(FLOW)}/executions", tok, body=e)
+            if status not in (202, 204):
+                sys.exit(f"Could not set requirement {want} in flow '{FLOW}' (HTTP {status})")
+    cond = next(e for e in ex if e.get("providerId") == "conditional-user-role")
+    status, _ = request("POST", f"/admin/realms/{REALM}/authentication/executions/{cond['id']}/config", tok,
+                        body={"alias": "email-probe-role-missing",
+                              "config": {"condUserRole": f"{CLIENT_ID}.{ROLE}", "negate": "true"}})
+    if status != 201:
+        sys.exit(f"Could not configure the role condition (HTTP {status})")
+    shape, ex = _flow_shape(tok)
+    if shape != FLOW_SHAPE or not _role_config_ok(tok, ex):
+        sys.exit(f"Flow '{FLOW}' has an unexpected shape after building it: {shape}")
+    say(f"Flow '{FLOW}': built")
+    return _flow_id(tok)
 
 
 def ensure_client(tok):
@@ -136,6 +239,28 @@ def ensure_client(tok):
             sys.exit(f"Could not add the stalwart-audience mapper (HTTP {status})")
         say("Mapper stalwart-audience: added")
 
+    # Client role held only by the probe user; the flow denies everyone else.
+    status, _ = request("GET", f"{base}/{cid}/roles/{ROLE}", tok)
+    if status == 404:
+        status, _ = request("POST", f"{base}/{cid}/roles", tok,
+                            body={"name": ROLE, "description": "May use the email-probe password grant"})
+        if status != 201:
+            sys.exit(f"Could not create client role {ROLE} (HTTP {status})")
+    elif status != 200:
+        sys.exit(f"Could not read client role {ROLE} (HTTP {status})")
+
+    flow_id = ensure_flow(tok, cid)
+    status, client = request("GET", f"{base}/{cid}", tok)
+    if status != 200:
+        sys.exit(f"Could not read client {CLIENT_ID} (HTTP {status})")
+    if (client.get("authenticationFlowBindingOverrides") or {}).get("direct_grant") != flow_id:
+        client["authenticationFlowBindingOverrides"] = {"direct_grant": flow_id}
+        status, _ = request("PUT", f"{base}/{cid}", tok, body=client)
+        if status != 204:
+            sys.exit(f"Could not bind flow '{FLOW}' to {CLIENT_ID} (HTTP {status})")
+        say(f"Client {CLIENT_ID}: direct grant bound to '{FLOW}'")
+    return cid
+
 
 def find_user(tok):
     status, users = request(
@@ -144,7 +269,26 @@ def find_user(tok):
         sys.exit(f"Could not look up user {USERNAME} (HTTP {status})")
     if not users:
         sys.exit(f"Keycloak user {USERNAME} does not exist (scripts/create-email-probe-user creates it)")
+    # Never touch (role, password) an account that merely shares the name.
+    if (users[0].get("email") or "").lower() != PROBE_EMAIL.lower():
+        sys.exit(f"Keycloak user {USERNAME} does not have the probe's email; refusing to manage it")
     return users[0]["id"]
+
+
+def ensure_user_role(tok, uid, cid):
+    path = f"/admin/realms/{REALM}/users/{uid}/role-mappings/clients/{cid}"
+    status, mapped = request("GET", path, tok)
+    if status != 200:
+        sys.exit(f"Could not read the probe user's client roles (HTTP {status})")
+    if any(r.get("name") == ROLE for r in mapped or []):
+        return
+    status, role = request("GET", f"/admin/realms/{REALM}/clients/{cid}/roles/{ROLE}", tok)
+    if status != 200:
+        sys.exit(f"Could not read client role {ROLE} (HTTP {status})")
+    status, _ = request("POST", path, tok, body=[role])
+    if status != 204:
+        sys.exit(f"Could not give the probe user role {ROLE} (HTTP {status})")
+    say(f"User {USERNAME}: given client role {ROLE}")
 
 
 def probe_login():
@@ -165,18 +309,28 @@ def probe_login():
         return False, f"token audience {auds} lacks {AUDIENCE}"
     if claims.get("preferred_username") != USERNAME:
         return False, "token preferred_username is not the probe user"
+    # Do not leave a (30-day) Keycloak session behind.
+    if data.get("refresh_token"):
+        request("POST", f"/realms/{REALM}/protocol/openid-connect/logout", form={
+            "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
+            "refresh_token": data["refresh_token"]})
     return True, f"iss={claims.get('iss')}"
 
 
 def main():
     tok = admin_token()
-    ensure_client(tok)
+    cid = ensure_client(tok)
     uid = find_user(tok)
+    ensure_user_role(tok, uid, cid)
 
     ok, reason = probe_login()
     if not ok:
         say(f"Probe login failed ({reason}); resetting the probe user's password")
         # A lockout from earlier failures would make the reset look useless.
+        status, bf = request("GET", f"/admin/realms/{REALM}/attack-detection/brute-force/users/{uid}", tok)
+        if status == 200 and bf and (bf.get("disabled") or bf.get("numFailures")):
+            say(f"Probe user had a brute-force record (failures={bf.get('numFailures')}, "
+                f"locked={bf.get('disabled')}); clearing it")
         request("DELETE", f"/admin/realms/{REALM}/attack-detection/brute-force/users/{uid}", tok)
         status, _ = request("PUT", f"/admin/realms/{REALM}/users/{uid}/reset-password", tok,
                             body={"type": "password", "value": PASSWORD, "temporary": False})
