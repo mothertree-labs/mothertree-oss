@@ -24,6 +24,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     0.11.69, roundcube 0.3.10, perf 0.2.6. No code changes.
   - Removed the `docker-compose.yml` 404 stub and `apps/helmfile.yaml.bak2/3`;
     CLAUDE.md names the running Keycloak (26.8.2) and Postfix (5.2.1).
+- **keycloak-magic-link 0.88 → 0.94** (#746). Keycloak runs 26.8.2, so the
+  hold below 0.89 (builds against Keycloak 26.8) is gone. 0.89–0.94 bring the
+  Keycloak 26.8 build, forwarding of the info message to the next
+  authenticator, and no user creation for invalid email input. The jar's
+  signature was verified against the pinned phasetwo key before re-pinning
+  its SHA-256.
+- **0.95 is held back** (#845): it is signed by a new PGP key that is not yet
+  verified. Renovate now holds magic-link below 0.95 until it is (re-evaluate
+  by 2026-12-09).
 
 ### Added
 - **Synthetic webmail login in the email probe.** Every 5 minutes the probe

@@ -357,15 +357,18 @@
     },
 
     // ---- Keycloak magic-link hold ------------------------------------------------------
-    // keycloak-magic-link 0.89 (2026-10-01) is built against Keycloak 26.8.0; we run
-    // 26.7.4 (0.85-0.88 declare 26.7.4). Hold below 0.89 until Keycloak moves to
-    // 26.8.x, tracked in #746. allowedVersions also hides magic-link from the
-    // Dependency Dashboard, so watch github.com/p2-inc/keycloak-magic-link/releases
-    // for security fixes. Re-evaluate by 2026-11-15; remove with the KC 26.8 bump.
+    // keycloak-magic-link 0.95 (2026-11) is signed by a NEW PGP key
+    // (E4807551...74BD7EF1, created 2026-11-20), not the pinned phasetwo key in
+    // ci/keys/phasetwo-bot.asc that signed 0.88-0.94. magic-link-pin.sh --fix
+    // therefore refuses it, and that failing branch would block the weekly batch.
+    // Hold below 0.95 until the rotation is verified (#845). allowedVersions also
+    // hides magic-link from the Dependency Dashboard, so watch
+    // github.com/p2-inc/keycloak-magic-link/releases for security fixes.
+    // Re-evaluate by 2026-12-09; remove once the new key is trusted.
     {
-      "description": "keycloak-magic-link: below 0.89 until Keycloak 26.8 (#746)",
+      "description": "keycloak-magic-link: below 0.95 until its new signing key is verified (#845)",
       "matchPackageNames": ["io.phasetwo.keycloak:keycloak-magic-link"],
-      "allowedVersions": "/^0\\.([0-7]?[0-9]|8[0-8])$/",
+      "allowedVersions": "/^0\\.([0-8]?[0-9]|9[0-4])$/",
     },
 
     // ---- LLM stack -------------------------------------------------------------------
