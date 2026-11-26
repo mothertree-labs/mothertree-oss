@@ -36,7 +36,7 @@ variable "linode_k8s_version" {
   # one minor at a time (then a node recycle); Terraform cannot downgrade, so
   # a stale value here fails the next phase1 plan. Linode supports only the
   # latest three minors, so move along before the oldest ages out.
-  default     = "1.37"
+  default = "1.37"
   validation {
     condition     = can(regex("^1\\.(2[4-9]|3[0-9])$", var.linode_k8s_version))
     error_message = "Kubernetes version must be between 1.24 and 1.39."
