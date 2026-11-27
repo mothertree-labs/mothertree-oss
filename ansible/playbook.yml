@@ -392,6 +392,17 @@
         msg: "turn_shared_secret must be passed via --extra-vars (source: tenants/<name>/<env>.secrets.yaml -> turn.shared_secret)"
       when: turn_shared_secret is not defined or turn_shared_secret | length == 0
 
+    # The public IP coturn advertises (external-ip). It used to be looked up
+    # with curl on every service start and sed-patched into turnserver.conf,
+    # so the file Ansible wrote never matched the template and every run
+    # reported a change.
+    - name: Validate turn_public_ip is provided
+      assert:
+        that:
+          - turn_public_ip is defined
+          - turn_public_ip is match('^([0-9]{1,3}\\.){3}[0-9]{1,3}$')
+        fail_msg: "turn_public_ip must be the TURN server's public IPv4 (inventory var; manage_infra sets it from TURN_SERVER_IP)"
+
     - name: Update apt cache
       apt:
         update_cache: yes

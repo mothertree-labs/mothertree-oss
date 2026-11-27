@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **coturn's external IP is written by Ansible.** `turnserver.conf` used to
+  carry a literal `$(curl … icanhazip.com)` that a systemd `ExecStartPre` sed
+  replaced on every start. That made each start depend on a third-party
+  lookup and made every Ansible run report the file as changed. The play now
+  renders `external-ip` from the inventory var `turn_public_ip`, which
+  `manage_infra` sets from the Terraform output, and asserts that it is an
+  IPv4 address. A second run now reports `changed=0`.
+- **`cleanup-headscale-nodes` and `mail-stats` verify SSH host keys**
+  (`StrictHostKeyChecking=accept-new`, was `no`).
+- **Headscale VMs: Vector's Loki healthcheck is off.** The healthcheck hit a
+  path that returns 404 on the Loki gateway, so Vector logged a failure on
+  every start even though pushes worked.
 - **TURN server on Ubuntu 24.04.** prod's TURN VM was rebuilt in place with
   a Linode rebuild, which keeps the instance, its public IP and its firewall,
   so DNS, Jitsi, Synapse and the deploy vaults are unchanged.

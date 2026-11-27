@@ -7,8 +7,10 @@ tls-listening-port={{ turn_tls_port }}
 alt-listening-port={{ turn_alt_port }}
 alt-tls-listening-port={{ turn_alt_tls_port }}
 
-# External IP (will be set by systemd)
-external-ip=$(curl -s https://ipv4.icanhazip.com/)
+# External (public) IP, from the inventory var turn_public_ip (manage_infra
+# sets it to the Terraform output). Written once by Ansible, so the file on
+# disk is exactly what this template renders.
+external-ip={{ turn_public_ip }}
 
 # Realm
 realm={{ turn_realm }}

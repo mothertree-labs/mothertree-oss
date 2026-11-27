@@ -19,6 +19,12 @@ sinks:
     type: loki
     inputs: ["enrich"]
     endpoint: "{{ loki_push_url }}"
+    # Vector's Loki healthcheck GETs /ready on the push URL; the in-cluster
+    # Loki gateway answers 404 there, so it logged a failed healthcheck on
+    # every start although pushes work. Delivery errors still surface as
+    # sink errors.
+    healthcheck:
+      enabled: false
     encoding:
       codec: text
     labels:

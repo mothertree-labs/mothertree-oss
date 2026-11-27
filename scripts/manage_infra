@@ -561,7 +561,7 @@ if [ "$RUN_ANSIBLE" = "true" ] && [ "$PLAN_ONLY" != "true" ] && [ "$DESTROY" != 
         cat >> "$TEMP_INVENTORY" <<EOF
 
 [turn_servers]
-turn-server ansible_host=${_turn_ansible_host} ansible_user=root
+turn-server ansible_host=${_turn_ansible_host} ansible_user=root turn_public_ip=${TURN_SERVER_IP}
 EOF
         print_status "TURN server ${_turn_ansible_host} added to inventory"
         _ansible_hosts="${_ansible_hosts} TURN (${TURN_SERVER_IP})"

@@ -72,7 +72,7 @@ process_env() {
 
   # Fetch all stats in one SSH call
   local vpn_result
-  vpn_result=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$vpn_ip" '
+  vpn_result=$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "root@$vpn_ip" '
     LOG="/var/log/mail.log"
 
     # Counts from full log
@@ -155,7 +155,7 @@ process_env() {
   print_subheader "Recent Relay Rejections (security)"
 
   local rejects
-  rejects=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$vpn_ip" \
+  rejects=$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "root@$vpn_ip" \
     'grep "NOQUEUE.*reject" /var/log/mail.log 2>/dev/null | tail -5' 2>/dev/null) || rejects=""
 
   if [ -n "$rejects" ]; then
