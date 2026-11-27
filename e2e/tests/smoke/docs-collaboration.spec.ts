@@ -50,6 +50,14 @@ test.describe('Docs — collaborative editing', () => {
       expect(csrfToken, 'Expected a csrftoken cookie after logging into Docs').toBeTruthy();
       apiHeaders = { 'X-CSRFToken': csrfToken!, Referer: `${urls.docs}/`, Origin: urls.docs };
 
+      // impress 6 shows a first-connection onboarding modal over the editor
+      // ("Compose your doc easily") that swallows clicks; mark it seen, as
+      // the frontend does when it is dismissed.
+      const onboardingResp = await page.request.post(`${urls.docs}/api/v1.0/users/onboarding-done/`, {
+        headers: apiHeaders,
+      });
+      expect(onboardingResp.status(), 'POST users/onboarding-done/ failed').toBe(200);
+
       // ── Create a document (backend → yhub create-ydoc in-cluster)
       const createResp = await page.request.post(`${urls.docs}/api/v1.0/documents/`, {
         headers: apiHeaders,
