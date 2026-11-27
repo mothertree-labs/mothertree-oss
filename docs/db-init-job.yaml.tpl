@@ -160,7 +160,13 @@ spec:
                 FOR r IN
                   SELECT t.oid::regtype AS typ FROM pg_type t
                   WHERE t.typnamespace = 'public'::regnamespace
-                    AND t.typtype IN ('e','d','c','r','m') AND t.typrelid = 0
+                    -- enum/domain/range (a range's multirange follows it, and
+                    -- refuses a direct ALTER), plus standalone composites,
+                    -- whose typrelid points at a relkind 'c' pg_class row.
+                    AND (
+                      (t.typtype IN ('e','d','r') AND t.typrelid = 0)
+                      OR (t.typtype = 'c' AND (SELECT relkind FROM pg_class WHERE oid = t.typrelid) = 'c')
+                    )
                     AND pg_get_userbyid(t.typowner) <> '$YHUB_ROLE'
                 LOOP
                   EXECUTE format('ALTER TYPE %s OWNER TO %I', r.typ, '$YHUB_ROLE');
