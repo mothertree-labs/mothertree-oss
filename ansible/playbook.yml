@@ -403,19 +403,9 @@
         _turn_ts_authkey: "{{ turn_tailscale_auth_key | default(tailscale_auth_key, true) | default('', true) }}"
       when: headscale_url is defined and headscale_url | length > 0
 
-    - name: Check if Tailscale is installed
-      command: tailscale version
-      register: turn_ts_version
-      changed_when: false
-      failed_when: false
+    - name: Install Tailscale (signed apt repository, pinned key)
+      import_tasks: tasks/tailscale-apt.yml
       when: headscale_url is defined and headscale_url | length > 0 and _turn_ts_authkey | length > 0
-
-    - name: Install Tailscale if not present
-      shell: curl -fsSL https://tailscale.com/install.sh | sh
-      when: >
-        headscale_url is defined and headscale_url | length > 0 and
-        _turn_ts_authkey | length > 0 and
-        turn_ts_version.rc is defined and turn_ts_version.rc != 0
 
     - name: Ensure Tailscale is enabled and running
       systemd:
@@ -529,6 +519,10 @@
   become: yes
   vars:
     headscale_version: "0.29.7"
+    # rclone for the S3 backups below. Renovate moves this (renovate.json5,
+    # "rclone version in ansible/playbook.yml"); the .deb is checked against
+    # the release's own SHA256SUMS.
+    rclone_version: "1.76.0"
     # headscale_base_domain: REQUIRED - e.g., ts.example.com (MagicDNS base domain)
     # headscale_domain: REQUIRED - e.g., hs-prod.example.com
     # tls_email: REQUIRED - for Let's Encrypt certificate
@@ -816,10 +810,20 @@
     # -------------------------------------------------------------------
     # Automated backup — SQLite DB + keys to S3 via rclone
     # -------------------------------------------------------------------
+    # Pinned release, checksum-verified (was `curl https://rclone.org/install.sh
+    # | bash`, which ran whatever that URL served as root and, with
+    # `creates:`, never upgraded). The checksum is read from the release's
+    # SHA256SUMS, so a Renovate version bump needs no hash edit.
+    - name: Download rclone .deb
+      get_url:
+        url: "https://downloads.rclone.org/v{{ rclone_version }}/rclone-v{{ rclone_version }}-linux-amd64.deb"
+        dest: "/tmp/rclone-v{{ rclone_version }}-linux-amd64.deb"
+        checksum: "sha256:https://downloads.rclone.org/v{{ rclone_version }}/SHA256SUMS"
+        mode: "0644"
+
     - name: Install rclone for S3 backups
-      shell: curl -fsSL https://rclone.org/install.sh | bash
-      args:
-        creates: /usr/bin/rclone
+      apt:
+        deb: "/tmp/rclone-v{{ rclone_version }}-linux-amd64.deb"
 
     - name: Create rclone config directory
       file:
@@ -951,15 +955,8 @@
     # Tailscale client — join the server's own mesh for operator SSH access.
     # Public SSH is blocked at the cloud firewall; operators use Tailscale SSH.
     # -------------------------------------------------------------------
-    - name: Check if Tailscale client is installed
-      command: tailscale version
-      register: hs_ts_version
-      changed_when: false
-      failed_when: false
-
-    - name: Install Tailscale client if not present
-      shell: curl -fsSL https://tailscale.com/install.sh | sh
-      when: hs_ts_version.rc != 0
+    - name: Install Tailscale client (signed apt repository, pinned key)
+      import_tasks: tasks/tailscale-apt.yml
 
     - name: Ensure Tailscale client is enabled and running
       systemd:
@@ -1084,15 +1081,8 @@
     # Tailscale client (should already be installed via cloud-init,
     # but ensure it's present and running)
     # -------------------------------------------------------------------
-    - name: Check if Tailscale is installed
-      command: tailscale version
-      register: ts_version
-      changed_when: false
-      failed_when: false
-
-    - name: Install Tailscale if not present
-      shell: curl -fsSL https://tailscale.com/install.sh | sh
-      when: ts_version.rc != 0
+    - name: Install Tailscale (signed apt repository, pinned key)
+      import_tasks: tasks/tailscale-apt.yml
 
     - name: Ensure Tailscale is enabled and running
       systemd:

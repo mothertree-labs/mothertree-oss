@@ -1,0 +1,54 @@
+---
+# Install Tailscale from its signed apt repository, with the signing key
+# pinned. Shared by ansible/playbook.yml (TURN, Headscale, PostgreSQL VMs),
+# ci/ansible/playbook.yml and the devhome playbooks (import_tasks).
+#
+# Replaces `curl -fsSL https://tailscale.com/install.sh | sh`, which ran
+# whatever that URL served as root. The install script does exactly this on
+# Debian/Ubuntu (same keyring path, same source file), so on a host it already
+# set up these tasks change nothing.
+#
+# The keyring is pinned by SHA-256. If Tailscale ever rotates its repository
+# key, the download fails here (loudly) instead of trusting a new key: verify
+# the new key's fingerprint out of band, then update the checksum below.
+#   Key:         Tailscale Inc. (Package repository signing key) <info@tailscale.com>
+#   Fingerprint: 2596 A99E AAB3 3821 893C  0A79 458C A832 957F 5868
+#   Same key file for every Ubuntu and Debian release.
+#
+# The package itself is not pinned: apt verifies it against that key, and
+# upgrades come through unattended-upgrades / apt like any other package. A
+# host that holds tailscale (apt-mark hold, e.g. headscale-prod) keeps its
+# version: state=present never upgrades.
+
+- name: Tailscale is only installed this way on Debian/Ubuntu
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution in ['Ubuntu', 'Debian']
+    fail_msg: "tailscale-apt.yml supports Ubuntu and Debian, not {{ ansible_distribution }}"
+
+- name: Tailscale apt signing key (pinned)
+  ansible.builtin.get_url:
+    url: "https://pkgs.tailscale.com/stable/{{ ansible_distribution | lower }}/{{ ansible_distribution_release }}.noarmor.gpg"
+    dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
+    checksum: "sha256:3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Tailscale apt source
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/tailscale.list
+    content: |
+      # Tailscale packages for {{ ansible_distribution | lower }} {{ ansible_distribution_release }} (managed by Ansible: ansible/tasks/tailscale-apt.yml)
+      deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} main
+    owner: root
+    group: root
+    mode: "0644"
+  register: _tailscale_apt_source
+
+- name: Install Tailscale
+  ansible.builtin.apt:
+    name: tailscale
+    state: present
+    update_cache: true
+    cache_valid_time: "{{ 0 if _tailscale_apt_source.changed else 3600 }}"

@@ -112,6 +112,10 @@
       ansible.builtin.get_url:
         url: "https://github.com/woodpecker-ci/woodpecker/releases/download/v{{ woodpecker_version }}/{{ item }}_{{ woodpecker_version }}_amd64.deb"
         dest: "/tmp/{{ item }}_{{ woodpecker_version }}_amd64.deb"
+        # Verified against the release's checksums.txt, so a Renovate bump of
+        # woodpecker_version needs no hash edit (the toolchain pins below
+        # carry literal hashes; these follow the version instead).
+        checksum: "sha256:https://github.com/woodpecker-ci/woodpecker/releases/download/v{{ woodpecker_version }}/checksums.txt"
         mode: "0644"
       loop:
         - woodpecker-server
@@ -215,14 +219,11 @@
                 != (woodpecker_version | string)
 
     # ── Install Tailscale (mesh networking for SSH access) ─────────
-    - name: Install Tailscale
-      ansible.builtin.shell: |
-        curl -fsSL https://tailscale.com/install.sh | sh
-      args:
-        creates: /usr/bin/tailscale
+    - name: Install Tailscale (signed apt repository, pinned key)
+      ansible.builtin.import_tasks: ../../ansible/tasks/tailscale-apt.yml
 
-    # The install script starts tailscaled on a VM but not inside a systemd
-    # container (devhome-ci); make it explicit either way.
+    # The package's postinst starts tailscaled on a VM but not necessarily
+    # inside a systemd container (devhome-ci); make it explicit either way.
     # A second CI host for a non-default dev-class env (devhome) must never
     # fall back to prod's mesh or post under the live CI's status context.
     - name: Refuse a partial second-CI-host configuration
@@ -548,8 +549,21 @@
       changed_when: false
       failed_when: not node_version_out.stdout.startswith('v' ~ node_major ~ '.')
 
+    # The Playwright the e2e suite actually runs (e2e/package-lock.json, which
+    # Dependabot moves), not whatever `npx --yes playwright` resolves today:
+    # install-deps lists the system packages per Playwright release.
+    - name: Read the e2e suite's locked Playwright version
+      ansible.builtin.set_fact:
+        _e2e_playwright_version: "{{ (lookup('ansible.builtin.file', playbook_dir ~ '/../../e2e/package-lock.json') | from_json).packages['node_modules/playwright'].version }}"
+
+    - name: The locked Playwright version is a plain semver
+      ansible.builtin.assert:
+        that:
+          - _e2e_playwright_version is match('^[0-9]+[.][0-9]+[.][0-9]+$')
+        fail_msg: "e2e/package-lock.json has no usable node_modules/playwright version ({{ _e2e_playwright_version }})"
+
     - name: Install Playwright Chromium system dependencies
-      ansible.builtin.shell: npx --yes playwright install-deps chromium
+      ansible.builtin.command: npx --yes "playwright@{{ _e2e_playwright_version }}" install-deps chromium
       args:
         creates: /usr/lib/x86_64-linux-gnu/libatk-1.0.so.0
       environment:
