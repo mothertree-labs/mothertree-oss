@@ -75,6 +75,14 @@ mt_load_infra_config() {
 # ---------------------------------------------------------------------------
 _mt_infra_set_kubeconfig() {
   export KUBECONFIG="${KUBECONFIG:-$REPO_ROOT/kubeconfig.$MT_ENV.yaml}"
+  # manage_infra's firewall and Ansible phases only use the cluster for two
+  # lookups that have fallbacks, and an env can outlive its cluster (dev keeps
+  # headscale-dev for devhome's tailnet). manage_infra sets this; deploy_infra
+  # and create_env never do, so they still fail without a kubeconfig.
+  if [ ! -f "$KUBECONFIG" ] && [ "${MT_INFRA_KUBECONFIG_OPTIONAL:-false}" = "true" ]; then
+    echo "[WARN] Kubeconfig not found: $KUBECONFIG — continuing without cluster lookups" >&2
+    return 0
+  fi
   if [ ! -f "$KUBECONFIG" ]; then
     echo "[ERROR] Kubeconfig not found: $KUBECONFIG" >&2
     echo "Run './scripts/manage_infra $MT_ENV' first to create the cluster." >&2
@@ -181,7 +189,13 @@ _mt_infra_load_env_config() {
     HEADSCALE_DOMAIN=$(yq '.headscale.domain // ""' "$infra_config")
     HEADSCALE_BASE_DOMAIN=$(yq '.headscale.base_domain // ""' "$infra_config")
     HEADSCALE_TAILSCALE_IP=$(yq '.headscale.tailscale_ip // ""' "$infra_config")
+    # Where the Headscale VM's Vector ships logs. Default: this env's own Loki
+    # (manage_infra derives the host and looks the IP up in the cluster). Set
+    # both to ship elsewhere, e.g. when the env has no cluster of its own.
+    HEADSCALE_LOKI_HOST=$(yq '.headscale.loki_host // ""' "$infra_config")
+    HEADSCALE_LOKI_INTERNAL_IP=$(yq '.headscale.loki_internal_ip // ""' "$infra_config")
     export HEADSCALE_URL HEADSCALE_DOMAIN HEADSCALE_BASE_DOMAIN HEADSCALE_TAILSCALE_IP
+    export HEADSCALE_LOKI_HOST HEADSCALE_LOKI_INTERNAL_IP
 
     # TURN server Tailscale IP (for Ansible inventory mesh fallback)
     TURN_TAILSCALE_IP=$(yq '.turn.tailscale_ip // ""' "$infra_config")

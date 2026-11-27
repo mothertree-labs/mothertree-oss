@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **`manage_infra` no longer needs a cluster for `--firewall` or `--ansible`.**
+  - Without a kubeconfig, those phases now warn and carry on. They only used
+    the cluster for two lookups that already had fallbacks.
+  - `deploy_infra` and `create_env` still fail without one.
+  - An env can now outlive its cluster. dev keeps only headscale-dev, the
+    control server for devhome's tailnet.
+- **The Headscale VM's log target can be set in infra config.** Set
+  `headscale.loki_host` and `headscale.loki_internal_ip` to ship Vector's
+  logs to another env's Loki. Setting only one of them fails. headscale-dev
+  now ships to devhome's Loki.
 - **coturn's external IP is written by Ansible.** `turnserver.conf` used to
   carry a literal `$(curl … icanhazip.com)` that a systemd `ExecStartPre` sed
   replaced on every start. That made each start depend on a third-party

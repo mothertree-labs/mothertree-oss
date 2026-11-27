@@ -236,8 +236,13 @@ fi
 
 # Load infrastructure config (needed by firewall and ansible phases)
 if [ "$RUN_FIREWALL" = "true" ] || [ "$RUN_ANSIBLE" = "true" ]; then
+  # Neither phase needs the cluster; see _mt_infra_set_kubeconfig. Scoped to
+  # this load only: child scripts (manage-dns.sh loads the config too) must
+  # still fail without a kubeconfig.
   source "${REPO_ROOT}/scripts/lib/infra-config.sh"
+  MT_INFRA_KUBECONFIG_OPTIONAL=true
   mt_load_infra_config
+  unset MT_INFRA_KUBECONFIG_OPTIONAL
 fi
 
 # =============================================================================
@@ -615,9 +620,12 @@ EOF
       # Resolve NodeBalancer's real hostname for mail routing.
       # Cloudflare-proxied LB FQDNs block SMTP (port 30025) — must use the
       # NodeBalancer's direct IP/hostname from the LoadBalancer service.
-      K8S_LB_DIRECT_HOST=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress \
-        get svc ingress-nginx-controller \
-        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+      K8S_LB_DIRECT_HOST=""
+      if [ -f "$KUBECONFIG" ]; then
+        K8S_LB_DIRECT_HOST=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress \
+          get svc ingress-nginx-controller \
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+      fi
       if [ -z "$K8S_LB_DIRECT_HOST" ]; then
         K8S_LB_DIRECT_HOST="$LB_FQDN"
         print_warning "Could not resolve NodeBalancer IP — using $K8S_LB_DIRECT_HOST (may fail if Cloudflare-proxied)"
@@ -664,13 +672,32 @@ EOF
       fi
       # Headscale log shipping — Vector to Loki via internal ingress
       if [ -n "${HEADSCALE_DOMAIN:-}" ]; then
-        # prod's internal prefix is "prod" while its env DNS label is empty.
-        _loki_host="loki.${INFRA_ENV_DNS_LABEL:-prod}.${INFRA_DOMAIN}"
+        if [ -n "${HEADSCALE_LOKI_HOST:-}" ] || [ -n "${HEADSCALE_LOKI_INTERNAL_IP:-}" ]; then
+          # Explicit target from infra config (headscale.loki_host/_internal_ip).
+          : "${HEADSCALE_LOKI_HOST:?headscale.loki_internal_ip is set, so headscale.loki_host is required}"
+          : "${HEADSCALE_LOKI_INTERNAL_IP:?headscale.loki_host is set, so headscale.loki_internal_ip is required}"
+          # Both land in extra-vars YAML and /etc/hosts: allow only plain values.
+          if ! [[ "$HEADSCALE_LOKI_HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            print_error "headscale.loki_host must be a plain hostname, got '${HEADSCALE_LOKI_HOST}'"; exit 1
+          fi
+          if ! [[ "$HEADSCALE_LOKI_INTERNAL_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            print_error "headscale.loki_internal_ip must be an IPv4 address, got '${HEADSCALE_LOKI_INTERNAL_IP}'"; exit 1
+          fi
+          _loki_host="$HEADSCALE_LOKI_HOST"
+          _internal_ingress_ip="$HEADSCALE_LOKI_INTERNAL_IP"
+        else
+          # prod's internal prefix is "prod" while its env DNS label is empty.
+          _loki_host="loki.${INFRA_ENV_DNS_LABEL:-prod}.${INFRA_DOMAIN}"
+          # Internal ingress ClusterIP — resolved via subnet router route
+          _internal_ingress_ip=""
+          if [ -f "$KUBECONFIG" ]; then
+            _internal_ingress_ip=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress-internal \
+              get svc ingress-nginx-internal-controller \
+              -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+          fi
+          [ -n "$_internal_ingress_ip" ] || print_warning "Could not look up the internal ingress IP — Headscale's Vector keeps its current /etc/hosts entry for ${_loki_host}"
+        fi
         echo "loki_push_url: \"http://${_loki_host}\"" >> "$TEMP_EXTRA_VARS"
-        # Internal ingress ClusterIP — resolved via subnet router route
-        _internal_ingress_ip=$(kubectl --kubeconfig="$KUBECONFIG" -n infra-ingress-internal \
-          get svc ingress-nginx-internal-controller \
-          -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
         if [ -n "$_internal_ingress_ip" ]; then
           echo "loki_internal_ip: \"${_internal_ingress_ip}\"" >> "$TEMP_EXTRA_VARS"
         fi
