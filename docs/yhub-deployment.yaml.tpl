@@ -13,12 +13,12 @@
 #     Secret docs-yhub (yhub-jwt.pem), whose public half it publishes on
 #     /collaboration/jwks/v1, which the backend reads over YHUB_API_BASE_URL.
 #
-# SOFT_MIGRATION seeds a document from its legacy S3 snapshot
-# ({document-id}/file in the media bucket) the first time it is opened; the
-# docs-migrate-documents Job backfills the rest. It must stay on until that
-# backfill has covered every document (deploy-docs.sh checks the ledger), and
-# needs read access to the media bucket — it currently reuses the backend's
-# keys (see the deploy script for the follow-up).
+# No access to the media bucket. During the 6.0 upgrade SOFT_MIGRATION seeded
+# documents from their legacy S3 snapshots and docs-migrate-documents
+# backfilled the rest; once every tenant's ledger was complete it was turned
+# off (#851) and the LEGACY_S3_* credentials removed. deploy-docs.sh still
+# fails a deploy if a document with a legacy snapshot was never migrated,
+# which turning the flag back on would be the fix for.
 #
 # Image is distroless: no shell, so no `sh -c` command overrides anywhere here.
 apiVersion: apps/v1
@@ -98,27 +98,6 @@ spec:
             # each thread with a heap of its own, sized for a far larger corpus.
             - name: YHUB_COMPUTE_THREADS
               value: "1"
-            # Legacy (impress < 6) document store, read on first open and by the
-            # full migration. Path-style addressing is chosen automatically for
-            # any endpoint other than amazonaws.com.
-            - name: SOFT_MIGRATION
-              value: "true"
-            - name: LEGACY_S3_ENDPOINT_URL
-              value: "${YHUB_LEGACY_S3_ENDPOINT}"
-            - name: LEGACY_S3_REGION_NAME
-              value: "${S3_CLUSTER}"
-            - name: LEGACY_S3_BUCKET_NAME
-              value: "${BUCKET_NAME}"
-            - name: LEGACY_S3_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: docs-secrets
-                  key: AWS_S3_ACCESS_KEY_ID
-            - name: LEGACY_S3_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: docs-secrets
-                  key: AWS_S3_SECRET_ACCESS_KEY
           # ping touches nothing (liveness must not restart a server over a
           # store it cannot reach: that drops healthy websockets); ready asks
           # PostgreSQL and Redis and takes the pod out of the endpoints.
