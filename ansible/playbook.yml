@@ -523,6 +523,9 @@
     # "rclone version in ansible/playbook.yml"); the .deb is checked against
     # the release's own SHA256SUMS.
     rclone_version: "1.76.0"
+    # Vector (log shipping, below). Same scheme: Renovate moves it, the
+    # tarball is checked against the release's SHA256SUMS.
+    vector_version: "0.61.0"
     # headscale_base_domain: REQUIRED - e.g., ts.example.com (MagicDNS base domain)
     # headscale_domain: REQUIRED - e.g., hs-prod.example.com
     # tls_email: REQUIRED - for Let's Encrypt certificate
@@ -817,13 +820,13 @@
     - name: Download rclone .deb
       get_url:
         url: "https://downloads.rclone.org/v{{ rclone_version }}/rclone-v{{ rclone_version }}-linux-amd64.deb"
-        dest: "/tmp/rclone-v{{ rclone_version }}-linux-amd64.deb"
+        dest: "/root/rclone-v{{ rclone_version }}-linux-amd64.deb"
         checksum: "sha256:https://downloads.rclone.org/v{{ rclone_version }}/SHA256SUMS"
         mode: "0644"
 
     - name: Install rclone for S3 backups
       apt:
-        deb: "/tmp/rclone-v{{ rclone_version }}-linux-amd64.deb"
+        deb: "/root/rclone-v{{ rclone_version }}-linux-amd64.deb"
 
     - name: Create rclone config directory
       file:
@@ -856,15 +859,43 @@
     # -------------------------------------------------------------------
     # Log shipping — Vector to Loki via internal ingress
     # -------------------------------------------------------------------
-    - name: Check if Vector is installed
-      command: vector --version
-      register: vector_version
+    # Pinned release, checksum-verified (was `curl https://sh.vector.dev |
+    # bash`, which ran whatever that URL served as root and never upgraded).
+    # The binary lands where the old installer put it (/usr/local/bin/vector,
+    # which the unit below runs) and is only replaced when the version differs.
+    - name: Check the installed Vector version
+      command: /usr/local/bin/vector --version
+      register: _vector_installed
       changed_when: false
       failed_when: false
 
-    - name: Install Vector
-      shell: curl -fsSL https://sh.vector.dev | bash -s -- -y --prefix /usr/local
-      when: vector_version.rc != 0
+    - name: Install Vector {{ vector_version }}
+      when: >-
+        _vector_installed.rc != 0 or
+        not (_vector_installed.stdout | default('')).startswith('vector ' ~ vector_version ~ ' ')
+      block:
+        - name: Download Vector
+          get_url:
+            url: "https://github.com/vectordotdev/vector/releases/download/v{{ vector_version }}/vector-{{ vector_version }}-x86_64-unknown-linux-gnu.tar.gz"
+            dest: "/root/vector-{{ vector_version }}-x86_64-unknown-linux-gnu.tar.gz"
+            checksum: "sha256:https://github.com/vectordotdev/vector/releases/download/v{{ vector_version }}/vector-{{ vector_version }}-SHA256SUMS"
+            mode: "0600"
+
+        - name: Unpack Vector
+          unarchive:
+            src: "/root/vector-{{ vector_version }}-x86_64-unknown-linux-gnu.tar.gz"
+            dest: /root
+            remote_src: true
+
+        - name: Install the Vector binary
+          copy:
+            src: /root/vector-x86_64-unknown-linux-gnu/bin/vector
+            dest: /usr/local/bin/vector
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0755"
+          notify: restart vector
 
     - name: Create Vector config directory
       file:

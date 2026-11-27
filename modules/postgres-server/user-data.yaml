@@ -15,17 +15,24 @@ runcmd:
   # -------------------------------------------------------------------
   - |
     echo "[cloud-init] Installing Tailscale (signed apt repository, pinned key)..."
-    set -eu
-    # Same pinned key as ansible/tasks/tailscale-apt.yml (fingerprint
-    # 2596A99EAAB33821893C0A79458CA832957F5868); a rotated key fails here.
-    . /etc/os-release
-    KEYRING=/usr/share/keyrings/tailscale-archive-keyring.gpg
-    curl -fsSL -o "$KEYRING" "https://pkgs.tailscale.com/stable/$ID/$VERSION_CODENAME.noarmor.gpg"
-    echo "3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39  $KEYRING" | sha256sum -c -
-    chmod 0644 "$KEYRING"
-    echo "deb [signed-by=$KEYRING] https://pkgs.tailscale.com/stable/$ID $VERSION_CODENAME main" > /etc/apt/sources.list.d/tailscale.list
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y tailscale
+    # Subshell: set -eu applies to this step only (cloud-init runs every
+    # runcmd entry in one script). Same pinned key as
+    # ansible/tasks/tailscale-apt.yml (fingerprint
+    # 2596A99EAAB33821893C0A79458CA832957F5868); a rotated key fails here, and
+    # the key reaches the keyring path only after its checksum is verified.
+    (
+      set -eu
+      . /etc/os-release
+      KEYRING=/usr/share/keyrings/tailscale-archive-keyring.gpg
+      TMPKEY=$(mktemp)
+      curl -fsSL -o "$TMPKEY" "https://pkgs.tailscale.com/stable/$ID/$VERSION_CODENAME.noarmor.gpg"
+      echo "3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39  $TMPKEY" | sha256sum -c -
+      install -m 0644 "$TMPKEY" "$KEYRING"
+      rm -f "$TMPKEY"
+      echo "deb [signed-by=$KEYRING] https://pkgs.tailscale.com/stable/$ID $VERSION_CODENAME main" > /etc/apt/sources.list.d/tailscale.list
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y tailscale
+    ) || { echo "[cloud-init] Tailscale install FAILED"; exit 1; }
 
   # -------------------------------------------------------------------
   # 2. Join the Headscale tailnet

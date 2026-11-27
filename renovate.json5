@@ -209,6 +209,15 @@
     },
     {
       "customType": "regex",
+      "description": "Vector version in ansible/playbook.yml",
+      "managerFilePatterns": ["/^ansible/playbook\\.yml$/"],
+      "matchStrings": ["vector_version:\\s*[\"'](?<currentValue>\\d+(?:\\.\\d+)*)[\"']"],
+      "depNameTemplate": "vectordotdev/vector",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>\\d+\\.\\d+\\.\\d+)$",
+    },
+    {
+      "customType": "regex",
       "description": "Woodpecker version in ci/ansible/playbook.yml",
       "managerFilePatterns": ["/^ci/ansible/playbook\\.yml$/"],
       "matchStrings": ["woodpecker_version_override \\| default\\('(?<currentValue>\\d+(?:\\.\\d+)*)'\\)"],

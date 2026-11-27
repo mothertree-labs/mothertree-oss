@@ -25,6 +25,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     bash`, which, because of `creates:`, never upgraded. It is now a pinned
     `.deb` checked against the release's `SHA256SUMS`, and Renovate moves the
     pin.
+  - **Vector** (Headscale log shipping): `curl https://sh.vector.dev | bash`,
+    which never upgraded, is now a pinned release (0.61.0) checked against
+    its `SHA256SUMS`. The binary is installed to the same
+    `/usr/local/bin/vector` and replaced only when the version differs.
+    Renovate moves the pin.
+  - The PostgreSQL cloud-init runs its Tailscale step in a subshell, so
+    `set -eu` covers that step only. The key reaches the keyring path only
+    after its checksum is verified. The rclone `.deb` is downloaded to
+    `/root`, not `/tmp`.
   - **Woodpecker `.deb`s:** now checked against each release's
     `checksums.txt`, so a Renovate version bump still needs no hash edit.
   - **CI host Playwright system dependencies:** installed with the Playwright
