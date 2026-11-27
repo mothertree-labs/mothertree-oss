@@ -39,7 +39,7 @@ source "${REPO_ROOT}/scripts/lib/notify.sh"
 source "${REPO_ROOT}/scripts/lib/platform.sh"
 mt_deploy_start "deploy-docs"
 
-mt_require_commands kubectl helm envsubst openssl jq yq
+mt_require_commands kubectl helm envsubst openssl yq
 
 # Track config changes to avoid restarting pods unnecessarily
 mt_reset_change_tracker
@@ -149,21 +149,35 @@ mt_apply kubectl apply -f <(kubectl create secret generic docs-secrets \
   -n "$NS_DOCS" \
   --dry-run=client -o yaml)
 
-# Collaboration server (yhub) secrets: its PostgreSQL url and its signing key.
-# Its database lives next to the Docs one, same tenant role (the tenant user's
-# password is DATABASE_PASSWORD above), created by docs-db-init below.
-# Session pooling in PgBouncer (wildcard [databases] entry), so yhub's
-# prepared statements work and no PgBouncer change is needed.
+# Collaboration server (yhub) secrets: its PostgreSQL url, its role's
+# password and its signing key. yhub connects as its own non-superuser role
+# (named like its database, created by docs-db-init below), never as the
+# tenant role: yhub faces the internet and the tenant role is a superuser.
+# Session pooling in PgBouncer (wildcard [databases] entry, auth_query), so
+# yhub's prepared statements and the new role work with no PgBouncer change.
 DOCS_YHUB_DB_NAME="${DOCS_DB_NAME:?DOCS_DB_NAME not set by config.sh}_yhub"
 export DOCS_YHUB_DB_NAME
-: "${TENANT_DB_USER:?TENANT_DB_USER not set by config.sh}" "${PG_HOST:?PG_HOST not set}"
-YHUB_POSTGRES_URL="postgres://$(U="$TENANT_DB_USER" jq -rn 'env.U|@uri'):$(P="$DB_PASSWORD" jq -rn 'env.P|@uri')@${PG_HOST}:5432/${DOCS_YHUB_DB_NAME}"
+# Also the role name, and used unescaped in the URL below and in SQL.
+[[ "$DOCS_YHUB_DB_NAME" =~ ^[a-z0-9_]+$ ]] || { print_error "Unexpected yhub database/role name '$DOCS_YHUB_DB_NAME'"; exit 1; }
+: "${PG_HOST:?PG_HOST not set}"
+YHUB_DB_PASSWORD=$(kubectl -n "$NS_DOCS" get secret docs-yhub -o jsonpath='{.data.YHUB_DB_PASSWORD}' 2>/dev/null | base64 -d || true)
+if [ -n "$YHUB_DB_PASSWORD" ] && ! [[ "$YHUB_DB_PASSWORD" =~ ^[0-9a-f]{64}$ ]]; then
+  # Always generated as 64 hex chars and used unescaped in the URL below.
+  print_error "docs-yhub/YHUB_DB_PASSWORD is not the 64-hex-char value this script writes; refusing to use it"
+  exit 1
+fi
+if [ -z "$YHUB_DB_PASSWORD" ]; then
+  YHUB_DB_PASSWORD=$(openssl rand -hex 32)
+  print_status "Generated a password for the yhub database role"
+fi
+YHUB_POSTGRES_URL="postgres://${DOCS_YHUB_DB_NAME}:${YHUB_DB_PASSWORD}@${PG_HOST}:5432/${DOCS_YHUB_DB_NAME}"
 mt_apply kubectl apply -f <(kubectl create secret generic docs-yhub \
   --from-literal=POSTGRES="$YHUB_POSTGRES_URL" \
+  --from-literal=YHUB_DB_PASSWORD="$YHUB_DB_PASSWORD" \
   --from-literal=YHUB_JWT_PRIVATE_KEY="$YHUB_JWT_PRIVATE_KEY" \
   -n "$NS_DOCS" \
   --dry-run=client -o yaml)
-unset YHUB_POSTGRES_URL JWT_PRIVATE_KEY YHUB_JWT_PRIVATE_KEY
+unset YHUB_POSTGRES_URL YHUB_DB_PASSWORD JWT_PRIVATE_KEY YHUB_JWT_PRIVATE_KEY
 
 print_success "Secrets configured successfully"
 
@@ -370,18 +384,9 @@ rm -f "$CELERY_MANIFEST"
 # is serving, replacing the y-provider's websocket ingress (impress < 6):
 # /collaboration/ws/ now belongs to yhub.
 print_status "Applying the collaboration server (yhub)..."
-: "${S3_INTERNAL_ENDPOINT:?S3_INTERNAL_ENDPOINT not set by config.sh}" "${BUCKET_NAME:?BUCKET_NAME not set by config.sh}" "${S3_CLUSTER:?S3_CLUSTER not set by config.sh}"
-# yhub refuses an endpoint with a path, and a trailing "/" reads as one.
-YHUB_LEGACY_S3_ENDPOINT="${S3_INTERNAL_ENDPOINT%/}"
-export YHUB_LEGACY_S3_ENDPOINT
 YHUB_MANIFEST=$(mktemp)
-envsubst '${DOCS_HOST} ${YPROVIDER_MIN_REPLICAS} ${YHUB_LEGACY_S3_ENDPOINT} ${S3_CLUSTER} ${BUCKET_NAME}' < "$REPO_ROOT/docs/yhub-deployment.yaml.tpl" | \
+envsubst '${DOCS_HOST} ${YPROVIDER_MIN_REPLICAS}' < "$REPO_ROOT/docs/yhub-deployment.yaml.tpl" | \
   sed "s/namespace: docs/namespace: $NS_DOCS/g" > "$YHUB_MANIFEST"
-# A devbox's S3 gateway may be an HTTPS name signed by the local CA; node
-# trusts extra roots through NODE_EXTRA_CA_CERTS.
-if mt_is_local_edge && [[ "$S3_INTERNAL_ENDPOINT" == https://* ]]; then
-  mt_local_ca_trust "$YHUB_MANIFEST" yhub NODE_EXTRA_CA_CERTS
-fi
 mt_apply kubectl apply -f "$YHUB_MANIFEST"
 rm -f "$YHUB_MANIFEST"
 if ! kubectl -n "$NS_DOCS" rollout status deployment/docs-yhub --timeout=600s; then
@@ -425,76 +430,54 @@ else
     print_status "No config changes detected, skipping restart of deployment/backend deployment/frontend deployment/docs-celery deployment/docs-yhub"
 fi
 
-# Step 10a: Hand the legacy documents (impress < 6: {document-id}/file in the
-# media bucket) to the collaboration server, and FAIL the deploy unless every
-# document is accounted for. yhub's SOFT_MIGRATION only seeds a document when
-# someone opens it; a document nobody opens stays in S3 until this backfill,
-# and SOFT_MIGRATION must not be turned off before it has covered the corpus.
-#
-# `migrate_documents` is resumable and idempotent: it records what became of
-# each document in impress_document_migration and skips the finished ones, so
-# on later deploys it only hands over documents created since (answered
-# "empty": they never had legacy content). It exits 0 even when documents
-# fail, hence the ledger check after it. Derived from the migrations Job
-# (same image, settings, mounts and env) plus the backend's signing key: the
-# command calls yhub's /collaboration/migrate/ with an admin JWT, in-cluster
-# (YHUB_API_BASE_URL).
-print_status "Backfilling legacy documents into the collaboration server..."
-read -r -d '' _MIGRATE_DOCUMENTS_SH <<'MIGRATE_EOF' || true
+# Step 10a: Legacy content guard (impress < 6 stored a document's content in
+# the media bucket at {document-id}/file; 6.x keeps it in yhub). The 6.0
+# upgrade backfilled every tenant (impress_document_migration ledger) and
+# yhub's SOFT_MIGRATION / S3 access was then removed (#851). FAIL the deploy
+# if a document still has a legacy snapshot but no successful ledger entry:
+# yhub would open it empty over content that only exists in S3. Fix: turn
+# SOFT_MIGRATION back on (with LEGACY_S3_*) and run
+# `manage.py migrate_documents` for it. Read-only, through the backend's own
+# storage; same image, settings and mounts as the migrations Job.
+print_status "Checking that no document still depends on legacy (impress < 6) content..."
+read -r -d '' _LEGACY_CHECK_SH <<'LEGACY_EOF' || true
 set -eu
-python manage.py migrate_documents --retry-failed --concurrency 2
 python manage.py shell -c '
-from collections import Counter
 from django.core.files.storage import default_storage
 from core import models as m
 S = m.DocumentMigrationStatus
-done = {S.MIGRATED.value, S.ALREADY.value, S.EMPTY.value, S.NOTHING.value}
-rows = list(m.Document.objects.values_list("id", "migration__status", "migration__error"))
-ledger = Counter(status for _, status, _ in rows)
-print("[migrate-documents] ledger:", {str(k): v for k, v in ledger.items()})
-problems = [f"{doc_id} status={status} error={(error or chr(45))[:200]}"
-            for doc_id, status, error in rows if status not in done]
-# "empty" means yhub found no legacy object. A misconfigured legacy read that
-# came back as NoSuchKey would look exactly the same, so confirm it against
-# the bucket with the backend own storage: a legacy snapshot that exists
-# while the ledger says empty means its content was never handed over.
-for doc_id, status, _ in rows:
-    if status == S.EMPTY.value and default_storage.exists(f"{doc_id}/file"):
-        problems.append(f"{doc_id} status=empty but its legacy snapshot {doc_id}/file exists")
-for doc_id, status, _ in rows:
-    if status == S.NOTHING.value:
-        print(f"[migrate-documents] WARNING: {doc_id}: no readable legacy version (status nothing)")
-if problems:
-    for line in problems:
-        print("[migrate-documents] NOT MIGRATED:", line)
-    raise SystemExit(f"[migrate-documents] {len(problems)} document(s) not migrated")
-print("[migrate-documents] every document is accounted for")
+migrated = {S.MIGRATED.value, S.ALREADY.value, S.NOTHING.value}
+rows = list(m.Document.objects.values_list("id", "migration__status"))
+stranded = [f"{doc_id} (ledger: {status or chr(45)})" for doc_id, status in rows
+            if status not in migrated and default_storage.exists(f"{doc_id}/file")]
+if stranded:
+    for line in stranded:
+        print("[legacy-check] legacy snapshot never migrated:", line)
+    raise SystemExit(f"[legacy-check] {len(stranded)} document(s) hold content only in S3")
+print(f"[legacy-check] ok: {len(rows)} documents, none with unmigrated legacy content")
 '
-MIGRATE_EOF
-MIGRATE_DOCS_MANIFEST=$(mktemp)
+LEGACY_EOF
+LEGACY_CHECK_MANIFEST=$(mktemp)
 sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/migrations-job.yaml" | \
   sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g" | \
-  SCRIPT="$_MIGRATE_DOCUMENTS_SH" yq '
-    .metadata.name = "docs-migrate-documents" |
+  SCRIPT="$_LEGACY_CHECK_SH" yq '
+    .metadata.name = "docs-legacy-check" |
     .spec.backoffLimit = 0 |
     (.spec.template.spec.containers[] | select(.name == "backend")) |= (
-      .command = ["/bin/sh", "-c", strenv(SCRIPT)] |
-      .env += [{"name": "JWT_PRIVATE_KEY_FILE", "value": "/etc/docs-jwt/backend-jwt.pem"}] |
-      .volumeMounts += [{"name": "docs-jwt", "mountPath": "/etc/docs-jwt", "readOnly": true}]
-    ) |
-    .spec.template.spec.securityContext.fsGroup = 127 |
-    .spec.template.spec.volumes += [{"name": "docs-jwt", "secret": {"secretName": "docs-secrets", "items": [{"key": "JWT_PRIVATE_KEY", "path": "backend-jwt.pem"}], "defaultMode": 288}}]
-  ' > "$MIGRATE_DOCS_MANIFEST"
-mt_delete_job_wait "$NS_DOCS" docs-migrate-documents || exit 1
-kubectl apply -f "$MIGRATE_DOCS_MANIFEST"
-rm -f "$MIGRATE_DOCS_MANIFEST"
-if ! poll_job_complete "$NS_DOCS" "docs-migrate-documents" 900 5; then
-    print_error "Legacy document backfill failed or left documents unmigrated"
-    kubectl -n "$NS_DOCS" logs job/docs-migrate-documents --tail=40 2>/dev/null || true
+      .command = ["/bin/sh", "-c", strenv(SCRIPT)]
+    )
+  ' > "$LEGACY_CHECK_MANIFEST"
+kubectl -n "$NS_DOCS" delete job docs-migrate-documents --ignore-not-found >/dev/null
+mt_delete_job_wait "$NS_DOCS" docs-legacy-check || exit 1
+kubectl apply -f "$LEGACY_CHECK_MANIFEST"
+rm -f "$LEGACY_CHECK_MANIFEST"
+if ! poll_job_complete "$NS_DOCS" "docs-legacy-check" 600 5; then
+    print_error "A document still holds content only in its legacy S3 snapshot"
+    kubectl -n "$NS_DOCS" logs job/docs-legacy-check --tail=40 2>/dev/null || true
     exit 1
 fi
-kubectl -n "$NS_DOCS" logs job/docs-migrate-documents --tail=5 2>/dev/null | grep '\[migrate-documents\]' || true
-print_success "Every document is in the collaboration server"
+kubectl -n "$NS_DOCS" logs job/docs-legacy-check --tail=5 2>/dev/null | grep '\[legacy-check\]' || true
+print_success "No document depends on legacy content"
 
 # Step 11: Deploy/Update y-provider (declarative)
 print_status "Applying y-provider deployment and service to namespace $NS_DOCS..."

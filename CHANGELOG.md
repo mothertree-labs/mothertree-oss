@@ -7,6 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **Docs: the collaboration server no longer touches the S3 media bucket, and
+  no longer connects as a superuser** (#851).
+  - The 6.0 backfill covered every tenant: on both prod and devhome, no
+    document has a legacy snapshot that was never migrated. So
+    `SOFT_MIGRATION` is off and yhub's `LEGACY_S3_*` credentials (the
+    backend's read-write keys) are gone.
+  - The per-deploy backfill Job becomes `docs-legacy-check`. It is read-only
+    and uses the backend's storage. It fails the deploy if a document still
+    holds content only in its old `{id}/file` snapshot, because yhub would
+    open that document empty.
+  - yhub now connects as its own role, `<docs db>_yhub`:
+    - the role is `NOSUPERUSER`, `NOCREATEDB` and `NOCREATEROLE`, and its
+      password is kept in the `docs-yhub` Secret;
+    - `docs-db-init` creates it, makes it the owner of the yhub database,
+      and moves the existing tables to it one object at a time;
+    - before this, yhub, which faces the internet, held the tenant role.
+      That role is a superuser and owns the Docs database.
 - **Docs (La Suite impress) 5.7.0 → 6.1.1.** 6.0 replaced the collaboration
   server and moved every document's content out of the S3 media bucket into
   it; the deploy does the upgrade end to end.
