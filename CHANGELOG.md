@@ -7,6 +7,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **Phase 3 of the update sweep: no more `curl | sh` installers, and every
+  CI-host download verified.**
+  - **Tailscale:** eight Ansible tasks (TURN, Headscale, PostgreSQL, the CI
+    host, and the devhome box, periscope and PG) and the PostgreSQL
+    cloud-init used to run `curl -fsSL https://tailscale.com/install.sh | sh`
+    as root. They now share `ansible/tasks/tailscale-apt.yml`, which installs
+    from Tailscale's signed apt repository.
+    - The repository key is pinned by SHA-256 (fingerprint
+      `2596A99EAAB33821893C0A79458CA832957F5868`). A rotated key makes the
+      task fail instead of being trusted.
+    - The install script did the same thing on Debian and Ubuntu, with the
+      same keyring. On a host it set up, the tasks only rewrite the
+      sources-list comment. Tested on Ubuntu 22.04 and 24.04, including a host
+      set up by the script first.
+  - **rclone** (Headscale backups): was `curl https://rclone.org/install.sh |
+    bash`, which, because of `creates:`, never upgraded. It is now a pinned
+    `.deb` checked against the release's `SHA256SUMS`, and Renovate moves the
+    pin.
+  - **Vector** (Headscale log shipping): `curl https://sh.vector.dev | bash`,
+    which never upgraded, is now a pinned release (0.61.0) checked against
+    its `SHA256SUMS`. The binary is installed to the same
+    `/usr/local/bin/vector` and replaced only when the version differs.
+    Renovate moves the pin.
+  - The PostgreSQL cloud-init runs its Tailscale step in a subshell, so
+    `set -eu` covers that step only. The key reaches the keyring path only
+    after its checksum is verified. The rclone `.deb` is downloaded to
+    `/root`, not `/tmp`.
+  - **Woodpecker `.deb`s:** now checked against each release's
+    `checksums.txt`, so a Renovate version bump still needs no hash edit.
+  - **CI host Playwright system dependencies:** installed with the Playwright
+    version locked in `e2e/package-lock.json`, not whatever `npx --yes
+    playwright` resolves at the time.
 - **Docs: the collaboration server no longer touches the S3 media bucket, and
   no longer connects as a superuser** (#851).
   - The 6.0 backfill covered every tenant: on both prod and devhome, no

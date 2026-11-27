@@ -73,10 +73,8 @@
         create_home: false
         shell: /usr/sbin/nologin
 
-    - name: Install Tailscale
-      ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
-      args:
-        creates: /usr/bin/tailscale
+    - name: Install Tailscale (signed apt repository, pinned key)
+      ansible.builtin.import_tasks: ../../ansible/tasks/tailscale-apt.yml
 
     - name: tailscaled running
       ansible.builtin.systemd:

@@ -35,10 +35,8 @@
         name: [haproxy, iptables]
         update_cache: true
 
-    - name: Install Tailscale
-      ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
-      args:
-        creates: /usr/bin/tailscale
+    - name: Install Tailscale (signed apt repository, pinned key)
+      ansible.builtin.import_tasks: ../../ansible/tasks/tailscale-apt.yml
 
     - name: Check tailnet membership
       ansible.builtin.command: tailscale ip -4
