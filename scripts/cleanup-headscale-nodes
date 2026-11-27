@@ -76,7 +76,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 
 # Get all nodes from Headscale as JSON
-NODES_JSON=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+NODES_JSON=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
   "root@${HEADSCALE_IP}" "headscale nodes list --output json" 2>/dev/null)
 
 if [[ -z "$NODES_JSON" ]]; then

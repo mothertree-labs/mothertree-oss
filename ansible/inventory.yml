@@ -8,6 +8,7 @@ all:
       hosts:
         turn.example.com:
           ansible_host: 192.0.2.1
+          turn_public_ip: 192.0.2.1
           ansible_user: root
           ansible_ssh_private_key_file: ~/.ssh/id_ed25519
     headscale_servers:
