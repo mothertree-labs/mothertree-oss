@@ -1,9 +1,10 @@
 apiVersion: v1
 data:
-  # External HTTPS URLs for y-provider → backend API calls
-  # Must use external URL so requests go through ingress which adds X-Forwarded-Proto: https
-  # This prevents Django's SECURE_SSL_REDIRECT from returning 301 redirects
-  COLLABORATION_API_URL: https://${DOCS_HOST}/api/v1.0/
+  # impress >= 6: the y-provider is the conversion service only. It verifies
+  # the backend's tokens against <COLLABORATION_BACKEND_BASE_URL>/api/v1.0/jwks.
+  # External HTTPS URL so the request goes through the ingress, which adds
+  # X-Forwarded-Proto: https (Django's SECURE_SSL_REDIRECT would 301 otherwise).
+  # This ConfigMap is also in the backend's envFrom (Y_PROVIDER_API_BASE_URL).
   COLLABORATION_BACKEND_BASE_URL: https://${DOCS_HOST}
   COLLABORATION_LOGGING: "true"
   # External URL for CORS (must match browser origin)

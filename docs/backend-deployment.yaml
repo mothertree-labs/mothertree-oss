@@ -33,7 +33,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: lasuite/impress-backend:v5.7.0
+          image: lasuite/impress-backend:v6.1.1
           # Customizations no longer rewrite files in the image at start-up.
           # DJANGO_SETTINGS_MODULE=mt_settings (docs-config) loads /app/mt_settings.py,
           # a subclass of upstream's Production that adds MediaMiddleware, the
@@ -85,6 +85,9 @@ spec:
             readOnly: true
           - name: tmp
             mountPath: /tmp
+          - name: docs-jwt
+            mountPath: /etc/docs-jwt
+            readOnly: true
           env:
           # ConfigMap mounts are read-only; stop CPython trying to write
           # __pycache__ next to mt_settings.py / mt_patches/.
@@ -95,16 +98,17 @@ spec:
               secretKeyRef:
                 name: docs-secrets
                 key: DJANGO_SECRET_KEY
-          - name: COLLABORATION_SERVER_SECRET
-            valueFrom:
-              secretKeyRef:
-                name: docs-secrets
-                key: COLLABORATION_SERVER_SECRET
           - name: Y_PROVIDER_API_KEY
             valueFrom:
               secretKeyRef:
                 name: docs-secrets
                 key: Y_PROVIDER_API_KEY
+          # RSA key (impress >= 6) signing the short-lived tokens the backend
+          # presents to the collaboration server (yhub) and the converter
+          # (y-provider); both verify them against /api/v1.0/jwks. Generated
+          # once per tenant by deploy-docs.sh, never shared with yhub.
+          - name: JWT_PRIVATE_KEY_FILE
+            value: /etc/docs-jwt/backend-jwt.pem
           - name: DB_PASSWORD
             valueFrom:
               secretKeyRef:
@@ -198,12 +202,22 @@ spec:
         runAsNonRoot: true
         runAsUser: 1001
         runAsGroup: 127
+        # Group-readable Secret volume (docs-jwt, mode 0440) for the image's
+        # group 127.
+        fsGroup: 127
         seccompProfile:
           type: RuntimeDefault
       volumes:
       - name: tmp
         emptyDir:
           sizeLimit: 512Mi
+      - name: docs-jwt
+        secret:
+          secretName: docs-secrets
+          items:
+            - key: JWT_PRIVATE_KEY
+              path: backend-jwt.pem
+          defaultMode: 0440
       - name: storage-backends
         configMap:
           name: storage-backends

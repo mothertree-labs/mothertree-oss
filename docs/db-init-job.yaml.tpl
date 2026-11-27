@@ -44,6 +44,10 @@ spec:
               value: "${DOCS_DB_NAME}"
             - name: DB_USER
               value: "${TENANT_DB_USER}"
+            # Collaboration server (yhub, impress >= 6) database: same tenant
+            # role, its own database. Schema is created by docs-yhub-init-db.
+            - name: YHUB_DB_NAME
+              value: "${DOCS_YHUB_DB_NAME}"
             - name: KEYCLOAK_DB_PASSWORD
               value: "${KEYCLOAK_DB_PASSWORD}"
           command:
@@ -90,6 +94,21 @@ spec:
               psql -v ON_ERROR_STOP=1 -d "$DB_NAME" -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO \"$DB_USER\"";
               psql -v ON_ERROR_STOP=1 -d "$DB_NAME" -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO \"$DB_USER\"";
               
+              # Collaboration server database (impress >= 6), owned by the same
+              # tenant role and closed to every other role the same way.
+              : "${YHUB_DB_NAME:?YHUB_DB_NAME must be set}"
+              YHUB_DB_EXISTS=$(psql -Atqc "SELECT 1 FROM pg_database WHERE datname='$YHUB_DB_NAME'" || true)
+              if [ "$YHUB_DB_EXISTS" != "1" ]; then
+                echo "Creating database '$YHUB_DB_NAME' with owner '$DB_USER'..."
+                psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$YHUB_DB_NAME\" OWNER \"$DB_USER\"";
+              else
+                psql -v ON_ERROR_STOP=1 -c "ALTER DATABASE \"$YHUB_DB_NAME\" OWNER TO \"$DB_USER\"";
+              fi
+              psql -v ON_ERROR_STOP=1 -c "REVOKE CONNECT ON DATABASE \"$YHUB_DB_NAME\" FROM PUBLIC";
+              psql -v ON_ERROR_STOP=1 -c "GRANT CONNECT ON DATABASE \"$YHUB_DB_NAME\" TO \"$DB_USER\"";
+              psql -v ON_ERROR_STOP=1 -d "$YHUB_DB_NAME" -c "REVOKE ALL ON SCHEMA public FROM PUBLIC";
+              psql -v ON_ERROR_STOP=1 -d "$YHUB_DB_NAME" -c "GRANT ALL PRIVILEGES ON SCHEMA public TO \"$DB_USER\"";
+
               # Pre-create common PostgreSQL extensions that may require C language functions
               # These need to be created as superuser (postgres) before migrations run
               # This prevents "permission denied for language c" errors during migrations

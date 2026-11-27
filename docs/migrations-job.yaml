@@ -20,7 +20,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: backend
-          image: lasuite/impress-backend:v5.7.0
+          image: lasuite/impress-backend:v6.1.1
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -39,11 +39,6 @@ spec:
                 secretKeyRef:
                   name: docs-secrets
                   key: DJANGO_SECRET_KEY
-            - name: COLLABORATION_SERVER_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: docs-secrets
-                  key: COLLABORATION_SERVER_SECRET
             - name: Y_PROVIDER_API_KEY
               valueFrom:
                 secretKeyRef:

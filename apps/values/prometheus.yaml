@@ -528,12 +528,33 @@ additionalPrometheusRulesMap:
           - alert: DocsYProviderDown
             annotations:
               summary: 'Docs Y-Provider is down in {{ $labels.namespace }}'
-              description: 'Docs Y-Provider (collaborative editing) has no available replicas in {{ $labels.namespace }}.'
+              description: 'Docs Y-Provider (document conversion: import, export, AI and formatted content) has no available replicas in {{ $labels.namespace }}.'
             expr: |-
               kube_deployment_status_replicas_available{deployment="docs-y-provider", namespace=~"tn-.*-docs"} == 0
             for: 3m
             labels:
               severity: critical
+          # impress >= 6: the collaboration server holds the editor websockets
+          # and is the store of record of every document's content. Down means
+          # no document opens.
+          - alert: DocsCollaborationServerDown
+            annotations:
+              summary: 'Docs collaboration server (yhub) is down in {{ $labels.namespace }}'
+              description: 'Deployment docs-yhub has no available replicas in {{ $labels.namespace }}: documents cannot be opened or edited. Readiness asks its PostgreSQL database and yhub-redis, so check both.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment=~"docs-yhub|yhub-redis", namespace=~"tn-.*-docs"} == 0
+            for: 3m
+            labels:
+              severity: critical
+          - alert: DocsCeleryWorkerDown
+            annotations:
+              summary: 'Docs Celery worker is down in {{ $labels.namespace }}'
+              description: 'Deployment docs-celery has no available replicas in {{ $labels.namespace }}: revoked accesses are not re-checked on open editors, deletions do not reach the collaboration server, and mention / ask-for-access mails are not sent.'
+            expr: |-
+              kube_deployment_status_replicas_available{deployment="docs-celery", namespace=~"tn-.*-docs"} == 0
+            for: 10m
+            labels:
+              severity: warning
           - alert: NextcloudDown
             annotations:
               summary: 'Nextcloud is down in {{ $labels.namespace }}'
