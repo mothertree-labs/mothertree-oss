@@ -1,0 +1,66 @@
+# Creates/upgrades the schema of the collaboration server's database.
+#
+# yhub never runs DDL from the server or the worker: until this has run, every
+# document read fails with `relation "..." does not exist`. Idempotent, so it
+# runs on every deploy (an image bump may add a table, as v6.0.2 did). The
+# database itself is created by docs-db-init, which owns database creation for
+# this tenant; this script only creates it when missing, which it never is.
+#
+# Image is distroless (no shell): the command is node, and dist/init-db.js
+# retries the whole script while PostgreSQL does not answer.
+#
+# Applied with plain `kubectl apply` after mt_delete_job_wait, never mt_apply
+# (a recreated Job always diffs as a change; see deploy-docs.sh).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: docs-yhub-init-db
+  namespace: docs
+  labels:
+    app.kubernetes.io/name: docs
+    app.kubernetes.io/component: yhub-init-db
+    app.kubernetes.io/part-of: mother-tree
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: docs
+        app.kubernetes.io/component: yhub-init-db
+    spec:
+      restartPolicy: Never
+      # Needs no Kubernetes API access.
+      automountServiceAccountToken: false
+      containers:
+        - name: init-db
+          image: lasuite/impress-yhub:v6.1.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - node
+            - dist/init-db.js
+            - --attempts=60
+            - --delay-seconds=5
+          env:
+            - name: POSTGRES
+              valueFrom:
+                secretKeyRef:
+                  name: docs-yhub
+                  key: POSTGRES
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault

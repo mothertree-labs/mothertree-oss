@@ -118,9 +118,27 @@ data:
   # route lives on the account portal, NOT the admin portal
   ACCOUNT_PORTAL_URL: "https://${ACCOUNT_HOST}"
 
-  # Collaboration/Y-Provider settings
-  COLLABORATION_WS_URL: "wss://${DOCS_HOST}/collaboration/ws/"  # Frontend customization
-  # Custom JavaScript for save status indicator (served from ConfigMap mount)
-  FRONTEND_JS_URL: "https://${DOCS_HOST}/static/save-status.js"
+  # Collaboration server (yhub, impress >= 6). The browser opens the websocket
+  # on COLLABORATION_WS_URL + "/<document id>"; its last segment is YHUB_ORG,
+  # which the backend and yhub must agree on. The backend reaches yhub
+  # in-cluster (document creation, duplication, formatted-content, deletions,
+  # the migration backfill, and yhub's JWKS) — never through the ingress,
+  # which does not publish those routes.
+  COLLABORATION_WS_URL: "wss://${DOCS_HOST}/collaboration/ws/v1/docs"
+  YHUB_API_BASE_URL: "http://yhub:3002"
+  YHUB_ORG: "docs"
+  # Celery (impress >= 6 relies on a worker: websocket re-checks when an access
+  # is revoked, deletions in yhub, mention/ask-for-access mails). Upstream's
+  # default spelled out: the backend's own redis, db 0.
+  DJANGO_CELERY_BROKER_URL: "redis://redis:6379/0"
+
+  # Reverse proxies in front of the backend that append to X-Forwarded-For.
+  # ingress-nginx resolves the client (PROXY protocol from the NodeBalancer,
+  # X-Forwarded-For only when that peer is a trusted Cloudflare address) and
+  # sends `proxy_set_header X-Forwarded-For $remote_addr` (checked in the
+  # controller's rendered nginx.conf), so the backend sees a single entry and
+  # the throttles key anonymous requests on it.
+  # Unset, a client could vary the header to escape its rate limit.
+  NUM_PROXIES: "1"
   # Skip the "Start Writing" splash page — go straight to Keycloak login
   FRONTEND_HOMEPAGE_FEATURE_ENABLED: "false"

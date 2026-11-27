@@ -10,9 +10,12 @@ invitee's address and the document id and walks them through account creation:
 
     ${ACCOUNT_PORTAL_URL}/guest-landing?email=<invitee>&doc=<document id>
 
-Upstream builds the email in ``Document.send_email`` and unconditionally
-``context.update({... "link": <doc url>?utm_source=... ...})`` — so a link put
-into the context by the caller (``send_invitation_email``) is overwritten. The
+Upstream builds the email in ``Document.send_email``. Up to 5.x it
+unconditionally ``context.update({... "link": <doc url>?utm_source=... ...})``,
+overwriting any link the caller put in; since 6.0 it builds
+``{<defaults incl. link>, **context}``, so a caller's ``link`` wins — but
+``send_invitation_email`` passes none, so the document link is still what
+goes out unless something injects ours. The
 previous implementation text-patched ``core/models.py`` at container start and
 failed OPEN when the source drifted (GitHub issue #606: the pod booted, the
 email carried the plain document link, nothing failed).
@@ -72,7 +75,8 @@ from django.utils.html import escape
 logger = logging.getLogger("mt_patches")
 
 # The exact upstream signatures this module was written against
-# (core/models.py, lasuite/impress-backend v5.7.0). Compared verbatim.
+# (core/models.py, lasuite/impress-backend v5.7.0; re-verified unchanged
+# against v6.1.1). Compared verbatim.
 EXPECTED_SEND_INVITATION_SIGNATURE = "(self, email, role, sender, language=None)"
 EXPECTED_SEND_EMAIL_SIGNATURE = "(self, subject, emails, context=None, language=None)"
 

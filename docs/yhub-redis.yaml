@@ -1,0 +1,136 @@
+# Redis for the Docs collaboration server (yhub, impress >= 6).
+#
+# Separate from the backend's `redis` (Django cache, sessions, Celery broker)
+# on purpose: that one runs allkeys-lru, and yhub keeps the live updates of a
+# document on a Redis stream until its worker persists them to PostgreSQL
+# (YHUB_TASK_DEBOUNCE_MS, 10 s by default), plus the set of documents the full
+# migration already replayed. Evicting either under memory pressure loses
+# edits or replays a history twice, so this instance refuses writes
+# (noeviction) instead of dropping keys — yhub then answers 503 and clients
+# retry, which is recoverable; a silently evicted stream is not.
+#
+# No persistence (no PVC): PostgreSQL is yhub's store of record. A restart of
+# this pod loses at most the updates not yet persisted (seconds), which the
+# connected editors resend on reconnect (Yjs sync is state-based).
+# Upstream's own deployment uses a dedicated valkey for yhub the same way.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yhub-redis
+  namespace: docs
+  labels:
+    app.kubernetes.io/name: docs
+    app.kubernetes.io/component: yhub-redis
+    app.kubernetes.io/part-of: mother-tree
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: docs
+      app.kubernetes.io/component: yhub-redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: docs
+        app.kubernetes.io/component: yhub-redis
+    spec:
+      priorityClassName: critical-service
+      # Needs no Kubernetes API access.
+      automountServiceAccountToken: false
+      containers:
+        - name: redis
+          image: redis:8
+          command: ["redis-server"]
+          args:
+            - "--maxmemory"
+            - "200mb"
+            - "--maxmemory-policy"
+            - "noeviction"
+            - "--save"
+            - ""
+            - "--appendonly"
+            - "no"
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: yhub-redis
+  namespace: docs
+  labels:
+    app.kubernetes.io/name: docs
+    app.kubernetes.io/component: yhub-redis
+    app.kubernetes.io/part-of: mother-tree
+spec:
+  selector:
+    app.kubernetes.io/name: docs
+    app.kubernetes.io/component: yhub-redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+# Only the collaboration server talks to this Redis. Without a policy any pod
+# that reaches the Service could append updates straight into a document's
+# stream, past the backend's access checks.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: protect-yhub-redis
+  namespace: docs
+  labels:
+    app.kubernetes.io/part-of: network-policies
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: docs
+      app.kubernetes.io/component: yhub-redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: docs
+              app.kubernetes.io/component: yhub
+      ports:
+        - protocol: TCP
+          port: 6379

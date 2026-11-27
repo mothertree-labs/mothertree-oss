@@ -39,7 +39,7 @@ source "${REPO_ROOT}/scripts/lib/notify.sh"
 source "${REPO_ROOT}/scripts/lib/platform.sh"
 mt_deploy_start "deploy-docs"
 
-mt_require_commands kubectl helm envsubst openssl
+mt_require_commands kubectl helm envsubst openssl jq yq
 
 # Track config changes to avoid restarting pods unnecessarily
 mt_reset_change_tracker
@@ -104,12 +104,31 @@ if [ -z "$DJANGO_SECRET_KEY" ]; then
   print_status "Generated new Django secret key"
 fi
 
-# Resolve collaboration server secret (preserve existing if present)
-COLLABORATION_SERVER_SECRET=$(kubectl -n "$NS_DOCS" get secret docs-secrets -o jsonpath='{.data.COLLABORATION_SERVER_SECRET}' 2>/dev/null | base64 -d || true)
-if [ -z "$COLLABORATION_SERVER_SECRET" ]; then
-  COLLABORATION_SERVER_SECRET=$(openssl rand -hex 32)
-  print_status "Generated COLLABORATION_SERVER_SECRET"
-fi
+# impress >= 6 dropped COLLABORATION_SERVER_SECRET on both sides: the backend
+# and the collaboration server (yhub) authenticate each other with RS256 JWTs,
+# each signing with a key of its own and publishing the public half (backend:
+# /api/v1.0/jwks, yhub: /collaboration/jwks/v1). The old key simply stops
+# being written into docs-secrets below.
+
+# Existing RSA private key from <secret>/<key>, or a new 2048-bit one when the
+# Secret has none (first deploy). Status goes to stderr: stdout is the PEM.
+_docs_rsa_key() {
+  local secret="$1" key="$2" pem
+  pem=$(kubectl -n "$NS_DOCS" get secret "$secret" -o jsonpath="{.data.$key}" 2>/dev/null | base64 -d || true)
+  if [ -z "$pem" ]; then
+    pem=$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>/dev/null) || {
+      print_error "Could not generate an RSA key for $secret/$key" >&2; return 1; }
+    print_status "Generated a new RSA signing key ($secret/$key)" >&2
+  fi
+  printf '%s\n' "$pem" | openssl pkey -noout 2>/dev/null || {
+    print_error "$secret/$key does not hold a valid private key" >&2; return 1; }
+  printf '%s\n' "$pem"
+}
+
+# Backend signing key (JWT_PRIVATE_KEY_FILE, mounted from docs-secrets).
+JWT_PRIVATE_KEY=$(_docs_rsa_key docs-secrets JWT_PRIVATE_KEY) || exit 1
+# yhub signing key, deliberately a different key (Secret docs-yhub).
+YHUB_JWT_PRIVATE_KEY=$(_docs_rsa_key docs-yhub YHUB_JWT_PRIVATE_KEY) || exit 1
 
 # Resolve y-provider API key (preserve existing if present)
 Y_PROVIDER_API_KEY=$(kubectl -n "$NS_DOCS" get secret docs-secrets -o jsonpath='{.data.Y_PROVIDER_API_KEY}' 2>/dev/null | base64 -d || true)
@@ -125,10 +144,26 @@ mt_apply kubectl apply -f <(kubectl create secret generic docs-secrets \
   --from-literal=AWS_S3_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
   --from-literal=AWS_S3_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
   --from-literal=OIDC_RP_CLIENT_SECRET="${TF_VAR_oidc_rp_client_secret_docs:-$(kubectl -n "$NS_DOCS" get secret docs-secrets -o jsonpath='{.data.OIDC_RP_CLIENT_SECRET}' 2>/dev/null | base64 -d)}" \
-  --from-literal=COLLABORATION_SERVER_SECRET="$COLLABORATION_SERVER_SECRET" \
   --from-literal=Y_PROVIDER_API_KEY="$Y_PROVIDER_API_KEY" \
+  --from-literal=JWT_PRIVATE_KEY="$JWT_PRIVATE_KEY" \
   -n "$NS_DOCS" \
   --dry-run=client -o yaml)
+
+# Collaboration server (yhub) secrets: its PostgreSQL url and its signing key.
+# Its database lives next to the Docs one, same tenant role (the tenant user's
+# password is DATABASE_PASSWORD above), created by docs-db-init below.
+# Session pooling in PgBouncer (wildcard [databases] entry), so yhub's
+# prepared statements work and no PgBouncer change is needed.
+DOCS_YHUB_DB_NAME="${DOCS_DB_NAME:?DOCS_DB_NAME not set by config.sh}_yhub"
+export DOCS_YHUB_DB_NAME
+: "${TENANT_DB_USER:?TENANT_DB_USER not set by config.sh}" "${PG_HOST:?PG_HOST not set}"
+YHUB_POSTGRES_URL="postgres://$(U="$TENANT_DB_USER" jq -rn 'env.U|@uri'):$(P="$DB_PASSWORD" jq -rn 'env.P|@uri')@${PG_HOST}:5432/${DOCS_YHUB_DB_NAME}"
+mt_apply kubectl apply -f <(kubectl create secret generic docs-yhub \
+  --from-literal=POSTGRES="$YHUB_POSTGRES_URL" \
+  --from-literal=YHUB_JWT_PRIVATE_KEY="$YHUB_JWT_PRIVATE_KEY" \
+  -n "$NS_DOCS" \
+  --dry-run=client -o yaml)
+unset YHUB_POSTGRES_URL JWT_PRIVATE_KEY YHUB_JWT_PRIVATE_KEY
 
 print_success "Secrets configured successfully"
 
@@ -140,7 +175,11 @@ mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO
 poll_pod_ready "$NS_DOCS" "io.kompose.service=redis" 60 5 || true
 print_success "Redis service deployed to namespace $NS_DOCS"
 
-# Step 6: Apply Docs ConfigMaps (storage backends, save-status, docs-config,
+# The collaboration server's own Redis (noeviction; see docs/yhub-redis.yaml
+# for why it cannot share the backend's allkeys-lru instance).
+mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/yhub-redis.yaml")
+
+# Step 6: Apply Docs ConfigMaps (storage backends, docs-config,
 # mt_settings/mt_patches, email assets)
 print_status "Applying Docs manifests to namespace $NS_DOCS..."
 print_status "Using environment: DOCS_HOST=$DOCS_HOST, AUTH_HOST=$AUTH_HOST"
@@ -148,7 +187,9 @@ print_status "Database user: $TENANT_DB_USER, Database: $DOCS_DB_NAME"
 
 # Apply manifests with namespace substitution
 mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/storage-backends-configmap.yaml")
-mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/save-status-configmap.yaml")
+# save-status.js (keepalive on content PATCHes) is gone with impress 6:
+# content is saved over the websocket, nothing PATCHes it any more.
+kubectl -n "$NS_DOCS" delete configmap save-status-scripts --ignore-not-found
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/env-d-yprovider-configmap.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 : "${S3_ENDPOINT:?S3_ENDPOINT not set by config.sh}" "${S3_ADDRESSING_STYLE:?S3_ADDRESSING_STYLE not set by config.sh}" "${S3_USE_SSL:?S3_USE_SSL not set by config.sh}"
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/docs-config.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
@@ -225,7 +266,7 @@ else
 fi
 
 mt_delete_job_wait "$NS_DOCS" docs-db-init || exit 1
-envsubst '${DOCS_DB_NAME} ${TENANT_DB_USER} ${PG_HOST} ${KEYCLOAK_DB_PASSWORD}' < "$REPO_ROOT/docs/db-init-job.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
+envsubst '${DOCS_DB_NAME} ${DOCS_YHUB_DB_NAME} ${TENANT_DB_USER} ${PG_HOST} ${KEYCLOAK_DB_PASSWORD}' < "$REPO_ROOT/docs/db-init-job.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g" | kubectl apply -f -
 if ! poll_job_complete "$NS_DOCS" "docs-db-init" 300 5; then
     print_error "Database initialization failed"
     exit 1
@@ -252,6 +293,18 @@ if ! poll_job_complete "$NS_DOCS" "docs-migrations" 900 5; then
 fi
 print_success "Database migrations completed"
 
+# Step 8a: Collaboration server schema (impress >= 6). Idempotent, every deploy:
+# an image bump can add a table, and until it exists every document read fails.
+# Plain kubectl apply after mt_delete_job_wait, like the two Jobs above.
+print_status "Creating/upgrading the collaboration server (yhub) schema in $DOCS_YHUB_DB_NAME..."
+mt_delete_job_wait "$NS_DOCS" docs-yhub-init-db || exit 1
+sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/yhub-init-db-job.yaml" | kubectl apply -f -
+if ! poll_job_complete "$NS_DOCS" "docs-yhub-init-db" 600 5; then
+    print_error "yhub schema initialization failed"
+    kubectl -n "$NS_DOCS" logs job/docs-yhub-init-db --tail=50 2>/dev/null || true
+    exit 1
+fi
+print_success "yhub schema is current"
 
 # Step 9: Apply the backend, frontend and ingress manifests
 # Update backend deployment to reference PostgreSQL in db namespace
@@ -273,9 +326,76 @@ if mt_is_local_edge; then
   mt_local_ca_publish_configmap "$NS_DOCS"
   mt_local_ca_trust "$BACKEND_MANIFEST" backend AWS_CA_BUNDLE SSL_CERT_DIR
 fi
+# Celery worker (impress >= 6 queues the websocket re-checks of a revoked
+# access, deletions in yhub and the mention / ask-for-access mails; nothing
+# consumed them before). Derived from the backend manifest so it can never
+# drift from the backend's env, secrets and mounts: same image, settings and
+# mt_patches; its own labels (it must not match the backend Service selector),
+# no ports, and the probes upstream's chart gives the worker (6.1.1: the worker
+# touches a heartbeat file from its event loop and a ready file once it
+# consumes from the broker, both in the /tmp emptyDir).
+CELERY_MANIFEST=$(mktemp)
+yq '
+  .metadata.name = "docs-celery" |
+  .metadata.labels = {"app.kubernetes.io/name": "docs", "app.kubernetes.io/component": "celery-worker", "app.kubernetes.io/part-of": "mother-tree"} |
+  .spec.replicas = 1 |
+  .spec.selector.matchLabels = {"app.kubernetes.io/name": "docs", "app.kubernetes.io/component": "celery-worker"} |
+  .spec.template.metadata.labels = {"app.kubernetes.io/name": "docs", "app.kubernetes.io/component": "celery-worker"} |
+  (.spec.template.spec.containers[] | select(.name == "backend")) |= (
+    .name = "celery" |
+    .args = ["exec celery -A impress.celery_app worker -l INFO -n impress@%h --concurrency 2"] |
+    del(.ports) | del(.readinessProbe) |
+    .startupProbe = {"exec": {"command": ["/bin/sh", "-c", "test -f /tmp/celery_worker_ready"]}, "periodSeconds": 5, "timeoutSeconds": 5, "failureThreshold": 60} |
+    .livenessProbe = {"exec": {"command": ["/bin/sh", "-c", "f=/tmp/celery_worker_heartbeat; [ -f \"$f\" ] && age=$(( $(date +%s) - $(stat -c %Y \"$f\") )) && [ \"$age\" -ge 0 ] && [ \"$age\" -lt 120 ]"]}, "periodSeconds": 30, "timeoutSeconds": 5, "failureThreshold": 3} |
+    .resources = {"requests": {"cpu": "50m", "memory": "256Mi"}, "limits": {"memory": "1Gi"}}
+  )
+' "$BACKEND_MANIFEST" > "$CELERY_MANIFEST"
+[ "$(yq '.spec.template.spec.containers[] | select(.name == "celery") | .name' "$CELERY_MANIFEST")" = "celery" ] || {
+  print_error "Could not derive the Celery worker manifest from the backend manifest"; exit 1; }
+
+# ORDER (impress >= 6): backend first, then the collaboration server. yhub
+# 6.1 reads a caller's rights from the backend's /documents/{id}/abilities/
+# endpoint, which a 5.x backend answers 404 — read by yhub as a refusal.
 mt_apply kubectl apply -f "$BACKEND_MANIFEST"
 rm -f "$BACKEND_MANIFEST"
 mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/backend-service.yaml")
+if ! kubectl -n "$NS_DOCS" rollout status deployment/backend --timeout=600s; then
+  print_error "Docs backend rollout did not complete"
+  exit 1
+fi
+mt_apply kubectl apply -f "$CELERY_MANIFEST"
+rm -f "$CELERY_MANIFEST"
+
+# Collaboration server (yhub) and its ingress. The ingress is applied once yhub
+# is serving, replacing the y-provider's websocket ingress (impress < 6):
+# /collaboration/ws/ now belongs to yhub.
+print_status "Applying the collaboration server (yhub)..."
+: "${S3_INTERNAL_ENDPOINT:?S3_INTERNAL_ENDPOINT not set by config.sh}" "${BUCKET_NAME:?BUCKET_NAME not set by config.sh}" "${S3_CLUSTER:?S3_CLUSTER not set by config.sh}"
+# yhub refuses an endpoint with a path, and a trailing "/" reads as one.
+YHUB_LEGACY_S3_ENDPOINT="${S3_INTERNAL_ENDPOINT%/}"
+export YHUB_LEGACY_S3_ENDPOINT
+YHUB_MANIFEST=$(mktemp)
+envsubst '${DOCS_HOST} ${YPROVIDER_MIN_REPLICAS} ${YHUB_LEGACY_S3_ENDPOINT} ${S3_CLUSTER} ${BUCKET_NAME}' < "$REPO_ROOT/docs/yhub-deployment.yaml.tpl" | \
+  sed "s/namespace: docs/namespace: $NS_DOCS/g" > "$YHUB_MANIFEST"
+# A devbox's S3 gateway may be an HTTPS name signed by the local CA; node
+# trusts extra roots through NODE_EXTRA_CA_CERTS.
+if mt_is_local_edge && [[ "$S3_INTERNAL_ENDPOINT" == https://* ]]; then
+  mt_local_ca_trust "$YHUB_MANIFEST" yhub NODE_EXTRA_CA_CERTS
+fi
+mt_apply kubectl apply -f "$YHUB_MANIFEST"
+rm -f "$YHUB_MANIFEST"
+if ! kubectl -n "$NS_DOCS" rollout status deployment/docs-yhub --timeout=600s; then
+  print_error "Collaboration server (docs-yhub) rollout did not complete"
+  kubectl -n "$NS_DOCS" logs deployment/docs-yhub --tail=50 2>/dev/null || true
+  exit 1
+fi
+# Old ingress first: ingress-nginx's admission webhook refuses a second
+# ingress claiming the same host + /collaboration/ws/ path.
+kubectl -n "$NS_DOCS" delete ingress docs-yprovider --ignore-not-found
+# Explicit variable list: a bare envsubst would blank nginx's $request_uri and
+# silently disable the ingress's traversal filter.
+mt_apply kubectl apply -f <(envsubst '${DOCS_HOST} ${TENANT_NAME}' < "$REPO_ROOT/docs/yhub-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
+print_success "Collaboration server is serving"
 
 # Deploy frontend with environment-specific configuration (includes replica count)
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/frontend-deployment.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
@@ -283,26 +403,98 @@ mt_apply kubectl apply -f <(sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 # Static asset cache ingress (/_next/static/ with immutable cache headers)
 mt_apply kubectl apply -f <(envsubst < "$REPO_ROOT/docs/static-cache-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
-# Y-Provider ingress with document ID-based consistent hashing for WebSocket scaling
-# Use explicit variable list to preserve nginx $request_uri variable
-mt_apply kubectl apply -f <(envsubst '${DOCS_HOST} ${TENANT_NAME}' < "$REPO_ROOT/docs/yprovider-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 print_success "Docs manifests applied successfully to namespace $NS_DOCS"
 
 # Step 10: Restart deployments to pick up ConfigMap changes, then wait for ready (PARALLEL)
 if mt_has_changes; then
-    print_status "Restarting backend and frontend to pick up ConfigMap changes..."
-    kubectl -n "$NS_DOCS" rollout restart deployment/backend deployment/frontend
+    print_status "Restarting backend, frontend, Celery worker and yhub to pick up ConfigMap/Secret changes..."
+    kubectl -n "$NS_DOCS" rollout restart deployment/backend deployment/frontend deployment/docs-celery deployment/docs-yhub
     print_status "Waiting for Docs backend and frontend to be ready (parallel)..."
     # Wait for both in parallel
     kubectl -n "$NS_DOCS" rollout status deployment/backend --timeout=300s &
     BACKEND_PID=$!
     kubectl -n "$NS_DOCS" rollout status deployment/frontend --timeout=300s &
     FRONTEND_PID=$!
-    wait $BACKEND_PID $FRONTEND_PID
-    print_success "Docs backend and frontend are ready"
+    kubectl -n "$NS_DOCS" rollout status deployment/docs-celery --timeout=300s &
+    CELERY_PID=$!
+    kubectl -n "$NS_DOCS" rollout status deployment/docs-yhub --timeout=300s &
+    YHUB_PID=$!
+    wait $BACKEND_PID $FRONTEND_PID $CELERY_PID $YHUB_PID
+    print_success "Docs backend, frontend, Celery worker and yhub are ready"
 else
-    print_status "No config changes detected, skipping restart of deployment/backend deployment/frontend"
+    print_status "No config changes detected, skipping restart of deployment/backend deployment/frontend deployment/docs-celery deployment/docs-yhub"
 fi
+
+# Step 10a: Hand the legacy documents (impress < 6: {document-id}/file in the
+# media bucket) to the collaboration server, and FAIL the deploy unless every
+# document is accounted for. yhub's SOFT_MIGRATION only seeds a document when
+# someone opens it; a document nobody opens stays in S3 until this backfill,
+# and SOFT_MIGRATION must not be turned off before it has covered the corpus.
+#
+# `migrate_documents` is resumable and idempotent: it records what became of
+# each document in impress_document_migration and skips the finished ones, so
+# on later deploys it only hands over documents created since (answered
+# "empty": they never had legacy content). It exits 0 even when documents
+# fail, hence the ledger check after it. Derived from the migrations Job
+# (same image, settings, mounts and env) plus the backend's signing key: the
+# command calls yhub's /collaboration/migrate/ with an admin JWT, in-cluster
+# (YHUB_API_BASE_URL).
+print_status "Backfilling legacy documents into the collaboration server..."
+read -r -d '' _MIGRATE_DOCUMENTS_SH <<'MIGRATE_EOF' || true
+set -eu
+python manage.py migrate_documents --retry-failed --concurrency 2
+python manage.py shell -c '
+from collections import Counter
+from django.core.files.storage import default_storage
+from core import models as m
+S = m.DocumentMigrationStatus
+done = {S.MIGRATED.value, S.ALREADY.value, S.EMPTY.value, S.NOTHING.value}
+rows = list(m.Document.objects.values_list("id", "migration__status", "migration__error"))
+ledger = Counter(status for _, status, _ in rows)
+print("[migrate-documents] ledger:", {str(k): v for k, v in ledger.items()})
+problems = [f"{doc_id} status={status} error={(error or chr(45))[:200]}"
+            for doc_id, status, error in rows if status not in done]
+# "empty" means yhub found no legacy object. A misconfigured legacy read that
+# came back as NoSuchKey would look exactly the same, so confirm it against
+# the bucket with the backend own storage: a legacy snapshot that exists
+# while the ledger says empty means its content was never handed over.
+for doc_id, status, _ in rows:
+    if status == S.EMPTY.value and default_storage.exists(f"{doc_id}/file"):
+        problems.append(f"{doc_id} status=empty but its legacy snapshot {doc_id}/file exists")
+for doc_id, status, _ in rows:
+    if status == S.NOTHING.value:
+        print(f"[migrate-documents] WARNING: {doc_id}: no readable legacy version (status nothing)")
+if problems:
+    for line in problems:
+        print("[migrate-documents] NOT MIGRATED:", line)
+    raise SystemExit(f"[migrate-documents] {len(problems)} document(s) not migrated")
+print("[migrate-documents] every document is accounted for")
+'
+MIGRATE_EOF
+MIGRATE_DOCS_MANIFEST=$(mktemp)
+sed "s/namespace: docs/namespace: $NS_DOCS/g" "$REPO_ROOT/docs/migrations-job.yaml" | \
+  sed "s/docs-postgresql.docs.svc/${PG_SERVICE_NAME}.$NS_DB.svc/g" | \
+  SCRIPT="$_MIGRATE_DOCUMENTS_SH" yq '
+    .metadata.name = "docs-migrate-documents" |
+    .spec.backoffLimit = 0 |
+    (.spec.template.spec.containers[] | select(.name == "backend")) |= (
+      .command = ["/bin/sh", "-c", strenv(SCRIPT)] |
+      .env += [{"name": "JWT_PRIVATE_KEY_FILE", "value": "/etc/docs-jwt/backend-jwt.pem"}] |
+      .volumeMounts += [{"name": "docs-jwt", "mountPath": "/etc/docs-jwt", "readOnly": true}]
+    ) |
+    .spec.template.spec.securityContext.fsGroup = 127 |
+    .spec.template.spec.volumes += [{"name": "docs-jwt", "secret": {"secretName": "docs-secrets", "items": [{"key": "JWT_PRIVATE_KEY", "path": "backend-jwt.pem"}], "defaultMode": 288}}]
+  ' > "$MIGRATE_DOCS_MANIFEST"
+mt_delete_job_wait "$NS_DOCS" docs-migrate-documents || exit 1
+kubectl apply -f "$MIGRATE_DOCS_MANIFEST"
+rm -f "$MIGRATE_DOCS_MANIFEST"
+if ! poll_job_complete "$NS_DOCS" "docs-migrate-documents" 900 5; then
+    print_error "Legacy document backfill failed or left documents unmigrated"
+    kubectl -n "$NS_DOCS" logs job/docs-migrate-documents --tail=40 2>/dev/null || true
+    exit 1
+fi
+kubectl -n "$NS_DOCS" logs job/docs-migrate-documents --tail=5 2>/dev/null | grep '\[migrate-documents\]' || true
+print_success "Every document is in the collaboration server"
 
 # Step 11: Deploy/Update y-provider (declarative)
 print_status "Applying y-provider deployment and service to namespace $NS_DOCS..."

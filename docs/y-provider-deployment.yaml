@@ -31,17 +31,12 @@ spec:
       containers:
         # Main y-provider container
         - name: docs
-          image: lasuite/impress-y-provider:v5.7.0
+          image: lasuite/impress-y-provider:v6.1.1
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
                 name: env-d-yprovider
           env:
-            - name: COLLABORATION_SERVER_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: docs-secrets
-                  key: COLLABORATION_SERVER_SECRET
             - name: Y_PROVIDER_API_KEY
               valueFrom:
                 secretKeyRef:

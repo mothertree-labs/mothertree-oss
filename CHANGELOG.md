@@ -7,6 +7,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **Docs (La Suite impress) 5.7.0 → 6.1.1.** 6.0 replaced the collaboration
+  server and moved every document's content out of the S3 media bucket into
+  it; the deploy does the upgrade end to end.
+  - New `docs-yhub` deployment (`lasuite/impress-yhub`) holding the editor
+    websocket (`wss://<docs>/collaboration/ws/v1/docs`). It runs with its own
+    PostgreSQL database (`<docs db>_yhub`, created by `docs-db-init`, schema by
+    the new `docs-yhub-init-db` Job on every deploy) and its own Redis,
+    `yhub-redis`. That Redis uses `noeviction`: the backend's Redis runs
+    allkeys-lru, which could evict updates that are not persisted yet.
+  - The backend and yhub authenticate each other with RS256 JWTs. Each has
+    its own key, generated once per tenant into `docs-secrets` and
+    `docs-yhub`. `COLLABORATION_SERVER_SECRET` is gone.
+  - The y-provider is now the conversion service only. The new
+    `docs-yhub` ingress publishes just the browser routes (`ws`, `ydoc`,
+    `activity`, `changeset`, `rollback`, `jwks`). The admin-only routes stay
+    in-cluster, and the old `/collaboration/api/` rule to the backend is gone.
+  - **Legacy content:** yhub seeds a document from its old S3 snapshot when
+    the document is first opened (`SOFT_MIGRATION=true`). The new
+    `docs-migrate-documents` Job backfills every document on each deploy and
+    **fails the deploy** if any document is left unmigrated.
+  - New `docs-celery` worker. 6.x relies on Celery for:
+    - re-checking open editors when an access is revoked;
+    - deletions in yhub;
+    - mention and ask-for-access mails.
+
+    Nothing consumed that queue before. The worker manifest is derived from
+    the backend's, so its env cannot drift.
+  - `NUM_PROXIES=1` (required by 6.1.1). The value comes from the
+    controller's rendered nginx.conf: it forwards a single resolved client
+    address, so this keeps the anonymous throttles keyed on the real client.
+  - `save-status.js` is removed. It kept the old content-save PATCH alive on
+    page unload, but content is now saved over the websocket.
+  - `mt_patches` (invitation-email link) is re-verified against 6.1.1:
+    - signatures are unchanged;
+    - the startup self-test passes on the real image;
+    - its notes now describe 6.0's `{defaults, **context}` merge.
+  - New alerts `DocsCollaborationServerDown` (critical) and
+    `DocsCeleryWorkerDown` (warning).
+  - New e2e coverage:
+    - `docs-collaboration.spec.ts` types into a document, checks the text
+      server-side through `formatted-content` (backend → yhub → y-provider),
+      then reloads;
+    - `docs-health.spec.ts` checks the yhub JWKS, and checks that the
+      admin-only routes are not published.
+  - The `docs-yhub` ingress refuses any `/collaboration/` path that contains
+    `..`, a backslash or an encoded `.`, `/` or `\`. nginx matches routes on
+    the normalised path but forwards the raw URI, so without this an encoded
+    path could reach an admin route through a published prefix. The ingress
+    also sends `Cache-Control: no-store`, as the main Docs ingress does. The
+    new pods mount no service-account token.
+  - **Known breakage, follow-up issue:** the Nextcloud `files_linkeditor`
+    DOCX → Docs conversion calls the y-provider with the static
+    `Y_PROVIDER_API_KEY`. Since 6.0 the y-provider accepts only JWTs signed by
+    the Docs backend, so that path now gets 401. The app is configured but not
+    enabled on any tenant, and no test covers it.
+  - Follow-up: once the backfill has covered every tenant, turn
+    `SOFT_MIGRATION` off. That also drops yhub's read access to the media
+    bucket, which currently reuses the backend's keys.
 - **Phase 2 of the update sweep: pins no bot was moving.**
   - The Nextcloud OIDC config Job ran `bitnami/kubectl:latest` (unpinned, and
     Bitnami no longer publishes versioned free images). It now uses

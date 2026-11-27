@@ -1,9 +1,8 @@
 Y_PROVIDER_API_BASE_URL=http://y-provider:4444/api/
 Y_PROVIDER_API_KEY=<generate a random key>
-COLLABORATION_SERVER_SECRET=<generate a random key>
-# All URLs must use external HTTPS to go through ingress
-# This ensures X-Forwarded-Proto: https is set, preventing SECURE_SSL_REDIRECT 301s
+# impress >= 6: the y-provider is the conversion service only; it verifies the
+# backend's JWTs against ${COLLABORATION_BACKEND_BASE_URL}/api/v1.0/jwks.
+# External HTTPS so the ingress sets X-Forwarded-Proto: https (no SECURE_SSL_REDIRECT 301s)
 COLLABORATION_SERVER_ORIGIN=https://${DOCS_HOST}
-COLLABORATION_API_URL=https://${DOCS_HOST}/api/v1.0/
 COLLABORATION_BACKEND_BASE_URL=https://${DOCS_HOST}
 COLLABORATION_LOGGING=true

@@ -41,15 +41,10 @@ spec:
             name: backend
             port:
               number: 8000
-      # /collaboration/ws/ is handled by separate yprovider-ingress.yaml.tpl
-      # with consistent hashing for document ID-based routing
-      - path: /collaboration/api/
-        pathType: Prefix
-        backend:
-          service:
-            name: backend
-            port:
-              number: 8000
+      # The collaboration server's browser routes (/collaboration/ws/, ydoc,
+      # activity, changeset, rollback, jwks) are published by the separate
+      # docs-yhub ingress (yhub-ingress.yaml.tpl). No /collaboration/ rule here:
+      # every other /collaboration/ path must stay in-cluster.
       - path: /media
         pathType: Prefix
         backend:

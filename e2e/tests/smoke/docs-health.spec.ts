@@ -69,12 +69,12 @@ test.describe('Smoke — Docs Backend Health', () => {
     ).toContain('image/png');
   });
 
-  test('save-status script is served by the frontend', async ({ request }) => {
-    // FRONTEND_JS_URL points at /static/save-status.js, served from the
-    // save-status-scripts ConfigMap mounted into the frontend nginx (web root
-    // /app since impress 4.8). If the mount lands outside the web root the
-    // script silently 404s and the keepalive save fix stops applying.
-    const response = await request.get(`${urls.docs}/static/save-status.js`);
+  test('collaboration server publishes its JWKS', async ({ request }) => {
+    // impress >= 6: the collaboration server (yhub) publishes the public half
+    // of the key it signs its calls to the backend with; the backend reads it
+    // in-cluster, and it is one of the routes the docs-yhub ingress publishes.
+    // A 404/HTML here means /collaboration/ is not routed to yhub.
+    const response = await request.get(`${urls.docs}/collaboration/jwks/v1`);
 
     if (response.status() === 0) {
       test.skip(true, 'Docs not reachable (DNS or connection error)');
@@ -82,14 +82,56 @@ test.describe('Smoke — Docs Backend Health', () => {
 
     expect(
       response.status(),
-      'Expected /static/save-status.js to be served. ' +
-      'Check the save-status-scripts ConfigMap and its /app/static mount in the frontend deployment.'
+      'Expected /collaboration/jwks/v1 to be served by yhub. ' +
+      'Check the docs-yhub ingress and the docs-yhub deployment.'
     ).toBe(200);
+    const body = await response.json();
+    expect(Array.isArray(body.keys) && body.keys.length > 0, 'JWKS has no keys').toBe(true);
+    for (const key of body.keys) {
+      // Public half only: an RSA private JWK carries "d".
+      expect(key.d, 'JWKS must not carry private key material').toBeUndefined();
+    }
+  });
 
-    const contentType = response.headers()['content-type'] || '';
-    expect(
-      contentType,
-      'Expected a JavaScript content-type for save-status.js, got: ' + contentType
-    ).toContain('javascript');
+  test('collaboration server keeps its backend-only routes in-cluster', async ({ request }) => {
+    // migrate / reset-ydoc / create-ydoc / restore-ydoc / reset-connections /
+    // prune are admin-JWT routes for the backend. The ingress publishes only
+    // the browser routes, so from outside these must never reach yhub (which
+    // answers JSON); they fall through to the frontend instead.
+    const id = '00000000-0000-4000-8000-000000000000';
+    for (const route of ['migrate', 'reset-ydoc', 'create-ydoc', 'restore-ydoc', 'reset-connections', 'prune']) {
+      const response = await request.post(`${urls.docs}/collaboration/${route}/v1/docs/${id}`, {
+        maxRedirects: 0,
+      });
+      if (response.status() === 0) {
+        test.skip(true, 'Docs not reachable (DNS or connection error)');
+      }
+      const contentType = response.headers()['content-type'] || '';
+      expect(
+        contentType.includes('application/json'),
+        `/collaboration/${route}/ answered JSON (HTTP ${response.status()}): it is published to yhub`,
+      ).toBe(false);
+    }
+
+    // The ingress matches on the normalised path but proxies the raw URI, so
+    // an encoded traversal or backslash under a published prefix must not be
+    // handed to yhub's router (configuration-snippet in yhub-ingress.yaml.tpl).
+    for (const raw of [
+      `/collaboration/ws/..%5Cmigrate/v1/docs/${id}`,
+      // (a bare %2e%2e segment is not listed: the WHATWG URL parser of the
+      // client itself resolves it to /collaboration/migrate/ before sending)
+      `/collaboration/ws/x%2e%2e%5Cmigrate/v1/docs/${id}`,
+      `/collaboration/ydoc/%2e%2e%2Freset-ydoc/v1/docs/${id}`,
+    ]) {
+      // Depending on how nginx normalises it, the URI lands either in a
+      // published yhub location (refused there with 404) or on the frontend;
+      // either way it must never be answered by yhub, which speaks JSON.
+      const response = await request.post(`${urls.docs}${raw}`, { maxRedirects: 0 });
+      const contentType = response.headers()['content-type'] || '';
+      expect(
+        contentType.includes('application/json'),
+        `${raw} reached yhub (HTTP ${response.status()}, ${contentType})`,
+      ).toBe(false);
+    }
   });
 });
