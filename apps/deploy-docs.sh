@@ -392,6 +392,8 @@ fi
 # Old ingress first: ingress-nginx's admission webhook refuses a second
 # ingress claiming the same host + /collaboration/ws/ path.
 kubectl -n "$NS_DOCS" delete ingress docs-yprovider --ignore-not-found
+# Explicit variable list: a bare envsubst would blank nginx's $request_uri and
+# silently disable the ingress's traversal filter.
 mt_apply kubectl apply -f <(envsubst '${DOCS_HOST} ${TENANT_NAME}' < "$REPO_ROOT/docs/yhub-ingress.yaml.tpl" | sed "s/namespace: docs/namespace: $NS_DOCS/g")
 print_success "Collaboration server is serving"
 

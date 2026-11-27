@@ -107,3 +107,30 @@ spec:
     - name: redis
       port: 6379
       targetPort: 6379
+---
+# Only the collaboration server talks to this Redis. Without a policy any pod
+# that reaches the Service could append updates straight into a document's
+# stream, past the backend's access checks.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: protect-yhub-redis
+  namespace: docs
+  labels:
+    app.kubernetes.io/part-of: network-policies
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: docs
+      app.kubernetes.io/component: yhub-redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: docs
+              app.kubernetes.io/component: yhub
+      ports:
+        - protocol: TCP
+          port: 6379

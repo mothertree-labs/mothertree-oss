@@ -38,11 +38,11 @@ metadata:
     # (WHATWG URL parsing does both) could then see /collaboration/ws/..\migrate
     # as an admin route the allowlist above was meant to keep in-cluster. Refuse
     # any such URI outright (path only, before "?": query strings legitimately
-    # carry %2F). "\\\\" is one literal backslash once nginx has unescaped the
+    # carry %2F; %25 blocks double encoding, document ids are UUIDs). "\\\\" is one literal backslash once nginx has unescaped the
     # string; verified against nginx with the URIs the smoke spec sends.
     # Document content is never cacheable (same header as the main ingress).
     nginx.ingress.kubernetes.io/configuration-snippet: |
-      if ($request_uri ~* "^[^?]*(\.\.|\\\\|%2e|%5c|%2f)") {
+      if ($request_uri ~* "^[^?]*(\.\.|\\\\|%2e|%5c|%2f|%25)") {
         return 404;
       }
       add_header Cache-Control "no-store" always;
