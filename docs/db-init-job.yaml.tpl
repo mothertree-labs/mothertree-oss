@@ -103,7 +103,9 @@ spec:
               
               # Collaboration server database (impress >= 6) and its own role.
               # The role is NOSUPERUSER NOCREATEDB NOCREATEROLE and owns only
-              # this database; every other role but postgres is closed out.
+              # this database. CONNECT is revoked from PUBLIC; the tenant role
+              # is a superuser and bypasses that, so this protects the
+              # tenant's data from yhub, not yhub's data from the tenant role.
               : "${YHUB_DB_NAME:?YHUB_DB_NAME must be set}" "${YHUB_DB_PASSWORD:?YHUB_DB_PASSWORD must be set (docs-yhub Secret)}"
               [[ "$YHUB_DB_NAME" =~ ^[a-z0-9_]+$ ]] || { echo "Refusing unexpected yhub db/role name '$YHUB_DB_NAME'"; exit 1; }
               YHUB_ROLE="$YHUB_DB_NAME"
@@ -143,6 +145,25 @@ spec:
                   EXECUTE format('ALTER %s public.%I OWNER TO %I',
                     CASE r.relkind WHEN 'S' THEN 'SEQUENCE' WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'TABLE' END,
                     r.relname, '$YHUB_ROLE');
+                END LOOP;
+                -- Functions and types too (none in yhub 6.1.1's schema; a
+                -- future one must not stay superuser-owned: a SECURITY
+                -- DEFINER function would run as the superuser, and init-db
+                -- could not CREATE OR REPLACE it).
+                FOR r IN
+                  SELECT p.oid::regprocedure AS sig FROM pg_proc p
+                  WHERE p.pronamespace = 'public'::regnamespace
+                    AND pg_get_userbyid(p.proowner) <> '$YHUB_ROLE'
+                LOOP
+                  EXECUTE format('ALTER ROUTINE %s OWNER TO %I', r.sig, '$YHUB_ROLE');
+                END LOOP;
+                FOR r IN
+                  SELECT t.oid::regtype AS typ FROM pg_type t
+                  WHERE t.typnamespace = 'public'::regnamespace
+                    AND t.typtype IN ('e','d','c','r','m') AND t.typrelid = 0
+                    AND pg_get_userbyid(t.typowner) <> '$YHUB_ROLE'
+                LOOP
+                  EXECUTE format('ALTER TYPE %s OWNER TO %I', r.typ, '$YHUB_ROLE');
                 END LOOP;
               END
               \$\$;

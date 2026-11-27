@@ -161,6 +161,11 @@ export DOCS_YHUB_DB_NAME
 [[ "$DOCS_YHUB_DB_NAME" =~ ^[a-z0-9_]+$ ]] || { print_error "Unexpected yhub database/role name '$DOCS_YHUB_DB_NAME'"; exit 1; }
 : "${PG_HOST:?PG_HOST not set}"
 YHUB_DB_PASSWORD=$(kubectl -n "$NS_DOCS" get secret docs-yhub -o jsonpath='{.data.YHUB_DB_PASSWORD}' 2>/dev/null | base64 -d || true)
+if [ -n "$YHUB_DB_PASSWORD" ] && ! [[ "$YHUB_DB_PASSWORD" =~ ^[0-9a-f]{64}$ ]]; then
+  # Always generated as 64 hex chars and used unescaped in the URL below.
+  print_error "docs-yhub/YHUB_DB_PASSWORD is not the 64-hex-char value this script writes; refusing to use it"
+  exit 1
+fi
 if [ -z "$YHUB_DB_PASSWORD" ]; then
   YHUB_DB_PASSWORD=$(openssl rand -hex 32)
   print_status "Generated a password for the yhub database role"
