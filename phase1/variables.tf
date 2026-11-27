@@ -164,7 +164,11 @@ variable "turn_server_type" {
 variable "turn_server_image" {
   description = "OS image for TURN server"
   type        = string
-  default     = "linode/ubuntu22.04"
+  # 24.04 since 2026-11-27: prod's TURN was rebuilt in place (Linode rebuild
+  # keeps the instance, its IPs and firewall). Changing this forces a
+  # REPLACEMENT (new IP: DNS, Jitsi/Synapse TURN config, deploy vaults), so a
+  # future OS move should be an in-place rebuild plus this edit, not an apply.
+  default = "linode/ubuntu24.04"
 }
 
 variable "turn_server_label" {

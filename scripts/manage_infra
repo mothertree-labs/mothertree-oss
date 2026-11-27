@@ -528,7 +528,16 @@ if [ "$RUN_ANSIBLE" = "true" ] && [ "$PLAN_ONLY" != "true" ] && [ "$DESTROY" != 
   else
     pushd "$REPO_ROOT/ansible" >/dev/null
 
-      export ANSIBLE_HOST_KEY_CHECKING=False
+      # Verify SSH host keys. accept-new trusts a VM the first time it is
+      # seen (a freshly created one has no known key yet) but refuses a key
+      # that CHANGED, which is what a rebuilt VM or a man-in-the-middle looks
+      # like: for a rebuild, drop the old key first (ssh-keygen -R <ip>, see
+      # CLAUDE.md "Stale SSH host keys"). This used to disable checking
+      # altogether (ANSIBLE_HOST_KEY_CHECKING=False). An operator's own
+      # ANSIBLE_SSH_ARGS comes first, so a stricter StrictHostKeyChecking=yes
+      # there wins (ssh keeps the first value of an option).
+      export ANSIBLE_HOST_KEY_CHECKING=True
+      export ANSIBLE_SSH_ARGS="${ANSIBLE_SSH_ARGS:--C -o ControlMaster=auto -o ControlPersist=60s} -o StrictHostKeyChecking=accept-new"
 
       # MX mail host FQDN
       if [ -n "$INFRA_ENV_DNS_LABEL" ]; then

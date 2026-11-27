@@ -7,6 +7,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **TURN server on Ubuntu 24.04.** prod's TURN VM was rebuilt in place with
+  a Linode rebuild, which keeps the instance, its public IP and its firewall,
+  so DNS, Jitsi, Synapse and the deploy vaults are unchanged.
+  - It joined the tailnet at first boot through cloud-init, using a
+    single-use tagged key and the pinned Tailscale apt key. Ansible then
+    configured it.
+  - The coturn config is identical to the old server's.
+  - `turn_server_image` now defaults to `linode/ubuntu24.04`, so the phase1
+    plan does not try to replace the VM. Its comment explains why a future OS
+    move should again be a rebuild plus this edit.
+- **`manage_infra` verifies SSH host keys.** The Ansible phase used to set
+  `ANSIBLE_HOST_KEY_CHECKING=False`. It now uses `StrictHostKeyChecking=accept-new`:
+  - a new VM is still trusted the first time it is seen;
+  - a changed key (a rebuilt VM, or someone in the middle) fails;
+  - an operator's own `ANSIBLE_SSH_ARGS` still comes first.
 - **Phase 3 of the update sweep: no more `curl | sh` installers, and every
   CI-host download verified.**
   - **Tailscale:** eight Ansible tasks (TURN, Headscale, PostgreSQL, the CI
